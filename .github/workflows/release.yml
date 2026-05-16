@@ -44,29 +44,14 @@ jobs:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
 
-      - name: Calver calculate version
-        uses: StephaneBour/actions-calver@master
-        id: calver
-        with:
-          date_format: '%Y.%-m.%-d'
-          release: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Cargo rejects leading zeros (e.g. 2026.05.16). Bump patch if today's tag exists.
-      - name: Normalize version for Cargo
+      # Calver without Cargo-safe patch bumps (use -post.N when re-releasing same day).
+      - name: Compute release version
         id: version
-        env:
-          RAW: ${{ steps.calver.outputs.release }}
         run: |
-          normalized="$(echo "$RAW" | awk -F. '{
-            printf "%s", $1
-            for (i=2; i<=NF; i++) printf ".%d", $i+0
-            printf "\n"
-          }')"
+          normalized=$(date -u +%Y.%-m.%-d)
           release="$normalized"
           patch=1
-          while git rev-parse "$release" >/dev/null 2>&1; do
+          while git rev-parse "refs/tags/${release}" >/dev/null 2>&1; do
             release="${normalized}-post.${patch}"
             patch=$((patch + 1))
           done
@@ -144,8 +129,7 @@ jobs:
         run: |
           git fetch --tags
           git checkout "$NEW_TAG"
-          uv run --with maturin maturin build --release --out dist/
-          # Bin wheels have no Python package in the wheel library (W007).
+          uvx maturin build --release --out dist/
           uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       # We use PyPI trusted publishing rather than a PyPI API token.
@@ -186,7 +170,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           git checkout "$TAG"
-          uv run --with maturin maturin build --release --out dist/
+          uvx maturin build --release --out dist/
           uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       - name: Publish distribution to PyPI
