@@ -48,15 +48,34 @@ jobs:
         uses: StephaneBour/actions-calver@master
         id: calver
         with:
-          date_format: '%Y.%m.%d'
+          date_format: '%Y.%-m.%-d'
           release: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Cargo rejects leading zeros (e.g. 2026.05.16). Bump patch if today's tag exists.
+      - name: Normalize version for Cargo
+        id: version
+        env:
+          RAW: ${{ steps.calver.outputs.release }}
+        run: |
+          normalized="$(echo "$RAW" | awk -F. '{
+            printf "%s", $1
+            for (i=2; i<=NF; i++) printf ".%d", $i+0
+            printf "\n"
+          }')"
+          release="$normalized"
+          patch=1
+          while git rev-parse "$release" >/dev/null 2>&1; do
+            release="${normalized}.${patch}"
+            patch=$((patch + 1))
+          done
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+
       - name: Get the changelog underline
         id: changelog_underline
         env:
-          RELEASE: ${{ steps.calver.outputs.release }}
+          RELEASE: ${{ steps.version.outputs.release }}
         run: |
           underline="$(echo "$RELEASE" | tr -c '\n' '-')"
           echo "underline=${underline}" >> "$GITHUB_OUTPUT"
@@ -70,7 +89,7 @@ jobs:
             Next
             ----
 
-            ${{ steps.calver.outputs.release }}
+            ${{ steps.version.outputs.release }}
             ${{ steps.changelog_underline.outputs.underline }}
           include: CHANGELOG.rst
           regex: false
@@ -86,7 +105,7 @@ jobs:
 
       - name: Set package version
         env:
-          NEW_TAG: ${{ steps.calver.outputs.release }}
+          NEW_TAG: ${{ steps.version.outputs.release }}
         run: |
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" Cargo.toml
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
@@ -104,7 +123,7 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          custom_tag: ${{ steps.calver.outputs.release }}
+          custom_tag: ${{ steps.version.outputs.release }}
           tag_prefix: ''
           commit_sha: ${{ steps.commit.outputs.commit_hash }}
 
