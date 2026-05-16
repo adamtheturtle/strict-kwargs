@@ -1,0 +1,140 @@
+//! Function signature model and "max positional arguments at call site" logic.
+//!
+//! Mirrors ``mypy_strict_kwargs.plugin._transform_signature`` behavior.
+
+/// A parameter in a callable signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub name: Option<String>,
+    pub kind: ParameterKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterKind {
+    PositionalOnly,
+    PositionalOrKeyword,
+    VarPositional,
+    KeywordOnly,
+    VarKeyword,
+}
+
+/// Parsed callable signature (functions and methods).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature {
+    pub parameters: Vec<Parameter>,
+}
+
+impl Signature {
+  /// Maximum number of positional arguments a call may pass (excluding ``self``).
+  pub fn max_positional_at_call_site(&self, fullname: &str, ignored: bool) -> Option<usize> {
+    if ignored {
+      return None;
+    }
+
+    let first_star = self
+      .parameters
+      .iter()
+      .position(|p| p.kind == ParameterKind::VarPositional);
+
+    let skip_first = fullname.ends_with(".__call__")
+      || fullname.ends_with(".__get__")
+      || fullname.ends_with(".__set__");
+    let skip_second = fullname.ends_with(".__get__") || fullname.ends_with(".__set__");
+    let is_dunder_call = fullname.ends_with(".__call__");
+
+    let mut max = 0usize;
+    for (index, param) in self.parameters.iter().enumerate() {
+      if skip_first && index == 0 {
+        continue;
+      }
+      if skip_second && index == 1 {
+        max += 1;
+        continue;
+      }
+
+      let allows_positional = match param.kind {
+        ParameterKind::PositionalOnly => true,
+        ParameterKind::VarPositional => false,
+        ParameterKind::KeywordOnly | ParameterKind::VarKeyword => false,
+        ParameterKind::PositionalOrKeyword => match first_star {
+          None => false,
+          Some(star_index) if index <= star_index => true,
+          Some(_) => false,
+        },
+      };
+
+      if allows_positional {
+        max += 1;
+      } else if is_dunder_call && index == 1 {
+        // ``__call__(self, func, ...)`` allows the first user argument positionally
+        // (e.g. ``@C()`` / ``C()(func)``), but not subsequent parameters.
+        max += 1;
+      }
+    }
+
+    Some(max)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn sig(params: &[(&str, ParameterKind)]) -> Signature {
+    Signature {
+      parameters: params
+        .iter()
+        .map(|(name, kind)| Parameter {
+          name: Some((*name).to_string()),
+          kind: *kind,
+        })
+        .collect(),
+    }
+  }
+
+  #[test]
+  fn plain_function_no_positionals() {
+    let s = sig(&[("a", ParameterKind::PositionalOrKeyword)]);
+    assert_eq!(s.max_positional_at_call_site("main.func", false), Some(0));
+  }
+
+  #[test]
+  fn positional_only_allows_one() {
+    let s = sig(&[
+      ("a", ParameterKind::PositionalOnly),
+      ("b", ParameterKind::PositionalOrKeyword),
+    ]);
+    assert_eq!(s.max_positional_at_call_site("main.func", false), Some(1));
+  }
+
+  #[test]
+  fn before_var_positional() {
+    let s = sig(&[
+      ("a", ParameterKind::PositionalOrKeyword),
+      ("args", ParameterKind::VarPositional),
+    ]);
+    assert_eq!(s.max_positional_at_call_site("main.func", false), Some(1));
+  }
+
+  #[test]
+  fn dunder_call_allows_first_argument() {
+    let s = sig(&[
+      ("self", ParameterKind::PositionalOrKeyword),
+      ("func", ParameterKind::PositionalOrKeyword),
+      ("a", ParameterKind::PositionalOrKeyword),
+    ]);
+    assert_eq!(
+      s.max_positional_at_call_site("main.C.__call__", false),
+      Some(1)
+    );
+  }
+
+  #[test]
+  fn method_excludes_self_from_count() {
+    let s = sig(&[
+      ("self", ParameterKind::PositionalOrKeyword),
+      ("a", ParameterKind::PositionalOrKeyword),
+    ]);
+    assert_eq!(s.max_positional_at_call_site("main.C.method", false), Some(0));
+  }
+}

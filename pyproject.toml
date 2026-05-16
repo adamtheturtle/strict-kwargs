@@ -1,0 +1,10 @@
+[project]
+name = "strict-kwargs"
+version = "0.1.0"
+description = "Enforce using keyword arguments where possible (fast, ty/mypy-independent)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.strict_kwargs]
+ignore_names = []
