@@ -8,15 +8,22 @@ jobs:
     name: Publish a release
     runs-on: ubuntu-latest
 
+    # Specifying an environment is strongly recommended by PyPI.
+    # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
     environment: release
 
     permissions:
+      # This is needed for PyPI publishing.
+      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
       id-token: write
+      # This is needed for https://github.com/stefanzweifel/git-auto-commit-action.
       contents: write
 
     steps:
       - uses: actions/checkout@v6
         with:
+          # See
+          # https://github.com/stefanzweifel/git-auto-commit-action?tab=readme-ov-file#push-to-protected-branches
           token: ${{ secrets.RELEASE_PAT }}
           fetch-depth: 0
 
@@ -110,6 +117,8 @@ jobs:
           uv run --with maturin maturin build --release --out dist/
           uv run --extra release check-wheel-contents dist/*.whl
 
+      # We use PyPI trusted publishing rather than a PyPI API token.
+      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

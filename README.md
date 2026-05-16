@@ -16,7 +16,7 @@ add(1, 2)  # strict-kwargs error: too many positional arguments
 
 ## Install
 
-From PyPI (after the first release):
+From PyPI:
 
 ```bash
 pip install strict-kwargs
