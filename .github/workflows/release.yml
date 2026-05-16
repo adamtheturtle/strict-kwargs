@@ -67,7 +67,7 @@ jobs:
           release="$normalized"
           patch=1
           while git rev-parse "$release" >/dev/null 2>&1; do
-            release="${normalized}.${patch}"
+            release="${normalized}-post.${patch}"
             patch=$((patch + 1))
           done
           echo "release=${release}" >> "$GITHUB_OUTPUT"
