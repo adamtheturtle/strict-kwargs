@@ -8,4 +8,4 @@ Next
 ----------
 
 - Fast Rust linter enforcing keyword arguments at call sites (companion to `mypy-strict-kwargs`).
-- Configuration via ``pyproject.toml`` (``[tool.strict_kwargs]``), ``mypy.ini``, ``.mypy.ini``, and ``setup.cfg`` (``[mypy_strict_kwargs]``).
+- Configuration via ``pyproject.toml`` (``[tool.strict_kwargs]``).

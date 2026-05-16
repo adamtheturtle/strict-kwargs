@@ -59,11 +59,6 @@ ignore_names = ["main.func", "builtins.str"]
 debug = false
 ```
 
-Legacy mypy configuration sections are also supported for migration:
-
-- `mypy.ini` / `.mypy.ini` → `[mypy_strict_kwargs]`
-- `setup.cfg` → `[mypy_strict_kwargs]`
-
 The same `ignore_names` entries as mypy-strict-kwargs work (fully-qualified names like `package.module.func`).
 
 ## Limitations
