@@ -198,10 +198,8 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-wheels, build-wheels-existing-tag]
-    if: >-
-      ${{ needs.build-wheels.result == 'success' ||
-      needs.build-wheels-existing-tag.result == 'success' }}
+    needs: build-wheels-existing-tag
+    if: ${{ inputs.publish_only }}
     runs-on: ubuntu-latest
 
     environment: release
@@ -233,6 +231,46 @@ jobs:
 
       # We use PyPI trusted publishing rather than a PyPI API token.
       # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
+      - name: Publish distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-pypi-release:
+    name: Publish to PyPI
+    needs: build-wheels
+    if: ${{ !inputs.publish_only }}
+    runs-on: ubuntu-latest
+
+    environment: release
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: '**/pyproject.toml'
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check wheels
+        run: |
+          ls -la dist/
+          uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
+
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
