@@ -120,7 +120,9 @@ jobs:
   build-wheels:
     name: Build wheels (${{ matrix.os }})
     needs: release
-    if: ${{ !cancelled() && (inputs.publish_only || needs.release.result == 'success') }}
+    if: >-
+      ${{ !cancelled() && !failure() && (inputs.publish_only ||
+      needs.release.result == 'success') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -160,6 +162,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build-wheels
+    if: ${{ needs.build-wheels.result == 'success' }}
     runs-on: ubuntu-latest
 
     environment: release
