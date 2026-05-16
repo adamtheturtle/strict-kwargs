@@ -4,8 +4,6 @@ Changelog
 Next
 ----
 
-- Initial public release.
-
 2026.05.16
 ----------
 

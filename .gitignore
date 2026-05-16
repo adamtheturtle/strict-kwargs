@@ -1,4 +1,5 @@
 /target/
+/dist/
 /python/strict_kwargs/_native/
 *.egg-info/
 .venv/
