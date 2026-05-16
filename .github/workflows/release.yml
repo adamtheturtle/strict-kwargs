@@ -15,20 +15,17 @@ on:
 
 jobs:
   release:
-    name: Publish a release
+    name: Bump version and tag
     if: ${{ !inputs.publish_only }}
     runs-on: ubuntu-latest
 
-    # Specifying an environment is strongly recommended by PyPI.
-    # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
     environment: release
 
     permissions:
-      # This is needed for PyPI publishing.
-      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
-      id-token: write
-      # This is needed for https://github.com/stefanzweifel/git-auto-commit-action.
       contents: write
+
+    outputs:
+      tag: ${{ steps.tag_version.outputs.new_tag }}
 
     steps:
       - uses: actions/checkout@v6
@@ -120,36 +117,15 @@ jobs:
           name: Release ${{ steps.tag_version.outputs.new_tag }}
           body: ${{ steps.tag_version.outputs.changelog }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build wheels
-        env:
-          NEW_TAG: ${{ steps.tag_version.outputs.new_tag }}
-        run: |
-          git fetch --tags
-          git checkout "$NEW_TAG"
-          uvx maturin build --release --out dist/
-          uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
-
-      # We use PyPI trusted publishing rather than a PyPI API token.
-      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
-      - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          verbose: true
-          packages-dir: dist/
-
-  publish_only:
-    name: Publish existing tag to PyPI
-    if: ${{ inputs.publish_only }}
-    runs-on: ubuntu-latest
-
-    environment: release
-
-    permissions:
-      id-token: write
-      contents: read
+  build-wheels:
+    name: Build wheels (${{ matrix.os }})
+    needs: release
+    if: ${{ !cancelled() && (inputs.publish_only || needs.release.result == 'success') }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v6
@@ -166,15 +142,58 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build wheels
+        shell: bash
         env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.publish_only && inputs.tag || needs.release.outputs.tag }}
         run: |
           git checkout "$TAG"
           uvx maturin build --release --out dist/
+          ls -la dist/
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-wheels
+    runs-on: ubuntu-latest
+
+    environment: release
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: '**/pyproject.toml'
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check wheels
+        run: |
+          ls -la dist/
           uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
 
+      # We use PyPI trusted publishing rather than a PyPI API token.
+      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
           packages-dir: dist/
+          skip-existing: true
