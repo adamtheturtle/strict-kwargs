@@ -42,7 +42,8 @@ jobs:
         run: |
           git checkout "$TAG"
           uv run --with maturin maturin build --release --out dist/
-          uv run --extra release check-wheel-contents dist/*.whl
+          # Bin wheels have no Python package in the wheel library (W007).
+          uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
