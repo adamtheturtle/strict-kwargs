@@ -1,10 +1,42 @@
+[build-system]
+build-backend = "maturin"
+requires = [ "maturin>=1.8,<2" ]
+
 [project]
 name = "strict-kwargs"
 version = "0.1.0"
-description = "Enforce using keyword arguments where possible (fast, ty/mypy-independent)"
+description = "Enforce using keyword arguments where possible."
 readme = "README.md"
-requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [
+    { name = "Adam Dangoor", email = "adamdangoor@gmail.com" },
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Quality Assurance",
+]
+keywords = [ "lint", "keyword-arguments", "ty", "mypy" ]
+urls.Source = "https://github.com/adamtheturtle/strict-kwargs"
+urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANGELOG.rst"
+
+[project.optional-dependencies]
+release = [ "check-wheel-contents==0.6.3" ]
+
+[tool.maturin]
+bindings = "bin"
+module-name = "strict_kwargs"
 
 [tool.strict_kwargs]
 ignore_names = []

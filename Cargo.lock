@@ -196,6 +196,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "configparser"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1d7dcda7d1da79e444bdfba1465f2f849a58b07774e1df473ee77030cb47a7"
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,6 +868,7 @@ name = "strict-kwargs"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "configparser",
  "ignore",
  "rustc-hash",
  "rustpython-ruff_python_ast",
