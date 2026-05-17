@@ -44,8 +44,8 @@ strict-kwargs --python .venv    # point the ty fallback at an environment
 ### Auto-fix
 
 `strict-kwargs fix` rewrites positional call arguments to keyword arguments
-for every violation it can resolve to a single in-project signature (much like
-`ruff check --fix`):
+for every violation it can resolve to a single known signature — project code
+*and* the embedded typeshed builtins — much like `ruff check --fix`:
 
 ```bash
 strict-kwargs fix .             # rewrite files in place
@@ -59,10 +59,11 @@ add(1, b=2)   # ->  add(a=1, b=2)
 ```
 
 The fixer is deliberately conservative: it never rewrites a call it would not
-report, and it leaves alone overloaded callees, builtins/stdlib, `*args` /
-`**kwargs` unpacking at the call site, and anything resolved only through the
-`ty` fallback. Positional-only parameters and arguments absorbed by `*args`
-stay positional. Run `strict-kwargs fix` before `ty check`.
+report, and it leaves alone overloaded callees (so an overloaded builtin like
+`str` is reported but not rewritten), `*args` / `**kwargs` unpacking at the
+call site, and anything resolved only through the `ty` fallback.
+Positional-only parameters and arguments absorbed by `*args` stay positional.
+Run `strict-kwargs fix` before `ty check`.
 
 `--python` accepts a Python interpreter, a virtualenv directory, or a
 `sys.prefix` directory (mirrors `ty check --python`). Use it when third-party

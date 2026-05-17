@@ -6,9 +6,9 @@ Next
 
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
-  resolve to a single in-project signature are rewritten; overloads,
-  builtins/stdlib, ``*args``/``**kwargs`` unpacking, and ty-only resolutions
-  are left untouched.
+  resolve to a single known signature are rewritten (project code and the
+  embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs``
+  unpacking, and ty-only resolutions are left untouched.
 - Resolve calls into builtins, the standard library, and third-party
   packages: a pinned typeshed copy is vendored and embedded in the binary;
   third-party resolves from ``site-packages`` (PEP 561).

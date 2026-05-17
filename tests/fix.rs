@@ -147,8 +147,16 @@ fn does_not_fix_double_star_kwargs() {
 }
 
 #[test]
-fn does_not_fix_builtins() {
-    // Flagged by the checker but intentionally out of scope for the fixer.
+fn fixes_builtins() {
+    // Builtins are in scope: a single-signature builtin is rewritten using
+    // its typeshed parameter names.
+    assert_fixed("enumerate([1])\n", "enumerate(iterable=[1])\n");
+}
+
+#[test]
+fn does_not_fix_overloaded_builtin() {
+    // `str` is overloaded in typeshed: still flagged by the checker, but the
+    // overload safety rule (not a builtins carve-out) keeps the fixer away.
     assert_unchanged("str(123)\n");
 }
 

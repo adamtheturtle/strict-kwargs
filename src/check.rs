@@ -610,11 +610,6 @@ fn call_fix_insertions(
     if call.arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
         return None;
     }
-    // Builtins/stdlib are out of scope for the initial fixer (`str(1)` is
-    // often intentionally positional).
-    if callee_fullname.starts_with("builtins.") {
-        return None;
-    }
     // Descriptor protocol calls are rare and their receiver/value mapping is
     // subtle; skip rather than risk a wrong rewrite.
     if callee_fullname.ends_with(".__get__") || callee_fullname.ends_with(".__set__") {
