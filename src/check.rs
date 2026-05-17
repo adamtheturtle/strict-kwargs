@@ -404,23 +404,21 @@ impl<'a> CallChecker<'a> {
     }
 
     fn check_call(&mut self, call: &ast::ExprCall) {
-        let resolved = self.resolve_callee(&call.func);
-        let indexed = resolved
-            .as_deref()
-            .filter(|name| self.index.get(name).is_some())
-            .map(str::to_string);
-        let Some(callee_fullname) = indexed else {
+        let Some(callee_fullname) = self.resolve_callee(&call.func) else {
             // Built-in resolver couldn't resolve: defer to a pipelined ty
             // query (handled once per file after the walk).
+            self.record_ty_pending(call);
+            return;
+        };
+        let Some(signatures) = self.index.get(&callee_fullname) else {
+            // Resolved to a name the index does not know (e.g. a module
+            // attribute bound to a non-callable): defer to the ty fallback.
             self.record_ty_pending(call);
             return;
         };
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
-        let Some(signatures) = self.index.get(&callee_fullname) else {
-            return;
-        };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
@@ -1019,6 +1017,12 @@ fn identifier_at(source: &str, offset: usize) -> Option<String> {
 
 /// Parse a ty-reported parameter list (`a: int, b: int = ..., /`) into a
 /// signature by reusing the real parser. `None` if it doesn't parse.
+// Only reached from the (excluded) `resolve_pending_with_ty` ty path, and
+// the synthesized `def __sk__(...)` always parses to a single
+// `FunctionDef`, so the non-`FunctionDef` arm is unreachable. Behaviour is
+// unit-tested in `signature_from_param_text_parses_or_fails`; exclude it
+// from the gate for the same reasons as the rest of the ty glue.
+#[cfg_attr(coverage, coverage(off))]
 fn signature_from_param_text(params: &str) -> Option<Signature> {
     let src = format!("def __sk__({params}): ...\n");
     let parsed = parse_module(&src).ok()?;
