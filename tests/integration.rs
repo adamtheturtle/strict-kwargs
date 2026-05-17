@@ -216,6 +216,81 @@ c.method(1)
 }
 
 #[test]
+fn unbound_first_party_method_receiver_not_flagged() {
+    // Issue #27: `K.n(K())` is an unbound-method call resolved by the
+    // built-in resolver (first-party class). The explicit receiver binds to
+    // `self` and is never keyword-passable, so it must not be counted — the
+    // first-party analogue of the issue #15 ty-path fix.
+    assert_ok(
+        r"
+class K:
+    def n(self) -> int:
+        return 0
+
+K.n(K())
+",
+    );
+}
+
+#[test]
+fn unbound_first_party_method_flags_only_real_positional() {
+    // `K.m(K(), 1)`: the receiver is excluded, but `a` is a genuine
+    // keyword-able positional — reported as `got 1`, not `got 2`.
+    let messages = check_source(
+        r"
+class K:
+    def m(self, a: int) -> int:
+        return a
+
+K.m(K(), 1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:6:"), "got: {messages:?}");
+    assert!(
+        messages[0].contains("\"m\" of \"K\"") && messages[0].contains("got 1, maximum 0"),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
+fn bound_instance_method_still_flagged() {
+    // The instance form `k.m(1)` is a normal bound call: the receiver is
+    // implicit, so `1` is still over the limit (issue #27 must not regress
+    // the existing instance-call behaviour).
+    assert_error(
+        r"
+class K:
+    def m(self, a: int) -> int:
+        return a
+
+k = K()
+k.m(1)
+",
+        7,
+        "got 1, maximum 0",
+    );
+}
+
+#[test]
+fn unbound_classmethod_via_class_still_flagged() {
+    // `cls` is auto-bound even through the class, so `K.cm(1)` passes no
+    // explicit receiver: `1` is a keyword-able positional and is flagged.
+    assert_error(
+        r"
+class K:
+    @classmethod
+    def cm(cls, a: int) -> int:
+        return a
+
+K.cm(1)
+",
+        7,
+        "got 1, maximum 0",
+    );
+}
+
+#[test]
 fn callable_class_as_decorator() {
     assert_ok(
         r"

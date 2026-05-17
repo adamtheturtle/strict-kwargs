@@ -4,6 +4,12 @@ Changelog
 Next
 ----
 
+- Fix a false positive on the explicit receiver of a first-party
+  unbound-method call (``K.n(K())``): the receiver binds to ``self`` and is
+  never keyword-passable, so it is no longer counted against the positional
+  limit. ``K.m(K(), 1)`` now reports only the real argument and the fixer
+  rewrites it to ``K.m(K(), a=1)``. This extends the typeshed/``ty``-path
+  fix to the built-in resolver path (issue #27; companion to #15).
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the
