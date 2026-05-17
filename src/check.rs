@@ -10,12 +10,16 @@ use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use rustc_hash::FxHashMap;
 
+use std::cell::RefCell;
+
 use crate::ast_util::{line_column, positional_argument_count};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::index::{build_index, module_name_for_path, DefinitionIndex};
 use crate::signature::Signature;
+use crate::ty_resolver::{byte_offset_to_lsp, lsp_to_byte_offset, TyResolver};
 
+use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
 
 pub fn check_paths(
@@ -25,6 +29,10 @@ pub fn check_paths(
 ) -> Result<Vec<Diagnostic>, CheckError> {
     let python_files = collect_python_files(paths);
     let index = build_index(project_root, &python_files)?;
+    // ty-grade resolution (inheritance/MRO, return types, annotated params,
+    // overloads) for calls the built-in resolver cannot resolve. Optional:
+    // absence of `ty` just disables the fallback.
+    let ty = TyResolver::start(project_root).map(RefCell::new);
     let mut diagnostics = Vec::new();
     for path in &python_files {
         let source = std::fs::read_to_string(path)?;
@@ -37,6 +45,7 @@ pub fn check_paths(
             &index,
             config,
             &mut diagnostics,
+            ty.as_ref(),
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -97,6 +106,8 @@ struct CallChecker<'a> {
     config: &'a Config,
     diagnostics: &'a mut Vec<Diagnostic>,
     scopes: Vec<Scope>,
+    ty: Option<&'a RefCell<TyResolver>>,
+    ty_file_cache: RefCell<FxHashMap<PathBuf, Option<String>>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -115,6 +126,7 @@ impl<'a> CallChecker<'a> {
         index: &'a DefinitionIndex,
         config: &'a Config,
         diagnostics: &'a mut Vec<Diagnostic>,
+        ty: Option<&'a RefCell<TyResolver>>,
     ) -> Self {
         Self {
             path,
@@ -124,6 +136,8 @@ impl<'a> CallChecker<'a> {
             config,
             diagnostics,
             scopes: vec![Scope::default()],
+            ty,
+            ty_file_cache: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -284,7 +298,15 @@ impl<'a> CallChecker<'a> {
     }
 
     fn check_call(&mut self, call: &ast::ExprCall) {
-        let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+        let resolved = self.resolve_callee(&call.func);
+        let indexed = resolved
+            .as_deref()
+            .filter(|name| self.index.get(name).is_some())
+            .map(str::to_string);
+        let Some(callee_fullname) = indexed else {
+            // Built-in resolver couldn't resolve (or had no signature):
+            // defer to ty's type inference.
+            self.try_ty_fallback(call);
             return;
         };
         let Some(signatures) = self.index.get(&callee_fullname) else {
@@ -325,6 +347,83 @@ impl<'a> CallChecker<'a> {
             positional_count,
             max_positional,
         });
+    }
+
+    /// Resolve a call via `ty` when the built-in resolver could not. ty's
+    /// type inference handles inheritance/MRO, return types, annotated
+    /// parameters, and overloads. Fails closed (no diagnostic) on any error.
+    fn try_ty_fallback(&mut self, call: &ast::ExprCall) {
+        let Some(ty) = self.ty else {
+            return;
+        };
+        // Position at the callee identifier: the attribute for ``x.m()``,
+        // otherwise the name itself.
+        let (offset, is_method) = match &*call.func {
+            Expr::Attribute(attr) => (attr.attr.range().start(), true),
+            Expr::Name(name) => (name.range().start(), false),
+            _ => return,
+        };
+        let (line, character) = byte_offset_to_lsp(self.source, offset.to_usize());
+        let loc = {
+            let mut ty = ty.borrow_mut();
+            ty.definition(&self.path, self.source, line, character)
+        };
+        let Some(loc) = loc else {
+            return;
+        };
+
+        let target_src = self.ty_target_source(&loc.path);
+        let Some(target_src) = target_src else {
+            return;
+        };
+        let Ok(parsed) = parse_module(&target_src) else {
+            return;
+        };
+        let Some(def_off) = lsp_to_byte_offset(&target_src, loc.line, loc.character) else {
+            return;
+        };
+
+        let _ = is_method;
+        let Some((fullname, signatures)) = resolve_def_at(parsed.suite(), def_off) else {
+            return;
+        };
+        let positional_count = positional_argument_count(&call.arguments);
+        if signatures.iter().any(|signature| {
+            !call_exceeds_positional_limit(signature, &fullname, false, positional_count)
+        }) {
+            return;
+        }
+        let max_positional = signatures
+            .iter()
+            .filter_map(|signature| signature.max_positional_at_call_site(&fullname, false))
+            .max()
+            .unwrap_or(0);
+        let (diag_line, column) = line_column(self.source, call.start());
+        self.diagnostics.push(Diagnostic {
+            path: self.path.clone(),
+            line: diag_line,
+            column,
+            callee: format_callee_display(&fullname),
+            positional_count,
+            max_positional,
+        });
+    }
+
+    /// Source of a ty-resolved target file (the file being checked is already
+    /// in memory). Cached; unreadable targets (e.g. ty's bundled stubs) yield
+    /// `None`.
+    fn ty_target_source(&self, path: &Path) -> Option<String> {
+        if path == self.path {
+            return Some(self.source.to_string());
+        }
+        if let Some(cached) = self.ty_file_cache.borrow().get(path) {
+            return cached.clone();
+        }
+        let read = std::fs::read_to_string(path).ok();
+        self.ty_file_cache
+            .borrow_mut()
+            .insert(path.to_path_buf(), read.clone());
+        read
     }
 
     /// Map a base name to the signature-bearing fullname to check: the name
@@ -514,4 +613,112 @@ fn format_callee_display(fullname: &str) -> String {
     } else {
         format!("\"{method}\"")
     }
+}
+
+/// Whether byte `offset` falls within an identifier's range.
+fn ident_hit(ident: &ast::Identifier, offset: usize) -> bool {
+    let range = ident.range();
+    offset >= range.start().to_usize() && offset < range.end().to_usize()
+}
+
+type FnEntry<'a> = (Option<String>, &'a StmtFunctionDef);
+
+/// Collect every function (with its immediate enclosing class name) and class
+/// defined in `stmts`, recursing through classes and control-flow blocks
+/// (typeshed gates defs behind `if sys.version_info`).
+fn collect_defs<'a>(
+    stmts: &'a [Stmt],
+    class: Option<&str>,
+    funcs: &mut Vec<FnEntry<'a>>,
+    classes: &mut Vec<&'a StmtClassDef>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(f) => {
+                funcs.push((class.map(str::to_string), f));
+                collect_defs(&f.body, None, funcs, classes);
+            }
+            Stmt::ClassDef(c) => {
+                classes.push(c);
+                collect_defs(&c.body, Some(c.name.as_str()), funcs, classes);
+            }
+            Stmt::If(ast::StmtIf {
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                collect_defs(body, class, funcs, classes);
+                for clause in elif_else_clauses {
+                    collect_defs(&clause.body, class, funcs, classes);
+                }
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                collect_defs(body, class, funcs, classes);
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = handler;
+                    collect_defs(&h.body, class, funcs, classes);
+                }
+                collect_defs(orelse, class, funcs, classes);
+                collect_defs(finalbody, class, funcs, classes);
+            }
+            Stmt::With(ast::StmtWith { body, .. })
+            | Stmt::For(ast::StmtFor { body, .. })
+            | Stmt::While(ast::StmtWhile { body, .. }) => {
+                collect_defs(body, class, funcs, classes);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Given the byte offset ty resolved a callee to, find the function (or class
+/// constructor) defined there and return its synthetic fullname plus all
+/// overload signatures (most-permissive overload wins downstream).
+fn resolve_def_at(stmts: &[Stmt], offset: usize) -> Option<(String, Vec<Signature>)> {
+    let mut funcs: Vec<FnEntry> = Vec::new();
+    let mut classes: Vec<&StmtClassDef> = Vec::new();
+    collect_defs(stmts, None, &mut funcs, &mut classes);
+
+    if let Some((class, target)) = funcs.iter().find(|(_, f)| ident_hit(&f.name, offset)) {
+        let name = target.name.as_str();
+        let overloads: Vec<Signature> = funcs
+            .iter()
+            .filter(|(c, f)| c.as_deref() == class.as_deref() && f.name.as_str() == name)
+            .map(|(_, f)| signature_from_parameters(&f.parameters))
+            .collect();
+        let fullname = match class {
+            Some(c) if name == "__init__" || name == "__new__" => {
+                format!("ty.{c}.__init__")
+            }
+            Some(c) => format!("ty.{c}.{name}"),
+            None => format!("ty.{name}"),
+        };
+        return Some((fullname, overloads));
+    }
+
+    // ty pointed at a class itself: a constructor call.
+    if let Some(class) = classes.iter().find(|c| ident_hit(&c.name, offset)) {
+        for ctor in ["__init__", "__new__"] {
+            let sigs: Vec<Signature> = class
+                .body
+                .iter()
+                .filter_map(|s| match s {
+                    Stmt::FunctionDef(f) if f.name.as_str() == ctor => {
+                        Some(signature_from_parameters(&f.parameters))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !sigs.is_empty() {
+                return Some((format!("ty.{}.__init__", class.name.as_str()), sigs));
+            }
+        }
+    }
+    None
 }

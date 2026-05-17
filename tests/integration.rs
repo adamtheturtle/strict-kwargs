@@ -769,3 +769,83 @@ fn reexport_first_party_package() {
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("app.py:3:"));
 }
+
+/// ty-backed tests need the `ty` binary; skip cleanly when it is absent so
+/// the suite is not environment-dependent.
+fn ty_available() -> bool {
+    std::process::Command::new("ty")
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn ty_resolves_inherited_method() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    assert_error(
+        r#"
+class A:
+    def method(self, a: int) -> None: ...
+
+class B(A):
+    pass
+
+B().method(1)
+"#,
+        8,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn ty_resolves_return_typed_and_annotated() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    let messages = check_source(
+        r#"
+class A:
+    def method(self, a: int) -> None: ...
+
+def make() -> A:
+    return A()
+
+def takes(x: A) -> None:
+    x.method(1)
+
+make().method(1)
+A().method(a=1)
+"#,
+    );
+    // x.method(1) (annotated) and make().method(1) (return-typed) flag;
+    // the keyword call does not.
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(messages.iter().any(|m| m.starts_with("main:9:")));
+    assert!(messages.iter().any(|m| m.starts_with("main:11:")));
+}
+
+#[test]
+fn ty_keyword_call_not_flagged() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    assert_ok(
+        r#"
+class A:
+    def method(self, a: int) -> None: ...
+
+class B(A):
+    pass
+
+B().method(a=1)
+"#,
+    );
+}
