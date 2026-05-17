@@ -332,6 +332,9 @@ impl<'a> CallChecker<'a> {
             self.record_ty_pending(call);
             return;
         };
+        if is_typing_special_form_constructor(&callee_fullname) {
+            return;
+        }
         let Some(signatures) = self.index.get(&callee_fullname) else {
             return;
         };
@@ -565,6 +568,43 @@ fn call_exceeds_positional_limit(
     positional_count > max_positional
 }
 
+/// `typing` / `typing_extensions` *special-form* constructors whose name is
+/// supplied as a positional string literal.
+///
+/// `TypeVar`/`ParamSpec`/`TypeVarTuple`/`NewType`/`TypeAliasType` are PEP 484 /
+/// 612 / 646 / 695 special forms: the first argument must be a string literal
+/// equal to the assigned variable so checkers can resolve them statically.
+/// mypy (no plugins), pyright and ty all reject the keyword form
+/// (`ParamSpec(name="P")` → *"expects a string literal as first argument"*),
+/// so a type-checked codebase — strict-kwargs' only audience — can never
+/// satisfy a keyword-rewrite diagnostic here. Exempt them regardless of the
+/// resolved signature: typeshed does not mark these params positional-only
+/// (the checkers special-case the call and ignore the stub), and the proposal
+/// to add `/` upstream (python/typeshed#15804) would not capture the
+/// literal/name-match half of the contract anyway.
+fn is_typing_special_form_constructor(fullname: &str) -> bool {
+    // The diagnostic may target the class itself (`typing.ParamSpec`), its
+    // constructor (`...__init__` / `...__new__`), or — for `NewType`, a class
+    // on 3.10+ — its `__call__`.
+    let core = fullname
+        .strip_suffix(".__init__")
+        .or_else(|| fullname.strip_suffix(".__new__"))
+        .or_else(|| fullname.strip_suffix(".__call__"))
+        .unwrap_or(fullname);
+    let Some((module, name)) = core.rsplit_once('.') else {
+        return false;
+    };
+    // The built-in resolver yields the real module; the ty fallback
+    // synthesizes `ty.<…>` names (see `resolve_def_at`). typeshed defines
+    // these only in `typing` / `typing_extensions`.
+    let module_ok = matches!(module, "typing" | "typing_extensions" | "ty");
+    module_ok
+        && matches!(
+            name,
+            "TypeVar" | "ParamSpec" | "TypeVarTuple" | "NewType" | "TypeAliasType"
+        )
+}
+
 /// Format like mypy: ``"func"`` or ``"method" of "C"``.
 fn format_callee_display(fullname: &str) -> String {
     let Some((parent, method)) = fullname.rsplit_once('.') else {
@@ -742,6 +782,9 @@ fn emit_if_violation(
     path: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if is_typing_special_form_constructor(fullname) {
+        return;
+    }
     if signatures.is_empty()
         || signatures
             .iter()
@@ -911,8 +954,44 @@ fn resolve_pending_with_ty(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_unbound_receiver;
+    use super::{is_typing_special_form_constructor, strip_unbound_receiver};
     use crate::signature::{Parameter, ParameterKind, Signature};
+
+    #[test]
+    fn exempts_typing_special_forms_in_every_resolved_form() {
+        // Built-in resolver: real module, class / constructor / `__call__`.
+        for fullname in [
+            "typing.TypeVar",
+            "typing.ParamSpec.__init__",
+            "typing.TypeVarTuple.__new__",
+            "typing.NewType.__call__",
+            "typing.TypeAliasType",
+            "typing_extensions.ParamSpec",
+            // ty fallback synthesizes `ty.<…>` names.
+            "ty.ParamSpec",
+            "ty.NewType.__call__",
+        ] {
+            assert!(
+                is_typing_special_form_constructor(fullname),
+                "{fullname} should be exempt (issue #19)"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_exempt_unrelated_callables() {
+        for fullname in [
+            "typing.cast",
+            "typing.NamedTuple",
+            "mypkg.TypeVar.__init__",
+            "TypeVar",
+        ] {
+            assert!(
+                !is_typing_special_form_constructor(fullname),
+                "{fullname} must not be exempt"
+            );
+        }
+    }
 
     fn sig(names: &[&str]) -> Signature {
         Signature {
