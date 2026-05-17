@@ -76,14 +76,7 @@ pub fn check_paths(
         }
         if !ty_start_attempted {
             ty_start_attempted = true;
-            ty = TyResolver::start(project_root, python_env);
-            if ty.is_none() && ty_binary_present() {
-                eprintln!(
-                    "strict-kwargs: `ty` found but its language server could \
-                     not be started; continuing without the type-inference \
-                     fallback"
-                );
-            }
+            ty = start_ty(project_root, python_env);
         }
         if let Some(ty) = ty.as_mut() {
             resolve_pending_with_ty(
@@ -1129,9 +1122,42 @@ fn hover_text(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Start the `ty` language server once, warning if its binary is present but
+/// the server could not be launched.
+///
+/// Like [`TyResolver::start`], this is `ty`-subprocess orchestration whose
+/// outcome is environment-specific (the coverage gate guarantees `ty` is
+/// present and startable, so the not-started warning path cannot be taken
+/// there), so it is excluded from the gate.
+#[cfg_attr(coverage, coverage(off))]
+fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Option<TyResolver> {
+    let ty = TyResolver::start(project_root, python_env);
+    if ty.is_none() && ty_binary_present() {
+        eprintln!(
+            "strict-kwargs: `ty` found but its language server could \
+             not be started; continuing without the type-inference \
+             fallback"
+        );
+    }
+    ty
+}
+
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver
 /// missed: hover (precise, overload- and inheritance-resolved, stdlib too),
 /// then goto-definition for the rest (constructors). Fails closed.
+///
+/// This is pure orchestration of the `ty` LSP subprocess: it pipelines
+/// hover/goto-definition requests and dispatches each reply to the parsing
+/// and emission logic. Its outcome depends on `ty`'s own
+/// version-/environment-specific resolution (the suite asserts ty behaviour
+/// only weakly for the same reason), so — like [`TyResolver::start`] — it is
+/// excluded from the coverage gate. Every piece of decision logic it calls is
+/// unit-tested deterministically instead: [`hover_text`],
+/// [`parse_hover_signature`], [`signature_from_param_text`],
+/// [`parse_callable_type_overloads`], [`strip_unbound_receiver`],
+/// [`identifier_at`], [`byte_offset_to_lsp`], [`lsp_to_byte_offset`],
+/// [`location_from_value`], [`resolve_def_at`] and [`emit_if_violation`].
+#[cfg_attr(coverage, coverage(off))]
 fn resolve_pending_with_ty(
     ty: &mut TyResolver,
     path: &Path,
@@ -1555,5 +1581,40 @@ while cond:
         assert_eq!(format_callee_display("a.b.__new__"), "\"b\"");
         assert_eq!(format_callee_display("pkg.mod.func"), "\"func\" of \"mod\"");
         assert_eq!(format_callee_display("mod.func"), "\"func\"");
+    }
+
+    #[test]
+    fn emit_if_violation_emits_only_on_a_real_violation() {
+        use super::emit_if_violation;
+        use std::path::Path;
+
+        // `def f(a)` allows zero positional args at the call site.
+        let one = sig(&["a"]);
+        let path = Path::new("m.py");
+
+        // Special-form constructors are always exempt.
+        let mut d = Vec::new();
+        emit_if_violation("ty.TypeVar", &[one.clone()], 2, "x", 0, path, &mut d);
+        assert!(d.is_empty());
+
+        // No signatures: nothing to check.
+        let mut d = Vec::new();
+        emit_if_violation("ty.f", &[], 2, "x", 0, path, &mut d);
+        assert!(d.is_empty());
+
+        // Within the limit (some overload permits it): no diagnostic.
+        let mut d = Vec::new();
+        emit_if_violation("ty.f", &[one.clone()], 0, "f()\n", 0, path, &mut d);
+        assert!(d.is_empty());
+
+        // Exceeds the limit: one diagnostic with the rendered fields.
+        let mut d = Vec::new();
+        emit_if_violation("ty.f", &[one], 2, "f(1, 2)\n", 0, path, &mut d);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].line, 1);
+        assert_eq!(d[0].column, 1);
+        assert_eq!(d[0].callee, "\"f\"");
+        assert_eq!(d[0].positional_count, 2);
+        assert_eq!(d[0].max_positional, 0);
     }
 }
