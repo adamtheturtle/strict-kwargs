@@ -104,6 +104,12 @@ otherwise-unresolved call.
 
 This tool's built-in engine uses static analysis (Ruff's Python parser), not a type checker; the optional `ty` fallback adds real inference for the common gaps but is not a full reimplementation of the mypy plugin. Overloads are handled permissively (a call is flagged only if it exceeds every candidate signature), `sys.version_info`/`sys.platform` stub branches are not evaluated, and dynamic callables / runtime-computed `__all__` are still not caught. Without `ty` on `PATH`, inheritance/return-type/annotation-typed receivers are not resolved.
 
+## Architecture & current state
+
+For the full resolution pipeline (built-in resolver + embedded typeshed + the
+optional `ty` inference fallback), the support matrix, parity status, and the
+honest limitations, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## License
 
 MIT
