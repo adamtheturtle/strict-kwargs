@@ -1378,4 +1378,181 @@ mod tests {
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
     }
+
+    // ----- ty goto-definition resolution internals --------------------
+
+    use super::{
+        collect_defs, format_callee_display, identifier_at, resolve_def_at,
+        signature_from_param_text,
+    };
+    use ruff_python_ast::{StmtClassDef, StmtFunctionDef};
+    use ruff_python_parser::parse_module;
+
+    #[test]
+    fn collect_defs_recurses_every_control_flow_form() {
+        // A def at module level, nested in a fn, in a class, and in every
+        // control-flow form (if/elif/else, try/except/else/finally, with,
+        // for, while).
+        let src = "\
+def top():
+    def inner():
+        ...
+
+class K:
+    def m(self):
+        ...
+
+if a:
+    def in_if():
+        ...
+elif b:
+    def in_elif():
+        ...
+else:
+    def in_else():
+        ...
+
+try:
+    def in_try():
+        ...
+except Exception:
+    def in_except():
+        ...
+else:
+    def in_try_else():
+        ...
+finally:
+    def in_finally():
+        ...
+
+with ctx() as c:
+    def in_with():
+        ...
+
+for i in xs:
+    def in_for():
+        ...
+
+while cond:
+    def in_while():
+        ...
+";
+        let parsed = parse_module(src).expect("parse");
+        let mut funcs: Vec<(Option<String>, &StmtFunctionDef)> = Vec::new();
+        let mut classes: Vec<&StmtClassDef> = Vec::new();
+        collect_defs(parsed.suite(), None, &mut funcs, &mut classes);
+
+        let names: Vec<&str> = funcs.iter().map(|(_, f)| f.name.as_str()).collect();
+        for expected in [
+            "top",
+            "inner",
+            "m",
+            "in_if",
+            "in_elif",
+            "in_else",
+            "in_try",
+            "in_except",
+            "in_try_else",
+            "in_finally",
+            "in_with",
+            "in_for",
+            "in_while",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        // `m` is recorded with its enclosing class.
+        assert!(funcs
+            .iter()
+            .any(|(c, f)| c.as_deref() == Some("K") && f.name.as_str() == "m"));
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].name.as_str(), "K");
+    }
+
+    fn resolve_at(src: &str, needle: &str) -> Option<(String, usize)> {
+        let parsed = parse_module(src).expect("parse");
+        let offset = src.find(needle).expect("needle");
+        resolve_def_at(parsed.suite(), offset).map(|(name, sigs)| (name, sigs.len()))
+    }
+
+    #[test]
+    fn resolve_def_at_free_function_and_dunder_without_class() {
+        assert_eq!(
+            resolve_at("def foo(a, b):\n    ...\n", "foo("),
+            Some(("ty.foo".to_string(), 1))
+        );
+        // A module-level `__new__` has no class: falls to the `ty.<name>` arm.
+        assert_eq!(
+            resolve_at("def __new__(cls):\n    ...\n", "__new__"),
+            Some(("ty.__new__".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn resolve_def_at_method_and_constructor_names() {
+        assert_eq!(
+            resolve_at("class C:\n    def mth(self, a):\n        ...\n", "mth"),
+            Some(("ty.C.mth".to_string(), 1))
+        );
+        assert_eq!(
+            resolve_at(
+                "class C:\n    def __init__(self, a):\n        ...\n",
+                "__init__"
+            ),
+            Some(("ty.C.__init__".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn resolve_def_at_collects_overloads() {
+        let src = "class C:\n    def f(self, a): ...\n    def f(self, a, b): ...\n";
+        assert_eq!(resolve_at(src, "f(self, a):"), Some(("ty.C.f".to_string(), 2)));
+    }
+
+    #[test]
+    fn resolve_def_at_class_name_resolves_constructor() {
+        // Offset on the class identifier (not a method) -> constructor path.
+        assert_eq!(
+            resolve_at("class Kx:\n    def __init__(self, a):\n        ...\n", "Kx"),
+            Some(("ty.Kx.__init__".to_string(), 1))
+        );
+        // Only `__new__` present: the ctor loop's second iteration.
+        assert_eq!(
+            resolve_at("class Nw:\n    def __new__(cls):\n        ...\n", "Nw"),
+            Some(("ty.Nw.__init__".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn resolve_def_at_returns_none_when_offset_hits_nothing() {
+        // Offset on the leading newline: no identifier there.
+        assert_eq!(resolve_at("\n\ndef f():\n    ...\n", "\n"), None);
+        // A class with no constructor: the ctor loop yields nothing.
+        assert_eq!(resolve_at("class Empty:\n    x = 1\n", "Empty"), None);
+    }
+
+    #[test]
+    fn identifier_at_extracts_or_rejects() {
+        assert_eq!(identifier_at("ab.cd", 0).as_deref(), Some("ab"));
+        assert_eq!(identifier_at("ab.cd", 3).as_deref(), Some("cd"));
+        // Offset on a non-identifier byte.
+        assert_eq!(identifier_at("(z", 0), None);
+        // Offset past the end of the source.
+        assert_eq!(identifier_at("x", 5), None);
+    }
+
+    #[test]
+    fn signature_from_param_text_parses_or_fails() {
+        let sig = signature_from_param_text("a: int, b: str = 'x'").expect("sig");
+        assert_eq!(sig.parameters.len(), 2);
+        assert!(signature_from_param_text("def").is_none());
+    }
+
+    #[test]
+    fn format_callee_display_covers_every_shape() {
+        assert_eq!(format_callee_display("foo"), "\"foo\"");
+        assert_eq!(format_callee_display("a.b.__init__"), "\"b\"");
+        assert_eq!(format_callee_display("a.b.__new__"), "\"b\"");
+        assert_eq!(format_callee_display("pkg.mod.func"), "\"func\" of \"mod\"");
+        assert_eq!(format_callee_display("mod.func"), "\"func\"");
+    }
 }
