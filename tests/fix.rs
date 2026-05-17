@@ -128,6 +128,43 @@ fn rewrites_method_excluding_self() {
 }
 
 #[test]
+fn standalone_function_named_self_is_not_skipped() {
+    // Regression (PR #24 review): a standalone function may name its first
+    // parameter `self`. It is called by name with `self` passed explicitly,
+    // so the receiver must NOT be skipped: `f(1, 2)` -> `f(self=1, a=2)`,
+    // not the wrong `f(a=1, b=2)`.
+    assert_fixed(
+        "def f(self, a, *, b=10) -> None: ...\nf(1, 2)\n",
+        "def f(self, a, *, b=10) -> None: ...\nf(self=1, a=2)\n",
+    );
+}
+
+#[test]
+fn standalone_function_named_cls_is_not_skipped() {
+    assert_fixed(
+        "def make(cls, *, opt) -> None: ...\nmake(1)\n",
+        "def make(cls, *, opt) -> None: ...\nmake(cls=1)\n",
+    );
+}
+
+#[test]
+fn standalone_function_named_self_round_trips() {
+    assert_round_trips("def f(self, a, *, b=10) -> None: ...\nf(1, 2)\n");
+}
+
+#[test]
+fn bound_method_self_still_skipped() {
+    // The receiver IS implicit for an attribute-style bound call, so the
+    // mapping must still start after `self`.
+    assert_fixed(
+        "class C:\n    def m(self, a: int, *, b: int = 1) -> None: ...\n\
+         c = C()\nc.m(1)\n",
+        "class C:\n    def m(self, a: int, *, b: int = 1) -> None: ...\n\
+         c = C()\nc.m(a=1)\n",
+    );
+}
+
+#[test]
 fn keeps_positional_only_positional() {
     // `a` is positional-only and stays; only `b` is rewritten.
     assert_fixed(
