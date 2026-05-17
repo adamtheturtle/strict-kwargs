@@ -86,6 +86,9 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   *first* failure latches ty OFF for the whole run (no timeout storms);
   server→client requests are answered so ty never blocks; a one-time stderr
   note is printed if `ty` is present but its server cannot start.
+- **Explicit environment (`--python`)**: forwarded to `ty server` over LSP
+  (see *Forwarding an explicit environment* below) so the fallback can
+  resolve third-party imports in environments ty would not auto-discover.
 
 ## Capability matrix
 
@@ -101,11 +104,44 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
 Windows layouts). Other environments (Conda, a Poetry venv elsewhere, system
 site-packages, `PYTHONPATH`) are *not* found by the built-in resolver. `ty`
 covers them when present: it auto-discovers an activated virtualenv/Conda env
-and `.venv`, or you can set `[tool.ty.environment] python = "…"` in
-`pyproject.toml`/`ty.toml`. strict-kwargs launches `ty server` rooted at the
-project, so it reads that config automatically — no flag needed (and none is
-passed; `ty server` takes no CLI args). Builtins/stdlib are unaffected
-(embedded).
+and `.venv`, reads `[tool.ty.environment] python = "…"` from
+`pyproject.toml`/`ty.toml` (strict-kwargs launches `ty server` rooted at the
+project, so that config applies automatically), **or** you point it at the
+environment with `strict-kwargs --python <path>` (interpreter, venv dir, or
+`sys.prefix`; mirrors `ty check --python`). `--python` only steers ty's
+third-party discovery — the built-in resolver's env discovery and the
+embedded builtins/stdlib are unaffected.
+
+### Forwarding an explicit environment (`--python`)
+
+`ty server` takes no CLI arguments, so the environment is delivered over
+LSP. This client does not implement `workspace/configuration`, but ty also
+accepts its dynamic options in the `initialize` request's
+`initializationOptions`. strict-kwargs sends the inline-config channel that
+mirrors ty's own config schema:
+
+```jsonc
+// initialize → params.initializationOptions
+{ "configuration": { "environment": { "python": "<absolute path>" } } }
+```
+
+`configuration` is `ty`'s `WorkspaceOptions.configuration` map, deserialized
+as `ty_project::metadata::Options`, so `environment.python` here is exactly
+`[environment] python` from `ty.toml`. The path is made absolute before
+sending (ty resolves a *relative* `environment.python` against its workspace
+root, but a CLI value is relative to the user's cwd). When `--python` is
+unset, no `initializationOptions` is sent and ty's auto-discovery is
+untouched. An invalid/unknown path is not validated by strict-kwargs: ty
+simply resolves nothing against it, so the fallback fails closed (no wrong
+diagnostics) just as when no environment is configured.
+
+**Stability.** `ty` is pre-1.0 and its LSP settings surface is undocumented
+for embedding; the schema above was verified against the `ty_server` source
+and the locally pinned `ty` (`0.0.23`) and is exercised by the
+`ty_forwards_external_python_env` / `ty_invalid_python_env_fails_closed`
+integration tests. If a future `ty` changes or rejects this channel, the
+fail-closed behaviour means the fallback degrades to today's
+auto-discovery-only behaviour rather than emitting wrong diagnostics.
 
 ## Parity with mypy-strict-kwargs
 
