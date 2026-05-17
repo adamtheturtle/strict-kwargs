@@ -56,9 +56,8 @@ repos:
     rev: v1.25.2
     hooks:
       - id: zizmor
-        # `low`/`help` findings are advisory here; `medium`+ are enforced.
-        # Keep this flag in sync with `.github/workflows/lint.yml`.
-        args: [--min-severity=medium]
+        # Rule policy lives in the repo-root `zizmor.yml` (mirrors
+        # mypy-strict-kwargs), so no severity flags are needed here.
 
   - repo: local
     hooks:
