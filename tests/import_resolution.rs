@@ -576,3 +576,60 @@ fn assignment_alias_via_import_binding() {
         "`helper = real` should alias the imported `real`; got: {messages:?}"
     );
 }
+
+/// More queued modules than `MODULE_BUDGET` (4000): the import-closure
+/// loop exhausts its budget and stops resolving further modules without
+/// panicking. The (unresolvable) names need no files — they are still
+/// dequeued and counted, driving the budget to zero.
+#[test]
+fn import_closure_module_budget_is_enforced() {
+    use std::fmt::Write as _;
+    let mut app = String::new();
+    for i in 0..4100 {
+        writeln!(app, "import m{i}").expect("write");
+    }
+    app.push_str("\n\ndef local(a: int) -> None: ...\n\nlocal(1)\n");
+    let project = TestProject::new().file("app.py", &app);
+    let messages = project.check();
+    // The run completes; the genuine first-party violation is still found.
+    assert!(
+        has(&messages, "app.py:", "Too many positional"),
+        "budget-capped run must still flag the local call; got count: {}",
+        messages.len()
+    );
+}
+
+/// A `@dataclass` whose body has a `ClassVar` field and an
+/// attribute-target annotation (`_sentinel.x: int`): the synthesized
+/// `__init__` field collector skips the `ClassVar` (not a constructor
+/// parameter) and the non-`Name` target, taking only `x`. `D(1, 2)`
+/// therefore exceeds the synthesized signature and is flagged.
+#[test]
+fn dataclass_skips_classvar_and_attribute_target_fields() {
+    let project = TestProject::new().file(
+        "app.py",
+        r"
+from dataclasses import dataclass
+from typing import ClassVar
+
+
+class _Sentinel:
+    x = 0
+
+
+@dataclass
+class D:
+    x: int
+    y: ClassVar[int] = 0
+    _Sentinel.x: int = 1
+
+
+D(1, 2)
+",
+    );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:", "Too many positional") || has(&messages, "app.py:", "\"D\""),
+        "dataclass synth must skip ClassVar/attribute fields; got: {messages:?}"
+    );
+}

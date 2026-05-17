@@ -259,6 +259,28 @@ K()(1, 2)
     assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
 }
 
+/// `Factory()(...)` where `Factory` is an *imported* (locally-bound) class
+/// with `__call__`: the constructor-call arm resolves `Factory` via
+/// `resolve_local`, finds `Factory.__call__` in the index, and the
+/// over-long call is flagged.
+#[test]
+fn call_of_imported_callable_class_resolves_dunder_call() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file("app.py", "from lib import Factory\n\nFactory()(1, 2, 3)\n")
+        .file(
+            "lib.py",
+            "class Factory:\n    def __call__(self, a, b): ...\n",
+        );
+    let config = Config::load(&project.root);
+    let app = project.root.join("app.py");
+    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    assert!(
+        diagnostics.iter().any(|d| d.line == 3),
+        "expected __call__ violation, got: {diagnostics:?}"
+    );
+}
+
 /// A subscript callee (`registry["k"](1, 2)`) is not a resolvable
 /// name/attribute/call; it is deferred to ty and, unresolved, not flagged.
 #[test]

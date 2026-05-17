@@ -195,13 +195,16 @@ fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
             // with this prefix are contiguous in the sorted snapshot.
             let src_dot = format!("{src}.");
             let start = keys.partition_point(|key| *key < src_dot.as_str());
-            for &key in &keys[start..] {
-                let Some(suffix) = key.strip_prefix(&src_dot) else {
-                    break;
-                };
-                if suffix.is_empty() {
-                    continue;
-                }
+            // Sorted keys with the `src.` prefix are contiguous from `start`;
+            // `take_while` stops at the first non-prefixed key and `filter`
+            // drops a (never-produced) bare `src.` key, so no separate
+            // break/empty-suffix guards are needed.
+            for &key in keys[start..]
+                .iter()
+                .take_while(|key| key.starts_with(src_dot.as_str()))
+                .filter(|key| key.len() > src_dot.len())
+            {
+                let suffix = &key[src_dot.len()..];
                 let new_key = format!("{dst}.{suffix}");
                 if index.signatures.contains_key(&new_key) {
                     continue;
