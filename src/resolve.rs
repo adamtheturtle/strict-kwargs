@@ -148,6 +148,7 @@ fn discover_site_packages(project_root: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
     use std::sync::Mutex;

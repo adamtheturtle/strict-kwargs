@@ -74,6 +74,7 @@ pub fn find_project_root(start: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

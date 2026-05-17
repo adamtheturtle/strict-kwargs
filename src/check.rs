@@ -1262,6 +1262,7 @@ fn resolve_pending_with_ty(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{is_typing_special_form_constructor, strip_unbound_receiver, without_leading_self};
     use crate::signature::{Parameter, ParameterKind, Signature};

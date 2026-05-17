@@ -35,6 +35,7 @@ impl std::fmt::Display for CheckError {
 impl std::error::Error for CheckError {}
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
     use ruff_python_parser::parse_module;

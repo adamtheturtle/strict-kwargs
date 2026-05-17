@@ -699,6 +699,7 @@ fn synthesize_data_constructor(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{expand_reexports, DefinitionIndex};
     use crate::signature::{Parameter, ParameterKind, Signature};

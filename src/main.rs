@@ -1,5 +1,12 @@
 //! CLI for ``strict-kwargs``.
 
+// `cargo llvm-cov` builds with `--cfg coverage`; under it we opt into the
+// unstable `coverage(off)` attribute to exclude the inline test module from
+// the coverage gate (test code is not measured). Gated on `coverage` (not
+// `coverage_nightly`) so local (stable + `RUSTC_BOOTSTRAP=1`) and CI
+// (nightly) coverage are identical. See `lib.rs` for the same rationale.
+#![cfg_attr(coverage, feature(coverage_attribute))]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -139,6 +146,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

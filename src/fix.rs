@@ -93,6 +93,7 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

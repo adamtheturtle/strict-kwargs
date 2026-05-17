@@ -610,6 +610,7 @@ pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usi
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
     use std::path::Path;
