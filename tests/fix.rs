@@ -244,3 +244,28 @@ fn unchanged_file_not_reported() {
     let fixes = fix_paths(&proj.root, &[main], &config).expect("fix");
     assert!(fixes.is_empty());
 }
+
+#[test]
+fn synthesized_dataclass_constructor_not_rewritten() {
+    // Issue #29: the synthesized `__init__` omits inherited base-class
+    // fields, so the position->name mapping is not guaranteed sound. The
+    // checker still flags it; the fixer conservatively declines.
+    let proj = project(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    );
+    assert!(
+        proj.check_main().iter().any(|m| m.contains(r#"for "D""#)),
+        "expected the dataclass call to be flagged: {:?}",
+        proj.check_main()
+    );
+    assert_unchanged(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    );
+}
+
+#[test]
+fn synthesized_namedtuple_constructor_not_rewritten() {
+    assert_unchanged(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
+    );
+}

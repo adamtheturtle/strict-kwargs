@@ -1348,3 +1348,92 @@ fn local_redefinition_shadows_import() {
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("app.py:7:"));
 }
+
+// --- issue #29: synthesized constructors (@dataclass, NamedTuple) ---
+
+#[test]
+fn dataclass_positional_construction_flagged() {
+    assert_error(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+        8,
+        r#"for "D" (got 2, maximum 0)"#,
+    );
+}
+
+#[test]
+fn dataclass_keyword_construction_ok() {
+    assert_ok(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\nD()\n",
+    );
+}
+
+#[test]
+fn namedtuple_positional_construction_flagged() {
+    assert_error(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
+        7,
+        r#"for "NT" (got 2, maximum 0)"#,
+    );
+}
+
+#[test]
+fn namedtuple_keyword_construction_ok() {
+    assert_ok(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(a=1, b=2)\n",
+    );
+}
+
+#[test]
+fn dataclass_decorator_variants_flagged() {
+    // Qualified, called, and argument forms all resolve to the same
+    // synthesized `__init__`.
+    assert_error(
+        "import dataclasses\n\n@dataclasses.dataclass\nclass Q:\n    a: int\n\nQ(1)\n",
+        7,
+        r#"for "Q""#,
+    );
+    assert_error(
+        "from dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass F:\n    a: int\n\nF(1)\n",
+        7,
+        r#"for "F""#,
+    );
+}
+
+#[test]
+fn dataclass_init_false_not_synthesized() {
+    // `@dataclass(init=False)` generates no `__init__`; nothing to flag.
+    assert_ok(
+        "from dataclasses import dataclass\n\n@dataclass(init=False)\nclass D:\n    a: int\n\nD()\n",
+    );
+}
+
+#[test]
+fn dataclass_classvar_and_field_init_false_excluded() {
+    // `ClassVar` and `field(init=False)` are not `__init__` parameters, so
+    // the lone real field still makes positional construction a violation.
+    assert_error(
+        "from dataclasses import dataclass, field\nfrom typing import ClassVar\n\n@dataclass\nclass D:\n    cv: ClassVar[int] = 0\n    real: int = 0\n    skip: int = field(init=False, default=3)\n\nD(1)\n",
+        10,
+        r#"for "D" (got 1, maximum 0)"#,
+    );
+}
+
+#[test]
+fn dataclass_explicit_init_wins_over_synthesis() {
+    // A hand-written `__init__` is used as-is; the synthesized one must not
+    // shadow or duplicate it.
+    let messages = check_source(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    a: int\n    def __init__(self, only: int) -> None: ...\n\nD(1)\n",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:8:"));
+}
+
+#[test]
+fn functional_namedtuple_form_out_of_scope() {
+    // The functional `NamedTuple("N", [...])` form is not synthesized; no
+    // false positive for the surrounding call.
+    assert_ok(
+        "from typing import NamedTuple\n\nNT = NamedTuple(\"NT\", [(\"a\", int), (\"b\", int)])\n",
+    );
+}

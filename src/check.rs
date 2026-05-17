@@ -382,8 +382,11 @@ impl<'a> CallChecker<'a> {
         });
         // Auto-fix is only applied when a single, unambiguous signature is
         // known: overloaded callees may bind the same position to differently
-        // named parameters, so a keyword rewrite would not be safe.
-        if let [signature] = signatures {
+        // named parameters, so a keyword rewrite would not be safe. A
+        // synthesized ``@dataclass`` / ``NamedTuple`` constructor is likewise
+        // declined — it omits inherited base-class fields, so the
+        // position->name mapping is not guaranteed sound (issue #29).
+        if let ([signature], false) = (signatures, self.index.is_synthesized(&callee_fullname)) {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));

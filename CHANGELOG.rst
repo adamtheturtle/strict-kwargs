@@ -18,6 +18,15 @@ Next
   receiver is skipped only for constructor/callable dunders and bound
   ``receiver.method(...)`` calls, so a standalone function whose first
   parameter is named ``self``/``cls`` is rewritten correctly.
+- Flag positional construction of ``@dataclass`` and ``NamedTuple`` classes
+  (issue #29): their compiler-synthesized ``__init__`` / ``__new__`` is now
+  modeled from the annotated fields, so ``D(1, 2)`` is reported while
+  ``D(x=1, y=2)`` is accepted. ``ClassVar`` and ``field(init=False)`` fields
+  are excluded, ``@dataclass(init=False)`` synthesizes nothing, and a
+  hand-written constructor still wins. The auto-fixer conservatively declines
+  these (a synthesized signature omits inherited base-class fields). The
+  functional ``NamedTuple("N", [...])``/``namedtuple`` forms, ``attrs``, and
+  ``TypedDict`` remain out of scope.
 - Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
   can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A
   `strict-kwargs-pre-commit
