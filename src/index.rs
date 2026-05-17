@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use ruff_python_ast::Stmt;
 use ruff_python_ast::{self as ast};
+use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -181,7 +181,50 @@ fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
 /// resolving relative imports against ``module_name``/``is_package``.
 fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collected) {
-    collect_scoped(stmts, module_name, is_package, true, out);
+    let mut bindings: FxHashMap<String, String> = FxHashMap::default();
+    collect_scoped(stmts, module_name, is_package, true, &mut bindings, out);
+}
+
+/// Flatten a pure name/attribute reference (``a`` or ``a.b.c``) into its
+/// dotted segments. Returns `None` for anything else (calls, literals,
+/// subscripts, …) so only genuine aliases become re-export edges.
+fn reference_path(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Name(name) => Some(vec![name.id.to_string()]),
+        Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
+            let mut path = reference_path(value)?;
+            path.push(attr.as_str().to_string());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+/// Record a module-level binding ``local -> fullname`` so a later
+/// assignment alias (``helper = impl.real``) can resolve its right-hand
+/// side. Only meaningful at true module scope.
+fn bind(bindings: &mut FxHashMap<String, String>, local: &str, fullname: String) {
+    bindings.insert(local.to_string(), fullname);
+}
+
+/// Resolve a reference's head against module-level import bindings, falling
+/// back to the current module's namespace (a sibling def or an earlier
+/// alias, which the re-export fixpoint then chains).
+fn resolve_reference(
+    bindings: &FxHashMap<String, String>,
+    module_name: &str,
+    segments: &[String],
+) -> Option<String> {
+    let (head, rest) = segments.split_first()?;
+    let base = bindings
+        .get(head)
+        .cloned()
+        .unwrap_or_else(|| format!("{module_name}.{head}"));
+    Some(if rest.is_empty() {
+        base
+    } else {
+        format!("{base}.{}", rest.join("."))
+    })
 }
 
 /// `module_scope` is true only at true module level. Imports nested inside a
@@ -195,6 +238,7 @@ fn collect_scoped(
     module_name: &str,
     is_package: bool,
     module_scope: bool,
+    bindings: &mut FxHashMap<String, String>,
     out: &mut Collected,
 ) {
     for stmt in stmts {
@@ -206,6 +250,16 @@ fn collect_scoped(
                     let parts: Vec<&str> = dotted.split('.').collect();
                     for end in 1..parts.len() {
                         out.modules.push(parts[..end].join("."));
+                    }
+                    // ``import a.b as c`` binds ``c`` -> ``a.b``; plain
+                    // ``import a.b`` binds the top-level ``a`` -> ``a``.
+                    if module_scope {
+                        if let Some(asname) = &alias.asname {
+                            bind(bindings, asname.as_str(), dotted.to_string());
+                        } else {
+                            let top = parts.first().copied().unwrap_or(dotted);
+                            bind(bindings, top, top.to_string());
+                        }
                     }
                 }
             }
@@ -247,16 +301,47 @@ fn collect_scoped(
                     // an alias of ``base.name`` — only at module level.
                     if module_scope {
                         let exported = alias.asname.as_ref().map_or(name, ast::Identifier::as_str);
+                        bind(bindings, exported, qualified.clone());
                         out.reexports
                             .push((qualified, format!("{module_name}.{exported}")));
                     }
+                }
+            }
+            // ``out = ref`` / ``out = mod.attr`` at module level re-exports
+            // ``ref`` under ``module.out`` (a common ``__init__`` idiom).
+            // Only pure name/attribute references alias; calls, literals and
+            // comprehensions are not (they would not share a signature).
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) if module_scope => {
+                if let Some(src) = reference_path(value)
+                    .and_then(|segments| resolve_reference(bindings, module_name, &segments))
+                {
+                    for target in targets {
+                        if let Expr::Name(name) = target {
+                            out.reexports
+                                .push((src.clone(), format!("{module_name}.{}", name.id)));
+                        }
+                    }
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                value: Some(value),
+                ..
+            }) if module_scope => {
+                if let (Expr::Name(name), Some(src)) = (
+                    target.as_ref(),
+                    reference_path(value)
+                        .and_then(|segments| resolve_reference(bindings, module_name, &segments)),
+                ) {
+                    out.reexports
+                        .push((src, format!("{module_name}.{}", name.id)));
                 }
             }
             // Imports here bind in the function/class namespace, never the
             // module's, so descend with ``module_scope = false``.
             Stmt::FunctionDef(ast::StmtFunctionDef { body, .. })
             | Stmt::ClassDef(ast::StmtClassDef { body, .. }) => {
-                collect_scoped(body, module_name, is_package, false, out);
+                collect_scoped(body, module_name, is_package, false, bindings, out);
             }
             // Control flow does not introduce a scope: a module-level
             // ``if``/``try`` still re-exports (typeshed gates re-exports on
@@ -264,16 +349,23 @@ fn collect_scoped(
             Stmt::While(ast::StmtWhile { body, .. })
             | Stmt::For(ast::StmtFor { body, .. })
             | Stmt::With(ast::StmtWith { body, .. }) => {
-                collect_scoped(body, module_name, is_package, module_scope, out);
+                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                collect_scoped(body, module_name, is_package, module_scope, out);
+                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
                 for clause in elif_else_clauses {
-                    collect_scoped(&clause.body, module_name, is_package, module_scope, out);
+                    collect_scoped(
+                        &clause.body,
+                        module_name,
+                        is_package,
+                        module_scope,
+                        bindings,
+                        out,
+                    );
                 }
             }
             Stmt::Try(ast::StmtTry {
@@ -283,13 +375,27 @@ fn collect_scoped(
                 finalbody,
                 ..
             }) => {
-                collect_scoped(body, module_name, is_package, module_scope, out);
+                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    collect_scoped(&handler.body, module_name, is_package, module_scope, out);
+                    collect_scoped(
+                        &handler.body,
+                        module_name,
+                        is_package,
+                        module_scope,
+                        bindings,
+                        out,
+                    );
                 }
-                collect_scoped(orelse, module_name, is_package, module_scope, out);
-                collect_scoped(finalbody, module_name, is_package, module_scope, out);
+                collect_scoped(orelse, module_name, is_package, module_scope, bindings, out);
+                collect_scoped(
+                    finalbody,
+                    module_name,
+                    is_package,
+                    module_scope,
+                    bindings,
+                    out,
+                );
             }
             _ => {}
         }

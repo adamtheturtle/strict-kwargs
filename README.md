@@ -77,7 +77,8 @@ Builtins and the standard library resolve against a pinned copy of
 `vendored/typeshed/` and embedded in the binary (no Python environment
 required). Third-party packages resolve from the active virtualenv's
 `site-packages` (PEP 561), like `ty`/pyright. Re-exports (`from .impl import
-name` in a package `__init__`, `from x import *`) are followed, including
+name` in a package `__init__`, `from x import *`, and module-level
+assignment aliases like `helper = _impl.real`) are followed, including
 chains, so APIs exposed through a package root resolve correctly.
 
 This indexing runs once per invocation and walks the import closure of the

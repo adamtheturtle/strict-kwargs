@@ -820,6 +820,120 @@ fn function_scoped_import_is_not_a_module_reexport() {
     assert!(messages.is_empty(), "got: {messages:?}");
 }
 
+#[test]
+fn reexport_assignment_alias_of_submodule_attr() {
+    // ``pkg/__init__`` exposes its API via a plain assignment alias of a
+    // submodule attribute (``helper = _impl.real``). The built-in resolver
+    // must follow it (no ty required), so the cross-module call is enforced.
+    let messages = check_with_aux(
+        &[("app.py", "from pkg import helper\n\nhelper(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "from . import _impl\n\nhelper = _impl.real\n",
+            ),
+            ("pkg/_impl.py", "def real(a, b): ...\n"),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
+fn reexport_assignment_alias_bare_name() {
+    // ``alias = real`` where ``real`` is itself a ``from`` import: the alias
+    // resolves through the import binding. Exercised via package attribute
+    // access too (``pkg.alias(...)``).
+    let messages = check_with_aux(
+        &[("app.py", "import pkg\n\npkg.alias(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "from ._impl import real\n\nalias = real\n",
+            ),
+            ("pkg/_impl.py", "def real(a, b): ...\n"),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_assignment_alias_chained() {
+    // ``helper = _impl.real`` then ``shortcut = helper``: the second alias
+    // has no import binding for its head, so it falls back to the module
+    // namespace and is filled by the re-export fixpoint.
+    let messages = check_with_aux(
+        &[("app.py", "from pkg import shortcut\n\nshortcut(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "from . import _impl\n\nhelper = _impl.real\nshortcut = helper\n",
+            ),
+            ("pkg/_impl.py", "def real(a, b): ...\n"),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_annotated_assignment_alias() {
+    // An annotated alias (``handler: Callable = _impl.real``) is followed
+    // just like a plain assignment.
+    let messages = check_with_aux(
+        &[("app.py", "from pkg import handler\n\nhandler(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "import typing\nfrom . import _impl\n\nhandler: typing.Callable = _impl.real\n",
+            ),
+            ("pkg/_impl.py", "def real(a, b): ...\n"),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn function_scoped_assignment_alias_is_not_a_module_reexport() {
+    // ``helper = _impl.real`` *inside a function* binds in that function's
+    // scope, not the package's, so ``pkg.helper`` must not resolve (no false
+    // positive against ``_impl.real``).
+    let messages = check_with_aux(
+        &[("app.py", "import pkg\n\npkg.helper(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "from . import _impl\n\n\ndef _setup():\n    helper = _impl.real\n    return helper\n",
+            ),
+            ("pkg/_impl.py", "def real(a, b): ...\n"),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn assignment_from_call_is_not_an_alias() {
+    // ``made = factory()`` is a value, not a re-export: it must not alias
+    // ``pkg.made`` to ``factory`` (which would wrongly flag ``made(1, 2)``).
+    let messages = check_with_aux(
+        &[("app.py", "from pkg import made\n\nmade(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "from ._impl import factory\n\nmade = factory()\n",
+            ),
+            (
+                "pkg/_impl.py",
+                "def factory(a, b):\n    return lambda *x: None\n",
+            ),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
 /// ty-backed tests need the `ty` binary; skip cleanly when it is absent so
 /// the suite is not environment-dependent.
 fn ty_available() -> bool {
