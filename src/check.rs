@@ -344,13 +344,28 @@ impl<'a> CallChecker<'a> {
     /// classmethod, auto-bound even through the class) and any other first
     /// parameter (a staticmethod / free function) pass no receiver, so only
     /// a genuine leading `self` qualifies.
+    ///
+    /// Dunder-receiver methods (`__init__`/`__new__`/`__call__`/`__get__`/
+    /// `__set__`) are excluded: [`Signature::max_positional_at_call_site`]
+    /// already drops their leading receiver itself, so also stripping it
+    /// here would double-count the first real parameter. Their
+    /// implicit-receiver semantics are out of scope for issue #27 (a regular
+    /// instance-method call) and keep their existing dedicated handling.
     fn is_unbound_class_method_call(
         &self,
         func: &Expr,
         callee_fullname: &str,
         first_param: Option<&str>,
     ) -> bool {
+        const DUNDER_RECEIVERS: [&str; 5] =
+            [".__init__", ".__new__", ".__call__", ".__get__", ".__set__"];
         if first_param != Some("self") {
+            return false;
+        }
+        if DUNDER_RECEIVERS
+            .iter()
+            .any(|suffix| callee_fullname.ends_with(suffix))
+        {
             return false;
         }
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {

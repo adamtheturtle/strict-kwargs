@@ -291,6 +291,29 @@ K.cm(1)
 }
 
 #[test]
+fn unbound_dunder_via_class_not_double_stripped() {
+    // Bugbot (PR #34): a dunder-receiver callee is excluded from the issue
+    // #27 strip — `max_positional_at_call_site` already drops its leading
+    // receiver, so stripping `self` again would double-count `a`. The
+    // explicit `K.__init__(K(), 1)` keeps the existing dunder handling
+    // (positional-only `a` allowed) -> `got 2, maximum 1`, not the
+    // double-stripped `got 1, maximum 0`.
+    let messages = check_source(
+        r"
+class K:
+    def __init__(self, a: int, /) -> None: ...
+
+K.__init__(K(), 1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("got 2, maximum 1"),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
 fn callable_class_as_decorator() {
     assert_ok(
         r"
