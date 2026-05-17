@@ -934,7 +934,10 @@ fn relative_import_in_package_init() {
             "pkg/__init__.py",
             "from .core import helper\n\nhelper(1, 2)\nhelper(a=1, b=2)\n",
         )],
-        &[("pkg/core.py", "def helper(a: int, b: int) -> int:\n    return a\n")],
+        &[(
+            "pkg/core.py",
+            "def helper(a: int, b: int) -> int:\n    return a\n",
+        )],
     );
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("__init__.py:3:"));
