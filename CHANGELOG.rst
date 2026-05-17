@@ -16,6 +16,14 @@ Next
   ``maximum 1``) and previously-missed cases such as ``C()(1, b=2)`` are
   flagged. The ``@C()`` decorator-application form is unaffected (it is never
   a checked call site).
+- Performance: large import closures (e.g. files importing ``numpy``) no
+  longer take many seconds. Re-export expansion was super-quadratic in the
+  index size; it now scans only each alias's prefix range, with identical
+  output (issue #31).
+- Performance: ``ty server`` is started lazily — only when a file has calls
+  the built-in resolver could not resolve. Runs the built-in resolver fully
+  handles (the common editor-on-save / pre-commit case on first-party code)
+  no longer pay ty's project-indexing startup cost (issue #31).
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the

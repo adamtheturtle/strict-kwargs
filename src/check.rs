@@ -44,13 +44,14 @@ pub fn check_paths(
     // absence of `ty` just disables the fallback. `python_env` (the
     // `--python` value) only steers ty's third-party discovery; the built-in
     // resolver's env discovery is unchanged.
-    let mut ty = TyResolver::start(project_root, python_env);
-    if ty.is_none() && ty_binary_present() {
-        eprintln!(
-            "strict-kwargs: `ty` found but its language server could not be \
-             started; continuing without the type-inference fallback"
-        );
-    }
+    //
+    // Started lazily — only when a file actually has calls the built-in
+    // resolver could not resolve. `ty server` indexes the whole project on
+    // `initialize`, a multi-second fixed cost (issue #31); a run where the
+    // built-in resolver resolves everything (the common editor-on-save /
+    // pre-commit case on first-party code) must not pay it.
+    let mut ty: Option<TyResolver> = None;
+    let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
     for path in &python_files {
@@ -70,6 +71,20 @@ pub fn check_paths(
             checker.visit_stmt(stmt);
         }
         let pending = std::mem::take(&mut checker.ty_pending);
+        if pending.is_empty() {
+            continue;
+        }
+        if !ty_start_attempted {
+            ty_start_attempted = true;
+            ty = TyResolver::start(project_root, python_env);
+            if ty.is_none() && ty_binary_present() {
+                eprintln!(
+                    "strict-kwargs: `ty` found but its language server could \
+                     not be started; continuing without the type-inference \
+                     fallback"
+                );
+            }
+        }
         if let Some(ty) = ty.as_mut() {
             resolve_pending_with_ty(
                 ty,
