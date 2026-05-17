@@ -697,6 +697,27 @@ fn signature_from_param_text(params: &str) -> Option<Signature> {
     })
 }
 
+/// ty renders a *bound* call's receiver away (`"x".upper()` -> `def upper()`,
+/// `bound method T.m(...)`) but leaves an *unbound* method's leading
+/// `self`/`cls` intact (`str.lower(key)` -> `def lower(self: ...)`). A leading
+/// `self`/`cls` therefore means the call passes the receiver explicitly: that
+/// argument binds to the receiver parameter and must not be counted against
+/// the positional limit. Drop the parameter and the receiver argument so only
+/// the *remaining* positional arguments are checked (issue #15).
+fn strip_unbound_receiver(signature: Signature, positional_count: usize) -> (Signature, usize) {
+    let first_is_receiver = signature
+        .parameters
+        .first()
+        .and_then(|p| p.name.as_deref())
+        .is_some_and(|name| name == "self" || name == "cls");
+    if !first_is_receiver {
+        return (signature, positional_count);
+    }
+    let mut parameters = signature.parameters;
+    parameters.remove(0);
+    (Signature { parameters }, positional_count.saturating_sub(1))
+}
+
 fn emit_if_violation(
     fullname: &str,
     signatures: &[Signature],
@@ -780,6 +801,8 @@ fn resolve_pending_with_ty(
             let Some(signature) = signature_from_param_text(&sig.params) else {
                 continue;
             };
+            let (signature, positional_count) =
+                strip_unbound_receiver(signature, p.positional_count);
             let fullname = match &sig.owner {
                 Some(owner) => {
                     let owner = owner.split('[').next().unwrap_or(owner);
@@ -791,7 +814,7 @@ fn resolve_pending_with_ty(
             emit_if_violation(
                 &fullname,
                 &[signature],
-                p.positional_count,
+                positional_count,
                 source,
                 p.call_start,
                 path,
@@ -867,5 +890,58 @@ fn resolve_pending_with_ty(
                 diagnostics,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_unbound_receiver;
+    use crate::signature::{Parameter, ParameterKind, Signature};
+
+    fn sig(names: &[&str]) -> Signature {
+        Signature {
+            parameters: names
+                .iter()
+                .map(|n| Parameter {
+                    name: Some((*n).to_string()),
+                    kind: ParameterKind::PositionalOrKeyword,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn strips_leading_self_and_the_explicit_receiver() {
+        // `str.lower(key)`: ty hover keeps `self`; the explicit receiver fills
+        // it and must not count (issue #15).
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1);
+        assert!(s.parameters.is_empty());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn strips_leading_cls() {
+        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2);
+        assert_eq!(s.parameters.len(), 1);
+        assert_eq!(s.parameters[0].name.as_deref(), Some("a"));
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn leaves_bound_signature_untouched() {
+        // ty already dropped the receiver for a bound call (`def upper()` /
+        // `bound method T.m(...)`): no leading `self`/`cls`, nothing to strip.
+        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1);
+        assert_eq!(s.parameters.len(), 2);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn saturates_when_no_explicit_receiver_argument() {
+        // Defensive: a leading `self` with zero positional args (e.g. a
+        // keyword-only / malformed call) must not underflow the count.
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0);
+        assert!(s.parameters.is_empty());
+        assert_eq!(count, 0);
     }
 }
