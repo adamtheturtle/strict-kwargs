@@ -908,3 +908,50 @@ s.upper()
 "#,
     );
 }
+
+#[test]
+fn constructor_via_module_attribute() {
+    // Bugbot: `import lib; lib.MyClass(1)` must resolve to
+    // `lib.MyClass.__init__` (was silently skipped).
+    let messages = check_with_aux(
+        &[("app.py", "import lib\n\nlib.MyClass(1)\nlib.MyClass(a=1)\n")],
+        &[(
+            "lib.py",
+            "class MyClass:\n    def __init__(self, a: int) -> None: ...\n",
+        )],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
+fn relative_import_in_package_init() {
+    // Bugbot: `from .core import helper` inside `pkg/__init__.py` must
+    // anchor on `pkg`, not strip to top level.
+    let messages = check_with_aux(
+        &[(
+            "pkg/__init__.py",
+            "from .core import helper\n\nhelper(1, 2)\nhelper(a=1, b=2)\n",
+        )],
+        &[("pkg/core.py", "def helper(a: int, b: int) -> int:\n    return a\n")],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("__init__.py:3:"));
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
+fn local_redefinition_shadows_import() {
+    // Bugbot: a locally redefined name must win over a stale `import`
+    // module binding in attribute resolution.
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "from lib import helper\n\nclass helper:\n    @staticmethod\n    def run(a: int) -> None: ...\n\nhelper.run(1)\nhelper.run(a=1)\n",
+        )],
+        &[("lib.py", "def helper(a: int) -> None: ...\n")],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:7:"));
+}

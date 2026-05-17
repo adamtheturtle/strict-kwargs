@@ -48,7 +48,7 @@ pub fn module_name_for_path(project_root: &Path, path: &Path) -> String {
 }
 
 /// Whether ``path`` is a package initializer (``__init__.py``/``.pyi``).
-fn is_package_init(path: &Path) -> bool {
+pub fn is_package_init(path: &Path) -> bool {
     path.file_stem().is_some_and(|s| s == "__init__")
 }
 
@@ -273,7 +273,7 @@ fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collec
 /// Resolve ``from <level dots><module> import ...`` to its base dotted path.
 /// For ``level > 0`` the anchor is the containing package: ``module_name``
 /// itself when it is a package (`__init__`), else its parent.
-fn relative_base(
+pub fn relative_base(
     module_name: &str,
     is_package: bool,
     level: u32,

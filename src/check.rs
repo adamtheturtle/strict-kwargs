@@ -16,7 +16,9 @@ use crate::ast_util::{line_column, positional_argument_count, signature_from_par
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
-use crate::index::{build_index, module_name_for_path, DefinitionIndex};
+use crate::index::{
+    build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
+};
 use crate::signature::Signature;
 use crate::ty_resolver::{
     byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_hover_signature,
@@ -49,6 +51,7 @@ pub fn check_paths(
         let mut checker = CallChecker::new(
             path.clone(),
             module_name,
+            is_package_init(path),
             &source,
             &index,
             config,
@@ -119,6 +122,9 @@ fn is_ignored_path(path: &Path) -> bool {
 struct CallChecker<'a> {
     path: PathBuf,
     module_name: String,
+    /// Whether the file is a package initializer (`__init__.py`), which is
+    /// the anchor for its own relative imports.
+    is_package: bool,
     source: &'a str,
     index: &'a DefinitionIndex,
     config: &'a Config,
@@ -150,6 +156,7 @@ impl<'a> CallChecker<'a> {
     fn new(
         path: PathBuf,
         module_name: String,
+        is_package: bool,
         source: &'a str,
         index: &'a DefinitionIndex,
         config: &'a Config,
@@ -158,6 +165,7 @@ impl<'a> CallChecker<'a> {
         Self {
             path,
             module_name,
+            is_package,
             source,
             index,
             config,
@@ -209,37 +217,11 @@ impl<'a> CallChecker<'a> {
         None
     }
 
-    /// Package containing the current module, for relative imports.
-    /// ``pkg.sub.mod`` -> ``pkg.sub``; a top-level module -> ``""``.
-    fn current_package(&self) -> &str {
-        self.module_name
-            .rsplit_once('.')
-            .map_or("", |(parent, _)| parent)
-    }
-
-    /// Resolve ``from <level dots><module> import ...`` to the base dotted
-    /// path that names are imported from.
+    /// Resolve ``from <level dots><module> import ...`` to its base dotted
+    /// path, using the shared resolver so package (`__init__`) anchoring
+    /// matches the indexer.
     fn resolve_import_base(&self, level: u32, module: Option<&str>) -> Option<String> {
-        if level == 0 {
-            return module.map(str::to_string);
-        }
-        // ``level`` leading dots: 1 == current package, 2 == its parent, ...
-        let mut package: Vec<&str> = if self.current_package().is_empty() {
-            Vec::new()
-        } else {
-            self.current_package().split('.').collect()
-        };
-        for _ in 1..level {
-            package.pop()?;
-        }
-        let mut base = package.join(".");
-        if let Some(module) = module {
-            if !base.is_empty() {
-                base.push('.');
-            }
-            base.push_str(module);
-        }
-        Some(base)
+        relative_base(&self.module_name, self.is_package, level, module)
     }
 
     fn record_import(&mut self, stmt: &Stmt) {
@@ -433,14 +415,19 @@ impl<'a> CallChecker<'a> {
                 let attr_name = attr.id.as_str();
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
-                    // ``import a.b as m`` / ``import os.path`` then ``m.f()``.
-                    if let Some(module_path) = self.resolve_module(base_name) {
-                        return Some(format!("{module_path}.{attr_name}"));
-                    }
-                    if let Some(class_fullname) = self.resolve_local(base_name) {
-                        return Some(format!("{class_fullname}.{attr_name}"));
-                    }
-                    return Some(format!("{}.{}.{}", self.module_name, base_name, attr_name));
+                    // Local bindings (incl. a locally redefined class) take
+                    // precedence over a stale ``import`` module binding.
+                    let candidate = if let Some(local) = self.resolve_local(base_name) {
+                        format!("{local}.{attr_name}")
+                    } else if let Some(module_path) = self.resolve_module(base_name) {
+                        // ``import a.b as m`` / ``import lib`` then ``m.f()``.
+                        format!("{module_path}.{attr_name}")
+                    } else {
+                        format!("{}.{}.{}", self.module_name, base_name, attr_name)
+                    };
+                    // Resolve through constructors so e.g. ``lib.MyClass(1)``
+                    // finds ``lib.MyClass.__init__``.
+                    return Some(self.callable_fullname(&candidate).unwrap_or(candidate));
                 }
                 // Deeper chains: ``import os.path`` then ``os.path.join()``.
                 if let Some(chain) = Self::dotted_path(value) {
@@ -448,10 +435,11 @@ impl<'a> CallChecker<'a> {
                         .split_once('.')
                         .map_or((chain.as_str(), None), |(h, r)| (h, Some(r)));
                     if let Some(module_path) = self.resolve_module(head) {
-                        return Some(match rest {
+                        let candidate = match rest {
                             Some(rest) => format!("{module_path}.{rest}.{attr_name}"),
                             None => format!("{module_path}.{attr_name}"),
-                        });
+                        };
+                        return Some(self.callable_fullname(&candidate).unwrap_or(candidate));
                     }
                 }
                 None
