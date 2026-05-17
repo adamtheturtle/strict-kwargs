@@ -680,10 +680,9 @@ fn call_exceeds_positional_limit(
     ignored: bool,
     positional_count: usize,
 ) -> bool {
-    if ignored {
-        return false;
-    }
-    let Some(max_positional) = signature.max_positional_at_call_site(fullname, false) else {
+    // `max_positional_at_call_site` returns `None` exactly when `ignored`,
+    // so this single check also covers the ignore-list case.
+    let Some(max_positional) = signature.max_positional_at_call_site(fullname, ignored) else {
         return false;
     };
     let has_var_positional = signature
@@ -1635,5 +1634,26 @@ while cond:
         assert_eq!(d[0].callee, "\"f\"");
         assert_eq!(d[0].positional_count, 2);
         assert_eq!(d[0].max_positional, 0);
+    }
+
+    #[test]
+    fn hover_text_reads_string_or_value_or_none() {
+        use super::hover_text;
+        use serde_json::json;
+
+        // `contents` is a bare string.
+        assert_eq!(
+            hover_text(&json!({"contents": "plain"})).as_deref(),
+            Some("plain")
+        );
+        // `contents.value` (MarkupContent form).
+        assert_eq!(
+            hover_text(&json!({"contents": {"value": "marked"}})).as_deref(),
+            Some("marked")
+        );
+        // No `contents` at all.
+        assert_eq!(hover_text(&json!({})), None);
+        // `contents` present but neither a string nor a `.value` string.
+        assert_eq!(hover_text(&json!({"contents": {"x": 1}})), None);
     }
 }

@@ -79,6 +79,19 @@ struct Collected {
     reexports: Vec<(String, String)>,
 }
 
+/// Index vendored typeshed `builtins.pyi`. Excluded from the coverage gate:
+/// the stub is vendored with the crate and is always present and parseable,
+/// so the `resolve`/`parse_module` failure arms are unreachable (same
+/// rationale as [`crate::ty_resolver::TyResolver::start`]).
+#[cfg_attr(coverage, coverage(off))]
+fn index_builtins(resolver: &ModuleResolver, index: &mut DefinitionIndex) {
+    if let Some(m) = resolver.resolve("builtins") {
+        if let Ok(parsed) = parse_module(&m.source) {
+            index_module(index, "builtins", parsed.suite());
+        }
+    }
+}
+
 pub fn build_index(
     project_root: &Path,
     python_files: &[PathBuf],
@@ -90,11 +103,7 @@ pub fn build_index(
     let mut reexports: Vec<(String, String)> = Vec::new();
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``.
-    if let Some(m) = resolver.resolve("builtins") {
-        if let Ok(parsed) = parse_module(&m.source) {
-            index_module(&mut index, "builtins", parsed.suite());
-        }
-    }
+    index_builtins(&resolver, &mut index);
     indexed.insert("builtins".to_string());
 
     // First-party: the files being checked.
