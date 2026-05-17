@@ -4,6 +4,12 @@ Changelog
 Next
 ----
 
+- Fix a bound-instance ``__call__`` off-by-one (issue #28): an explicit call
+  through ``__call__`` now strips the receiver-bound ``self`` and grants no
+  first-positional exemption, so ``C()(1, 2)`` reports ``maximum 0`` (was
+  ``maximum 1``) and previously-missed cases such as ``C()(1, b=2)`` are
+  flagged. The ``@C()`` decorator-application form is unaffected (it is never
+  a checked call site).
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the

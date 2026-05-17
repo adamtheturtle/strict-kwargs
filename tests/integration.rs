@@ -232,6 +232,9 @@ def func() -> None: ...
 
 #[test]
 fn callable_class_extra_params() {
+    // An *explicit* call through `__call__` gets no first-argument exemption:
+    // `self` is bound by the receiver and every remaining parameter can be
+    // passed by keyword, so any positional argument is flagged (issue #28).
     let messages = check_source(
         r"
 from typing import Any
@@ -245,8 +248,27 @@ c(func=lambda: None, a=1)
 c(lambda: None, a=1)
 ",
     );
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("Too many positional"));
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m.contains("Too many positional")));
+}
+
+/// Issue #28: a bound instance `__call__` strips `self` and grants no
+/// first-positional exemption, so both the count and the flagging are exact.
+#[test]
+fn bound_dunder_call_strips_self_no_exemption() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, a: int, b: int) -> int:
+        return a + b
+
+C()(1, 2)
+C()(1, b=2)
+",
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].contains("got 2, maximum 0"));
+    assert!(messages[1].contains("got 1, maximum 0"));
 }
 
 #[test]
