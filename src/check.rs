@@ -34,13 +34,16 @@ pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
+    python_env: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
     let python_files = collect_python_files(paths);
     let index = build_index(project_root, &python_files)?;
     // ty-grade resolution (inheritance/MRO, return types, annotated params,
     // overloads) for calls the built-in resolver cannot resolve. Optional:
-    // absence of `ty` just disables the fallback.
-    let mut ty = TyResolver::start(project_root);
+    // absence of `ty` just disables the fallback. `python_env` (the
+    // `--python` value) only steers ty's third-party discovery; the built-in
+    // resolver's env discovery is unchanged.
+    let mut ty = TyResolver::start(project_root, python_env);
     if ty.is_none() && ty_binary_present() {
         eprintln!(
             "strict-kwargs: `ty` found but its language server could not be \

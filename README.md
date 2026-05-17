@@ -38,7 +38,16 @@ pip install .
 strict-kwargs .                 # check a directory
 strict-kwargs src/foo.py        # check a file
 strict-kwargs --project-root .  # explicit project root for config
+strict-kwargs --python .venv    # point the ty fallback at an environment
 ```
+
+`--python` accepts a Python interpreter, a virtualenv directory, or a
+`sys.prefix` directory (mirrors `ty check --python`). Use it when third-party
+packages live in an environment strict-kwargs/`ty` would not otherwise find
+(Conda, a venv outside the project, system site-packages). It is forwarded to
+the `ty` fallback only; the built-in resolver and embedded builtins/stdlib are
+unaffected, and an invalid path simply disables the fallback rather than
+producing wrong diagnostics.
 
 With ty:
 
@@ -99,6 +108,13 @@ inference-dependent cases. `ty` is pre-1.0; its resolution/LSP behavior may
 change between versions. The fallback fails closed — any error yields no
 diagnostic rather than a wrong one — and adds a `ty`-server round-trip per
 otherwise-unresolved call.
+
+If your third-party packages are not in an activated virtualenv, a Conda env,
+or `<project>/.venv`, pass `--python <interpreter|venv|sys.prefix>`: it is
+forwarded to `ty server` over LSP so the fallback resolves those imports,
+without you editing `ty`'s own config. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ("Forwarding an explicit
+environment") for the mechanism and stability notes.
 
 ## Limitations
 
