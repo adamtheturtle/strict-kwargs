@@ -517,6 +517,32 @@ print("hi", 1, 2)
 }
 
 #[test]
+fn typing_special_forms_not_flagged() {
+    // `TypeVar`/`ParamSpec`/`TypeVarTuple`/`NewType`/`TypeAliasType` require a
+    // positional string literal first argument; no type-checker-valid keyword
+    // form exists, so the rule must never fire (issue #19).
+    assert_ok(
+        r#"
+from typing import ParamSpec, TypeVar, TypeVarTuple, NewType
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+_Ts = TypeVarTuple("_Ts")
+Uid = NewType("UserId", int)
+"#,
+    );
+    // `typing_extensions` backports resolve to the same special forms.
+    assert_ok(
+        r#"
+from typing_extensions import ParamSpec, TypeAliasType
+
+_P = ParamSpec("_P")
+IntList = TypeAliasType("IntList", list[int])
+"#,
+    );
+}
+
+#[test]
 fn builtin_shadowed_by_local_def() {
     // A local ``def str`` shadows the builtin; resolution must prefer it.
     assert_error(
