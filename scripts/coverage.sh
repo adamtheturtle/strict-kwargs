@@ -30,8 +30,11 @@ if [ -z "${LLVM_COV:-}" ]; then
   done
 fi
 
-# Collect coverage once (runs the whole test suite, instrumented).
-cargo llvm-cov --no-report --branch --workspace --all-targets
+# Collect coverage once (runs the whole test suite, instrumented). This
+# builds the library, the binary and every `tests/` integration crate, but
+# deliberately *not* `benches/` — benchmarks are not tests and are not part
+# of the coverage contract.
+cargo llvm-cov --no-report --branch --workspace
 
 # Enforce 100% on lines, regions and functions. `llvm-cov` has no
 # `--fail-under-branches`, so branch coverage is checked from the JSON below.

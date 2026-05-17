@@ -11,6 +11,13 @@ readme = "README.md"
 name = "strict-kwargs"
 path = "src/main.rs"
 
+# Continuous benchmarking (issue #30). `harness = false` hands the binary to
+# divan / codspeed-divan-compat rather than libtest. Run locally with
+# `cargo bench`; CI runs it under CodSpeed (see `.github/workflows/ci.yml`).
+[[bench]]
+name = "resolver"
+harness = false
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 ignore = "0.4"
@@ -27,6 +34,11 @@ ruff_python_parser = { package = "rustpython-ruff_python_parser", version = "0.1
 ruff_text_size = { package = "rustpython-ruff_text_size", version = "0.15.8" }
 
 [dev-dependencies]
+# Renamed to `divan`: the compat layer's proc-macro emits `divan::…` paths, so
+# the crate must be in scope under that name (a `use … as divan` alias does
+# not satisfy attribute-macro path resolution). Locally this behaves exactly
+# like `divan`; under CodSpeed it instruments instead.
+divan = { package = "codspeed-divan-compat", version = "4.6.0" }
 tempfile = "3.20"
 
 [lints.rust]

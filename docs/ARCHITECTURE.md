@@ -38,7 +38,9 @@ call site
 The built-in path is primary (fast, offline, deterministic). `ty` is an
 **optional, additive fallback** for the cases static resolution structurally
 cannot do. Every ty failure mode yields *no diagnostic* (fails closed), never
-a wrong one.
+a wrong one. `ty server` is started **lazily** — only once a file actually
+has calls the built-in resolver could not resolve — so a run the built-in
+path fully handles never pays ty's project-indexing startup cost.
 
 ### The DefinitionIndex (`src/index.rs`)
 
@@ -72,6 +74,15 @@ alias; a function-local assignment binds in that scope, not the package's).
 Builtins resolve via a synthetic `builtins` module plus a
 bare-name fallback; `Class(...)` resolves to `Class.__init__`/`__new__`.
 
+**Synthesized constructors.** `@dataclass` and `NamedTuple` classes have no
+written `__init__`/`__new__`, so one is synthesized from the class's
+annotated fields (each a positional-or-keyword parameter; `ClassVar` and
+`field(init=False)` excluded, `@dataclass(init=False)` synthesizes nothing, a
+hand-written constructor wins). Scoped to the class's *own* fields —
+inherited base-class fields are not merged, so the auto-fixer declines
+synthesized constructors (the position→name mapping is not guaranteed sound),
+but the positional limit is `0` regardless so the diagnostic stays correct.
+
 ### The ty fallback (`src/ty_resolver.rs`)
 
 A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
@@ -86,6 +97,9 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   `<class 'A'>`, not a signature).
 - **Pipelined per file**: all requests for a file are sent, then collected —
   round-trip latency is hidden; out-of-order responses are buffered.
+- **Lazy start**: the subprocess is spawned on the first file with deferred
+  calls, not at the start of the run; the "ty present but server could not
+  start" note is likewise emitted only if the fallback was actually needed.
 - **Robust / fails closed**: bounded timeouts (5 s request, 15 s init); the
   *first* failure latches ty OFF for the whole run (no timeout storms);
   server→client requests are answered so ty never blocks; a one-time stderr
@@ -178,6 +192,11 @@ Tool-specific:
   branches are indexed and treated as overloads.
 - typeshed re-export following is structural; **runtime-computed** `__all__`
   is not followed.
+- Synthesized constructors cover the **class form** of `@dataclass` and
+  `NamedTuple` only. The functional `NamedTuple("N", [...])`/`namedtuple`
+  forms, `attrs`, and `TypedDict` (keyword-only by definition) are out of
+  scope; inherited base-class fields are not merged into the synthesized
+  signature (limit is `0` regardless, so detection is unaffected).
 - Cosmetic: module-qualified functions display as `"f" of "module"` (mypy
   wording differs slightly); detection is correct.
 
@@ -205,6 +224,7 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
 | `src/signature.rs` | the positional/keyword rule and `max_positional` logic |
 | `src/ast_util.rs` | AST → signature, argument counting, line/column |
 | `src/config.rs` | `[tool.strict_kwargs]` loading, project-root discovery |
+| `benches/resolver.rs` | divan / CodSpeed benchmark suite for the resolver hot paths |
 | `vendored/typeshed/` | pinned, embedded typeshed stdlib (see its README) |
 
 ## Testing & CI
@@ -217,3 +237,13 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
   `ci.yml` installs `ty` (via `uv`) with a `ty version` gate so the
   ty-backed tests actually execute on every platform; `lint.yml` runs
   `cargo fmt --check` and `cargo clippy -D warnings`.
+- **Continuous benchmarking** (`benches/resolver.rs`, issue #30): a
+  divan suite run under [CodSpeed](https://codspeed.io) by a non-gating
+  `benchmarks` job in `ci.yml`, reporting an instruction-count delta against
+  `main` on every PR. It covers a leaf file, a large stdlib import closure,
+  an overload/special-form heavy file, a generated first-party closure, and
+  the auto-fixer. The job does **not** install `ty`: CodSpeed counts
+  instructions of the strict-kwargs process, so the ty subprocess fallback
+  is out of scope, and every fixture is fully resolvable by the built-in
+  resolver — keeping the numbers deterministic and focused on the
+  parse / index / walk / resolve hot paths. Run locally with `cargo bench`.

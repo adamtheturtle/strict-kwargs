@@ -42,7 +42,6 @@ impl Signature {
             || fullname.ends_with(".__init__")
             || fullname.ends_with(".__new__");
         let skip_second = fullname.ends_with(".__get__") || fullname.ends_with(".__set__");
-        let is_dunder_call = fullname.ends_with(".__call__");
 
         let mut max = 0usize;
         for (index, param) in self.parameters.iter().enumerate() {
@@ -66,11 +65,12 @@ impl Signature {
 
             if allows_positional {
                 max += 1;
-            } else if is_dunder_call && index == 1 {
-                // ``__call__(self, func, ...)`` allows the first user argument positionally
-                // (e.g. ``@C()`` / ``C()(func)``), but not subsequent parameters.
-                max += 1;
             }
+            // `__call__` gets no first-user-argument exemption. The `@C()`
+            // decorator-application form (`C()(func)` with `func` forced
+            // positional) is never a checked call site, so it never needs one;
+            // an *explicit* `c(func)` / `C()(1, 2)` can pass the argument by
+            // keyword and must be flagged like any bound method (issue #28).
         }
 
         Some(max)
@@ -118,7 +118,9 @@ mod tests {
     }
 
     #[test]
-    fn dunder_call_allows_first_argument() {
+    fn dunder_call_strips_self_with_no_first_arg_exemption() {
+        // `self` is bound by the receiver; the remaining params can be passed
+        // by keyword at an explicit call site, so none count (issue #28).
         let s = sig(&[
             ("self", ParameterKind::PositionalOrKeyword),
             ("func", ParameterKind::PositionalOrKeyword),
@@ -126,7 +128,7 @@ mod tests {
         ]);
         assert_eq!(
             s.max_positional_at_call_site("main.C.__call__", false),
-            Some(1)
+            Some(0)
         );
     }
 

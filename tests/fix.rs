@@ -165,6 +165,24 @@ fn bound_method_self_still_skipped() {
 }
 
 #[test]
+fn unbound_class_method_keeps_explicit_receiver_positional() {
+    // Issue #27: `K.m(K(), 1)` passes the receiver explicitly. It binds to
+    // `self` (never keyword-passable) and stays positional; only the real
+    // argument `a` is rewritten.
+    assert_fixed(
+        "class K:\n    def m(self, a: int) -> int:\n        return a\nK.m(K(), 1)\n",
+        "class K:\n    def m(self, a: int) -> int:\n        return a\nK.m(K(), a=1)\n",
+    );
+}
+
+#[test]
+fn unbound_class_method_fix_round_trips() {
+    assert_round_trips(
+        "class K:\n    def m(self, a: int, b: int) -> int:\n        return a\nK.m(K(), 1, 2)\n",
+    );
+}
+
+#[test]
 fn keeps_positional_only_positional() {
     // `a` is positional-only and stays; only `b` is rewritten.
     assert_fixed(
@@ -293,5 +311,30 @@ fn does_not_fix_descriptor_set_call() {
     assert_unchanged(
         "class Desc:\n    def __set__(self, obj, value, extra): ...\n\n\
          d = Desc()\nd.__set__(obj, value, extra)\n",
+    );
+}
+
+#[test]
+fn synthesized_dataclass_constructor_not_rewritten() {
+    // Issue #29: the synthesized `__init__` omits inherited base-class
+    // fields, so the position->name mapping is not guaranteed sound. The
+    // checker still flags it; the fixer conservatively declines.
+    let proj = project(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    );
+    assert!(
+        proj.check_main().iter().any(|m| m.contains(r#"for "D""#)),
+        "expected the dataclass call to be flagged: {:?}",
+        proj.check_main()
+    );
+    assert_unchanged(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    );
+}
+
+#[test]
+fn synthesized_namedtuple_constructor_not_rewritten() {
+    assert_unchanged(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
     );
 }

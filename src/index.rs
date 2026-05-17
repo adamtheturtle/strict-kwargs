@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{Parameter, ParameterKind, Signature};
 
 #[derive(Debug, Default)]
 pub struct DefinitionIndex {
@@ -19,6 +19,12 @@ pub struct DefinitionIndex {
     /// signatures. Multiple entries occur for ``@overload``-ed definitions
     /// (common in ``.pyi`` stubs) and plain redefinitions.
     pub signatures: FxHashMap<String, Vec<Signature>>,
+    /// Constructor fullnames whose signature we *synthesized* from class
+    /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
+    /// ``def``. The auto-fixer declines these: a synthesized signature omits
+    /// inherited base-class fields (cross-module MRO is not resolved), so a
+    /// positional->keyword name mapping could be wrong.
+    pub synthesized: FxHashSet<String>,
 }
 
 impl DefinitionIndex {
@@ -28,6 +34,12 @@ impl DefinitionIndex {
 
     pub fn get(&self, fullname: &str) -> Option<&[Signature]> {
         self.signatures.get(fullname).map(Vec::as_slice)
+    }
+
+    /// Whether `fullname` is a constructor we synthesized from class fields
+    /// (see [`DefinitionIndex::synthesized`]).
+    pub fn is_synthesized(&self, fullname: &str) -> bool {
+        self.synthesized.contains(fullname)
     }
 }
 
@@ -144,31 +156,53 @@ fn enqueue(queue: &mut VecDeque<String>, modules: Vec<String>) {
 /// Real definitions always win; aliases never overwrite them. Iterated to a
 /// fixpoint to follow chained re-exports.
 fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
+    // Drop no-op edges once so they cost nothing on every iteration.
+    let edges: Vec<(&str, &str)> = edges
+        .iter()
+        .filter(|(src, dst)| src != dst && !src.is_empty() && !dst.is_empty())
+        .map(|(src, dst)| (src.as_str(), dst.as_str()))
+        .collect();
+    if edges.is_empty() {
+        return;
+    }
     for _ in 0..MAX_EXPAND_ITERS {
+        // The keys touched by an edge are exactly `src` and everything under
+        // `src.`. A sorted snapshot lets each edge binary-search to its
+        // contiguous `src.` block instead of scanning the whole (growing)
+        // index, which is what made this super-quadratic on large
+        // import closures (issue #31). The set is unchanged within an
+        // iteration: additions are deferred, exactly as before.
+        let mut keys: Vec<&str> = index.signatures.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         let mut additions: Vec<(String, Vec<Signature>)> = Vec::new();
-        for (src, dst) in edges {
-            if src == dst || src.is_empty() || dst.is_empty() {
-                continue;
+        for &(src, dst) in &edges {
+            // `src` itself re-exported as `dst` (the old `key == src` case).
+            if let Some(sigs) = index.signatures.get(src) {
+                if !index.signatures.contains_key(dst) {
+                    additions.push((dst.to_string(), sigs.clone()));
+                }
             }
+            // Everything under `src.` re-exported as `dst.<suffix>`. Keys
+            // with this prefix are contiguous in the sorted snapshot.
             let src_dot = format!("{src}.");
-            for (key, sigs) in &index.signatures {
-                let suffix = if key == src {
-                    ""
-                } else if let Some(rest) = key.strip_prefix(&src_dot) {
-                    rest
-                } else {
+            let start = keys.partition_point(|key| *key < src_dot.as_str());
+            for &key in &keys[start..] {
+                let Some(suffix) = key.strip_prefix(&src_dot) else {
+                    break;
+                };
+                if suffix.is_empty() {
                     continue;
-                };
-                let new_key = if suffix.is_empty() {
-                    dst.clone()
-                } else {
-                    format!("{dst}.{suffix}")
-                };
-                if !index.signatures.contains_key(&new_key) {
+                }
+                let new_key = format!("{dst}.{suffix}");
+                if index.signatures.contains_key(&new_key) {
+                    continue;
+                }
+                if let Some(sigs) = index.signatures.get(key) {
                     additions.push((new_key, sigs.clone()));
                 }
             }
         }
+        drop(keys);
         if additions.is_empty() {
             break;
         }
@@ -455,9 +489,10 @@ fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
             index.insert(fullname, signature_from_parameters(parameters));
             index_module(index, module_name, body);
         }
-        Stmt::ClassDef(ast::StmtClassDef { name, body, .. }) => {
-            let class_name = format!("{module_name}.{name}");
-            index_class_body(index, &class_name, body);
+        Stmt::ClassDef(class_def) => {
+            let class_name = format!("{module_name}.{}", class_def.name);
+            index_class_body(index, &class_name, &class_def.body);
+            synthesize_data_constructor(index, &class_name, class_def);
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -509,10 +544,10 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
                 index.insert(fullname, signature_from_parameters(parameters));
                 index_module(index, class_name, body);
             }
-            Stmt::ClassDef(ast::StmtClassDef {
-                name: inner, body, ..
-            }) => {
-                index_class_body(index, &format!("{class_name}.{inner}"), body);
+            Stmt::ClassDef(class_def) => {
+                let nested = format!("{class_name}.{}", class_def.name);
+                index_class_body(index, &nested, &class_def.body);
+                synthesize_data_constructor(index, &nested, class_def);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -526,5 +561,231 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
             }
             _ => {}
         }
+    }
+}
+
+/// Final dotted segment of a pure name/attribute reference, peeling a
+/// trailing call. Resolves ``dataclass`` / ``dataclasses.dataclass`` /
+/// ``dataclasses.dataclass(frozen=True)`` and base classes like
+/// ``typing.NamedTuple`` to their bare tail (`None` for anything else).
+fn callee_tail(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+        Expr::Call(ast::ExprCall { func, .. }) => callee_tail(func),
+        _ => None,
+    }
+}
+
+/// Whether `call` passes ``<keyword>=False`` (a literal `False`).
+fn keyword_is_false(call: &ast::ExprCall, keyword: &str) -> bool {
+    call.arguments.keywords.iter().any(|kw| {
+        kw.arg.as_ref().map(ast::Identifier::as_str) == Some(keyword)
+            && matches!(&kw.value, Expr::BooleanLiteral(b) if !b.value)
+    })
+}
+
+/// Whether `annotation` is a ``ClassVar`` (`ClassVar` or ``ClassVar[...]``,
+/// possibly module-qualified). Such attributes are not ``__init__`` fields.
+fn is_class_var(annotation: &Expr) -> bool {
+    let core = match annotation {
+        Expr::Subscript(ast::ExprSubscript { value, .. }) => value.as_ref(),
+        other => other,
+    };
+    matches!(callee_tail(core), Some("ClassVar"))
+}
+
+/// Whether a ``@dataclass`` field assignment opts out of ``__init__`` via
+/// ``= field(init=False)``.
+fn dataclass_field_excluded(value: &Expr) -> bool {
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    matches!(callee_tail(&call.func), Some("field")) && keyword_is_false(call, "init")
+}
+
+/// The ``@dataclass`` decorator expression on `class_def`, if any. Matches a
+/// bare name, an attribute access, or a call form (`@dataclass(...)`).
+fn dataclass_decorator(class_def: &ast::StmtClassDef) -> Option<&Expr> {
+    class_def
+        .decorator_list
+        .iter()
+        .map(|dec| &dec.expression)
+        .find(|expr| matches!(callee_tail(expr), Some("dataclass")))
+}
+
+/// Whether `class_def` subclasses ``NamedTuple`` (`typing` /
+/// `typing_extensions`, qualified or not).
+fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
+    class_def.arguments.as_ref().is_some_and(|arguments| {
+        arguments
+            .args
+            .iter()
+            .any(|base| matches!(callee_tail(base), Some("NamedTuple")))
+    })
+}
+
+/// Synthesize the compiler-generated constructor for ``@dataclass`` and
+/// ``NamedTuple`` classes, whose ``__init__`` / ``__new__`` is not written as
+/// a ``def`` and so is otherwise invisible to the resolver (issue #29). Each
+/// annotated field becomes a positional-or-keyword parameter, so positional
+/// construction (`D(1, 2)`) is flagged while the keyword form (`D(x=1, y=2)`)
+/// is accepted.
+///
+/// Scoped to the class's *own* fields: inherited base-class fields are not
+/// resolved (so the auto-fixer declines these — see
+/// [`DefinitionIndex::synthesized`]), but the positional limit is `0` either
+/// way, so the diagnostic stays correct. Out of scope: the functional
+/// ``NamedTuple("N", [...])`` / ``namedtuple`` forms, ``attrs``, and
+/// ``TypedDict`` (whose constructor is keyword-only by definition).
+fn synthesize_data_constructor(
+    index: &mut DefinitionIndex,
+    class_name: &str,
+    class_def: &ast::StmtClassDef,
+) {
+    let is_namedtuple = is_namedtuple_class(class_def);
+    let decorator = dataclass_decorator(class_def);
+    if decorator.is_none() && !is_namedtuple {
+        return;
+    }
+    // ``@dataclass(init=False)`` generates no ``__init__``.
+    if let Some(Expr::Call(call)) = decorator {
+        if keyword_is_false(call, "init") {
+            return;
+        }
+    }
+    // An explicitly written constructor wins: ``@dataclass`` / ``NamedTuple``
+    // only synthesize one when the class defines none itself.
+    if index.get(&format!("{class_name}.__init__")).is_some()
+        || index.get(&format!("{class_name}.__new__")).is_some()
+    {
+        return;
+    }
+
+    let receiver = if is_namedtuple { "cls" } else { "self" };
+    let mut parameters = vec![Parameter {
+        name: Some(receiver.to_string()),
+        kind: ParameterKind::PositionalOrKeyword,
+    }];
+    for stmt in &class_def.body {
+        let Stmt::AnnAssign(ast::StmtAnnAssign {
+            target,
+            annotation,
+            value,
+            ..
+        }) = stmt
+        else {
+            continue;
+        };
+        let Expr::Name(name) = target.as_ref() else {
+            continue;
+        };
+        if is_class_var(annotation) {
+            continue;
+        }
+        if !is_namedtuple && value.as_deref().is_some_and(dataclass_field_excluded) {
+            continue;
+        }
+        parameters.push(Parameter {
+            name: Some(name.id.to_string()),
+            kind: ParameterKind::PositionalOrKeyword,
+        });
+    }
+
+    let ctor = if is_namedtuple { "__new__" } else { "__init__" };
+    let fullname = format!("{class_name}.{ctor}");
+    index.insert(fullname.clone(), Signature { parameters });
+    index.synthesized.insert(fullname);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_reexports, DefinitionIndex};
+    use crate::signature::{Parameter, ParameterKind, Signature};
+
+    /// A signature with `n` positional-or-keyword parameters, so a test can
+    /// tell which definition won an alias collision by its arity.
+    fn sig(n: usize) -> Signature {
+        Signature {
+            parameters: (0..n)
+                .map(|i| Parameter {
+                    name: Some(format!("p{i}")),
+                    kind: ParameterKind::PositionalOrKeyword,
+                })
+                .collect(),
+        }
+    }
+
+    fn index_of(pairs: &[(&str, usize)]) -> DefinitionIndex {
+        let mut index = DefinitionIndex::default();
+        for &(name, arity) in pairs {
+            index.insert(name.to_string(), sig(arity));
+        }
+        index
+    }
+
+    fn arity(index: &DefinitionIndex, key: &str) -> Option<usize> {
+        index
+            .get(key)
+            .map(|sigs| sigs.first().map_or(0, |s| s.parameters.len()))
+    }
+
+    #[test]
+    fn copies_exact_name_and_everything_under_the_prefix() {
+        let mut index = index_of(&[("numpy", 1), ("numpy.array", 2), ("numpy.linalg.norm", 3)]);
+        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+        assert_eq!(arity(&index, "np"), Some(1));
+        assert_eq!(arity(&index, "np.array"), Some(2));
+        assert_eq!(arity(&index, "np.linalg.norm"), Some(3));
+    }
+
+    #[test]
+    fn prefix_match_respects_the_dotted_boundary() {
+        // The sorted-range scan must not treat `numpy_core` / `numpyfoo` as
+        // being under the `numpy.` prefix (they sort adjacent to `numpy.`).
+        let mut index = index_of(&[
+            ("numpy.array", 2),
+            ("numpy_core", 9),
+            ("numpyfoo.bar", 9),
+            ("numpz.x", 9),
+        ]);
+        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+        assert_eq!(arity(&index, "np.array"), Some(2));
+        assert!(index.get("np_core").is_none());
+        assert!(index.get("np").is_none());
+        assert!(index.get("npfoo.bar").is_none());
+    }
+
+    #[test]
+    fn a_real_definition_is_never_overwritten_by_an_alias() {
+        let mut index = index_of(&[("impl.f", 2), ("pkg.f", 5)]);
+        expand_reexports(&mut index, &[("impl".into(), "pkg".into())]);
+        // `pkg.f` already had a real definition; the alias must not clobber it.
+        assert_eq!(arity(&index, "pkg.f"), Some(5));
+    }
+
+    #[test]
+    fn chained_reexports_resolve_to_a_fixpoint() {
+        let mut index = index_of(&[("a.f", 1)]);
+        expand_reexports(
+            &mut index,
+            &[("a".into(), "b".into()), ("b".into(), "c".into())],
+        );
+        assert_eq!(arity(&index, "b.f"), Some(1));
+        assert_eq!(arity(&index, "c.f"), Some(1));
+    }
+
+    #[test]
+    fn noop_edges_are_ignored() {
+        let mut index = index_of(&[("a.f", 1)]);
+        expand_reexports(
+            &mut index,
+            &[
+                ("a".into(), "a".into()),
+                (String::new(), "b".into()),
+                ("c".into(), String::new()),
+            ],
+        );
+        assert_eq!(index.signatures.len(), 1);
     }
 }
