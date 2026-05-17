@@ -21,8 +21,8 @@ use crate::index::{
 };
 use crate::signature::Signature;
 use crate::ty_resolver::{
-    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_hover_signature, same_path,
-    ty_binary_present, TyResolver,
+    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
+    parse_hover_signature, same_path, ty_binary_present, TyResolver,
 };
 
 pub fn check_paths(
@@ -676,6 +676,16 @@ fn resolve_def_at(stmts: &[Stmt], offset: usize) -> Option<(String, Vec<Signatur
     None
 }
 
+/// The identifier starting at byte `offset` in `source` (the callee name, for
+/// the diagnostic display when hover gave an unnamed callable type).
+fn identifier_at(source: &str, offset: usize) -> Option<String> {
+    let rest = source.get(offset..)?;
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    (end > 0).then(|| rest[..end].to_string())
+}
+
 /// Parse a ty-reported parameter list (`a: int, b: int = ..., /`) into a
 /// signature by reusing the real parser. `None` if it doesn't parse.
 fn signature_from_param_text(params: &str) -> Option<Signature> {
@@ -756,30 +766,57 @@ fn resolve_pending_with_ty(
 
     let mut needs_def: Vec<usize> = Vec::new();
     for (i, p) in pending.iter().enumerate() {
-        let sig = hover_ids[i]
+        let raw = hover_ids[i]
             .and_then(|id| ty.take(id))
             .as_ref()
-            .and_then(hover_text)
-            .as_deref()
-            .and_then(parse_hover_signature);
-        let Some(sig) = sig else {
+            .and_then(hover_text);
+        let Some(raw) = raw else {
             needs_def.push(i);
             continue;
         };
-        let Some(signature) = signature_from_param_text(&sig.params) else {
+
+        // `def …`/`bound method …` display: a single, named signature.
+        if let Some(sig) = parse_hover_signature(&raw) {
+            let Some(signature) = signature_from_param_text(&sig.params) else {
+                continue;
+            };
+            let fullname = match &sig.owner {
+                Some(owner) => {
+                    let owner = owner.split('[').next().unwrap_or(owner);
+                    let owner = owner.rsplit('.').next().unwrap_or(owner);
+                    format!("ty.{owner}.{}", sig.name)
+                }
+                None => format!("ty.{}", sig.name),
+            };
+            emit_if_violation(
+                &fullname,
+                &[signature],
+                p.positional_count,
+                source,
+                p.call_start,
+                path,
+                diagnostics,
+            );
             continue;
-        };
-        let fullname = match &sig.owner {
-            Some(owner) => {
-                let owner = owner.split('[').next().unwrap_or(owner);
-                let owner = owner.rsplit('.').next().unwrap_or(owner);
-                format!("ty.{owner}.{}", sig.name)
-            }
-            None => format!("ty.{}", sig.name),
-        };
+        }
+
+        // Callable-*type* display, incl. `Overload[…]`: ty already excluded
+        // `self` and kept typeshed positional-only `/` markers. Use it
+        // directly rather than falling through to goto-definition, which on
+        // an inferred stdlib receiver lands on runtime `.py` source whose
+        // signatures drop `/` and yield false positives (issue #14).
+        let overloads: Vec<Signature> = parse_callable_type_overloads(&raw)
+            .iter()
+            .filter_map(|params| signature_from_param_text(params))
+            .collect();
+        if overloads.is_empty() {
+            needs_def.push(i);
+            continue;
+        }
+        let name = identifier_at(source, p.callee_offset).unwrap_or_default();
         emit_if_violation(
-            &fullname,
-            &[signature],
+            &format!("ty.{name}"),
+            &overloads,
             p.positional_count,
             source,
             p.call_start,

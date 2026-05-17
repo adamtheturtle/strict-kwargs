@@ -929,6 +929,27 @@ s.upper()
 }
 
 #[test]
+fn ty_positional_only_inferred_receiver_not_flagged() {
+    // Issue #14: `sys.stdout` infers to `TextIO`; ty's hover is the callable
+    // *type* `(Overload[(s: …, /) -> int, …]) | Any`. `s` is positional-only,
+    // so these calls cannot be rewritten and must not be flagged. (Pre-fix
+    // this fell through to goto-definition on runtime stdlib source whose
+    // signature drops the `/`, yielding a false positive.)
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    assert_ok(
+        r#"
+import sys
+
+sys.stdout.write("hello\n")
+sys.stderr.write("oops\n")
+"#,
+    );
+}
+
+#[test]
 fn constructor_via_module_attribute() {
     // Bugbot: `import lib; lib.MyClass(1)` must resolve to
     // `lib.MyClass.__init__` (was silently skipped).
