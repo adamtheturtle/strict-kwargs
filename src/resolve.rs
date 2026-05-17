@@ -25,24 +25,27 @@ impl ModuleResolver {
         }
     }
 
-    /// Resolve a dotted module name (e.g. ``os.path``) to its source text.
+    /// Resolve a dotted module name (e.g. ``os.path``) to its source.
     /// Search order matches ty: first-party, stdlib, then site-packages.
-    pub fn resolve(&self, dotted: &str) -> Option<String> {
+    pub fn resolve(&self, dotted: &str) -> Option<ResolvedModule> {
         let rel = dotted.replace('.', "/");
 
         // 1. First-party source (`.py` then `.pyi`).
         for root in &self.first_party {
-            if let Some(src) = read_module(root, &rel, &["py", "pyi"]) {
-                return Some(src);
+            if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
+                return Some(m);
             }
         }
 
         // 2. Vendored typeshed stdlib (`.pyi` only).
-        for candidate in [format!("{rel}.pyi"), format!("{rel}/__init__.pyi")] {
-            if let Some(file) = TYPESHED_STDLIB.get_file(&candidate) {
-                if let Some(text) = file.contents_utf8() {
-                    return Some(text.to_string());
-                }
+        if let Some(file) = TYPESHED_STDLIB.get_file(format!("{rel}.pyi")) {
+            if let Some(text) = file.contents_utf8() {
+                return Some(ResolvedModule::module(text));
+            }
+        }
+        if let Some(file) = TYPESHED_STDLIB.get_file(format!("{rel}/__init__.pyi")) {
+            if let Some(text) = file.contents_utf8() {
+                return Some(ResolvedModule::package(text));
             }
         }
 
@@ -54,11 +57,11 @@ impl ModuleResolver {
         };
         for sp in &self.site_packages {
             // Prefer dedicated `*-stubs` distributions, then inline packages.
-            if let Some(src) = read_module(sp, &stub_rel, &["pyi"]) {
-                return Some(src);
+            if let Some(m) = read_module(sp, &stub_rel, &["pyi"]) {
+                return Some(m);
             }
-            if let Some(src) = read_module(sp, &rel, &["pyi", "py"]) {
-                return Some(src);
+            if let Some(m) = read_module(sp, &rel, &["pyi", "py"]) {
+                return Some(m);
             }
         }
 
@@ -66,16 +69,37 @@ impl ModuleResolver {
     }
 }
 
-/// Try ``<root>/<rel>.<ext>`` then ``<root>/<rel>/__init__.<ext>``.
-fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<String> {
+/// A resolved module's source and whether it is a package (`__init__`),
+/// which determines the base for relative imports inside it.
+pub struct ResolvedModule {
+    pub source: String,
+    pub is_package: bool,
+}
+
+impl ResolvedModule {
+    fn module(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            is_package: false,
+        }
+    }
+    fn package(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            is_package: true,
+        }
+    }
+}
+
+/// Try ``<root>/<rel>.<ext>`` (a module) then ``<root>/<rel>/__init__.<ext>``
+/// (a package).
+fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> {
     for ext in exts {
-        for candidate in [
-            root.join(format!("{rel}.{ext}")),
-            root.join(rel).join(format!("__init__.{ext}")),
-        ] {
-            if let Ok(text) = std::fs::read_to_string(&candidate) {
-                return Some(text);
-            }
+        if let Ok(text) = std::fs::read_to_string(root.join(format!("{rel}.{ext}"))) {
+            return Some(ResolvedModule::module(text));
+        }
+        if let Ok(text) = std::fs::read_to_string(root.join(rel).join(format!("__init__.{ext}"))) {
+            return Some(ResolvedModule::package(text));
         }
     }
     None

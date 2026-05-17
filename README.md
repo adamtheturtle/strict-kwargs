@@ -67,7 +67,13 @@ Builtins and the standard library resolve against a pinned copy of
 [typeshed](https://github.com/python/typeshed) vendored under
 `vendored/typeshed/` and embedded in the binary (no Python environment
 required). Third-party packages resolve from the active virtualenv's
-`site-packages` (PEP 561), like `ty`/pyright.
+`site-packages` (PEP 561), like `ty`/pyright. Re-exports (`from .impl import
+name` in a package `__init__`, `from x import *`) are followed, including
+chains, so APIs exposed through a package root resolve correctly.
+
+This indexing runs once per invocation and walks the import closure of the
+checked files (capped for safety), so checking files that import large
+portions of the stdlib costs a fraction of a second of one-time work.
 
 Maintainers: see [`vendored/typeshed/README.md`](vendored/typeshed/README.md)
 for the documented update process. To bump the pinned stubs:
@@ -79,7 +85,7 @@ scripts/update-typeshed.sh <git-ref>  # a specific commit/tag
 
 ## Limitations
 
-This tool uses static analysis (Ruff's Python parser), not a type checker. It resolves many calls within a project but will not catch every case mypy's plugin handles (dynamic callables, complex overloads, etc.). It does not follow typeshed re-exports, and `sys.version_info`/`sys.platform` stub branches are not evaluated (all branches are indexed permissively).
+This tool uses static analysis (Ruff's Python parser), not a type checker. It resolves many calls within a project but will not catch every case mypy's plugin handles (dynamic callables, complex overloads, runtime-computed `__all__`, etc.). Overloads are handled permissively (a call is flagged only if it exceeds every candidate signature), and `sys.version_info`/`sys.platform` stub branches are not evaluated — all branches are indexed and treated as overloads.
 
 ## License
 

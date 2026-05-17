@@ -671,3 +671,101 @@ fn stdlib_typeshed_resolves() {
     );
     assert!(messages.is_empty(), "got: {messages:?}");
 }
+
+#[test]
+fn reexport_from_submodule_in_init() {
+    // ``pkg/__init__`` re-exports ``handler`` from a private submodule; a
+    // call via the package must resolve through the re-export.
+    let messages = check_with_aux(
+        &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
+        &[
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "from ._impl import handler\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/_impl.py",
+                "def handler(a, b): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_imported_name_resolves() {
+    let messages = check_with_aux(
+        &[("app.py", "from mypkg import handler\n\nhandler(1, 2)\n")],
+        &[
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "from ._impl import handler\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/_impl.py",
+                "def handler(a, b): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_chained_through_packages() {
+    // __init__ -> sub/__init__ -> _deep, a multi-hop re-export chain.
+    let messages = check_with_aux(
+        &[("app.py", "import mypkg\n\nmypkg.deep(1)\n")],
+        &[
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "from .sub import deep\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/sub/__init__.py",
+                "from ._deep import deep\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/sub/_deep.py",
+                "def deep(a): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_star() {
+    // ``from ._impl import *`` re-exports every public name.
+    let messages = check_with_aux(
+        &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
+        &[
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "from ._impl import *\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/_impl.py",
+                "def handler(a, b): ...\ndef other(x, /): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn reexport_first_party_package() {
+    // Single-file check still resolves a sibling package's re-exported API.
+    let messages = check_with_aux(
+        &[("app.py", "from pkg import api\n\napi(1, 2)\n")],
+        &[
+            ("pkg/__init__.py", "from .core import api\n"),
+            ("pkg/core.py", "def api(a, b):\n    return a\n"),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}

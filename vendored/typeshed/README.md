@@ -62,9 +62,9 @@ git commit -m "Bump vendored typeshed to <short-sha>"
 
 ## Notes / caveats
 
-- The resolver does **not** follow typeshed re-exports (e.g.
-  `os.path` → `posixpath`); only symbols defined directly in a module's own
-  `.pyi` are indexed. Bumping typeshed will not change that.
+- Re-exports **are** followed (e.g. `os.path` → `posixpath`, `from x import
+  *`), including chains. A bump that restructures typeshed re-exports is
+  handled automatically; only runtime-computed `__all__` is not.
 - `sys.version_info` / `sys.platform` branches in stubs are **not** evaluated;
   all branches are indexed and treated as overloads (permissive). Updating
   typeshed does not change this behavior either.
