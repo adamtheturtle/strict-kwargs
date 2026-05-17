@@ -4,6 +4,18 @@ Changelog
 Next
 ----
 
+- Fix a false positive on the explicit receiver of a first-party
+  unbound-method call (``K.n(K())``): the receiver binds to ``self`` and is
+  never keyword-passable, so it is no longer counted against the positional
+  limit. ``K.m(K(), 1)`` now reports only the real argument and the fixer
+  rewrites it to ``K.m(K(), a=1)``. This extends the typeshed/``ty``-path
+  fix to the built-in resolver path (issue #27; companion to #15).
+- Fix a bound-instance ``__call__`` off-by-one (issue #28): an explicit call
+  through ``__call__`` now strips the receiver-bound ``self`` and grants no
+  first-positional exemption, so ``C()(1, 2)`` reports ``maximum 0`` (was
+  ``maximum 1``) and previously-missed cases such as ``C()(1, b=2)`` are
+  flagged. The ``@C()`` decorator-application form is unaffected (it is never
+  a checked call site).
 - Performance: large import closures (e.g. files importing ``numpy``) no
   longer take many seconds. Re-export expansion was super-quadratic in the
   index size; it now scans only each alias's prefix range, with identical
@@ -20,6 +32,15 @@ Next
   receiver is skipped only for constructor/callable dunders and bound
   ``receiver.method(...)`` calls, so a standalone function whose first
   parameter is named ``self``/``cls`` is rewritten correctly.
+- Flag positional construction of ``@dataclass`` and ``NamedTuple`` classes
+  (issue #29): their compiler-synthesized ``__init__`` / ``__new__`` is now
+  modeled from the annotated fields, so ``D(1, 2)`` is reported while
+  ``D(x=1, y=2)`` is accepted. ``ClassVar`` and ``field(init=False)`` fields
+  are excluded, ``@dataclass(init=False)`` synthesizes nothing, and a
+  hand-written constructor still wins. The auto-fixer conservatively declines
+  these (a synthesized signature omits inherited base-class fields). The
+  functional ``NamedTuple("N", [...])``/``namedtuple`` forms, ``attrs``, and
+  ``TypedDict`` remain out of scope.
 - Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
   can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A
   `strict-kwargs-pre-commit

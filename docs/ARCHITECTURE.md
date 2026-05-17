@@ -74,6 +74,15 @@ alias; a function-local assignment binds in that scope, not the package's).
 Builtins resolve via a synthetic `builtins` module plus a
 bare-name fallback; `Class(...)` resolves to `Class.__init__`/`__new__`.
 
+**Synthesized constructors.** `@dataclass` and `NamedTuple` classes have no
+written `__init__`/`__new__`, so one is synthesized from the class's
+annotated fields (each a positional-or-keyword parameter; `ClassVar` and
+`field(init=False)` excluded, `@dataclass(init=False)` synthesizes nothing, a
+hand-written constructor wins). Scoped to the class's *own* fields —
+inherited base-class fields are not merged, so the auto-fixer declines
+synthesized constructors (the position→name mapping is not guaranteed sound),
+but the positional limit is `0` regardless so the diagnostic stays correct.
+
 ### The ty fallback (`src/ty_resolver.rs`)
 
 A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
@@ -183,6 +192,11 @@ Tool-specific:
   branches are indexed and treated as overloads.
 - typeshed re-export following is structural; **runtime-computed** `__all__`
   is not followed.
+- Synthesized constructors cover the **class form** of `@dataclass` and
+  `NamedTuple` only. The functional `NamedTuple("N", [...])`/`namedtuple`
+  forms, `attrs`, and `TypedDict` (keyword-only by definition) are out of
+  scope; inherited base-class fields are not merged into the synthesized
+  signature (limit is `0` regardless, so detection is unaffected).
 - Cosmetic: module-qualified functions display as `"f" of "module"` (mypy
   wording differs slightly); detection is correct.
 
