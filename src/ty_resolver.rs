@@ -1065,7 +1065,11 @@ mod tests {
             let (_tx, rx) = std::sync::mpsc::channel::<Value>();
             let mut r = TyResolver::from_parts(child, stdin, rx);
 
-            // Writing to the dead child's stdin fails => disabled.
+            // `ensure_open` reaches the `didOpen` notify before anything has
+            // disabled the resolver; the write fails there (the `?` error
+            // path) and latches it off.
+            assert!(r.ensure_open(Path::new("/first.py"), "src").is_none());
+            // Subsequent writes also fail.
             assert!(r
                 .ask("textDocument/hover", Path::new("/x.py"), 1, 2)
                 .is_none());
