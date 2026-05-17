@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{Parameter, ParameterKind, Signature};
 
 #[derive(Debug, Default)]
 pub struct DefinitionIndex {
@@ -19,6 +19,12 @@ pub struct DefinitionIndex {
     /// signatures. Multiple entries occur for ``@overload``-ed definitions
     /// (common in ``.pyi`` stubs) and plain redefinitions.
     pub signatures: FxHashMap<String, Vec<Signature>>,
+    /// Constructor fullnames whose signature we *synthesized* from class
+    /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
+    /// ``def``. The auto-fixer declines these: a synthesized signature omits
+    /// inherited base-class fields (cross-module MRO is not resolved), so a
+    /// positional->keyword name mapping could be wrong.
+    pub synthesized: FxHashSet<String>,
 }
 
 impl DefinitionIndex {
@@ -28,6 +34,12 @@ impl DefinitionIndex {
 
     pub fn get(&self, fullname: &str) -> Option<&[Signature]> {
         self.signatures.get(fullname).map(Vec::as_slice)
+    }
+
+    /// Whether `fullname` is a constructor we synthesized from class fields
+    /// (see [`DefinitionIndex::synthesized`]).
+    pub fn is_synthesized(&self, fullname: &str) -> bool {
+        self.synthesized.contains(fullname)
     }
 }
 
@@ -455,9 +467,10 @@ fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
             index.insert(fullname, signature_from_parameters(parameters));
             index_module(index, module_name, body);
         }
-        Stmt::ClassDef(ast::StmtClassDef { name, body, .. }) => {
-            let class_name = format!("{module_name}.{name}");
-            index_class_body(index, &class_name, body);
+        Stmt::ClassDef(class_def) => {
+            let class_name = format!("{module_name}.{}", class_def.name);
+            index_class_body(index, &class_name, &class_def.body);
+            synthesize_data_constructor(index, &class_name, class_def);
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -509,10 +522,10 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
                 index.insert(fullname, signature_from_parameters(parameters));
                 index_module(index, class_name, body);
             }
-            Stmt::ClassDef(ast::StmtClassDef {
-                name: inner, body, ..
-            }) => {
-                index_class_body(index, &format!("{class_name}.{inner}"), body);
+            Stmt::ClassDef(class_def) => {
+                let nested = format!("{class_name}.{}", class_def.name);
+                index_class_body(index, &nested, &class_def.body);
+                synthesize_data_constructor(index, &nested, class_def);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -527,4 +540,138 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
             _ => {}
         }
     }
+}
+
+/// Final dotted segment of a pure name/attribute reference, peeling a
+/// trailing call. Resolves ``dataclass`` / ``dataclasses.dataclass`` /
+/// ``dataclasses.dataclass(frozen=True)`` and base classes like
+/// ``typing.NamedTuple`` to their bare tail (`None` for anything else).
+fn callee_tail(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+        Expr::Call(ast::ExprCall { func, .. }) => callee_tail(func),
+        _ => None,
+    }
+}
+
+/// Whether `call` passes ``<keyword>=False`` (a literal `False`).
+fn keyword_is_false(call: &ast::ExprCall, keyword: &str) -> bool {
+    call.arguments.keywords.iter().any(|kw| {
+        kw.arg.as_ref().map(ast::Identifier::as_str) == Some(keyword)
+            && matches!(&kw.value, Expr::BooleanLiteral(b) if !b.value)
+    })
+}
+
+/// Whether `annotation` is a ``ClassVar`` (`ClassVar` or ``ClassVar[...]``,
+/// possibly module-qualified). Such attributes are not ``__init__`` fields.
+fn is_class_var(annotation: &Expr) -> bool {
+    let core = match annotation {
+        Expr::Subscript(ast::ExprSubscript { value, .. }) => value.as_ref(),
+        other => other,
+    };
+    matches!(callee_tail(core), Some("ClassVar"))
+}
+
+/// Whether a ``@dataclass`` field assignment opts out of ``__init__`` via
+/// ``= field(init=False)``.
+fn dataclass_field_excluded(value: &Expr) -> bool {
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    matches!(callee_tail(&call.func), Some("field")) && keyword_is_false(call, "init")
+}
+
+/// The ``@dataclass`` decorator expression on `class_def`, if any. Matches a
+/// bare name, an attribute access, or a call form (`@dataclass(...)`).
+fn dataclass_decorator(class_def: &ast::StmtClassDef) -> Option<&Expr> {
+    class_def
+        .decorator_list
+        .iter()
+        .map(|dec| &dec.expression)
+        .find(|expr| matches!(callee_tail(expr), Some("dataclass")))
+}
+
+/// Whether `class_def` subclasses ``NamedTuple`` (`typing` /
+/// `typing_extensions`, qualified or not).
+fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
+    class_def.arguments.as_ref().is_some_and(|arguments| {
+        arguments
+            .args
+            .iter()
+            .any(|base| matches!(callee_tail(base), Some("NamedTuple")))
+    })
+}
+
+/// Synthesize the compiler-generated constructor for ``@dataclass`` and
+/// ``NamedTuple`` classes, whose ``__init__`` / ``__new__`` is not written as
+/// a ``def`` and so is otherwise invisible to the resolver (issue #29). Each
+/// annotated field becomes a positional-or-keyword parameter, so positional
+/// construction (`D(1, 2)`) is flagged while the keyword form (`D(x=1, y=2)`)
+/// is accepted.
+///
+/// Scoped to the class's *own* fields: inherited base-class fields are not
+/// resolved (so the auto-fixer declines these — see
+/// [`DefinitionIndex::synthesized`]), but the positional limit is `0` either
+/// way, so the diagnostic stays correct. Out of scope: the functional
+/// ``NamedTuple("N", [...])`` / ``namedtuple`` forms, ``attrs``, and
+/// ``TypedDict`` (whose constructor is keyword-only by definition).
+fn synthesize_data_constructor(
+    index: &mut DefinitionIndex,
+    class_name: &str,
+    class_def: &ast::StmtClassDef,
+) {
+    let is_namedtuple = is_namedtuple_class(class_def);
+    let decorator = dataclass_decorator(class_def);
+    if decorator.is_none() && !is_namedtuple {
+        return;
+    }
+    // ``@dataclass(init=False)`` generates no ``__init__``.
+    if let Some(Expr::Call(call)) = decorator {
+        if keyword_is_false(call, "init") {
+            return;
+        }
+    }
+    // An explicitly written constructor wins: ``@dataclass`` / ``NamedTuple``
+    // only synthesize one when the class defines none itself.
+    if index.get(&format!("{class_name}.__init__")).is_some()
+        || index.get(&format!("{class_name}.__new__")).is_some()
+    {
+        return;
+    }
+
+    let receiver = if is_namedtuple { "cls" } else { "self" };
+    let mut parameters = vec![Parameter {
+        name: Some(receiver.to_string()),
+        kind: ParameterKind::PositionalOrKeyword,
+    }];
+    for stmt in &class_def.body {
+        let Stmt::AnnAssign(ast::StmtAnnAssign {
+            target,
+            annotation,
+            value,
+            ..
+        }) = stmt
+        else {
+            continue;
+        };
+        let Expr::Name(name) = target.as_ref() else {
+            continue;
+        };
+        if is_class_var(annotation) {
+            continue;
+        }
+        if !is_namedtuple && value.as_deref().is_some_and(dataclass_field_excluded) {
+            continue;
+        }
+        parameters.push(Parameter {
+            name: Some(name.id.to_string()),
+            kind: ParameterKind::PositionalOrKeyword,
+        });
+    }
+
+    let ctor = if is_namedtuple { "__new__" } else { "__init__" };
+    let fullname = format!("{class_name}.{ctor}");
+    index.insert(fullname.clone(), Signature { parameters });
+    index.synthesized.insert(fullname);
 }
