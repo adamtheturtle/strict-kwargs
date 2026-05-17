@@ -4,6 +4,9 @@ Changelog
 Next
 ----
 
+- Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
+  can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_; see the
+  README "pre-commit" section.
 - Resolve calls into builtins, the standard library, and third-party
   packages: a pinned typeshed copy is vendored and embedded in the binary;
   third-party resolves from ``site-packages`` (PEP 561).

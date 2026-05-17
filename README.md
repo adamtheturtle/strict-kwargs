@@ -58,6 +58,36 @@ strict-kwargs .
 
 Exit codes: `0` = clean, `1` = violations found, `2` = internal error.
 
+## pre-commit
+
+Run strict-kwargs automatically with [pre-commit](https://pre-commit.com/).
+Add this to your project's `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/adamtheturtle/strict-kwargs
+    rev: 2026.5.16.post1  # pin to the latest release tag
+    hooks:
+      - id: strict-kwargs
+```
+
+Then:
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+Pin `rev` to a published release tag (see
+[Releases](https://github.com/adamtheturtle/strict-kwargs/releases)) and let
+[`pre-commit autoupdate`](https://pre-commit.com/#pre-commit-autoupdate) bump
+it.
+
+The hook builds strict-kwargs' maturin wheel in an isolated environment, so
+the machine running the hook needs a [Rust
+toolchain](https://rustup.rs/). Pass extra arguments (config flags, paths)
+with `args:` as usual; by default the hook checks the staged Python files.
+
 ## Configuration
 
 In `pyproject.toml`:
