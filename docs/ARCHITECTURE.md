@@ -64,8 +64,12 @@ ty/pyright order:
 **Imports and re-exports** are followed: `import a.b [as m]`,
 `from a.b import c [as d]`, relative imports (correctly anchored for
 `__init__.py` packages), and re-exports — explicit `from .impl import name`,
-`from x import *`, and chains through package roots (e.g. `os.path` →
-`posixpath`). Builtins resolve via a synthetic `builtins` module plus a
+`from x import *`, module-level assignment aliases (`helper = _impl.real`,
+`alias = real`), and chains through package roots (e.g. `os.path` →
+`posixpath`). Assignment aliases are followed only for pure name/attribute
+references at true module scope (a call/literal RHS is a value, not an
+alias; a function-local assignment binds in that scope, not the package's).
+Builtins resolve via a synthetic `builtins` module plus a
 bare-name fallback; `Class(...)` resolves to `Class.__init__`/`__new__`.
 
 ### The ty fallback (`src/ty_resolver.rs`)
@@ -205,7 +209,7 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
 
 ## Testing & CI
 
-- 63 tests (unit + integration). Integration tests are ported from
+- Unit and integration tests. Integration tests are ported from
   `mypy-strict-kwargs`; ty-backed tests are guarded by a `ty` availability
   check so the suite stays green for contributors without `ty`.
 - Cross-platform URI handling has dedicated platform-independent unit tests.

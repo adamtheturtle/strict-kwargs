@@ -14,7 +14,8 @@ Next
   packages: a pinned typeshed copy is vendored and embedded in the binary;
   third-party resolves from ``site-packages`` (PEP 561).
 - Follow imports and re-exports (relative imports, ``from x import *``,
-  package-root re-export chains); overload-safe (permissive) signature model.
+  package-root re-export chains, and module-level assignment aliases such as
+  ``helper = _impl.real``); overload-safe (permissive) signature model.
 - Optional ``ty`` type-inference fallback (drives a ``ty server`` over LSP):
   resolves inheritance/MRO, return-typed and annotation-typed receivers,
   locals bound from calls, and precise overloads. Fails closed; pipelined;
