@@ -4,6 +4,12 @@ Changelog
 Next
 ----
 
+- Fix a false positive on the explicit receiver of a first-party
+  unbound-method call (``K.n(K())``): the receiver binds to ``self`` and is
+  never keyword-passable, so it is no longer counted against the positional
+  limit. ``K.m(K(), 1)`` now reports only the real argument and the fixer
+  rewrites it to ``K.m(K(), a=1)``. This extends the typeshed/``ty``-path
+  fix to the built-in resolver path (issue #27; companion to #15).
 - Fix a bound-instance ``__call__`` off-by-one (issue #28): an explicit call
   through ``__call__`` now strips the receiver-bound ``self`` and grants no
   first-positional exemption, so ``C()(1, 2)`` reports ``maximum 0`` (was
