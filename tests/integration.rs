@@ -849,3 +849,62 @@ B().method(a=1)
 "#,
     );
 }
+
+#[test]
+fn ty_overload_precision() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    // ty resolves the argument-matched overload; the call is flagged
+    // because positional args should be keywords either way.
+    assert_error(
+        r#"
+from typing import overload
+
+@overload
+def f(a: int) -> int: ...
+@overload
+def f(a: int, b: int) -> str: ...
+def f(a, b=0): return a
+
+f(1, 2)
+"#,
+        10,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn ty_stdlib_via_inferred_receiver() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    let messages = check_source(
+        r#"
+xs: list[int] = []
+xs.append(1, 2)
+xs.append(1)
+"#,
+    );
+    // append's `object` is positional-only in typeshed: append(1) is fine,
+    // append(1, 2) exceeds it. Proves stdlib resolves via ty inference.
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:3:"));
+    assert!(messages[0].contains("\"append\""));
+}
+
+#[test]
+fn ty_stdlib_keyword_ok() {
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    assert_ok(
+        r#"
+s = "hello"
+s.upper()
+"#,
+    );
+}

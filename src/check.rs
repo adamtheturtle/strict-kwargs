@@ -10,17 +10,18 @@ use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use rustc_hash::FxHashMap;
 
-use std::cell::RefCell;
+use ruff_text_size::TextSize;
 
-use crate::ast_util::{line_column, positional_argument_count};
+use crate::ast_util::{line_column, positional_argument_count, signature_from_parameters};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
+use crate::error::CheckError;
 use crate::index::{build_index, module_name_for_path, DefinitionIndex};
 use crate::signature::Signature;
-use crate::ty_resolver::{byte_offset_to_lsp, lsp_to_byte_offset, TyResolver};
-
-use crate::ast_util::signature_from_parameters;
-use crate::error::CheckError;
+use crate::ty_resolver::{
+    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_hover_signature,
+    ty_binary_present, TyResolver,
+};
 
 pub fn check_paths(
     project_root: &Path,
@@ -32,7 +33,14 @@ pub fn check_paths(
     // ty-grade resolution (inheritance/MRO, return types, annotated params,
     // overloads) for calls the built-in resolver cannot resolve. Optional:
     // absence of `ty` just disables the fallback.
-    let ty = TyResolver::start(project_root).map(RefCell::new);
+    let mut ty = TyResolver::start(project_root);
+    if ty.is_none() && ty_binary_present() {
+        eprintln!(
+            "strict-kwargs: `ty` found but its language server could not be \
+             started; continuing without the type-inference fallback"
+        );
+    }
+    let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
     for path in &python_files {
         let source = std::fs::read_to_string(path)?;
@@ -45,10 +53,20 @@ pub fn check_paths(
             &index,
             config,
             &mut diagnostics,
-            ty.as_ref(),
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
+        }
+        let pending = std::mem::take(&mut checker.ty_pending);
+        if let Some(ty) = ty.as_mut() {
+            resolve_pending_with_ty(
+                ty,
+                path,
+                &source,
+                &pending,
+                &mut ty_file_cache,
+                &mut diagnostics,
+            );
         }
     }
     diagnostics.sort_by(|left, right| {
@@ -106,8 +124,18 @@ struct CallChecker<'a> {
     config: &'a Config,
     diagnostics: &'a mut Vec<Diagnostic>,
     scopes: Vec<Scope>,
-    ty: Option<&'a RefCell<TyResolver>>,
-    ty_file_cache: RefCell<FxHashMap<PathBuf, Option<String>>>,
+    /// Calls the built-in resolver couldn't resolve, deferred for a single
+    /// pipelined batch of ty queries per file.
+    ty_pending: Vec<PendingTy>,
+}
+
+/// A call awaiting ty resolution: byte offsets into the file's source.
+struct PendingTy {
+    /// Start of the callee identifier (where we hover / goto-definition).
+    callee_offset: usize,
+    /// Start of the whole call expression (for the diagnostic position).
+    call_start: usize,
+    positional_count: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -126,7 +154,6 @@ impl<'a> CallChecker<'a> {
         index: &'a DefinitionIndex,
         config: &'a Config,
         diagnostics: &'a mut Vec<Diagnostic>,
-        ty: Option<&'a RefCell<TyResolver>>,
     ) -> Self {
         Self {
             path,
@@ -136,8 +163,7 @@ impl<'a> CallChecker<'a> {
             config,
             diagnostics,
             scopes: vec![Scope::default()],
-            ty,
-            ty_file_cache: RefCell::new(FxHashMap::default()),
+            ty_pending: Vec::new(),
         }
     }
 
@@ -304,9 +330,9 @@ impl<'a> CallChecker<'a> {
             .filter(|name| self.index.get(name).is_some())
             .map(str::to_string);
         let Some(callee_fullname) = indexed else {
-            // Built-in resolver couldn't resolve (or had no signature):
-            // defer to ty's type inference.
-            self.try_ty_fallback(call);
+            // Built-in resolver couldn't resolve: defer to a pipelined ty
+            // query (handled once per file after the walk).
+            self.record_ty_pending(call);
             return;
         };
         let Some(signatures) = self.index.get(&callee_fullname) else {
@@ -349,81 +375,20 @@ impl<'a> CallChecker<'a> {
         });
     }
 
-    /// Resolve a call via `ty` when the built-in resolver could not. ty's
-    /// type inference handles inheritance/MRO, return types, annotated
-    /// parameters, and overloads. Fails closed (no diagnostic) on any error.
-    fn try_ty_fallback(&mut self, call: &ast::ExprCall) {
-        let Some(ty) = self.ty else {
-            return;
-        };
+    /// Defer a call the built-in resolver missed to a pipelined ty query.
+    fn record_ty_pending(&mut self, call: &ast::ExprCall) {
         // Position at the callee identifier: the attribute for ``x.m()``,
         // otherwise the name itself.
-        let (offset, is_method) = match &*call.func {
-            Expr::Attribute(attr) => (attr.attr.range().start(), true),
-            Expr::Name(name) => (name.range().start(), false),
+        let callee_offset = match &*call.func {
+            Expr::Attribute(attr) => attr.attr.range().start(),
+            Expr::Name(name) => name.range().start(),
             _ => return,
         };
-        let (line, character) = byte_offset_to_lsp(self.source, offset.to_usize());
-        let loc = {
-            let mut ty = ty.borrow_mut();
-            ty.definition(&self.path, self.source, line, character)
-        };
-        let Some(loc) = loc else {
-            return;
-        };
-
-        let target_src = self.ty_target_source(&loc.path);
-        let Some(target_src) = target_src else {
-            return;
-        };
-        let Ok(parsed) = parse_module(&target_src) else {
-            return;
-        };
-        let Some(def_off) = lsp_to_byte_offset(&target_src, loc.line, loc.character) else {
-            return;
-        };
-
-        let _ = is_method;
-        let Some((fullname, signatures)) = resolve_def_at(parsed.suite(), def_off) else {
-            return;
-        };
-        let positional_count = positional_argument_count(&call.arguments);
-        if signatures.iter().any(|signature| {
-            !call_exceeds_positional_limit(signature, &fullname, false, positional_count)
-        }) {
-            return;
-        }
-        let max_positional = signatures
-            .iter()
-            .filter_map(|signature| signature.max_positional_at_call_site(&fullname, false))
-            .max()
-            .unwrap_or(0);
-        let (diag_line, column) = line_column(self.source, call.start());
-        self.diagnostics.push(Diagnostic {
-            path: self.path.clone(),
-            line: diag_line,
-            column,
-            callee: format_callee_display(&fullname),
-            positional_count,
-            max_positional,
+        self.ty_pending.push(PendingTy {
+            callee_offset: callee_offset.to_usize(),
+            call_start: call.start().to_usize(),
+            positional_count: positional_argument_count(&call.arguments),
         });
-    }
-
-    /// Source of a ty-resolved target file (the file being checked is already
-    /// in memory). Cached; unreadable targets (e.g. ty's bundled stubs) yield
-    /// `None`.
-    fn ty_target_source(&self, path: &Path) -> Option<String> {
-        if path == self.path {
-            return Some(self.source.to_string());
-        }
-        if let Some(cached) = self.ty_file_cache.borrow().get(path) {
-            return cached.clone();
-        }
-        let read = std::fs::read_to_string(path).ok();
-        self.ty_file_cache
-            .borrow_mut()
-            .insert(path.to_path_buf(), read.clone());
-        read
     }
 
     /// Map a base name to the signature-bearing fullname to check: the name
@@ -721,4 +686,161 @@ fn resolve_def_at(stmts: &[Stmt], offset: usize) -> Option<(String, Vec<Signatur
         }
     }
     None
+}
+
+/// Parse a ty-reported parameter list (`a: int, b: int = ..., /`) into a
+/// signature by reusing the real parser. `None` if it doesn't parse.
+fn signature_from_param_text(params: &str) -> Option<Signature> {
+    let src = format!("def __sk__({params}): ...\n");
+    let parsed = parse_module(&src).ok()?;
+    parsed.suite().iter().find_map(|stmt| match stmt {
+        Stmt::FunctionDef(f) => Some(signature_from_parameters(&f.parameters)),
+        _ => None,
+    })
+}
+
+fn emit_if_violation(
+    fullname: &str,
+    signatures: &[Signature],
+    positional_count: usize,
+    source: &str,
+    call_start: usize,
+    path: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if signatures.is_empty()
+        || signatures
+            .iter()
+            .any(|s| !call_exceeds_positional_limit(s, fullname, false, positional_count))
+    {
+        return;
+    }
+    let max_positional = signatures
+        .iter()
+        .filter_map(|s| s.max_positional_at_call_site(fullname, false))
+        .max()
+        .unwrap_or(0);
+    let (line, column) = line_column(source, TextSize::new(call_start as u32));
+    diagnostics.push(Diagnostic {
+        path: path.to_path_buf(),
+        line,
+        column,
+        callee: format_callee_display(fullname),
+        positional_count,
+        max_positional,
+    });
+}
+
+fn hover_text(value: &serde_json::Value) -> Option<String> {
+    let contents = value.get("contents")?;
+    if let Some(s) = contents.as_str() {
+        return Some(s.to_string());
+    }
+    contents
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// Resolve, in one pipelined batch per file, the calls the built-in resolver
+/// missed: hover (precise, overload- and inheritance-resolved, stdlib too),
+/// then goto-definition for the rest (constructors). Fails closed.
+fn resolve_pending_with_ty(
+    ty: &mut TyResolver,
+    path: &Path,
+    source: &str,
+    pending: &[PendingTy],
+    file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if pending.is_empty() || ty.ensure_open(path, source).is_none() {
+        return;
+    }
+
+    // Phase A: pipeline all hover requests, then collect.
+    let hover_ids: Vec<Option<i64>> = pending
+        .iter()
+        .map(|p| {
+            let (line, ch) = byte_offset_to_lsp(source, p.callee_offset);
+            ty.ask("textDocument/hover", path, line, ch)
+        })
+        .collect();
+
+    let mut needs_def: Vec<usize> = Vec::new();
+    for (i, p) in pending.iter().enumerate() {
+        let sig = hover_ids[i]
+            .and_then(|id| ty.take(id))
+            .as_ref()
+            .and_then(hover_text)
+            .as_deref()
+            .and_then(parse_hover_signature);
+        let Some(sig) = sig else {
+            needs_def.push(i);
+            continue;
+        };
+        let Some(signature) = signature_from_param_text(&sig.params) else {
+            continue;
+        };
+        let fullname = match &sig.owner {
+            Some(owner) => {
+                let owner = owner.split('[').next().unwrap_or(owner);
+                let owner = owner.rsplit('.').next().unwrap_or(owner);
+                format!("ty.{owner}.{}", sig.name)
+            }
+            None => format!("ty.{}", sig.name),
+        };
+        emit_if_violation(
+            &fullname,
+            &[signature],
+            p.positional_count,
+            source,
+            p.call_start,
+            path,
+            diagnostics,
+        );
+    }
+
+    // Phase B: pipeline goto-definition for hover misses (constructors).
+    let def_ids: Vec<(usize, Option<i64>)> = needs_def
+        .iter()
+        .map(|&i| {
+            let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
+            (i, ty.ask("textDocument/definition", path, line, ch))
+        })
+        .collect();
+    for (i, id) in def_ids {
+        let Some(loc) = id
+            .and_then(|id| ty.take(id))
+            .as_ref()
+            .and_then(location_from_value)
+        else {
+            continue;
+        };
+        let target = if loc.path == path {
+            Some(source.to_string())
+        } else {
+            file_cache
+                .entry(loc.path.clone())
+                .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
+                .clone()
+        };
+        let Some(target) = target else { continue };
+        let Ok(parsed) = parse_module(&target) else {
+            continue;
+        };
+        let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {
+            continue;
+        };
+        if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
+            emit_if_violation(
+                &fullname,
+                &sigs,
+                pending[i].positional_count,
+                source,
+                pending[i].call_start,
+                path,
+                diagnostics,
+            );
+        }
+    }
 }

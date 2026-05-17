@@ -23,18 +23,44 @@ pub struct DefLocation {
     pub character: u32,
 }
 
+/// Per-request timeout. ty normally answers in milliseconds; this only
+/// bounds pathological hangs. The first failure latches ty OFF for the rest
+/// of the run, so a slow ty never multiplies into a timeout storm.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// The initialize handshake (project discovery) can be slower than steady
+/// state, so allow more headroom.
+const INIT_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct TyResolver {
     child: Child,
     stdin: ChildStdin,
     incoming: Receiver<Value>,
     next_id: i64,
     opened: HashSet<PathBuf>,
-    timeout: Duration,
+    /// Responses that arrived out of order, keyed by request id — required
+    /// for pipelining (send many requests, then collect).
+    pending: FxPending,
+    /// Once true, all further work is skipped (ty died/hung/misbehaved).
+    disabled: bool,
 }
+
+/// Whether a usable `ty` executable is on `PATH`.
+pub fn ty_binary_present() -> bool {
+    Command::new("ty")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+type FxPending = std::collections::HashMap<i64, Value>;
 
 impl TyResolver {
     /// Start `ty server` and complete the LSP initialize handshake rooted at
-    /// `project_root`. Returns `None` if ty is unavailable or misbehaves.
+    /// `project_root`. Returns `None` if ty is unavailable or misbehaves —
+    /// the caller then runs without the inference fallback.
     pub fn start(project_root: &Path) -> Option<Self> {
         let mut child = Command::new("ty")
             .arg("server")
@@ -55,46 +81,28 @@ impl TyResolver {
             incoming: rx,
             next_id: 1,
             opened: HashSet::new(),
-            timeout: Duration::from_secs(10),
+            pending: FxPending::new(),
+            disabled: false,
         };
 
-        let root_uri = path_to_uri(project_root);
         let id = resolver.request(
             "initialize",
             json!({
                 "processId": std::process::id(),
-                "rootUri": root_uri,
+                "rootUri": path_to_uri(project_root),
                 "capabilities": {},
             }),
         )?;
-        resolver.await_response(id)?;
+        resolver.collect(id, INIT_TIMEOUT)?;
         resolver.notify("initialized", json!({}))?;
         Some(resolver)
     }
 
-    /// Resolve the definition of the symbol at `(line, character)` (0-based,
-    /// UTF-16) in `path`, opening the document on first use.
-    pub fn definition(
-        &mut self,
-        path: &Path,
-        text: &str,
-        line: u32,
-        character: u32,
-    ) -> Option<DefLocation> {
-        self.ensure_open(path, text)?;
-        let uri = path_to_uri(path);
-        let id = self.request(
-            "textDocument/definition",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }),
-        )?;
-        let result = self.await_response(id)?;
-        location_from_result(&result)
-    }
-
-    fn ensure_open(&mut self, path: &Path, text: &str) -> Option<()> {
+    /// Open `path` (idempotent). Returns `None` if ty is disabled.
+    pub fn ensure_open(&mut self, path: &Path, text: &str) -> Option<()> {
+        if self.disabled {
+            return None;
+        }
         let key = path.to_path_buf();
         if self.opened.contains(&key) {
             return Some(());
@@ -114,7 +122,31 @@ impl TyResolver {
         Some(())
     }
 
+    /// Fire a positional request (`textDocument/hover` or `.../definition`)
+    /// without waiting, returning its id for a later [`Self::take`]. This is
+    /// what enables pipelining: send all, then collect all.
+    pub fn ask(&mut self, method: &str, path: &Path, line: u32, character: u32) -> Option<i64> {
+        if self.disabled {
+            return None;
+        }
+        self.request(
+            method,
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": character },
+            }),
+        )
+    }
+
+    /// Collect the response for a previously [`Self::ask`]ed id.
+    pub fn take(&mut self, id: i64) -> Option<Value> {
+        self.collect(id, REQUEST_TIMEOUT)
+    }
+
     fn request(&mut self, method: &str, params: Value) -> Option<i64> {
+        if self.disabled {
+            return None;
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({
@@ -131,28 +163,106 @@ impl TyResolver {
 
     fn send(&mut self, msg: Value) -> Option<()> {
         let body = serde_json::to_vec(&msg).ok()?;
-        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len()).ok()?;
-        self.stdin.write_all(&body).ok()?;
-        self.stdin.flush().ok()?;
+        let ok = write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|()| self.stdin.write_all(&body))
+            .and_then(|()| self.stdin.flush())
+            .is_ok();
+        if !ok {
+            self.disabled = true;
+            return None;
+        }
         Some(())
     }
 
-    /// Wait for the response with `id`, discarding notifications and
-    /// unrelated server requests until it arrives or we time out.
-    fn await_response(&mut self, id: i64) -> Option<Value> {
+    /// Wait for the response with `id`, buffering out-of-order responses and
+    /// answering server→client requests so ty never blocks. Any timeout or
+    /// disconnect latches ty OFF for the remainder of the run.
+    fn collect(&mut self, id: i64, timeout: Duration) -> Option<Value> {
+        if let Some(value) = self.pending.remove(&id) {
+            return Some(value);
+        }
         loop {
-            match self.incoming.recv_timeout(self.timeout) {
+            match self.incoming.recv_timeout(timeout) {
                 Ok(msg) => {
-                    if msg.get("id").and_then(Value::as_i64) == Some(id) {
-                        return msg.get("result").cloned();
+                    if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
+                        if msg.get("method").is_some() {
+                            // Server→client request: reply empty to unblock ty.
+                            let _ = self.send(json!({
+                                "jsonrpc": "2.0", "id": msg_id, "result": null
+                            }));
+                        } else if msg_id == id {
+                            return Some(msg.get("result").cloned().unwrap_or(Value::Null));
+                        } else {
+                            self.pending
+                                .insert(msg_id, msg.get("result").cloned().unwrap_or(Value::Null));
+                        }
                     }
+                    // Notifications (no id) are ignored.
                 }
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                    self.disabled = true;
                     return None;
                 }
             }
         }
     }
+}
+
+/// Parse a ty hover `contents.value` into a callable signature description.
+pub struct HoverSignature {
+    /// `def NAME(` / `bound method T.NAME(` — the callee's display name.
+    pub name: String,
+    /// Owning type for a bound method (`list[int]` etc.), if any.
+    pub owner: Option<String>,
+    /// The parameter-list text between the outermost parentheses.
+    pub params: String,
+}
+
+/// Extract a signature from ty hover text. Handles `def name(params) -> ret`
+/// and `bound method Owner.name(params) -> ret`, including multi-line params,
+/// and stops at the `---` docstring separator. Returns `None` for plain
+/// types (`<class 'A'>`, `list[int]`) — the caller falls back to goto-def.
+pub fn parse_hover_signature(value: &str) -> Option<HoverSignature> {
+    let head = value.split("\n---").next().unwrap_or(value);
+    let head = head.trim();
+
+    let (name, owner) = if let Some(rest) = head.strip_prefix("def ") {
+        let name = rest.split('(').next()?.trim().to_string();
+        (name, None)
+    } else if let Some(rest) = head.strip_prefix("bound method ") {
+        let qualified = rest.split('(').next()?.trim();
+        let (owner, name) = qualified.rsplit_once('.')?;
+        (name.to_string(), Some(owner.to_string()))
+    } else {
+        return None;
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // Balanced extraction of the parameter list.
+    let open = head.find('(')?;
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, ch) in head[open..].char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let params = head[open + 1..end?].trim().to_string();
+    Some(HoverSignature {
+        name,
+        owner,
+        params,
+    })
 }
 
 impl Drop for TyResolver {
@@ -201,7 +311,7 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
 
 /// Extract the first `Location` from a `textDocument/definition` result,
 /// which may be a single `Location`, an array, or `LocationLink`s.
-fn location_from_result(result: &Value) -> Option<DefLocation> {
+pub fn location_from_value(result: &Value) -> Option<DefLocation> {
     let loc = match result {
         Value::Array(items) => items.first()?,
         Value::Object(_) => result,
