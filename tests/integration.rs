@@ -929,6 +929,52 @@ s.upper()
 }
 
 #[test]
+fn ty_unbound_method_receiver_not_flagged() {
+    // Issue #15: `str.lower(key)` is an unbound-method call — `key` binds to
+    // `self`. ty's hover keeps the unbound function's leading `self`
+    // (`def lower(self: ...) -> ...`); pre-fix that explicit receiver was
+    // counted against the limit (`got 1, maximum 0`). The receiver must not
+    // count, including in a comprehension (the real-world repro).
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    assert_ok(
+        r#"
+key = "Content-Type"
+str.lower(key)
+str.split("a b")
+headers = {"Content-Type": "text/html"}
+lowered = {str.lower(k) for k in headers}
+"#,
+    );
+}
+
+#[test]
+fn ty_unbound_method_still_flags_real_extra_positional() {
+    // The receiver is excluded, but a genuine keyword-able positional still
+    // is: `str.encode("hello", "utf-8")` == `"hello".encode("utf-8")`, where
+    // `"utf-8"` should be `encoding=`. Only that one argument is counted
+    // (`got 1`), not the receiver (issue #15).
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    let messages = check_source(
+        r#"
+text = "hello"
+str.encode(text, "utf-8")
+"#,
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:3:"), "got: {messages:?}");
+    assert!(
+        messages[0].contains("\"encode\"") && messages[0].contains("got 1, maximum 0"),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
 fn ty_positional_only_inferred_receiver_not_flagged() {
     // Issue #14: `sys.stdout` infers to `TextIO`; ty's hover is the callable
     // *type* `(Overload[(s: …, /) -> int, …]) | Any`. `s` is positional-only,
