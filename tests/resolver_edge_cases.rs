@@ -310,6 +310,65 @@ Widget(1, 2)
     );
 }
 
+/// A *free function* whose first parameter is literally named `self` is
+/// called by name (not as a bound method), so the receiver is not implicit:
+/// every positional argument counts. `f(1, 2)` against `def f(self, a)`
+/// therefore exceeds the limit and is flagged (the unbound-class-method
+/// detector bails out early because the callee is a `Name`, not an
+/// attribute access).
+#[test]
+fn free_function_named_self_first_param_is_flagged() {
+    let messages = check_source("def f(self, a): ...\nf(1, 2)\n");
+    assert!(
+        has_error_at(&messages, 2, "Too many positional"),
+        "expected violation for free function with `self` param, got: {messages:?}"
+    );
+}
+
+/// A name that resolves syntactically but is bound to a non-callable value
+/// (no signature in the index) is left alone — no diagnostic, no panic.
+#[test]
+fn call_to_non_callable_module_attribute_is_ignored() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file("app.py", "import lib\n\nlib.thing(1, 2)\n")
+        .file("lib.py", "thing = 5\n");
+    let config = Config::load(&project.root);
+    let app = project.root.join("app.py");
+    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    assert!(
+        diagnostics.is_empty(),
+        "non-callable attribute must not be flagged, got: {diagnostics:?}"
+    );
+}
+
+/// A `@dataclass` synthesizes `__init__` from its annotated fields but
+/// *excludes* `ClassVar` fields. With `x: int` and `y: ClassVar[int]`, the
+/// synthesized signature takes only `x`, so `D(1, 2)` exceeds it and is
+/// flagged (exercises the `ClassVar` skip in the field collector).
+#[test]
+fn dataclass_classvar_field_excluded_from_synthesized_init() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+from typing import ClassVar
+
+
+@dataclass
+class D:
+    x: int
+    y: ClassVar[int] = 0
+
+
+D(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "Too many positional") || has_error_at(&messages, 12, "\"D\""),
+        "expected dataclass ClassVar-excluded violation, got: {messages:?}"
+    );
+}
+
 /// An attribute call reports `"method" of "Class"`.
 #[test]
 fn method_violation_reports_method_of_class() {
