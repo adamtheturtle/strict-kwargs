@@ -573,15 +573,21 @@ fn call_exceeds_positional_limit(
 ///
 /// `TypeVar`/`ParamSpec`/`TypeVarTuple`/`NewType`/`TypeAliasType` are PEP 484 /
 /// 612 / 646 / 695 special forms: the first argument must be a string literal
-/// equal to the assigned variable so checkers can resolve them statically.
-/// mypy (no plugins), pyright and ty all reject the keyword form
-/// (`ParamSpec(name="P")` → *"expects a string literal as first argument"*),
-/// so a type-checked codebase — strict-kwargs' only audience — can never
-/// satisfy a keyword-rewrite diagnostic here. Exempt them regardless of the
-/// resolved signature: typeshed does not mark these params positional-only
-/// (the checkers special-case the call and ignore the stub), and the proposal
-/// to add `/` upstream (python/typeshed#15804) would not capture the
-/// literal/name-match half of the contract anyway.
+/// equal to the assigned variable so checkers can resolve them statically. A
+/// generic keyword-rewrite never captures that literal/name-match half of the
+/// contract, and the keyword form is non-idiomatic and was explicitly declined
+/// upstream (python/typeshed#15804) — typeshed deliberately keeps these params
+/// positional-or-keyword to mirror runtime, and the checkers special-case the
+/// call and ignore the stub. So exempt them regardless of the resolved
+/// signature.
+///
+/// Checker behaviour on `ParamSpec(name="P")` varies (it is not, as once
+/// assumed, universally rejected): pyright accepts all five forms, ty accepts
+/// all but `NewType(name=, tp=)`, and mypy rejects all five with *"expects a
+/// string literal as first argument"*. mypy's blanket rejection is a tracked
+/// mypy bug (python/mypy#20468), but this exemption must outlive its fix:
+/// older mypy stays in use for years, ty still rejects `NewType` kwargs, and
+/// the literal/name-match contract above is the durable reason regardless.
 fn is_typing_special_form_constructor(fullname: &str) -> bool {
     // The diagnostic may target the class itself (`typing.ParamSpec`), its
     // constructor (`...__init__` / `...__new__`), or — for `NewType`, a class
