@@ -29,6 +29,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install ty (type-inference fallback under test)
+        shell: bash
+        run: |
+          uv tool install ty
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        # Fail loudly if ty is missing so the ty-backed tests are actually
+        # exercised on every platform (incl. Windows) rather than skipped.
+        shell: bash
+        run: ty version
+
       - name: Run tests
         run: cargo test --verbose
 

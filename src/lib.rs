@@ -6,7 +6,9 @@ mod config;
 mod diagnostic;
 mod error;
 mod index;
+mod resolve;
 mod signature;
+mod ty_resolver;
 
 pub use check::check_paths;
 pub use config::{find_project_root, Config};

@@ -38,7 +38,9 @@ impl Signature {
 
         let skip_first = fullname.ends_with(".__call__")
             || fullname.ends_with(".__get__")
-            || fullname.ends_with(".__set__");
+            || fullname.ends_with(".__set__")
+            || fullname.ends_with(".__init__")
+            || fullname.ends_with(".__new__");
         let skip_second = fullname.ends_with(".__get__") || fullname.ends_with(".__set__");
         let is_dunder_call = fullname.ends_with(".__call__");
 

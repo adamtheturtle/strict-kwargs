@@ -4,6 +4,20 @@ Changelog
 Next
 ----
 
+- Resolve calls into builtins, the standard library, and third-party
+  packages: a pinned typeshed copy is vendored and embedded in the binary;
+  third-party resolves from ``site-packages`` (PEP 561).
+- Follow imports and re-exports (relative imports, ``from x import *``,
+  package-root re-export chains); overload-safe (permissive) signature model.
+- Optional ``ty`` type-inference fallback (drives a ``ty server`` over LSP):
+  resolves inheritance/MRO, return-typed and annotation-typed receivers,
+  locals bound from calls, and precise overloads. Fails closed; pipelined;
+  robust to ty being absent/slow/changing.
+- Cross-platform ``file://`` URI handling; CI runs the ty-backed suite on
+  Linux and Windows.
+- See ``docs/ARCHITECTURE.md`` for the current state, capability matrix,
+  parity status, and limitations.
+
 2026.5.16-post.1
 ----------------
 
