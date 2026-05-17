@@ -61,11 +61,13 @@ Exit codes: `0` = clean, `1` = violations found, `2` = internal error.
 ## pre-commit
 
 Run strict-kwargs automatically with [pre-commit](https://pre-commit.com/).
-Add this to your project's `.pre-commit-config.yaml`:
+Use the [`strict-kwargs-pre-commit`](https://github.com/adamtheturtle/strict-kwargs-pre-commit)
+mirror, which installs the prebuilt wheel from PyPI (**no Rust toolchain
+required**). Add this to your project's `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/adamtheturtle/strict-kwargs
+  - repo: https://github.com/adamtheturtle/strict-kwargs-pre-commit
     rev: 2026.5.16.post1  # pin to the latest release tag
     hooks:
       - id: strict-kwargs
@@ -78,15 +80,18 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-Pin `rev` to a published release tag (see
-[Releases](https://github.com/adamtheturtle/strict-kwargs/releases)) and let
-[`pre-commit autoupdate`](https://pre-commit.com/#pre-commit-autoupdate) bump
-it.
+Each mirror tag installs the identically-versioned `strict-kwargs` release;
+pin `rev` to a published tag (see the mirror's
+[Releases](https://github.com/adamtheturtle/strict-kwargs-pre-commit/releases))
+and let [`pre-commit autoupdate`](https://pre-commit.com/#pre-commit-autoupdate)
+bump it. Pass extra arguments (config flags, paths) with `args:` as usual; by
+default the hook checks the staged Python files.
 
-The hook builds strict-kwargs' maturin wheel in an isolated environment, so
-the machine running the hook needs a [Rust
-toolchain](https://rustup.rs/). Pass extra arguments (config flags, paths)
-with `args:` as usual; by default the hook checks the staged Python files.
+This repo also ships a `.pre-commit-hooks.yaml`, so pointing `repo:` at
+`https://github.com/adamtheturtle/strict-kwargs` directly works too — but that
+path builds the maturin wheel from source and needs a [Rust
+toolchain](https://rustup.rs/) on the machine running the hook. Prefer the
+mirror unless you specifically want to track unreleased revisions.
 
 ## Configuration
 
