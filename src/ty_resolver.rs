@@ -331,12 +331,58 @@ pub fn location_from_value(result: &Value) -> Option<DefLocation> {
     })
 }
 
+/// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
+/// drive paths the leading slash LSP servers expect
+/// (`C:\a` -> `file:///C:/a`), so paths round-trip with what ty returns.
 fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.to_string_lossy())
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        // POSIX absolute path: `file://` + `/abs` == `file:///abs`.
+        format!("file://{s}")
+    } else {
+        // Windows drive path (`C:/a`) or other: needs the extra slash.
+        format!("file:///{s}")
+    }
 }
 
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://").map(PathBuf::from)
+    uri_to_path_string(uri).map(PathBuf::from)
+}
+
+/// Parse a `file://` URI back to a filesystem path string. Strips the
+/// leading slash from `/C:/...` (RFC 8089 Windows form) and
+/// percent-decodes, so it round-trips with [`path_to_uri`] and matches
+/// the native paths we compare against. Pure/deterministic for testing.
+fn uri_to_path_string(uri: &str) -> Option<String> {
+    let rest = percent_decode(uri.strip_prefix("file://")?);
+    let bytes = rest.as_bytes();
+    // `/C:/path` -> `C:/path` (drive-letter form).
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        Some(rest[1..].to_string())
+    } else {
+        Some(rest)
+    }
+}
+
+/// Minimal `%XX` percent-decoding (LSP servers encode spaces etc.).
+fn percent_decode(s: &str) -> String {
+    let raw = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            let hi = (raw[i + 1] as char).to_digit(16);
+            let lo = (raw[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Convert a byte offset in `source` to an LSP `(line, character)` position
@@ -380,4 +426,72 @@ pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usi
         return Some(source.len());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // These run on every CI platform (incl. windows-latest) and need no
+    // `ty` binary, so the Windows file-URI handling is actually exercised.
+
+    #[test]
+    fn posix_path_to_uri() {
+        assert_eq!(
+            path_to_uri(Path::new("/home/u/a.py")),
+            "file:///home/u/a.py"
+        );
+    }
+
+    #[test]
+    fn windows_path_to_uri_is_rfc8089() {
+        // Backslashes are replaced and the drive gets the leading slash;
+        // the old `file://{lossy}` produced `file://C:\...` (the bug).
+        assert_eq!(
+            path_to_uri(Path::new(r"C:\Users\a\x.py")),
+            "file:///C:/Users/a/x.py"
+        );
+    }
+
+    #[test]
+    fn windows_uri_to_path_strips_leading_slash() {
+        // ty returns RFC 8089 `file:///C:/...`; the old code yielded the
+        // invalid `/C:/...`, silently disabling the fallback on Windows.
+        assert_eq!(
+            uri_to_path_string("file:///C:/Users/a/x.py").as_deref(),
+            Some("C:/Users/a/x.py")
+        );
+    }
+
+    #[test]
+    fn posix_uri_to_path_keeps_leading_slash() {
+        assert_eq!(
+            uri_to_path_string("file:///home/u/a.py").as_deref(),
+            Some("/home/u/a.py")
+        );
+    }
+
+    #[test]
+    fn uri_percent_decoded() {
+        assert_eq!(
+            uri_to_path_string("file:///C:/Program%20Files/x.py").as_deref(),
+            Some("C:/Program Files/x.py")
+        );
+    }
+
+    #[test]
+    fn windows_path_uri_round_trips() {
+        // We don't percent-encode on output; decoding on input is still
+        // exercised by `uri_percent_decoded`.
+        let uri = path_to_uri(Path::new(r"C:\a b\x.py"));
+        assert_eq!(uri, "file:///C:/a b/x.py");
+        assert_eq!(uri_to_path_string(&uri).as_deref(), Some("C:/a b/x.py"));
+    }
+
+    #[test]
+    fn posix_path_uri_round_trips() {
+        let uri = path_to_uri(Path::new("/home/u/a.py"));
+        assert_eq!(uri_to_path_string(&uri).as_deref(), Some("/home/u/a.py"));
+    }
 }
