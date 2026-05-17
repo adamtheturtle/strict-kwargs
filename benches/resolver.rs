@@ -122,6 +122,87 @@ fn first_party_project() -> &'static Path {
         .path()
 }
 
+/// Width of the re-export hub: a `__init__` that aggregates this many leaf
+/// modules through chained `from … import *` hops, the structural shape of a
+/// real third-party package's public surface (numpy/scipy-style). Large
+/// enough that backward re-export resolution dominates; small enough that
+/// one-time generation stays cheap.
+const REEXPORT_LEAVES: usize = 40;
+/// Functions defined per leaf module (each a positional call target).
+const REEXPORT_FUNCS_PER_LEAF: usize = 8;
+
+/// A deterministic first-party project whose package root re-exports a wide,
+/// chained `import *` web — `pkg/__init__` ← `pkg.api` ← `pkg.agg` ←
+/// `pkg.leaf_000 … leaf_039`, with `app.py` calling every leaf function
+/// *through the package root* positionally.
+///
+/// This is the regression fixture for issue #39: the old eager
+/// `expand_reexports` materialized the full alias cross-product over this
+/// shape and did not complete on a real heavy closure; the lazy
+/// demand-driven resolver chases each queried name backward through the
+/// `dst`-keyed edge index instead. Every name is fully resolvable by the
+/// built-in resolver (no `ty`, no third-party deps), so the measured number
+/// is the deterministic lazy-resolution hot path #39 introduced. Generated
+/// once and reused (read-only), so generation never counts toward the bench.
+fn reexport_hub_project() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create reexport fixture tempdir");
+            let root = temp.path();
+            std::fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"reexport-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write pyproject.toml");
+
+            let pkg = root.join("pkg");
+            std::fs::create_dir_all(&pkg).expect("create pkg/");
+            // Chained star re-export hops: root ← api ← agg ← every leaf.
+            std::fs::write(pkg.join("__init__.py"), "from pkg.api import *\n")
+                .expect("write pkg/__init__.py");
+            std::fs::write(pkg.join("api.py"), "from pkg.agg import *\n")
+                .expect("write pkg/api.py");
+            let mut agg = String::new();
+            for leaf in 0..REEXPORT_LEAVES {
+                writeln!(agg, "from pkg.leaf_{leaf:03} import *").expect("format agg import");
+            }
+            std::fs::write(pkg.join("agg.py"), agg).expect("write pkg/agg.py");
+
+            for leaf in 0..REEXPORT_LEAVES {
+                let mut module = format!("\"\"\"Generated leaf {leaf}.\"\"\"\n\n");
+                for func in 0..REEXPORT_FUNCS_PER_LEAF {
+                    writeln!(
+                        module,
+                        "def leaf_{leaf:03}_f{func}(alpha: int, beta: int, gamma: int = 0) -> int:\n    return alpha + beta + gamma\n"
+                    )
+                    .expect("format leaf def");
+                }
+                std::fs::write(pkg.join(format!("leaf_{leaf:03}.py")), module)
+                    .expect("write leaf module");
+            }
+
+            let mut app = String::from("\"\"\"Calls every re-exported leaf via the package root.\"\"\"\n\n");
+            for leaf in 0..REEXPORT_LEAVES {
+                for func in 0..REEXPORT_FUNCS_PER_LEAF {
+                    writeln!(app, "from pkg import leaf_{leaf:03}_f{func}")
+                        .expect("format app import");
+                }
+            }
+            app.push('\n');
+            for leaf in 0..REEXPORT_LEAVES {
+                for func in 0..REEXPORT_FUNCS_PER_LEAF {
+                    writeln!(app, "leaf_{leaf:03}_f{func}(1, 2, 3)")
+                        .expect("format app call");
+                }
+            }
+            std::fs::write(root.join("app.py"), app).expect("write app.py");
+
+            temp
+        })
+        .path()
+}
+
 #[divan::bench]
 fn leaf() -> usize {
     check(&fixture_dir("leaf"))
@@ -140,6 +221,15 @@ fn special_forms_overloads() -> usize {
 #[divan::bench]
 fn first_party_closure() -> usize {
     check(first_party_project())
+}
+
+/// Heavy re-export closure (issue #39): wide, chained `import *` web fully
+/// resolved by the lazy demand-driven backward resolver. The eager
+/// `expand_reexports` this replaced did not complete on a real closure of
+/// this shape.
+#[divan::bench]
+fn reexport_closure() -> usize {
+    check(reexport_hub_project())
 }
 
 /// The auto-fixer shares the index/parse/walk path with `check` but runs the

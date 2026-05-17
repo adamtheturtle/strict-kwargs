@@ -48,31 +48,40 @@ A map from fully-qualified name → **list** of signatures (a list, so
 `@overload` stubs and redefinitions are handled *permissively*: a call is
 flagged only if it exceeds *every* candidate — never a false positive).
 
-Built once per run via a bounded recursive worklist over three sources, in
-ty/pyright order:
-
-1. **First-party** — the project's own files (and sibling modules resolved
-   via the project root, so single-file checks still see the package).
-2. **Standard library + builtins** — a pinned copy of
-   [typeshed](https://github.com/python/typeshed) vendored under
-   `vendored/typeshed/` and **embedded in the binary** (`include_dir!`). No
-   Python environment required; fully offline and deterministic. Pinned
-   commit is recorded in `vendored/typeshed/COMMIT`; update with
-   `scripts/update-typeshed.sh` (see `vendored/typeshed/README.md`).
-3. **Third-party** — the active environment's `site-packages`, honoring
-   **PEP 561**: `*-stubs` distributions, inline-typed packages (`py.typed`),
-   and bundled `.pyi`.
+**Lazy & demand-driven.** Only **builtins** and the **files being checked**
+are indexed eagerly (they are small and their call sites are what we walk).
+Every *other* module — sibling first-party, stdlib, third-party — is
+resolved, parsed and indexed **on demand**, the first time a query needs a
+name it could define or route. Module resolution still follows ty/pyright
+order — first-party, then vendored, embedded
+[typeshed](https://github.com/python/typeshed) stdlib (offline,
+deterministic; pinned in `vendored/typeshed/COMMIT`, updated via
+`scripts/update-typeshed.sh`), then the active environment's `site-packages`
+honoring **PEP 561** (`*-stubs`, `py.typed`, bundled `.pyi`). The earlier
+eager worklist walked the *entire transitive import closure* up front; on a
+heavy third-party package (numpy/torch/scipy) that did not complete in any
+practical time (issue #39). Now only the modules on a queried name's actual
+re-export path are parsed.
 
 **Imports and re-exports** are followed: `import a.b [as m]`,
 `from a.b import c [as d]`, relative imports (correctly anchored for
 `__init__.py` packages), and re-exports — explicit `from .impl import name`,
 `from x import *`, module-level assignment aliases (`helper = _impl.real`,
 `alias = real`), and chains through package roots (e.g. `os.path` →
-`posixpath`). Assignment aliases are followed only for pure name/attribute
-references at true module scope (a call/literal RHS is a value, not an
-alias; a function-local assignment binds in that scope, not the package's).
-Builtins resolve via a synthetic `builtins` module plus a
-bare-name fallback; `Class(...)` resolves to `Class.__init__`/`__new__`.
+`posixpath`). A re-export `(src, dst)` edge is resolved *backwards* on
+demand — `dst.foo` is tried as `src.foo` — instead of eagerly materializing
+the full alias cross-product (which was superlinear). Edges are indexed by
+destination, so a hop costs O(name-depth), not O(total edges). A
+self-referential `from pkg.sub import *` web (`src` inside `dst`'s subtree)
+is followed only one segment at a time, so chained stars still resolve while
+the unbounded `pkg.sub.sub…` rewrite family cannot form. Per-query module
+and step backstops keep an unforeseen pathology fail-closed (the query
+yields nothing → the call defers to `ty`, never a false positive).
+Assignment aliases are followed only for pure name/attribute references at
+true module scope (a call/literal RHS is a value, not an alias; a
+function-local assignment binds in that scope, not the package's). Builtins
+resolve via a synthetic `builtins` module plus a bare-name fallback;
+`Class(...)` resolves to `Class.__init__`/`__new__`.
 
 **Synthesized constructors.** `@dataclass` and `NamedTuple` classes have no
 written `__init__`/`__new__`, so one is synthesized from the class's
@@ -192,6 +201,13 @@ Tool-specific:
   branches are indexed and treated as overloads.
 - typeshed re-export following is structural; **runtime-computed** `__all__`
   is not followed.
+- Re-export resolution is lazy and bounded. A self-referential
+  `from pkg.sub import *` web resolves names re-exported one segment at a
+  time; a name reachable only by a *multi-segment* path through such a
+  self-referential star (rare; `from pkg.sub import *` then
+  `pkg.deep.attr`) is not built-in-resolved and defers to `ty`. Per-query
+  module/step backstops likewise defer on an unforeseen pathology. All
+  deferrals fail closed (never a false positive).
 - Synthesized constructors cover the **class form** of `@dataclass` and
   `NamedTuple` only. The functional `NamedTuple("N", [...])`/`namedtuple`
   forms, `attrs`, and `TypedDict` (keyword-only by definition) are out of
@@ -218,7 +234,7 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
 | File | Responsibility |
 | --- | --- |
 | `src/check.rs` | call visitor, name/import/scope resolution, rule application, ty deferral |
-| `src/index.rs` | DefinitionIndex, worklist build, import/re-export following |
+| `src/index.rs` | DefinitionIndex, lazy demand-driven module + re-export resolution |
 | `src/resolve.rs` | module resolver (first-party / embedded typeshed / site-packages, PEP 561) |
 | `src/ty_resolver.rs` | LSP client, hover/definition, pipelining, robustness, URI handling |
 | `src/signature.rs` | the positional/keyword rule and `max_positional` logic |
@@ -241,8 +257,10 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
   divan suite run under [CodSpeed](https://codspeed.io) by a non-gating
   `benchmarks` job in `ci.yml`, reporting an instruction-count delta against
   `main` on every PR. It covers a leaf file, a large stdlib import closure,
-  an overload/special-form heavy file, a generated first-party closure, and
-  the auto-fixer. The job does **not** install `ty`: CodSpeed counts
+  an overload/special-form heavy file, a generated first-party closure, a
+  wide chained `import *` re-export closure (`reexport_closure`, the issue
+  #39 regression shape), and the auto-fixer. The job does **not** install
+  `ty`: CodSpeed counts
   instructions of the strict-kwargs process, so the ty subprocess fallback
   is out of scope, and every fixture is fully resolvable by the built-in
   resolver — keeping the numbers deterministic and focused on the

@@ -4,6 +4,20 @@ Changelog
 Next
 ----
 
+- Performance: a file importing a heavy third-party package
+  (``numpy``/``torch``/``scipy``/``PIL``) is now checked in milliseconds
+  instead of timing out (issue #39, follow-up to #31/#36). The eager
+  re-export expansion is gone; the ``DefinitionIndex`` now resolves modules
+  *and* re-export aliases lazily and on demand — only the modules a queried
+  name's actual re-export path traverses are parsed, instead of the whole
+  transitive import closure. Re-export edges are indexed by destination
+  (O(name-depth) per hop, not O(total edges)), a self-referential
+  ``from pkg.sub import *`` web resolves via single-segment hops without the
+  unbounded ``pkg.sub.sub…`` blow-up, and per-query module/step backstops
+  keep an unforeseen pathology fail-closed (defers to ``ty``; never a false
+  positive). Resolution is otherwise unchanged — all existing behavior tests
+  pass. A ``reexport_closure`` benchmark covers this shape (issue #30).
+
 - Fix a false positive on the explicit receiver of a first-party
   unbound-method call (``K.n(K())``): the receiver binds to ``self`` and is
   never keyword-passable, so it is no longer counted against the positional
