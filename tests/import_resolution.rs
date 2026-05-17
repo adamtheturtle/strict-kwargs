@@ -341,10 +341,9 @@ fn double_dot_relative_import_pops_a_package_level() {
 /// nothing (no panic, no binding, no diagnostic).
 #[test]
 fn over_deep_relative_import_returns_none_and_is_skipped() {
-    let project = TestProject::new().dep("pkg/__init__.py", "").file(
-        "pkg/app.py",
-        "from ... import helper\n\nhelper(1)\n",
-    );
+    let project = TestProject::new()
+        .dep("pkg/__init__.py", "")
+        .file("pkg/app.py", "from ... import helper\n\nhelper(1)\n");
     let messages = project.check();
     assert!(
         !has(&messages, "app.py:3:", "Too many positional"),

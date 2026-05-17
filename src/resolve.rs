@@ -189,8 +189,8 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).expect("mkdir");
         std::fs::write(root.join("pkg").join("__init__.pyi"), "x: int\n").expect("write");
         let resolver = ModuleResolver::new(root);
-        let resolved = resolver.resolve("pkg").expect("package");
-        assert!(resolved.is_package);
+        let module = resolver.resolve("pkg").expect("package");
+        assert!(module.is_package);
     }
 
     #[test]

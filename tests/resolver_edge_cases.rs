@@ -65,8 +65,8 @@ impl TestProject {
     /// Diagnostics for the whole project directory (exercises directory walk).
     fn check_dir(&self) -> Vec<String> {
         let config = Config::load(&self.root);
-        let diagnostics =
-            check_paths(&self.root, &[self.root.clone()], &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, std::slice::from_ref(&self.root), &config, None)
+            .expect("check");
         diagnostics
             .iter()
             .map(|d| {

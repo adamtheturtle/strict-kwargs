@@ -94,7 +94,7 @@ fn check_explicit_project_root_flag() {
 }
 
 #[test]
-fn check_unparseable_file_is_fatal_exit_two() {
+fn check_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
     let output = project.run(&["broken.py"]);
     assert_eq!(code(&output), 2);
@@ -161,7 +161,7 @@ fn fix_multiple_calls_and_files_plural_messages() {
 }
 
 #[test]
-fn fix_unparseable_file_is_fatal_exit_two() {
+fn fix_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
     let output = project.run(&["fix", "broken.py"]);
     assert_eq!(code(&output), 2);
