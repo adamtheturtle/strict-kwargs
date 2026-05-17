@@ -224,6 +224,7 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
 | `src/signature.rs` | the positional/keyword rule and `max_positional` logic |
 | `src/ast_util.rs` | AST → signature, argument counting, line/column |
 | `src/config.rs` | `[tool.strict_kwargs]` loading, project-root discovery |
+| `benches/resolver.rs` | divan / CodSpeed benchmark suite for the resolver hot paths |
 | `vendored/typeshed/` | pinned, embedded typeshed stdlib (see its README) |
 
 ## Testing & CI
@@ -236,3 +237,13 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
   `ci.yml` installs `ty` (via `uv`) with a `ty version` gate so the
   ty-backed tests actually execute on every platform; `lint.yml` runs
   `cargo fmt --check` and `cargo clippy -D warnings`.
+- **Continuous benchmarking** (`benches/resolver.rs`, issue #30): a
+  divan suite run under [CodSpeed](https://codspeed.io) by a non-gating
+  `benchmarks` job in `ci.yml`, reporting an instruction-count delta against
+  `main` on every PR. It covers a leaf file, a large stdlib import closure,
+  an overload/special-form heavy file, a generated first-party closure, and
+  the auto-fixer. The job does **not** install `ty`: CodSpeed counts
+  instructions of the strict-kwargs process, so the ty subprocess fallback
+  is out of scope, and every fixture is fully resolvable by the built-in
+  resolver — keeping the numbers deterministic and focused on the
+  parse / index / walk / resolve hot paths. Run locally with `cargo bench`.

@@ -24,6 +24,12 @@ Next
   the built-in resolver could not resolve. Runs the built-in resolver fully
   handles (the common editor-on-save / pre-commit case on first-party code)
   no longer pay ty's project-indexing startup cost (issue #31).
+- Continuous benchmarking via `CodSpeed <https://codspeed.io>`_: a divan
+  benchmark suite (``benches/resolver.rs``) covering a leaf file, a large
+  stdlib import closure, an overload/special-form heavy file, and a
+  generated first-party closure, plus the auto-fixer. A non-gating CI job
+  reports an instruction-count delta against ``main`` on every PR. See
+  ``docs/ARCHITECTURE.md``.
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the
