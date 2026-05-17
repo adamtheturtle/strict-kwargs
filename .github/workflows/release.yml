@@ -13,6 +13,9 @@ on:
         type: string
         default: '2026.5.16'
 
+# Deny by default; each job opts into the minimum scopes it needs.
+permissions: {}
+
 jobs:
   release:
     name: Bump version and tag
@@ -28,15 +31,17 @@ jobs:
       tag: ${{ steps.tag_version.outputs.new_tag }}
 
     steps:
-      - uses: actions/checkout@v6
-        with:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        # Credentials must persist so git-auto-commit-action can push the
+        # release commit/tag back to the protected branch.
+        with: # zizmor: ignore[artipacked]
           # See
           # https://github.com/stefanzweifel/git-auto-commit-action?tab=readme-ov-file#push-to-protected-branches
           token: ${{ secrets.RELEASE_PAT }}
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
@@ -64,7 +69,7 @@ jobs:
 
       - name: Update changelog
         id: update_changelog
-        uses: jacobtomlinson/gha-find-replace@v3
+        uses: jacobtomlinson/gha-find-replace@2ff30f644d2e0078fc028beb9193f5ff0dcad39e # v3
         with:
           find: "Next\n----"
           replace: |
@@ -93,7 +98,7 @@ jobs:
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
           rm -f Cargo.toml.bak pyproject.toml.bak
 
-      - uses: stefanzweifel/git-auto-commit-action@v7
+      - uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9 # v7
         id: commit
         with:
           commit_message: Bump CHANGELOG and version for release
@@ -102,7 +107,7 @@ jobs:
 
       - name: Bump version and push tag
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           custom_tag: ${{ steps.version.outputs.release }}
@@ -110,7 +115,7 @@ jobs:
           commit_sha: ${{ steps.commit.outputs.commit_hash }}
 
       - name: Create a GitHub release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
         with:
           tag: ${{ steps.tag_version.outputs.new_tag }}
           makeLatest: true
@@ -122,24 +127,27 @@ jobs:
     needs: release
     if: ${{ !inputs.publish_only }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Build wheels
         shell: bash
@@ -151,7 +159,7 @@ jobs:
           ls -la dist/
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -161,24 +169,27 @@ jobs:
     name: Build wheels (${{ matrix.os }})
     if: ${{ inputs.publish_only }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Build wheels
         shell: bash
@@ -190,7 +201,7 @@ jobs:
           ls -la dist/
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -209,16 +220,19 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          enable-cache: true
-          cache-dependency-glob: '**/pyproject.toml'
+          # No cache on artifact-publishing jobs: a poisoned restore must not
+          # be able to influence what is published to PyPI.
+          enable-cache: false
 
       - name: Download wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -232,7 +246,7 @@ jobs:
       # We use PyPI trusted publishing rather than a PyPI API token.
       # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
       - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           verbose: true
           packages-dir: dist/
@@ -251,16 +265,19 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          enable-cache: true
-          cache-dependency-glob: '**/pyproject.toml'
+          # No cache on artifact-publishing jobs: a poisoned restore must not
+          # be able to influence what is published to PyPI.
+          enable-cache: false
 
       - name: Download wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -272,7 +289,7 @@ jobs:
           uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           verbose: true
           packages-dir: dist/

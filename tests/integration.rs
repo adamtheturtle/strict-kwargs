@@ -1,5 +1,10 @@
 //! Integration tests ported from ``mypy-strict-kwargs``'s ``test_plugin.yaml``.
 
+// `expect`/`unwrap` are idiomatic in tests: a failed fixture *should* abort the
+// test with a clear message. Clippy's `allow-*-in-tests` does not apply to an
+// integration-test crate (it is not `#[cfg(test)]`), so allow them here.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use strict_kwargs::{check_paths, Config};
@@ -89,10 +94,10 @@ func(1)
 #[test]
 fn positional() {
     assert_error(
-        r#"
+        r"
 def func(a: int) -> None: ...
 func(1)
-"#,
+",
         3,
         "Too many positional",
     );
@@ -101,11 +106,11 @@ func(1)
 #[test]
 fn positional_optional() {
     assert_error(
-        r#"
+        r"
 def func(a: int = 1) -> None: ...
 func(1)
 func()
-"#,
+",
         3,
         "Too many positional",
     );
@@ -114,21 +119,21 @@ func()
 #[test]
 fn keyword_only() {
     assert_ok(
-        r#"
+        r"
 def func(*, a: int) -> None: ...
 func(a=1)
-"#,
+",
     );
 }
 
 #[test]
 fn keyword_only_optional() {
     assert_ok(
-        r#"
+        r"
 def func(*, a: int = 1) -> None: ...
 func(a=1)
 func()
-"#,
+",
     );
 }
 
@@ -155,31 +160,31 @@ func(a="extra")
 #[test]
 fn positional_followed_by_var_positional() {
     assert_ok(
-        r#"
+        r"
 def func(a: int, *args: str) -> None: ...
 func(1)
-"#,
+",
     );
 }
 
 #[test]
 fn positional_optional_followed_by_var_positional() {
     assert_ok(
-        r#"
+        r"
 def func(a: int = 1, *args: str) -> None: ...
 func(1)
 func()
-"#,
+",
     );
 }
 
 #[test]
 fn positional_followed_by_var_keyword() {
     assert_error(
-        r#"
+        r"
 def func(a: int, **kwargs: str) -> None: ...
 func(1)
-"#,
+",
         3,
         "Too many positional",
     );
@@ -198,13 +203,13 @@ func("a", a=1)
 #[test]
 fn method() {
     assert_error(
-        r#"
+        r"
 class C:
     def __init__(self) -> None: ...
     def method(self, a: int) -> None: ...
 c = C()
 c.method(1)
-"#,
+",
         6,
         "Too many positional",
     );
@@ -213,7 +218,7 @@ c.method(1)
 #[test]
 fn callable_class_as_decorator() {
     assert_ok(
-        r#"
+        r"
 from typing import Any
 
 class C:
@@ -221,14 +226,14 @@ class C:
 
 @C()
 def func() -> None: ...
-"#,
+",
     );
 }
 
 #[test]
 fn callable_class_extra_params() {
     let messages = check_source(
-        r#"
+        r"
 from typing import Any
 
 class C:
@@ -238,7 +243,7 @@ c = C()
 c(lambda: None, 1)
 c(func=lambda: None, a=1)
 c(lambda: None, a=1)
-"#,
+",
     );
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("Too many positional"));
@@ -247,7 +252,7 @@ c(lambda: None, a=1)
 #[test]
 fn descriptor() {
     assert_ok(
-        r#"
+        r"
 class D:
     def __get__(self, o: object, ot: type | None = None) -> None:
         return
@@ -261,7 +266,7 @@ class C:
 c = C()
 c.a
 c.a = 1
-"#,
+",
     );
 }
 
@@ -280,7 +285,7 @@ ignore_names = ["main.func", "builtins.str"]
 "#,
         )
         .main(
-            r#"
+            r"
 def func(a: int) -> None: ...
 func(1)
 
@@ -288,7 +293,7 @@ def not_ignored(a: int) -> None: ...
 not_ignored(1)
 
 str(1)
-"#,
+",
         );
     assert_error_at(&project, 6, "not_ignored");
 }
@@ -309,7 +314,7 @@ debug = true
 "#,
         )
         .main(
-            r#"
+            r"
 def func(a: int) -> None: ...
 func(1)
 
@@ -317,7 +322,7 @@ def not_ignored(a: int) -> None: ...
 not_ignored(1)
 
 str(1)
-"#,
+",
         );
     assert_error_at(&project, 6, "not_ignored");
 }
@@ -528,11 +533,11 @@ str("x")
 fn project_constructor_positional_flags() {
     // Constructor resolution: ``C(1)`` now maps to ``C.__init__``.
     assert_error(
-        r#"
+        r"
 class C:
     def __init__(self, a: int) -> None: ...
 C(1)
-"#,
+",
         4,
         "Too many positional",
     );
@@ -541,11 +546,11 @@ C(1)
 #[test]
 fn project_constructor_keyword_ok() {
     assert_ok(
-        r#"
+        r"
 class C:
     def __init__(self, a: int) -> None: ...
 C(a=1)
-"#,
+",
     );
 }
 
@@ -797,8 +802,7 @@ fn ty_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 #[test]
@@ -808,7 +812,7 @@ fn ty_resolves_inherited_method() {
         return;
     }
     assert_error(
-        r#"
+        r"
 class A:
     def method(self, a: int) -> None: ...
 
@@ -816,7 +820,7 @@ class B(A):
     pass
 
 B().method(1)
-"#,
+",
         8,
         "Too many positional",
     );
@@ -829,7 +833,7 @@ fn ty_resolves_return_typed_and_annotated() {
         return;
     }
     let messages = check_source(
-        r#"
+        r"
 class A:
     def method(self, a: int) -> None: ...
 
@@ -841,7 +845,7 @@ def takes(x: A) -> None:
 
 make().method(1)
 A().method(a=1)
-"#,
+",
     );
     // x.method(1) (annotated) and make().method(1) (return-typed) flag;
     // the keyword call does not.
@@ -857,7 +861,7 @@ fn ty_keyword_call_not_flagged() {
         return;
     }
     assert_ok(
-        r#"
+        r"
 class A:
     def method(self, a: int) -> None: ...
 
@@ -865,7 +869,7 @@ class B(A):
     pass
 
 B().method(a=1)
-"#,
+",
     );
 }
 
@@ -878,7 +882,7 @@ fn ty_overload_precision() {
     // ty resolves the argument-matched overload; the call is flagged
     // because positional args should be keywords either way.
     assert_error(
-        r#"
+        r"
 from typing import overload
 
 @overload
@@ -888,7 +892,7 @@ def f(a: int, b: int) -> str: ...
 def f(a, b=0): return a
 
 f(1, 2)
-"#,
+",
         10,
         "Too many positional",
     );
@@ -901,11 +905,11 @@ fn ty_stdlib_via_inferred_receiver() {
         return;
     }
     let messages = check_source(
-        r#"
+        r"
 xs: list[int] = []
 xs.append(1, 2)
 xs.append(1)
-"#,
+",
     );
     // append's `object` is positional-only in typeshed: append(1) is fine,
     // append(1, 2) exceeds it. Proves stdlib resolves via ty inference.

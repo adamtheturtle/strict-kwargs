@@ -28,3 +28,32 @@ ruff_text_size = { package = "rustpython-ruff_text_size", version = "0.15.8" }
 
 [dev-dependencies]
 tempfile = "3.20"
+
+[lints.rust]
+# Zero-warning policy: every compiler warning is an error in CI and locally.
+warnings = "deny"
+# This project does not need `unsafe`; forbid it so it cannot be reintroduced.
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+# Strict Clippy groups. `priority = -1` lets the explicit `allow`s below
+# override individual lints pulled in by these groups.
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Selected `restriction` lints (the group as a whole is intentionally noisy
+# and not meant to be enabled wholesale).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+# --- Documented allow-list (too noisy or counter-productive here) ---
+# `module_name_repetitions` fights the existing module/type naming.
+module_name_repetitions = "allow"
+# Some internal helpers are deliberately not split further.
+too_many_lines = "allow"
+# `map_or_else` rewrites of multi-branch `if let` chains hurt readability.
+option_if_let_else = "allow"

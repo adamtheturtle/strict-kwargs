@@ -51,8 +51,7 @@ pub fn ty_binary_present() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 type FxPending = std::collections::HashMap<i64, Value>;
@@ -87,14 +86,14 @@ impl TyResolver {
 
         let id = resolver.request(
             "initialize",
-            json!({
+            &json!({
                 "processId": std::process::id(),
                 "rootUri": path_to_uri(project_root),
                 "capabilities": {},
             }),
         )?;
         resolver.collect(id, INIT_TIMEOUT)?;
-        resolver.notify("initialized", json!({}))?;
+        resolver.notify("initialized", &json!({}))?;
         Some(resolver)
     }
 
@@ -109,7 +108,7 @@ impl TyResolver {
         }
         self.notify(
             "textDocument/didOpen",
-            json!({
+            &json!({
                 "textDocument": {
                     "uri": path_to_uri(path),
                     "languageId": "python",
@@ -131,7 +130,7 @@ impl TyResolver {
         }
         self.request(
             method,
-            json!({
+            &json!({
                 "textDocument": { "uri": path_to_uri(path) },
                 "position": { "line": line, "character": character },
             }),
@@ -143,26 +142,26 @@ impl TyResolver {
         self.collect(id, REQUEST_TIMEOUT)
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Option<i64> {
+    fn request(&mut self, method: &str, params: &Value) -> Option<i64> {
         if self.disabled {
             return None;
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.send(json!({
+        self.send(&json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params
         }))?;
         Some(id)
     }
 
-    fn notify(&mut self, method: &str, params: Value) -> Option<()> {
-        self.send(json!({
+    fn notify(&mut self, method: &str, params: &Value) -> Option<()> {
+        self.send(&json!({
             "jsonrpc": "2.0", "method": method, "params": params
         }))
     }
 
-    fn send(&mut self, msg: Value) -> Option<()> {
-        let body = serde_json::to_vec(&msg).ok()?;
+    fn send(&mut self, msg: &Value) -> Option<()> {
+        let body = serde_json::to_vec(msg).ok()?;
         let ok = write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())
             .and_then(|()| self.stdin.write_all(&body))
             .and_then(|()| self.stdin.flush())
@@ -187,7 +186,7 @@ impl TyResolver {
                     if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
                         if msg.get("method").is_some() {
                             // Server→client request: reply empty to unblock ty.
-                            let _ = self.send(json!({
+                            let _ = self.send(&json!({
                                 "jsonrpc": "2.0", "id": msg_id, "result": null
                             }));
                         } else if msg_id == id {
@@ -377,7 +376,7 @@ pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
 
 impl Drop for TyResolver {
     fn drop(&mut self) {
-        let _ = self.send(json!({
+        let _ = self.send(&json!({
             "jsonrpc": "2.0", "id": -1, "method": "shutdown", "params": null
         }));
         let _ = self.child.kill();
@@ -436,8 +435,8 @@ pub fn location_from_value(result: &Value) -> Option<DefLocation> {
     let start = range.get("start")?;
     Some(DefLocation {
         path: uri_to_path(uri)?,
-        line: start.get("line").and_then(Value::as_u64)? as u32,
-        character: start.get("character").and_then(Value::as_u64)? as u32,
+        line: u32::try_from(start.get("line").and_then(Value::as_u64)?).ok()?,
+        character: u32::try_from(start.get("character").and_then(Value::as_u64)?).ok()?,
     })
 }
 
@@ -493,9 +492,13 @@ fn percent_decode(s: &str) -> String {
             let hi = (raw[i + 1] as char).to_digit(16);
             let lo = (raw[i + 2] as char).to_digit(16);
             if let (Some(hi), Some(lo)) = (hi, lo) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
+                // `hi`/`lo` are single hex digits (0..=15), so the byte is
+                // always in 0..=255 and the conversion cannot fail.
+                if let Ok(byte) = u8::try_from(hi * 16 + lo) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
             }
         }
         out.push(raw[i]);
@@ -517,7 +520,7 @@ pub fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
             line += 1;
             col_utf16 = 0;
         } else {
-            col_utf16 += ch.len_utf16() as u32;
+            col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
         }
     }
     (line, col_utf16)
@@ -538,7 +541,7 @@ pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usi
             cur_line += 1;
             col_utf16 = 0;
         } else if cur_line == line {
-            col_utf16 += ch.len_utf16() as u32;
+            col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
         }
     }
     if cur_line == line && col_utf16 == character {

@@ -56,13 +56,12 @@ impl Signature {
 
             let allows_positional = match param.kind {
                 ParameterKind::PositionalOnly => true,
-                ParameterKind::VarPositional => false,
-                ParameterKind::KeywordOnly | ParameterKind::VarKeyword => false,
-                ParameterKind::PositionalOrKeyword => match first_star {
-                    None => false,
-                    Some(star_index) if index <= star_index => true,
-                    Some(_) => false,
-                },
+                ParameterKind::VarPositional
+                | ParameterKind::KeywordOnly
+                | ParameterKind::VarKeyword => false,
+                ParameterKind::PositionalOrKeyword => {
+                    matches!(first_star, Some(star_index) if index <= star_index)
+                }
             };
 
             if allows_positional {

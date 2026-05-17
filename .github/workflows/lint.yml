@@ -22,12 +22,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
 
@@ -37,14 +37,48 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Docs (warnings are errors)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features --document-private-items
+
+  pre-commit:
+    # Runs the exact same hooks contributors run locally (see
+    # `.pre-commit-config.yaml`) so there is no drift between local and CI.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Run pre-commit hooks (commit stage)
+        run: uvx pre-commit run --all-files --show-diff-on-failure --color=always
+
+      - name: Run pre-commit hooks (push stage)
+        run: uvx pre-commit run --all-files --hook-stage pre-push
+          --show-diff-on-failure --color=always
+
   completion-lint:
-    needs: build
+    needs: [build, pre-commit]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
-      - name: Check matrix job status
+      - name: Check job statuses
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
         run: |-
-          if ! ${{ needs.build.result == 'success' }}; then
-            echo "One or more matrix jobs failed"
+          if [ "$BUILD_RESULT" != "success" ] \
+            || [ "$PRE_COMMIT_RESULT" != "success" ]; then
+            echo "One or more lint jobs failed"
             exit 1
           fi
