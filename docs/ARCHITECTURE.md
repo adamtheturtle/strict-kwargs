@@ -209,7 +209,7 @@ Exit codes: `0` clean, `1` violations, `2` internal error.
 
 ## Testing & CI
 
-- 87 tests (unit + integration). Integration tests are ported from
+- Unit and integration tests. Integration tests are ported from
   `mypy-strict-kwargs`; ty-backed tests are guarded by a `ty` availability
   check so the suite stays green for contributors without `ty`.
 - Cross-platform URI handling has dedicated platform-independent unit tests.
