@@ -1,0 +1,22 @@
+# Consumer-facing pre-commit hook definition.
+#
+# Projects enable strict-kwargs by adding this repo to their own
+# `.pre-commit-config.yaml` (see the README "pre-commit" section). This file
+# is read by pre-commit in the *consuming* project; it is unrelated to this
+# repo's own developer tooling in `.pre-commit-config.yaml`.
+#
+# The hook is `language: python`: pre-commit builds and installs this repo's
+# maturin wheel into an isolated environment, exposing the `strict-kwargs`
+# binary. Building the wheel needs a Rust toolchain on the machine running
+# the hook. A future zero-toolchain path (a thin mirror repo depending on the
+# published PyPI wheel) is tracked separately.
+- id: strict-kwargs
+  name: strict-kwargs
+  description: Enforce keyword arguments at call sites.
+  entry: strict-kwargs
+  language: python
+  types: [python]
+  # strict-kwargs does one-time import-closure indexing per invocation, so a
+  # single process over all files is faster than pre-commit's default
+  # batched/parallel invocation.
+  require_serial: true

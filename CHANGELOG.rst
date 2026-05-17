@@ -9,6 +9,12 @@ Next
   resolve to a single known signature are rewritten (project code and the
   embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs``
   unpacking, and ty-only resolutions are left untouched.
+- Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
+  can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A
+  `strict-kwargs-pre-commit
+  <https://github.com/adamtheturtle/strict-kwargs-pre-commit>`_ mirror
+  installs the prebuilt PyPI wheel (no Rust toolchain required); the in-repo
+  hook builds from source. See the README "pre-commit" section.
 - Resolve calls into builtins, the standard library, and third-party
   packages: a pinned typeshed copy is vendored and embedded in the binary;
   third-party resolves from ``site-packages`` (PEP 561).
