@@ -8,7 +8,10 @@ Next
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the
   embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs``
-  unpacking, and ty-only resolutions are left untouched.
+  unpacking, and ty-only resolutions are left untouched. The implicit
+  receiver is skipped only for constructor/callable dunders and bound
+  ``receiver.method(...)`` calls, so a standalone function whose first
+  parameter is named ``self``/``cls`` is rewritten correctly.
 - Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
   can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A
   `strict-kwargs-pre-commit

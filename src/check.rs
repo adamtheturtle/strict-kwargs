@@ -384,12 +384,16 @@ impl<'a> CallChecker<'a> {
         // known: overloaded callees may bind the same position to differently
         // named parameters, so a keyword rewrite would not be safe.
         if let [signature] = signatures {
+            // `receiver.method(...)` omits the bound receiver at the call
+            // site; a plain `name(...)` call passes every parameter explicitly.
+            let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
             if let Some(insertions) = call_fix_insertions(
                 call,
                 &callee_fullname,
                 signature,
                 max_positional,
                 positional_count,
+                is_attribute_call,
             ) {
                 self.fixes.extend(insertions);
                 self.fixed_calls += 1;
@@ -601,6 +605,7 @@ fn call_fix_insertions(
     signature: &Signature,
     max_positional: usize,
     positional_count: usize,
+    is_attribute_call: bool,
 ) -> Option<Vec<Insertion>> {
     // Star-unpacking at the call site (`f(*xs)` / `f(**kw)`): the positional
     // count is unknown, so a positional->keyword mapping is unsound.
@@ -618,17 +623,24 @@ fn call_fix_insertions(
 
     // Leading signature parameters that are implicit at the call site (the
     // bound/constructed receiver, never present in `call.arguments`).
-    let skip = if callee_fullname.ends_with(".__init__")
+    //
+    // A name-only `self`/`cls` test is unsound: a *standalone* function may
+    // legitimately name its first parameter `self`/`cls` (factories,
+    // decorators, metaclass helpers), and such a function is always called
+    // by name (`f(...)`) with that parameter passed *explicitly*. Skipping it
+    // there shifts the whole mapping by one and silently emits wrong keyword
+    // names. The receiver is implicit only for a constructor/callable dunder
+    // or a *bound* attribute-style call (`receiver.method(...)`).
+    let first_param_is_receiver_name = matches!(
+        signature.parameters.first().and_then(|p| p.name.as_deref()),
+        Some("self" | "cls")
+    );
+    let is_dunder_receiver = callee_fullname.ends_with(".__init__")
         || callee_fullname.ends_with(".__new__")
-        || callee_fullname.ends_with(".__call__")
-    {
-        1
-    } else {
-        match signature.parameters.first().and_then(|p| p.name.as_deref()) {
-            Some("self" | "cls") => 1,
-            _ => 0,
-        }
-    };
+        || callee_fullname.ends_with(".__call__");
+    let receiver_is_implicit =
+        is_dunder_receiver || (is_attribute_call && first_param_is_receiver_name);
+    let skip = usize::from(receiver_is_implicit);
 
     let mut insertions = Vec::new();
     for arg_index in max_positional..positional_count {
