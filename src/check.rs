@@ -16,10 +16,11 @@ use crate::ast_util::{line_column, positional_argument_count, signature_from_par
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
+use crate::fix::{apply_insertions, FileFix, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
-use crate::signature::Signature;
+use crate::signature::{ParameterKind, Signature};
 use crate::ty_resolver::{
     byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
@@ -141,6 +142,10 @@ struct CallChecker<'a> {
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
     ty_pending: Vec<PendingTy>,
+    /// Source insertions for the auto-fixer (`check_paths` ignores these).
+    fixes: Vec<Insertion>,
+    /// Number of call sites the fixer rewrote in this file.
+    fixed_calls: usize,
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
@@ -180,6 +185,8 @@ impl<'a> CallChecker<'a> {
             diagnostics,
             scopes: vec![Scope::default()],
             ty_pending: Vec::new(),
+            fixes: Vec::new(),
+            fixed_calls: 0,
         }
     }
 
@@ -373,6 +380,21 @@ impl<'a> CallChecker<'a> {
             positional_count,
             max_positional,
         });
+        // Auto-fix is only applied when a single, unambiguous signature is
+        // known: overloaded callees may bind the same position to differently
+        // named parameters, so a keyword rewrite would not be safe.
+        if let [signature] = signatures {
+            if let Some(insertions) = call_fix_insertions(
+                call,
+                &callee_fullname,
+                signature,
+                max_positional,
+                positional_count,
+            ) {
+                self.fixes.extend(insertions);
+                self.fixed_calls += 1;
+            }
+        }
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
@@ -566,6 +588,132 @@ fn call_exceeds_positional_limit(
         return false;
     }
     positional_count > max_positional
+}
+
+/// Build the `name=` insertions that rewrite a flagged call's surplus
+/// positional arguments, or `None` when the call cannot be fixed safely.
+///
+/// Conservative by design (issue #7): if anything about the call or the
+/// mapping is uncertain we decline to fix and leave the diagnostic standing.
+fn call_fix_insertions(
+    call: &ast::ExprCall,
+    callee_fullname: &str,
+    signature: &Signature,
+    max_positional: usize,
+    positional_count: usize,
+) -> Option<Vec<Insertion>> {
+    // Star-unpacking at the call site (`f(*xs)` / `f(**kw)`): the positional
+    // count is unknown, so a positional->keyword mapping is unsound.
+    if call.arguments.args.iter().any(Expr::is_starred_expr) {
+        return None;
+    }
+    if call.arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
+        return None;
+    }
+    // Builtins/stdlib are out of scope for the initial fixer (`str(1)` is
+    // often intentionally positional).
+    if callee_fullname.starts_with("builtins.") {
+        return None;
+    }
+    // Descriptor protocol calls are rare and their receiver/value mapping is
+    // subtle; skip rather than risk a wrong rewrite.
+    if callee_fullname.ends_with(".__get__") || callee_fullname.ends_with(".__set__") {
+        return None;
+    }
+
+    // Leading signature parameters that are implicit at the call site (the
+    // bound/constructed receiver, never present in `call.arguments`).
+    let skip = if callee_fullname.ends_with(".__init__")
+        || callee_fullname.ends_with(".__new__")
+        || callee_fullname.ends_with(".__call__")
+    {
+        1
+    } else {
+        match signature.parameters.first().and_then(|p| p.name.as_deref()) {
+            Some("self" | "cls") => 1,
+            _ => 0,
+        }
+    };
+
+    let mut insertions = Vec::new();
+    for arg_index in max_positional..positional_count {
+        let arg = call.arguments.args.get(arg_index)?;
+        // A bare generator (`f(x for x in y)`) or walrus (`f(x := 1)`) would
+        // need extra parentheses once prefixed; decline rather than wrap.
+        if arg.is_generator_expr() || arg.is_named_expr() {
+            return None;
+        }
+        let param = signature.parameters.get(arg_index + skip)?;
+        let name = param.name.as_deref()?;
+        // Only these kinds accept a keyword argument; a positional-only
+        // parameter or `*args`/`**kwargs` slot cannot be rewritten.
+        if !matches!(
+            param.kind,
+            ParameterKind::PositionalOrKeyword | ParameterKind::KeywordOnly
+        ) {
+            return None;
+        }
+        insertions.push(Insertion {
+            at: arg.range().start().to_usize(),
+            text: format!("{name}="),
+        });
+    }
+    (!insertions.is_empty()).then_some(insertions)
+}
+
+/// Rewrite positional call arguments to keyword arguments for every fixable
+/// violation reachable from `paths`.
+///
+/// Mirrors [`check_paths`] but, by design (issue #7), does not consult the
+/// `ty` fallback: only calls the built-in resolver can resolve to a single
+/// in-project signature are rewritten. Files without changes are omitted.
+///
+/// # Errors
+///
+/// Returns [`CheckError`] if a source file cannot be read or parsed.
+pub fn fix_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<FileFix>, CheckError> {
+    let python_files = collect_python_files(paths);
+    let index = build_index(project_root, &python_files)?;
+    let mut results = Vec::new();
+    for path in &python_files {
+        let source = std::fs::read_to_string(path)?;
+        let parsed = parse_module(&source)?;
+        let module_name = module_name_for_path(project_root, path);
+        let mut diagnostics = Vec::new();
+        let mut checker = CallChecker::new(
+            path.clone(),
+            module_name,
+            is_package_init(path),
+            &source,
+            &index,
+            config,
+            &mut diagnostics,
+        );
+        for stmt in parsed.suite() {
+            checker.visit_stmt(stmt);
+        }
+        let insertions = std::mem::take(&mut checker.fixes);
+        let count = checker.fixed_calls;
+        if insertions.is_empty() {
+            continue;
+        }
+        let fixed = apply_insertions(&source, &insertions);
+        if fixed == source {
+            continue;
+        }
+        results.push(FileFix {
+            path: path.clone(),
+            original: source,
+            fixed,
+            count,
+        });
+    }
+    results.sort_by_key(|fix| fix.path.clone());
+    Ok(results)
 }
 
 /// `typing` / `typing_extensions` *special-form* constructors whose name is
