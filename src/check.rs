@@ -258,56 +258,48 @@ impl<'a> CallChecker<'a> {
         relative_base(&self.module_name, self.is_package, level, module)
     }
 
-    fn record_import(&mut self, stmt: &Stmt) {
-        match stmt {
-            // ``import a.b.c`` / ``import a.b as c``
-            Stmt::Import(ast::StmtImport { names, .. }) => {
-                for alias in names {
-                    let dotted = alias.name.as_str();
-                    if let Some(asname) = &alias.asname {
-                        // ``import a.b as c`` binds ``c`` -> ``a.b``.
-                        self.define_module(asname.as_str(), dotted.to_string());
-                    } else {
-                        // ``import a.b`` binds the top-level ``a``; attribute
-                        // access uses the full dotted path.
-                        let top = dotted.split('.').next().unwrap_or(dotted);
-                        self.define_module(top, top.to_string());
-                    }
-                }
+    /// ``import a.b.c`` / ``import a.b as c``
+    fn record_plain_import(&mut self, import: &ast::StmtImport) {
+        for alias in &import.names {
+            let dotted = alias.name.as_str();
+            if let Some(asname) = &alias.asname {
+                // ``import a.b as c`` binds ``c`` -> ``a.b``.
+                self.define_module(asname.as_str(), dotted.to_string());
+            } else {
+                // ``import a.b`` binds the top-level ``a``; attribute access
+                // uses the full dotted path.
+                let top = dotted.split('.').next().unwrap_or(dotted);
+                self.define_module(top, top.to_string());
             }
-            // ``from a.b import c [as d]`` / ``from . import x``
-            Stmt::ImportFrom(ast::StmtImportFrom {
-                module,
-                names,
-                level,
-                ..
-            }) => {
-                let Some(base) =
-                    self.resolve_import_base(*level, module.as_ref().map(ast::Identifier::as_str))
-                else {
-                    return;
-                };
-                for alias in names {
-                    let imported = alias.name.as_str();
-                    if imported == "*" {
-                        continue;
-                    }
-                    let local = alias
-                        .asname
-                        .as_ref()
-                        .map_or(imported, ast::Identifier::as_str);
-                    let fullname = if base.is_empty() {
-                        imported.to_string()
-                    } else {
-                        format!("{base}.{imported}")
-                    };
-                    // The imported name may be a submodule or a callable; bind
-                    // both interpretations so attribute and direct calls work.
-                    self.define(local, fullname.clone());
-                    self.define_module(local, fullname);
-                }
+        }
+    }
+
+    /// ``from a.b import c [as d]`` / ``from . import x``
+    fn record_from_import(&mut self, import: &ast::StmtImportFrom) {
+        let Some(base) = self.resolve_import_base(
+            import.level,
+            import.module.as_ref().map(ast::Identifier::as_str),
+        ) else {
+            return;
+        };
+        for alias in &import.names {
+            let imported = alias.name.as_str();
+            if imported == "*" {
+                continue;
             }
-            _ => {}
+            let local = alias
+                .asname
+                .as_ref()
+                .map_or(imported, ast::Identifier::as_str);
+            let fullname = if base.is_empty() {
+                imported.to_string()
+            } else {
+                format!("{base}.{imported}")
+            };
+            // The imported name may be a submodule or a callable; bind both
+            // interpretations so attribute and direct calls work.
+            self.define(local, fullname.clone());
+            self.define_module(local, fullname);
         }
     }
 
@@ -669,9 +661,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 walk_stmt(self, stmt);
             }
-            Stmt::Import(_) | Stmt::ImportFrom(_) => {
-                self.record_import(stmt);
-            }
+            Stmt::Import(import) => self.record_plain_import(import),
+            Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
         }
     }

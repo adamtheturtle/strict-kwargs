@@ -99,6 +99,20 @@ fn has_error_at(messages: &[String], line: usize, contains: &str) -> bool {
 
 // --- Directory discovery ---------------------------------------------------
 
+/// A path argument that is neither a file nor a directory (does not exist)
+/// and a non-Python file passed directly are both silently skipped — no
+/// panic, no diagnostics.
+#[test]
+fn nonexistent_and_non_python_paths_are_skipped() {
+    let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
+    let missing = project.root.join("does_not_exist.py");
+    let not_py = project.root.join("notes.txt");
+    std::fs::write(&not_py, "plain text\n").expect("write");
+    let config = Config::load(&project.root);
+    let diagnostics = check_paths(&project.root, &[missing, not_py], &config, None).expect("check");
+    assert!(diagnostics.is_empty(), "got: {diagnostics:?}");
+}
+
 /// Checking a directory walks it, picking up `.py` files and ignoring
 /// non-Python files like `README.txt`.
 #[test]
@@ -209,6 +223,23 @@ Factory()(1, 2)
         has_error_at(&messages, 5, "__call__") || has_error_at(&messages, 5, "Too many positional"),
         "expected __call__ violation, got: {messages:?}"
     );
+}
+
+/// Calling the result of a call whose callee is *not* a class with
+/// `__call__` (`make()(1)` where `make` returns a plain value) falls
+/// through the constructor-call arm to `None` — deferred to ty, unresolved,
+/// not flagged.
+#[test]
+fn call_result_without_dunder_call_is_unresolved() {
+    let messages = check_source(
+        r"
+def make():
+    return 1
+
+make()(1, 2)
+",
+    );
+    assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
 }
 
 /// A subscript callee (`registry["k"](1, 2)`) is not a resolvable
