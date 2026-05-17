@@ -32,6 +32,12 @@ tempfile = "3.20"
 [lints.rust]
 # Zero-warning policy: every compiler warning is an error in CI and locally.
 warnings = "deny"
+# `cargo llvm-cov` injects `--cfg coverage` (and `--cfg coverage_nightly`);
+# register them so the zero-warning policy does not reject coverage builds.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(coverage)",
+    "cfg(coverage_nightly)",
+] }
 # This project does not need `unsafe`; forbid it so it cannot be reintroduced.
 unsafe_code = "forbid"
 missing_docs = "warn"

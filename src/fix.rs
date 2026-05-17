@@ -91,3 +91,81 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str) -> String {
     out.push('\n');
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_insertions_splices_high_to_low() {
+        let out = apply_insertions(
+            "f(a, b)",
+            &[
+                Insertion {
+                    at: 2,
+                    text: "x=".to_string(),
+                },
+                Insertion {
+                    at: 5,
+                    text: "y=".to_string(),
+                },
+            ],
+        );
+        assert_eq!(out, "f(x=a, y=b)");
+    }
+
+    #[test]
+    fn unified_diff_empty_when_unchanged() {
+        let path = Path::new("m.py");
+        assert!(unified_diff(path, "a\nb\n", "a\nb\n").is_empty());
+    }
+
+    #[test]
+    fn unified_diff_single_hunk_with_context_clamped() {
+        let original = "l1\nl2\nf(a)\nl4\nl5\n";
+        let fixed = "l1\nl2\nf(x=a)\nl4\nl5\n";
+        let diff = unified_diff(Path::new("pkg/m.py"), original, fixed);
+        assert_eq!(
+            diff,
+            "--- a/pkg/m.py\n\
+             +++ b/pkg/m.py\n\
+             @@ -1,6 +1,6 @@\n\
+             \u{20}l1\n\
+             \u{20}l2\n\
+             -f(a)\n\
+             +f(x=a)\n\
+             \u{20}l4\n\
+             \u{20}l5\n\
+             \u{20}\n"
+        );
+        // Context window clamps at the start (`saturating_sub`) and end
+        // (`min(line_count - 1)`).
+        assert!(diff.starts_with("--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1,6"));
+    }
+
+    #[test]
+    fn unified_diff_merges_near_changes_into_one_hunk() {
+        // Two changed lines 4 apart: within `2*CONTEXT+1`, so one hunk.
+        let original = "c0\nc1\nA\nc3\nc4\nB\nc6\nc7\n";
+        let fixed = "c0\nc1\nA1\nc3\nc4\nB1\nc6\nc7\n";
+        let diff = unified_diff(Path::new("m.py"), original, fixed);
+        assert_eq!(diff.matches("@@").count(), 2); // one hunk header (`@@ ... @@`)
+        assert!(diff.contains("-A\n+A1\n"));
+        assert!(diff.contains("-B\n+B1\n"));
+    }
+
+    #[test]
+    fn unified_diff_splits_distant_changes_into_two_hunks() {
+        let mut before = String::from("X\n");
+        for _ in 0..20 {
+            before.push_str("ctx\n");
+        }
+        before.push_str("Y\n");
+        let after = before.replace("X\n", "X1\n").replace("Y\n", "Y1\n");
+        let diff = unified_diff(Path::new("m.py"), &before, &after);
+        // Two separate hunks => two `@@ ... @@` headers.
+        assert_eq!(diff.matches("@@ -").count(), 2);
+        assert!(diff.contains("-X\n+X1\n"));
+        assert!(diff.contains("-Y\n+Y1\n"));
+    }
+}

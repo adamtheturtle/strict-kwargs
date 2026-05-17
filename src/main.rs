@@ -1,5 +1,9 @@
 //! CLI for ``strict-kwargs``.
 
+// See `lib.rs` for why this is gated on `coverage` rather than
+// `coverage_nightly`.
+#![cfg_attr(coverage, feature(coverage_attribute))]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -136,4 +140,37 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
         if fixes.len() == 1 { "" } else { "s" }
     );
     Ok(ExitCode::from(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_root_uses_explicit_when_given() {
+        let explicit = PathBuf::from("/some/explicit/root");
+        assert_eq!(
+            project_root_for(Some(explicit.clone()), &[PathBuf::from("x.py")]),
+            explicit
+        );
+    }
+
+    #[test]
+    fn project_root_discovers_from_first_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").expect("write");
+        let nested = dir.path().join("pkg");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let file = nested.join("m.py");
+        std::fs::write(&file, "").expect("write");
+        assert_eq!(project_root_for(None, &[file]), dir.path());
+    }
+
+    #[test]
+    fn project_root_falls_back_to_dot_when_no_paths() {
+        // `paths.first()` is `None` (unreachable from the CLI because clap
+        // defaults `paths` to `.`, but covered here for completeness).
+        let root = project_root_for(None, &[]);
+        assert_eq!(root, find_project_root(&PathBuf::from(".")));
+    }
 }
