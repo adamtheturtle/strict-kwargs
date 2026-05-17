@@ -349,6 +349,15 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     uri_to_path_string(uri).map(PathBuf::from)
 }
 
+/// Whether two paths denote the same file. ty returns URIs that decode to
+/// forward-slash paths (`C:/a/x.py`) while the paths we hold on Windows use
+/// native backslashes (`C:\a\x.py`); a plain `==` is lexicographic and would
+/// never match, so the current file would be needlessly re-read from disk on
+/// every ty-resolved call. Normalizing separators fixes that. Pure for tests.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || a.to_string_lossy().replace('\\', "/") == b.to_string_lossy().replace('\\', "/")
+}
+
 /// Parse a `file://` URI back to a filesystem path string. Strips the
 /// leading slash from `/C:/...` (RFC 8089 Windows form) and
 /// percent-decodes, so it round-trips with [`path_to_uri`] and matches
@@ -493,5 +502,23 @@ mod tests {
     fn posix_path_uri_round_trips() {
         let uri = path_to_uri(Path::new("/home/u/a.py"));
         assert_eq!(uri_to_path_string(&uri).as_deref(), Some("/home/u/a.py"));
+    }
+
+    #[test]
+    fn same_path_tolerates_separator_mismatch() {
+        // ty's decoded URI uses forward slashes; the path we hold on Windows
+        // uses backslashes. They denote the same file and must compare equal.
+        assert!(same_path(
+            &uri_to_path("file:///C:/Users/a/x.py").unwrap(),
+            Path::new(r"C:\Users\a\x.py"),
+        ));
+        assert!(same_path(
+            Path::new("/home/u/a.py"),
+            Path::new("/home/u/a.py")
+        ));
+        assert!(!same_path(
+            Path::new("/home/u/a.py"),
+            Path::new("/home/u/b.py")
+        ));
     }
 }

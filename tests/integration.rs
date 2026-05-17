@@ -770,6 +770,25 @@ fn reexport_first_party_package() {
     assert!(messages[0].starts_with("app.py:3:"));
 }
 
+#[test]
+fn function_scoped_import_is_not_a_module_reexport() {
+    // A `from ._impl import helper` *inside a function* binds `helper` in
+    // that function's scope, not the package's. It must not make
+    // ``pkg.helper`` resolve, so the call below is unresolved (not flagged)
+    // rather than a false "too many positional" against ``_impl.helper``.
+    let messages = check_with_aux(
+        &[("app.py", "import pkg\n\npkg.helper(1, 2)\n")],
+        &[
+            (
+                "pkg/__init__.py",
+                "def _setup():\n    from ._impl import helper\n    return helper\n",
+            ),
+            ("pkg/_impl.py", "def helper(a, b): ...\n"),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
 /// ty-backed tests need the `ty` binary; skip cleanly when it is absent so
 /// the suite is not environment-dependent.
 fn ty_available() -> bool {
