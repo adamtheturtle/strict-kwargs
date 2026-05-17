@@ -163,6 +163,10 @@ struct Scope {
     names: FxHashMap<String, String>,
     /// Local name -> fully-qualified *module* path (from ``import``).
     modules: FxHashMap<String, String>,
+    /// Names in `names` that are bound to an *instance* (`x = C()`), as
+    /// opposed to the class object itself. Lets `Class.method(recv, …)` be
+    /// told apart from a bound `instance.method(…)` call (issue #27).
+    instances: rustc_hash::FxHashSet<String>,
 }
 
 impl<'a> CallChecker<'a> {
@@ -312,9 +316,73 @@ impl<'a> CallChecker<'a> {
     }
 
     fn record_instance(&mut self, local_name: &str, class_fullname: String) {
-        self.current_scope()
-            .names
-            .insert(local_name.to_string(), class_fullname);
+        let scope = self.current_scope();
+        scope.names.insert(local_name.to_string(), class_fullname);
+        scope.instances.insert(local_name.to_string());
+    }
+
+    /// Whether the nearest binding of `name` (the one [`resolve_local`] would
+    /// return) is an *instance*, rather than the class object itself.
+    ///
+    /// [`resolve_local`]: Self::resolve_local
+    fn binding_is_instance(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.names.contains_key(name) {
+                return scope.instances.contains(name);
+            }
+        }
+        false
+    }
+
+    /// Whether `func` is an unbound instance-method call made through the
+    /// class object itself — `Class.method(receiver, …)` — so the first
+    /// positional argument is the explicitly-passed receiver.
+    ///
+    /// It binds to `self` and is never keyword-passable, exactly the issue
+    /// #15 case the ty path handles via [`strip_unbound_receiver`]; this is
+    /// the first-party/built-in-resolver analogue (issue #27). `cls` (a
+    /// classmethod, auto-bound even through the class) and any other first
+    /// parameter (a staticmethod / free function) pass no receiver, so only
+    /// a genuine leading `self` qualifies.
+    ///
+    /// Dunder-receiver methods (`__init__`/`__new__`/`__call__`/`__get__`/
+    /// `__set__`) are excluded: [`Signature::max_positional_at_call_site`]
+    /// already drops their leading receiver itself, so also stripping it
+    /// here would double-count the first real parameter. Their
+    /// implicit-receiver semantics are out of scope for issue #27 (a regular
+    /// instance-method call) and keep their existing dedicated handling.
+    fn is_unbound_class_method_call(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+        first_param: Option<&str>,
+    ) -> bool {
+        const DUNDER_RECEIVERS: [&str; 5] =
+            [".__init__", ".__new__", ".__call__", ".__get__", ".__set__"];
+        if first_param != Some("self") {
+            return false;
+        }
+        if DUNDER_RECEIVERS
+            .iter()
+            .any(|suffix| callee_fullname.ends_with(suffix))
+        {
+            return false;
+        }
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return false;
+        };
+        let Expr::Name(base) = &**value else {
+            return false;
+        };
+        let base = base.id.as_str();
+        // `base` must resolve to the class that *directly* owns `attr` (the
+        // method itself — not a constructor or nested type, whose receiver
+        // is implicit) and must denote the class object, not an instance of
+        // it (`k.method(…)` is an ordinary bound call).
+        let Some(resolved) = self.resolve_local(base) else {
+            return false;
+        };
+        callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
     }
 
     fn class_from_constructor(&self, expr: &Expr) -> Option<String> {
@@ -356,15 +424,37 @@ impl<'a> CallChecker<'a> {
                 .or_else(|| callee_fullname.strip_suffix(".__new__"))
                 .is_some_and(|class| self.config.is_ignored(class));
         let positional_count = positional_argument_count(&call.arguments);
+        // Issue #27: an unbound instance-method call through the class object
+        // (`K.m(K(), 1)`) passes the receiver explicitly. It binds to `self`
+        // and is never keyword-passable, so — like the typeshed/ty path's
+        // `strip_unbound_receiver` (issue #15) — drop the leading `self` and
+        // that one positional argument before the limit check, the
+        // diagnostic, and the fixer.
+        let first_param_name = signatures
+            .first()
+            .and_then(|s| s.parameters.first())
+            .and_then(|p| p.name.as_deref());
+        let receiver_is_explicit =
+            self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
+        let effective: Vec<Signature> = if receiver_is_explicit {
+            signatures.iter().map(without_leading_self).collect()
+        } else {
+            signatures.to_vec()
+        };
+        let effective_count = if receiver_is_explicit {
+            positional_count.saturating_sub(1)
+        } else {
+            positional_count
+        };
         // Overload-safe: only flag when the call exceeds the positional limit
         // of *every* candidate signature (the most permissive overload wins),
         // so ``.pyi`` stub overloads never produce false positives.
-        if signatures.iter().any(|signature| {
-            !call_exceeds_positional_limit(signature, &callee_fullname, ignored, positional_count)
+        if effective.iter().any(|signature| {
+            !call_exceeds_positional_limit(signature, &callee_fullname, ignored, effective_count)
         }) {
             return;
         }
-        let max_positional = signatures
+        let max_positional = effective
             .iter()
             .filter_map(|signature| {
                 signature.max_positional_at_call_site(&callee_fullname, ignored)
@@ -377,13 +467,16 @@ impl<'a> CallChecker<'a> {
             line,
             column,
             callee: format_callee_display(&callee_fullname),
-            positional_count,
+            positional_count: effective_count,
             max_positional,
         });
         // Auto-fix is only applied when a single, unambiguous signature is
         // known: overloaded callees may bind the same position to differently
-        // named parameters, so a keyword rewrite would not be safe.
-        if let [signature] = signatures {
+        // named parameters, so a keyword rewrite would not be safe. A
+        // synthesized ``@dataclass`` / ``NamedTuple`` constructor is likewise
+        // declined — it omits inherited base-class fields, so the
+        // position->name mapping is not guaranteed sound (issue #29).
+        if let ([signature], false) = (signatures, self.index.is_synthesized(&callee_fullname)) {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
@@ -394,6 +487,7 @@ impl<'a> CallChecker<'a> {
                 max_positional,
                 positional_count,
                 is_attribute_call,
+                receiver_is_explicit,
             ) {
                 self.fixes.extend(insertions);
                 self.fixed_calls += 1;
@@ -606,6 +700,7 @@ fn call_fix_insertions(
     max_positional: usize,
     positional_count: usize,
     is_attribute_call: bool,
+    receiver_is_explicit: bool,
 ) -> Option<Vec<Insertion>> {
     // Star-unpacking at the call site (`f(*xs)` / `f(**kw)`): the positional
     // count is unknown, so a positional->keyword mapping is unsound.
@@ -621,29 +716,42 @@ fn call_fix_insertions(
         return None;
     }
 
-    // Leading signature parameters that are implicit at the call site (the
-    // bound/constructed receiver, never present in `call.arguments`).
-    //
-    // A name-only `self`/`cls` test is unsound: a *standalone* function may
-    // legitimately name its first parameter `self`/`cls` (factories,
-    // decorators, metaclass helpers), and such a function is always called
-    // by name (`f(...)`) with that parameter passed *explicitly*. Skipping it
-    // there shifts the whole mapping by one and silently emits wrong keyword
-    // names. The receiver is implicit only for a constructor/callable dunder
-    // or a *bound* attribute-style call (`receiver.method(...)`).
-    let first_param_is_receiver_name = matches!(
-        signature.parameters.first().and_then(|p| p.name.as_deref()),
-        Some("self" | "cls")
-    );
-    let is_dunder_receiver = callee_fullname.ends_with(".__init__")
-        || callee_fullname.ends_with(".__new__")
-        || callee_fullname.ends_with(".__call__");
-    let receiver_is_implicit =
-        is_dunder_receiver || (is_attribute_call && first_param_is_receiver_name);
-    let skip = usize::from(receiver_is_implicit);
+    // `(skip, start)`: how the call's positional arguments map onto the
+    // signature's parameters, and the first argument index to rewrite.
+    let (skip, start) = if receiver_is_explicit {
+        // Unbound `Class.method(receiver, …)` (issue #27): the receiver is
+        // `args[0]` and binds to `self`, which is never keyword-passable, so
+        // it stays positional. Arguments map 1:1 onto parameters (no skip);
+        // `max_positional` is the limit *after* `self` was stripped, so the
+        // receiver slot adds one more allowed positional.
+        (0usize, max_positional + 1)
+    } else {
+        // Leading signature parameters that are implicit at the call site
+        // (the bound/constructed receiver, never present in
+        // `call.arguments`).
+        //
+        // A name-only `self`/`cls` test is unsound: a *standalone* function
+        // may legitimately name its first parameter `self`/`cls` (factories,
+        // decorators, metaclass helpers), and such a function is always
+        // called by name (`f(...)`) with that parameter passed *explicitly*.
+        // Skipping it there shifts the whole mapping by one and silently
+        // emits wrong keyword names. The receiver is implicit only for a
+        // constructor/callable dunder or a *bound* attribute-style call
+        // (`receiver.method(...)`).
+        let first_param_is_receiver_name = matches!(
+            signature.parameters.first().and_then(|p| p.name.as_deref()),
+            Some("self" | "cls")
+        );
+        let is_dunder_receiver = callee_fullname.ends_with(".__init__")
+            || callee_fullname.ends_with(".__new__")
+            || callee_fullname.ends_with(".__call__");
+        let receiver_is_implicit =
+            is_dunder_receiver || (is_attribute_call && first_param_is_receiver_name);
+        (usize::from(receiver_is_implicit), max_positional)
+    };
 
     let mut insertions = Vec::new();
-    for arg_index in max_positional..positional_count {
+    for arg_index in start..positional_count {
         let arg = call.arguments.args.get(arg_index)?;
         // A bare generator (`f(x for x in y)`) or walrus (`f(x := 1)`) would
         // need extra parentheses once prefixed; decline rather than wrap.
@@ -920,18 +1028,43 @@ fn signature_from_param_text(params: &str) -> Option<Signature> {
 /// argument binds to the receiver parameter and must not be counted against
 /// the positional limit. Drop the parameter and the receiver argument so only
 /// the *remaining* positional arguments are checked (issue #15).
-fn strip_unbound_receiver(signature: Signature, positional_count: usize) -> (Signature, usize) {
-    let first_is_receiver = signature
-        .parameters
-        .first()
-        .and_then(|p| p.name.as_deref())
-        .is_some_and(|name| name == "self" || name == "cls");
+///
+/// Only `def …` hovers (`is_def_hover`, i.e. ty reported no owner) can carry an
+/// unstripped receiver. A `bound method Owner.m(...)` hover already had its
+/// receiver removed by ty, so its leading parameter is genuine — stripping it
+/// would corrupt the count for a method whose first non-receiver parameter is
+/// itself literally named `self`/`cls` (e.g. `def m(self, cls, x)`).
+fn strip_unbound_receiver(
+    signature: Signature,
+    positional_count: usize,
+    is_def_hover: bool,
+) -> (Signature, usize) {
+    let first_is_receiver = is_def_hover
+        && signature
+            .parameters
+            .first()
+            .and_then(|p| p.name.as_deref())
+            .is_some_and(|name| name == "self" || name == "cls");
     if !first_is_receiver {
         return (signature, positional_count);
     }
     let mut parameters = signature.parameters;
     parameters.remove(0);
     (Signature { parameters }, positional_count.saturating_sub(1))
+}
+
+/// Drop a leading `self` parameter — the explicitly-passed receiver of an
+/// unbound `Class.method(receiver, …)` call (issue #27), the built-in
+/// resolver analogue of [`strip_unbound_receiver`]. The caller has already
+/// established (via [`CallChecker::is_unbound_class_method_call`]) that the
+/// first parameter is `self`; anything else is returned unchanged.
+fn without_leading_self(signature: &Signature) -> Signature {
+    match signature.parameters.split_first() {
+        Some((first, rest)) if first.name.as_deref() == Some("self") => Signature {
+            parameters: rest.to_vec(),
+        },
+        _ => signature.clone(),
+    }
 }
 
 fn emit_if_violation(
@@ -1022,7 +1155,7 @@ fn resolve_pending_with_ty(
                 continue;
             };
             let (signature, positional_count) =
-                strip_unbound_receiver(signature, p.positional_count);
+                strip_unbound_receiver(signature, p.positional_count, sig.owner.is_none());
             let fullname = match &sig.owner {
                 Some(owner) => {
                     let owner = owner.split('[').next().unwrap_or(owner);
@@ -1115,7 +1248,7 @@ fn resolve_pending_with_ty(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_typing_special_form_constructor, strip_unbound_receiver};
+    use super::{is_typing_special_form_constructor, strip_unbound_receiver, without_leading_self};
     use crate::signature::{Parameter, ParameterKind, Signature};
 
     #[test]
@@ -1170,14 +1303,14 @@ mod tests {
     fn strips_leading_self_and_the_explicit_receiver() {
         // `str.lower(key)`: ty hover keeps `self`; the explicit receiver fills
         // it and must not count (issue #15).
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1);
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
     }
 
     #[test]
     fn strips_leading_cls() {
-        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2);
+        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2, true);
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].name.as_deref(), Some("a"));
         assert_eq!(count, 1);
@@ -1187,16 +1320,46 @@ mod tests {
     fn leaves_bound_signature_untouched() {
         // ty already dropped the receiver for a bound call (`def upper()` /
         // `bound method T.m(...)`): no leading `self`/`cls`, nothing to strip.
-        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1);
+        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1, true);
         assert_eq!(s.parameters.len(), 2);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn without_leading_self_drops_only_a_leading_self() {
+        // Issue #27: `K.m(K(), 1)` — the resolved instance method's `self`
+        // is filled by the explicit receiver and must not be counted.
+        let s = without_leading_self(&sig(&["self", "a"]));
+        assert_eq!(s.parameters.len(), 1);
+        assert_eq!(s.parameters[0].name.as_deref(), Some("a"));
+
+        // No leading `self` (e.g. a staticmethod): untouched.
+        assert_eq!(without_leading_self(&sig(&["a", "b"])).parameters.len(), 2);
+        // `cls` is auto-bound even through the class: not a stripped receiver.
+        assert_eq!(
+            without_leading_self(&sig(&["cls", "a"])).parameters.len(),
+            2
+        );
+        assert!(without_leading_self(&sig(&[])).parameters.is_empty());
+    }
+
+    #[test]
+    fn keeps_cls_parameter_of_bound_method_hover() {
+        // `bound method Owner.m(...)` (owner present -> `is_def_hover` false):
+        // ty already stripped the real receiver, so a leading parameter that
+        // happens to be named `cls`/`self` (`def m(self, cls, x)`) is genuine
+        // and must not be dropped (PR #17 review).
+        let (s, count) = strip_unbound_receiver(sig(&["cls", "x"]), 2, false);
+        assert_eq!(s.parameters.len(), 2);
+        assert_eq!(s.parameters[0].name.as_deref(), Some("cls"));
+        assert_eq!(count, 2);
     }
 
     #[test]
     fn saturates_when_no_explicit_receiver_argument() {
         // Defensive: a leading `self` with zero positional args (e.g. a
         // keyword-only / malformed call) must not underflow the count.
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0);
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
     }

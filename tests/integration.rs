@@ -216,6 +216,104 @@ c.method(1)
 }
 
 #[test]
+fn unbound_first_party_method_receiver_not_flagged() {
+    // Issue #27: `K.n(K())` is an unbound-method call resolved by the
+    // built-in resolver (first-party class). The explicit receiver binds to
+    // `self` and is never keyword-passable, so it must not be counted — the
+    // first-party analogue of the issue #15 ty-path fix.
+    assert_ok(
+        r"
+class K:
+    def n(self) -> int:
+        return 0
+
+K.n(K())
+",
+    );
+}
+
+#[test]
+fn unbound_first_party_method_flags_only_real_positional() {
+    // `K.m(K(), 1)`: the receiver is excluded, but `a` is a genuine
+    // keyword-able positional — reported as `got 1`, not `got 2`.
+    let messages = check_source(
+        r"
+class K:
+    def m(self, a: int) -> int:
+        return a
+
+K.m(K(), 1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:6:"), "got: {messages:?}");
+    assert!(
+        messages[0].contains("\"m\" of \"K\"") && messages[0].contains("got 1, maximum 0"),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
+fn bound_instance_method_still_flagged() {
+    // The instance form `k.m(1)` is a normal bound call: the receiver is
+    // implicit, so `1` is still over the limit (issue #27 must not regress
+    // the existing instance-call behaviour).
+    assert_error(
+        r"
+class K:
+    def m(self, a: int) -> int:
+        return a
+
+k = K()
+k.m(1)
+",
+        7,
+        "got 1, maximum 0",
+    );
+}
+
+#[test]
+fn unbound_classmethod_via_class_still_flagged() {
+    // `cls` is auto-bound even through the class, so `K.cm(1)` passes no
+    // explicit receiver: `1` is a keyword-able positional and is flagged.
+    assert_error(
+        r"
+class K:
+    @classmethod
+    def cm(cls, a: int) -> int:
+        return a
+
+K.cm(1)
+",
+        7,
+        "got 1, maximum 0",
+    );
+}
+
+#[test]
+fn unbound_dunder_via_class_not_double_stripped() {
+    // Bugbot (PR #34): a dunder-receiver callee is excluded from the issue
+    // #27 strip — `max_positional_at_call_site` already drops its leading
+    // receiver, so stripping `self` again would double-count `a`. The
+    // explicit `K.__init__(K(), 1)` keeps the existing dunder handling
+    // (positional-only `a` allowed) -> `got 2, maximum 1`, not the
+    // double-stripped `got 1, maximum 0`.
+    let messages = check_source(
+        r"
+class K:
+    def __init__(self, a: int, /) -> None: ...
+
+K.__init__(K(), 1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("got 2, maximum 1"),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
 fn callable_class_as_decorator() {
     assert_ok(
         r"
@@ -232,6 +330,9 @@ def func() -> None: ...
 
 #[test]
 fn callable_class_extra_params() {
+    // An *explicit* call through `__call__` gets no first-argument exemption:
+    // `self` is bound by the receiver and every remaining parameter can be
+    // passed by keyword, so any positional argument is flagged (issue #28).
     let messages = check_source(
         r"
 from typing import Any
@@ -245,8 +346,27 @@ c(func=lambda: None, a=1)
 c(lambda: None, a=1)
 ",
     );
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("Too many positional"));
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m.contains("Too many positional")));
+}
+
+/// Issue #28: a bound instance `__call__` strips `self` and grants no
+/// first-positional exemption, so both the count and the flagging are exact.
+#[test]
+fn bound_dunder_call_strips_self_no_exemption() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, a: int, b: int) -> int:
+        return a + b
+
+C()(1, 2)
+C()(1, b=2)
+",
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].contains("got 2, maximum 0"));
+    assert!(messages[1].contains("got 1, maximum 0"));
 }
 
 #[test]
@@ -1325,4 +1445,93 @@ fn local_redefinition_shadows_import() {
     );
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("app.py:7:"));
+}
+
+// --- issue #29: synthesized constructors (@dataclass, NamedTuple) ---
+
+#[test]
+fn dataclass_positional_construction_flagged() {
+    assert_error(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+        8,
+        r#"for "D" (got 2, maximum 0)"#,
+    );
+}
+
+#[test]
+fn dataclass_keyword_construction_ok() {
+    assert_ok(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\nD()\n",
+    );
+}
+
+#[test]
+fn namedtuple_positional_construction_flagged() {
+    assert_error(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
+        7,
+        r#"for "NT" (got 2, maximum 0)"#,
+    );
+}
+
+#[test]
+fn namedtuple_keyword_construction_ok() {
+    assert_ok(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(a=1, b=2)\n",
+    );
+}
+
+#[test]
+fn dataclass_decorator_variants_flagged() {
+    // Qualified, called, and argument forms all resolve to the same
+    // synthesized `__init__`.
+    assert_error(
+        "import dataclasses\n\n@dataclasses.dataclass\nclass Q:\n    a: int\n\nQ(1)\n",
+        7,
+        r#"for "Q""#,
+    );
+    assert_error(
+        "from dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass F:\n    a: int\n\nF(1)\n",
+        7,
+        r#"for "F""#,
+    );
+}
+
+#[test]
+fn dataclass_init_false_not_synthesized() {
+    // `@dataclass(init=False)` generates no `__init__`; nothing to flag.
+    assert_ok(
+        "from dataclasses import dataclass\n\n@dataclass(init=False)\nclass D:\n    a: int\n\nD()\n",
+    );
+}
+
+#[test]
+fn dataclass_classvar_and_field_init_false_excluded() {
+    // `ClassVar` and `field(init=False)` are not `__init__` parameters, so
+    // the lone real field still makes positional construction a violation.
+    assert_error(
+        "from dataclasses import dataclass, field\nfrom typing import ClassVar\n\n@dataclass\nclass D:\n    cv: ClassVar[int] = 0\n    real: int = 0\n    skip: int = field(init=False, default=3)\n\nD(1)\n",
+        10,
+        r#"for "D" (got 1, maximum 0)"#,
+    );
+}
+
+#[test]
+fn dataclass_explicit_init_wins_over_synthesis() {
+    // A hand-written `__init__` is used as-is; the synthesized one must not
+    // shadow or duplicate it.
+    let messages = check_source(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    a: int\n    def __init__(self, only: int) -> None: ...\n\nD(1)\n",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:8:"));
+}
+
+#[test]
+fn functional_namedtuple_form_out_of_scope() {
+    // The functional `NamedTuple("N", [...])` form is not synthesized; no
+    // false positive for the surrounding call.
+    assert_ok(
+        "from typing import NamedTuple\n\nNT = NamedTuple(\"NT\", [(\"a\", int), (\"b\", int)])\n",
+    );
 }
