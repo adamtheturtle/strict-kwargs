@@ -38,7 +38,9 @@ call site
 The built-in path is primary (fast, offline, deterministic). `ty` is an
 **optional, additive fallback** for the cases static resolution structurally
 cannot do. Every ty failure mode yields *no diagnostic* (fails closed), never
-a wrong one.
+a wrong one. `ty server` is started **lazily** — only once a file actually
+has calls the built-in resolver could not resolve — so a run the built-in
+path fully handles never pays ty's project-indexing startup cost.
 
 ### The DefinitionIndex (`src/index.rs`)
 
@@ -86,6 +88,9 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   `<class 'A'>`, not a signature).
 - **Pipelined per file**: all requests for a file are sent, then collected —
   round-trip latency is hidden; out-of-order responses are buffered.
+- **Lazy start**: the subprocess is spawned on the first file with deferred
+  calls, not at the start of the run; the "ty present but server could not
+  start" note is likewise emitted only if the fallback was actually needed.
 - **Robust / fails closed**: bounded timeouts (5 s request, 15 s init); the
   *first* failure latches ty OFF for the whole run (no timeout storms);
   server→client requests are answered so ty never blocks; a one-time stderr

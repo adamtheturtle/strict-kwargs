@@ -144,31 +144,53 @@ fn enqueue(queue: &mut VecDeque<String>, modules: Vec<String>) {
 /// Real definitions always win; aliases never overwrite them. Iterated to a
 /// fixpoint to follow chained re-exports.
 fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
+    // Drop no-op edges once so they cost nothing on every iteration.
+    let edges: Vec<(&str, &str)> = edges
+        .iter()
+        .filter(|(src, dst)| src != dst && !src.is_empty() && !dst.is_empty())
+        .map(|(src, dst)| (src.as_str(), dst.as_str()))
+        .collect();
+    if edges.is_empty() {
+        return;
+    }
     for _ in 0..MAX_EXPAND_ITERS {
+        // The keys touched by an edge are exactly `src` and everything under
+        // `src.`. A sorted snapshot lets each edge binary-search to its
+        // contiguous `src.` block instead of scanning the whole (growing)
+        // index, which is what made this super-quadratic on large
+        // import closures (issue #31). The set is unchanged within an
+        // iteration: additions are deferred, exactly as before.
+        let mut keys: Vec<&str> = index.signatures.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         let mut additions: Vec<(String, Vec<Signature>)> = Vec::new();
-        for (src, dst) in edges {
-            if src == dst || src.is_empty() || dst.is_empty() {
-                continue;
+        for &(src, dst) in &edges {
+            // `src` itself re-exported as `dst` (the old `key == src` case).
+            if let Some(sigs) = index.signatures.get(src) {
+                if !index.signatures.contains_key(dst) {
+                    additions.push((dst.to_string(), sigs.clone()));
+                }
             }
+            // Everything under `src.` re-exported as `dst.<suffix>`. Keys
+            // with this prefix are contiguous in the sorted snapshot.
             let src_dot = format!("{src}.");
-            for (key, sigs) in &index.signatures {
-                let suffix = if key == src {
-                    ""
-                } else if let Some(rest) = key.strip_prefix(&src_dot) {
-                    rest
-                } else {
+            let start = keys.partition_point(|key| *key < src_dot.as_str());
+            for &key in &keys[start..] {
+                let Some(suffix) = key.strip_prefix(&src_dot) else {
+                    break;
+                };
+                if suffix.is_empty() {
                     continue;
-                };
-                let new_key = if suffix.is_empty() {
-                    dst.clone()
-                } else {
-                    format!("{dst}.{suffix}")
-                };
-                if !index.signatures.contains_key(&new_key) {
+                }
+                let new_key = format!("{dst}.{suffix}");
+                if index.signatures.contains_key(&new_key) {
+                    continue;
+                }
+                if let Some(sigs) = index.signatures.get(key) {
                     additions.push((new_key, sigs.clone()));
                 }
             }
         }
+        drop(keys);
         if additions.is_empty() {
             break;
         }
@@ -526,5 +548,97 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_reexports, DefinitionIndex};
+    use crate::signature::{Parameter, ParameterKind, Signature};
+
+    /// A signature with `n` positional-or-keyword parameters, so a test can
+    /// tell which definition won an alias collision by its arity.
+    fn sig(n: usize) -> Signature {
+        Signature {
+            parameters: (0..n)
+                .map(|i| Parameter {
+                    name: Some(format!("p{i}")),
+                    kind: ParameterKind::PositionalOrKeyword,
+                })
+                .collect(),
+        }
+    }
+
+    fn index_of(pairs: &[(&str, usize)]) -> DefinitionIndex {
+        let mut index = DefinitionIndex::default();
+        for &(name, arity) in pairs {
+            index.insert(name.to_string(), sig(arity));
+        }
+        index
+    }
+
+    fn arity(index: &DefinitionIndex, key: &str) -> Option<usize> {
+        index
+            .get(key)
+            .map(|sigs| sigs.first().map_or(0, |s| s.parameters.len()))
+    }
+
+    #[test]
+    fn copies_exact_name_and_everything_under_the_prefix() {
+        let mut index = index_of(&[("numpy", 1), ("numpy.array", 2), ("numpy.linalg.norm", 3)]);
+        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+        assert_eq!(arity(&index, "np"), Some(1));
+        assert_eq!(arity(&index, "np.array"), Some(2));
+        assert_eq!(arity(&index, "np.linalg.norm"), Some(3));
+    }
+
+    #[test]
+    fn prefix_match_respects_the_dotted_boundary() {
+        // The sorted-range scan must not treat `numpy_core` / `numpyfoo` as
+        // being under the `numpy.` prefix (they sort adjacent to `numpy.`).
+        let mut index = index_of(&[
+            ("numpy.array", 2),
+            ("numpy_core", 9),
+            ("numpyfoo.bar", 9),
+            ("numpz.x", 9),
+        ]);
+        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+        assert_eq!(arity(&index, "np.array"), Some(2));
+        assert!(index.get("np_core").is_none());
+        assert!(index.get("np").is_none());
+        assert!(index.get("npfoo.bar").is_none());
+    }
+
+    #[test]
+    fn a_real_definition_is_never_overwritten_by_an_alias() {
+        let mut index = index_of(&[("impl.f", 2), ("pkg.f", 5)]);
+        expand_reexports(&mut index, &[("impl".into(), "pkg".into())]);
+        // `pkg.f` already had a real definition; the alias must not clobber it.
+        assert_eq!(arity(&index, "pkg.f"), Some(5));
+    }
+
+    #[test]
+    fn chained_reexports_resolve_to_a_fixpoint() {
+        let mut index = index_of(&[("a.f", 1)]);
+        expand_reexports(
+            &mut index,
+            &[("a".into(), "b".into()), ("b".into(), "c".into())],
+        );
+        assert_eq!(arity(&index, "b.f"), Some(1));
+        assert_eq!(arity(&index, "c.f"), Some(1));
+    }
+
+    #[test]
+    fn noop_edges_are_ignored() {
+        let mut index = index_of(&[("a.f", 1)]);
+        expand_reexports(
+            &mut index,
+            &[
+                ("a".into(), "a".into()),
+                (String::new(), "b".into()),
+                ("c".into(), String::new()),
+            ],
+        );
+        assert_eq!(index.signatures.len(), 1);
     }
 }
