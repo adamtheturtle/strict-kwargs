@@ -36,19 +36,17 @@ fi
 # of the coverage contract.
 cargo llvm-cov --no-report --branch --workspace
 
-# Enforce 100% on lines and functions. `llvm-cov` has no
-# `--fail-under-branches`, so branch coverage is checked from the JSON below.
-#
-# Region coverage is intentionally *not* gated: LLVM "regions" subdivide a
-# line at every short-circuit/`?`, double-count macro expansions, and are
-# sensitive to multi-instantiation accounting — they are an implementation
-# signal, not the contract. "100% coverage including branches" is precisely
-# line + branch (+ function) coverage, which is what this gate enforces.
+# Enforce 100% line and function coverage on production code (test
+# modules and documented-unreachable defensive helpers are
+# `#[coverage(off)]`). Region coverage is not gated: LLVM "regions"
+# subdivide a line at every short-circuit/`?` and double-count macro
+# expansions — an instrumentation signal, not the contract.
 cargo llvm-cov report --branch \
   --fail-under-lines 100 \
   --fail-under-functions 100
 
-# Enforce 100% branch coverage from the JSON summary.
+# Enforce 100% branch coverage from the JSON summary (`llvm-cov` has no
+# `--fail-under-branches`).
 branch_percent="$(
   cargo llvm-cov report --branch --json --summary-only |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["totals"]["branches"]["percent"])'
@@ -59,4 +57,4 @@ python3 -c "import sys; sys.exit(0 if float('${branch_percent}') >= 100.0 else 1
   exit 1
 }
 
-echo "Coverage gate passed: 100% lines, regions, functions and branches."
+echo "Coverage gate passed: 100% lines, functions and branches."

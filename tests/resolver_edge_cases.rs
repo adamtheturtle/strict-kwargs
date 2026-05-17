@@ -259,6 +259,135 @@ K()(1, 2)
     assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
 }
 
+/// The callee is a call whose own callee is an *attribute*
+/// (`o.factory()(...)`), not a bare name, so the constructor-call arm
+/// bails immediately (`Expr::Name` else-branch) — unresolved, not flagged.
+#[test]
+fn call_result_of_attribute_call_is_unresolved() {
+    let messages = check_source(
+        r"
+class O:
+    def factory(self): ...
+
+
+o = O()
+o.factory()(1, 2)
+",
+    );
+    assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+}
+
+/// A call to a `*args` function with more positionals than the named
+/// parameters is legal — `*args` absorbs the surplus, so it is not flagged
+/// (exercises the var-positional short-circuit in the limit check).
+#[test]
+fn var_positional_absorbs_surplus_positionals() {
+    let messages = check_source("def f(a, *rest): ...\nf(1, 2, 3, 4)\n");
+    assert!(
+        messages.is_empty(),
+        "*args call must be accepted: {messages:?}"
+    );
+}
+
+/// A `@dataclass` with a `ClassVar` field: the synthesized `__init__`
+/// skips it, so `D(1, 2)` exceeds the one real field and is flagged.
+#[test]
+fn dataclass_classvar_excluded_minimal() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+from typing import ClassVar
+
+
+@dataclass
+class D:
+    a: int
+    b: ClassVar[int] = 0
+
+
+D(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "Too many positional") || has_error_at(&messages, 12, "\"D\""),
+        "ClassVar must be excluded from the synthesized __init__: {messages:?}"
+    );
+}
+
+/// A `@dataclass` that defines its own `__new__`: synthesis is skipped
+/// (the `__new__` arm of the explicit-constructor short-circuit), so the
+/// run does not panic and resolution falls to the written constructor.
+#[test]
+fn dataclass_with_explicit_new_skips_synthesis() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+
+
+@dataclass
+class D:
+    a: int
+
+    def __new__(cls):
+        return object.__new__(cls)
+
+
+D()
+",
+    );
+    assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+}
+
+/// `@dataclass(init=True)` keeps the synthesized `__init__` (the
+/// `init=False` opt-out does not fire — exercises the non-`False` arm of
+/// the keyword check), so `D(1, 2)` against one field is flagged.
+#[test]
+fn dataclass_init_true_keyword_still_synthesizes() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+
+
+@dataclass(init=True)
+class D:
+    a: int
+
+
+D(1, 2)
+",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Too many positional") || m.contains("\"D\"")),
+        "init=True must still synthesize __init__: {messages:?}"
+    );
+}
+
+/// Assigning / annotating a constructor result onto an *attribute* target
+/// (`h.attr = C()`, `h.attr2: C = C()`) is not a name binding, so no
+/// instance is recorded — the non-`Name` target branches are taken and the
+/// run does not panic or mis-resolve.
+#[test]
+fn constructor_assigned_to_attribute_target_records_no_instance() {
+    let messages = check_source(
+        r"
+class C:
+    def __init__(self, a): ...
+
+
+class H:
+    pass
+
+
+h = H()
+h.attr = C()
+h.attr2: C = C()
+",
+    );
+    assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+}
+
 /// `Factory()(...)` where `Factory` is an *imported* (locally-bound) class
 /// with `__call__`: the constructor-call arm resolves `Factory` via
 /// `resolve_local`, finds `Factory.__call__` in the index, and the

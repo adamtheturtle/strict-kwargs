@@ -1,11 +1,16 @@
 //! CLI for ``strict-kwargs``.
 
-// `cargo llvm-cov` builds with `--cfg coverage`; under it we opt into the
-// unstable `coverage(off)` attribute to exclude the inline test module from
-// the coverage gate (test code is not measured). Gated on `coverage` (not
-// `coverage_nightly`) so local (stable + `RUSTC_BOOTSTRAP=1`) and CI
-// (nightly) coverage are identical. See `lib.rs` for the same rationale.
-#![cfg_attr(coverage, feature(coverage_attribute))]
+// `cargo llvm-cov` builds with `--cfg coverage`; under it the inline
+// `#[cfg(test)] mod tests` is marked `#[coverage(off)]` (test code is not
+// measured). That attribute is the *only* use of `coverage_attribute` in
+// this crate root, and it lives behind `#[cfg(test)]` — so the feature is
+// only actually used when building the test harness. Gating the `feature`
+// on `all(coverage, test)` keeps the non-test binary build (which the
+// coverage job also compiles) from declaring an unused feature, which
+// nightly rejects under `-D unused-features`. `coverage` (not
+// `coverage_nightly`) keeps local (stable + `RUSTC_BOOTSTRAP=1`) and CI
+// (nightly) identical. See `lib.rs` for the library-crate rationale.
+#![cfg_attr(all(coverage, test), feature(coverage_attribute))]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
