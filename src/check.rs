@@ -1532,7 +1532,10 @@ while cond:
     #[test]
     fn resolve_def_at_collects_overloads() {
         let src = "class C:\n    def f(self, a): ...\n    def f(self, a, b): ...\n";
-        assert_eq!(resolve_at(src, "f(self, a):"), Some(("ty.C.f".to_string(), 2)));
+        assert_eq!(
+            resolve_at(src, "f(self, a):"),
+            Some(("ty.C.f".to_string(), 2))
+        );
     }
 
     #[test]
@@ -1594,7 +1597,15 @@ while cond:
 
         // Special-form constructors are always exempt.
         let mut d = Vec::new();
-        emit_if_violation("ty.TypeVar", &[one.clone()], 2, "x", 0, path, &mut d);
+        emit_if_violation(
+            "ty.TypeVar",
+            std::slice::from_ref(&one),
+            2,
+            "x",
+            0,
+            path,
+            &mut d,
+        );
         assert!(d.is_empty());
 
         // No signatures: nothing to check.
@@ -1604,7 +1615,15 @@ while cond:
 
         // Within the limit (some overload permits it): no diagnostic.
         let mut d = Vec::new();
-        emit_if_violation("ty.f", &[one.clone()], 0, "f()\n", 0, path, &mut d);
+        emit_if_violation(
+            "ty.f",
+            std::slice::from_ref(&one),
+            0,
+            "f()\n",
+            0,
+            path,
+            &mut d,
+        );
         assert!(d.is_empty());
 
         // Exceeds the limit: one diagnostic with the rendered fields.
