@@ -80,9 +80,12 @@ fn is_python_file(path: &Path) -> bool {
 }
 
 fn is_ignored_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy();
-        name.starts_with('.') || name == "venv" || name == "__pycache__"
+    path.components().any(|component| match component {
+        std::path::Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            name.starts_with('.') || name == "venv" || name == "__pycache__"
+        }
+        _ => false,
     })
 }
 
@@ -98,7 +101,10 @@ struct CallChecker<'a> {
 
 #[derive(Debug, Default, Clone)]
 struct Scope {
+    /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
+    /// Local name -> fully-qualified *module* path (from ``import``).
+    modules: FxHashMap<String, String>,
 }
 
 impl<'a> CallChecker<'a> {
@@ -148,6 +154,119 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn define_module(&mut self, local_name: &str, module_path: String) {
+        self.current_scope()
+            .modules
+            .insert(local_name.to_string(), module_path);
+    }
+
+    fn resolve_module(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(path) = scope.modules.get(name) {
+                return Some(path.clone());
+            }
+        }
+        None
+    }
+
+    /// Package containing the current module, for relative imports.
+    /// ``pkg.sub.mod`` -> ``pkg.sub``; a top-level module -> ``""``.
+    fn current_package(&self) -> &str {
+        self.module_name
+            .rsplit_once('.')
+            .map_or("", |(parent, _)| parent)
+    }
+
+    /// Resolve ``from <level dots><module> import ...`` to the base dotted
+    /// path that names are imported from.
+    fn resolve_import_base(&self, level: u32, module: Option<&str>) -> Option<String> {
+        if level == 0 {
+            return module.map(str::to_string);
+        }
+        // ``level`` leading dots: 1 == current package, 2 == its parent, ...
+        let mut package: Vec<&str> = if self.current_package().is_empty() {
+            Vec::new()
+        } else {
+            self.current_package().split('.').collect()
+        };
+        for _ in 1..level {
+            package.pop()?;
+        }
+        let mut base = package.join(".");
+        if let Some(module) = module {
+            if !base.is_empty() {
+                base.push('.');
+            }
+            base.push_str(module);
+        }
+        Some(base)
+    }
+
+    fn record_import(&mut self, stmt: &Stmt) {
+        match stmt {
+            // ``import a.b.c`` / ``import a.b as c``
+            Stmt::Import(ast::StmtImport { names, .. }) => {
+                for alias in names {
+                    let dotted = alias.name.as_str();
+                    if let Some(asname) = &alias.asname {
+                        // ``import a.b as c`` binds ``c`` -> ``a.b``.
+                        self.define_module(asname.as_str(), dotted.to_string());
+                    } else {
+                        // ``import a.b`` binds the top-level ``a``; attribute
+                        // access uses the full dotted path.
+                        let top = dotted.split('.').next().unwrap_or(dotted);
+                        self.define_module(top, top.to_string());
+                    }
+                }
+            }
+            // ``from a.b import c [as d]`` / ``from . import x``
+            Stmt::ImportFrom(ast::StmtImportFrom {
+                module,
+                names,
+                level,
+                ..
+            }) => {
+                let Some(base) =
+                    self.resolve_import_base(*level, module.as_ref().map(ast::Identifier::as_str))
+                else {
+                    return;
+                };
+                for alias in names {
+                    let imported = alias.name.as_str();
+                    if imported == "*" {
+                        continue;
+                    }
+                    let local = alias
+                        .asname
+                        .as_ref()
+                        .map_or(imported, ast::Identifier::as_str);
+                    let fullname = if base.is_empty() {
+                        imported.to_string()
+                    } else {
+                        format!("{base}.{imported}")
+                    };
+                    // The imported name may be a submodule or a callable; bind
+                    // both interpretations so attribute and direct calls work.
+                    self.define(local, fullname.clone());
+                    self.define_module(local, fullname);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Flatten an attribute/name chain (``a.b.c``) into a dotted string.
+    fn dotted_path(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Name(name) => Some(name.id.to_string()),
+            Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
+                let base = Self::dotted_path(value)?;
+                Some(format!("{base}.{attr}"))
+            }
+            _ => None,
+        }
+    }
+
     fn record_instance(&mut self, local_name: &str, class_fullname: String) {
         self.current_scope()
             .names
@@ -168,19 +287,34 @@ impl<'a> CallChecker<'a> {
         let Some(callee_fullname) = self.resolve_callee(&call.func) else {
             return;
         };
-        let Some(signature) = self.index.get(&callee_fullname) else {
+        let Some(signatures) = self.index.get(&callee_fullname) else {
             return;
         };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
-        let ignored = self.config.is_ignored(&callee_fullname);
+        // A constructor call resolves to ``Class.__init__``/``__new__``; also
+        // honor an ``ignore_names`` entry for the class itself (``builtins.str``).
+        let ignored = self.config.is_ignored(&callee_fullname)
+            || callee_fullname
+                .strip_suffix(".__init__")
+                .or_else(|| callee_fullname.strip_suffix(".__new__"))
+                .is_some_and(|class| self.config.is_ignored(class));
         let positional_count = positional_argument_count(&call.arguments);
-        if !call_exceeds_positional_limit(signature, &callee_fullname, ignored, positional_count) {
+        // Overload-safe: only flag when the call exceeds the positional limit
+        // of *every* candidate signature (the most permissive overload wins),
+        // so ``.pyi`` stub overloads never produce false positives.
+        if signatures.iter().any(|signature| {
+            !call_exceeds_positional_limit(signature, &callee_fullname, ignored, positional_count)
+        }) {
             return;
         }
-        let max_positional = signature
-            .max_positional_at_call_site(&callee_fullname, ignored)
+        let max_positional = signatures
+            .iter()
+            .filter_map(|signature| {
+                signature.max_positional_at_call_site(&callee_fullname, ignored)
+            })
+            .max()
             .unwrap_or(0);
         let (line, column) = line_column(self.source, call.start());
         self.diagnostics.push(Diagnostic {
@@ -193,6 +327,22 @@ impl<'a> CallChecker<'a> {
         });
     }
 
+    /// Map a base name to the signature-bearing fullname to check: the name
+    /// itself (a function), else its constructor (``__init__``/``__new__``
+    /// for a class). Returns `None` when nothing is indexed.
+    fn callable_fullname(&self, base: &str) -> Option<String> {
+        if self.index.get(base).is_some() {
+            return Some(base.to_string());
+        }
+        for ctor in ["__init__", "__new__"] {
+            let candidate = format!("{base}.{ctor}");
+            if self.index.get(&candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             Expr::Name(name) => {
@@ -202,18 +352,43 @@ impl<'a> CallChecker<'a> {
                     if self.index.get(&dunder_call).is_some() {
                         return Some(dunder_call);
                     }
-                    return Some(resolved);
+                    // Class name -> its constructor, if indexed.
+                    return Some(self.callable_fullname(&resolved).unwrap_or(resolved));
                 }
-                Some(format!("{}.{}", self.module_name, local))
+                // Not a local binding: try this module, then builtins.
+                let module_candidate = format!("{}.{}", self.module_name, local);
+                if let Some(found) = self.callable_fullname(&module_candidate) {
+                    return Some(found);
+                }
+                if let Some(found) = self.callable_fullname(&format!("builtins.{local}")) {
+                    return Some(found);
+                }
+                Some(module_candidate)
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
+                    // ``import a.b as m`` / ``import os.path`` then ``m.f()``.
+                    if let Some(module_path) = self.resolve_module(base_name) {
+                        return Some(format!("{module_path}.{attr_name}"));
+                    }
                     if let Some(class_fullname) = self.resolve_local(base_name) {
                         return Some(format!("{class_fullname}.{attr_name}"));
                     }
                     return Some(format!("{}.{}.{}", self.module_name, base_name, attr_name));
+                }
+                // Deeper chains: ``import os.path`` then ``os.path.join()``.
+                if let Some(chain) = Self::dotted_path(value) {
+                    let (head, rest) = chain
+                        .split_once('.')
+                        .map_or((chain.as_str(), None), |(h, r)| (h, Some(r)));
+                    if let Some(module_path) = self.resolve_module(head) {
+                        return Some(match rest {
+                            Some(rest) => format!("{module_path}.{rest}.{attr_name}"),
+                            None => format!("{module_path}.{attr_name}"),
+                        });
+                    }
                 }
                 None
             }
@@ -286,6 +461,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 walk_stmt(self, stmt);
             }
+            Stmt::Import(_) | Stmt::ImportFrom(_) => {
+                self.record_import(stmt);
+            }
             _ => walk_stmt(self, stmt),
         }
     }
@@ -325,6 +503,11 @@ fn format_callee_display(fullname: &str) -> String {
     let Some((parent, method)) = fullname.rsplit_once('.') else {
         return format!("\"{fullname}\"");
     };
+    if method == "__init__" || method == "__new__" {
+        // Constructor: report the class name (``"str"``), as mypy does.
+        let class = parent.rsplit('.').next().unwrap_or(parent);
+        return format!("\"{class}\"");
+    }
     if parent.contains('.') {
         let class = parent.rsplit('.').next().unwrap_or(parent);
         format!("\"{method}\" of \"{class}\"")

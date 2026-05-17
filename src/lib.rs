@@ -6,6 +6,7 @@ mod config;
 mod diagnostic;
 mod error;
 mod index;
+mod resolve;
 mod signature;
 
 pub use check::check_paths;

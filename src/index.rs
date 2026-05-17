@@ -5,25 +5,28 @@ use std::path::{Path, PathBuf};
 use ruff_python_ast::Stmt;
 use ruff_python_ast::{self as ast};
 use ruff_python_parser::parse_module;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
+use crate::resolve::ModuleResolver;
 use crate::signature::Signature;
 
 #[derive(Debug, Default)]
 pub struct DefinitionIndex {
-    /// Fully-qualified name (e.g. ``main.C.method``) -> signature.
-    pub signatures: FxHashMap<String, Signature>,
+    /// Fully-qualified name (e.g. ``main.C.method``) -> one or more
+    /// signatures. Multiple entries occur for ``@overload``-ed definitions
+    /// (common in ``.pyi`` stubs) and plain redefinitions.
+    pub signatures: FxHashMap<String, Vec<Signature>>,
 }
 
 impl DefinitionIndex {
     pub fn insert(&mut self, fullname: String, signature: Signature) {
-        self.signatures.insert(fullname, signature);
+        self.signatures.entry(fullname).or_default().push(signature);
     }
 
-    pub fn get(&self, fullname: &str) -> Option<&Signature> {
-        self.signatures.get(fullname)
+    pub fn get(&self, fullname: &str) -> Option<&[Signature]> {
+        self.signatures.get(fullname).map(Vec::as_slice)
     }
 }
 
@@ -43,15 +46,151 @@ pub fn build_index(
     project_root: &Path,
     python_files: &[PathBuf],
 ) -> Result<DefinitionIndex, CheckError> {
+    let resolver = ModuleResolver::new(project_root);
     let mut index = DefinitionIndex::default();
+    let mut indexed: FxHashSet<String> = FxHashSet::default();
+    let mut imports: Vec<String> = Vec::new();
+
+    // Builtins come from vendored typeshed ``stdlib/builtins.pyi``.
+    if let Some(src) = resolver.resolve("builtins") {
+        if let Ok(parsed) = parse_module(&src) {
+            index_module(&mut index, "builtins", parsed.suite());
+        }
+    }
+    indexed.insert("builtins".to_string());
+
+    // First-party: the files being checked.
     for path in python_files {
         let source = std::fs::read_to_string(path)?;
         let parsed = parse_module(&source)?;
-        let module = parsed.suite();
         let module_name = module_name_for_path(project_root, path);
-        index_module(&mut index, &module_name, module);
+        collect_imports(parsed.suite(), &module_name, &mut imports);
+        index_module(&mut index, &module_name, parsed.suite());
+        indexed.insert(module_name);
     }
+
+    // Lazily resolve & index modules imported by the checked files (one level),
+    // mirroring ty's resolution order: first-party, stdlib, site-packages.
+    for dotted in imports {
+        if !indexed.insert(dotted.clone()) {
+            continue;
+        }
+        if let Some(src) = resolver.resolve(&dotted) {
+            if let Ok(parsed) = parse_module(&src) {
+                index_module(&mut index, &dotted, parsed.suite());
+            }
+        }
+    }
+
     Ok(index)
+}
+
+/// Collect dotted module names imported by ``stmts`` (recursively), resolving
+/// relative imports against ``current_module``. Records the imported module
+/// and useful parents so attribute access (`a.b.c`) resolves.
+fn collect_imports(stmts: &[Stmt], current_module: &str, out: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Import(ast::StmtImport { names, .. }) => {
+                for alias in names {
+                    let dotted = alias.name.as_str();
+                    out.push(dotted.to_string());
+                    // Parents, for ``import a.b.c`` then ``a.b.c.f()``.
+                    let parts: Vec<&str> = dotted.split('.').collect();
+                    for end in 1..parts.len() {
+                        out.push(parts[..end].join("."));
+                    }
+                }
+            }
+            Stmt::ImportFrom(ast::StmtImportFrom {
+                module,
+                names,
+                level,
+                ..
+            }) => {
+                let Some(base) = resolve_relative(
+                    current_module,
+                    *level,
+                    module.as_ref().map(ast::Identifier::as_str),
+                ) else {
+                    continue;
+                };
+                if !base.is_empty() {
+                    out.push(base.clone());
+                }
+                // ``from a import b`` where ``b`` is itself a submodule.
+                for alias in names {
+                    let name = alias.name.as_str();
+                    if name != "*" {
+                        let sub = if base.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{base}.{name}")
+                        };
+                        out.push(sub);
+                    }
+                }
+            }
+            Stmt::FunctionDef(ast::StmtFunctionDef { body, .. })
+            | Stmt::ClassDef(ast::StmtClassDef { body, .. })
+            | Stmt::While(ast::StmtWhile { body, .. })
+            | Stmt::For(ast::StmtFor { body, .. })
+            | Stmt::With(ast::StmtWith { body, .. }) => {
+                collect_imports(body, current_module, out);
+            }
+            Stmt::If(ast::StmtIf {
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                collect_imports(body, current_module, out);
+                for clause in elif_else_clauses {
+                    collect_imports(&clause.body, current_module, out);
+                }
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                collect_imports(body, current_module, out);
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    collect_imports(&handler.body, current_module, out);
+                }
+                collect_imports(orelse, current_module, out);
+                collect_imports(finalbody, current_module, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Resolve ``from <level dots><module> import ...`` to its base dotted path,
+/// relative to ``current_module`` for ``level > 0``.
+fn resolve_relative(current_module: &str, level: u32, module: Option<&str>) -> Option<String> {
+    if level == 0 {
+        return module.map(str::to_string);
+    }
+    let package = current_module.rsplit_once('.').map_or("", |(p, _)| p);
+    let mut parts: Vec<&str> = if package.is_empty() {
+        Vec::new()
+    } else {
+        package.split('.').collect()
+    };
+    for _ in 1..level {
+        parts.pop()?;
+    }
+    let mut base = parts.join(".");
+    if let Some(module) = module {
+        if !base.is_empty() {
+            base.push('.');
+        }
+        base.push_str(module);
+    }
+    Some(base)
 }
 
 fn index_module(index: &mut DefinitionIndex, module_name: &str, stmts: &[Stmt]) {

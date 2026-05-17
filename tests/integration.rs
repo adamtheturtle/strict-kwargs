@@ -321,3 +321,353 @@ str(1)
         );
     assert_error_at(&project, 6, "not_ignored");
 }
+
+/// Regression: passing a directory whose path contains a `.` (current-dir)
+/// component — as happens with the documented ``strict-kwargs .`` — must
+/// still discover files. ``tempfile::tempdir`` names dirs ``.tmpXXXX``, which
+/// would itself be ignored, so use an explicit non-dotted prefix here.
+#[test]
+fn directory_with_curdir_component() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    std::fs::write(
+        root.join("main.py"),
+        "\ndef func(a: int) -> None: ...\nfunc(1)\n",
+    )
+    .expect("write main");
+
+    let dir = root.join(".");
+    let config = Config::load(&root);
+    let diagnostics = check_paths(&root, &[dir], &config).expect("check");
+    let messages: Vec<String> = diagnostics
+        .iter()
+        .map(|d| format!("{}: {}", d.line, d.message()))
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("3:") && m.contains("Too many positional")),
+        "expected violation to be reported, got: {messages:?}"
+    );
+}
+
+/// Build a non-dotted project dir, write the given files, and check them all
+/// (passing explicit file paths so directory-ignore rules don't interfere).
+fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let mut paths = Vec::new();
+    for (name, content) in files {
+        let path = root.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create dirs");
+        }
+        std::fs::write(&path, content).expect("write file");
+        paths.push(path);
+    }
+    let config = Config::load(&root);
+    let diagnostics = check_paths(&root, &paths, &config).expect("check");
+    diagnostics
+        .iter()
+        .map(|d| {
+            format!(
+                "{}:{}: {}",
+                d.path.file_name().unwrap().to_string_lossy(),
+                d.line,
+                d.message()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn cross_module_from_import() {
+    let messages = check_multi(&[
+        (
+            "lib.py",
+            "def helper(a: int, b: int) -> int:\n    return a + b\n",
+        ),
+        (
+            "app.py",
+            "from lib import helper\n\nhelper(1, 2)\nhelper(a=1, b=2)\n",
+        ),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
+fn cross_module_from_import_aliased() {
+    let messages = check_multi(&[
+        ("lib.py", "def helper(a: int) -> None: ...\n"),
+        ("app.py", "from lib import helper as h\n\nh(1)\n"),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn module_attribute_import() {
+    let messages = check_multi(&[
+        ("lib.py", "def helper(a: int) -> None: ...\n"),
+        ("app.py", "import lib\n\nlib.helper(1)\nlib.helper(a=1)\n"),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn module_attribute_import_aliased() {
+    let messages = check_multi(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/lib.py", "def helper(a: int) -> None: ...\n"),
+        ("app.py", "import pkg.lib as pl\n\npl.helper(1)\n"),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn relative_import() {
+    let messages = check_multi(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/lib.py", "def helper(a: int) -> None: ...\n"),
+        ("pkg/app.py", "from .lib import helper\n\nhelper(1)\n"),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+/// Overloads (multiple signatures for one name, as in ``.pyi`` stubs) must be
+/// treated permissively: a call OK under *any* overload is not flagged.
+#[test]
+fn overload_is_permissive() {
+    let messages = check_multi(&[
+        (
+            "lib.py",
+            "def f(a: int, /) -> None: ...\ndef f(a: int, b: int, /) -> None: ...\n",
+        ),
+        ("app.py", "from lib import f\n\nf(1, 2)\n"),
+    ]);
+    assert!(
+        messages.is_empty(),
+        "call valid under the 2-arg overload must not flag, got: {messages:?}"
+    );
+}
+
+#[test]
+fn overload_flags_when_all_exceed() {
+    let messages = check_multi(&[
+        (
+            "lib.py",
+            "def f(a: int) -> None: ...\ndef f(a: int, b: int) -> None: ...\n",
+        ),
+        ("app.py", "from lib import f\n\nf(1, 2)\n"),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn builtin_str_positional_flags() {
+    assert_error(r#"str("a")"#, 1, "Too many positional");
+    assert_error(r#"str("a")"#, 1, "\"str\"");
+}
+
+#[test]
+fn builtin_str_keyword_ok() {
+    assert_ok(r#"str(object="a")"#);
+}
+
+#[test]
+fn builtin_positional_only_ok() {
+    // typeshed marks these positional-only, so idiomatic calls don't flag.
+    assert_ok(
+        r#"
+len([1])
+int("1")
+range(10)
+isinstance(1, int)
+sorted([3, 1])
+print("hi", 1, 2)
+"#,
+    );
+}
+
+#[test]
+fn builtin_shadowed_by_local_def() {
+    // A local ``def str`` shadows the builtin; resolution must prefer it.
+    assert_error(
+        r#"
+def str(object): ...
+str("x")
+"#,
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn project_constructor_positional_flags() {
+    // Constructor resolution: ``C(1)`` now maps to ``C.__init__``.
+    assert_error(
+        r#"
+class C:
+    def __init__(self, a: int) -> None: ...
+C(1)
+"#,
+        4,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn project_constructor_keyword_ok() {
+    assert_ok(
+        r#"
+class C:
+    def __init__(self, a: int) -> None: ...
+C(a=1)
+"#,
+    );
+}
+
+#[test]
+fn builtin_ignore_name_suppresses() {
+    let project = TestProject::new()
+        .file(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nignore_names = [\"builtins.str\"]\n",
+        )
+        .main(r#"str("a")"#);
+    assert!(
+        project.check().is_empty(),
+        "ignored builtin must not flag: {:?}",
+        project.check()
+    );
+}
+
+/// Write `aux` files to disk (sibling modules, fake venv) but only check the
+/// `check` files, so resolver behavior can be exercised in isolation.
+fn check_with_aux(check: &[(&str, &str)], aux: &[(&str, &str)]) -> Vec<String> {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let write = |name: &str, content: &str| {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dirs");
+        std::fs::write(&path, content).expect("write");
+        path
+    };
+    for (n, c) in aux {
+        write(n, c);
+    }
+    let paths: Vec<_> = check.iter().map(|(n, c)| write(n, c)).collect();
+    let config = Config::load(&root);
+    check_paths(&root, &paths, &config)
+        .expect("check")
+        .iter()
+        .map(|d| {
+            format!(
+                "{}:{}: {}",
+                d.path.file_name().unwrap().to_string_lossy(),
+                d.line,
+                d.message()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn first_party_sibling_resolved_for_single_file() {
+    // Only ``app.py`` is checked; ``lib.py`` is resolved via the first-party
+    // root (ty-style), so the cross-module call is still enforced.
+    let messages = check_with_aux(
+        &[("app.py", "from lib import helper\n\nhelper(1, 2)\n")],
+        &[(
+            "lib.py",
+            "def helper(a: int, b: int) -> int:\n    return a + b\n",
+        )],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn third_party_inline_typed_package() {
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "from mypkg import api\n\napi(1, 2)\napi(a=1, b=2)\n",
+        )],
+        &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "def api(a, b):\n    return a\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
+fn third_party_stub_package_pep561() {
+    // A dedicated ``*-stubs`` distribution is preferred over inline source.
+    let messages = check_with_aux(
+        &[("app.py", "import mypkg\n\nmypkg.api(1)\n")],
+        &[
+            (
+                ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
+                "def api(*args, **kwargs): ...\n",
+            ),
+            (
+                ".venv/lib/python3.12/site-packages/mypkg-stubs/__init__.pyi",
+                "def api(a: int) -> None: ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn stdlib_typeshed_resolves() {
+    // ``OrderedDict`` (collections) takes its arg positional-or-keyword in
+    // typeshed via ``dict``; a keyword call must be accepted, proving the
+    // stdlib module was resolved (not silently skipped).
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "from collections import OrderedDict\n\nOrderedDict()\n",
+        )],
+        &[],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
