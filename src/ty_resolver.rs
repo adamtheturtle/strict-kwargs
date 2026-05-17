@@ -941,12 +941,15 @@ mod tests {
         bytes.extend(frame("not json"));
         bytes.extend(frame(r#"{"id":2}"#));
         read_messages(Cursor::new(bytes), &tx);
+        // Release the only sender so a drained channel reports disconnect
+        // instead of blocking `recv` forever.
+        drop(tx);
 
         let first = rx.recv().unwrap();
         assert_eq!(first["id"], 1);
         let second = rx.recv().unwrap();
         assert_eq!(second["id"], 2);
-        // Reader returned at EOF; channel now closed.
+        // Only two valid frames were forwarded; the garbage one was skipped.
         assert!(rx.recv().is_err());
     }
 
@@ -965,6 +968,7 @@ mod tests {
             Cursor::new(b"X-Other: 1\r\nContent-Length: abc\r\n\r\n".to_vec()),
             &tx,
         );
+        drop(tx);
         assert!(rx.recv().is_err());
 
         // Declared length exceeds the available body => body read fails.
