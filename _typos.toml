@@ -1,0 +1,16 @@
+# Spell-checking configuration for `typos`.
+# https://github.com/crate-ci/typos
+
+[files]
+# `vendored/typeshed/` is a verbatim third-party copy (see
+# `vendored/typeshed/README.md`); never rewrite it. Lockfiles are generated.
+extend-exclude = [
+  "vendored/",
+  "Cargo.lock",
+  "uv.lock",
+]
+
+[default.extend-words]
+# `ot` is a parameter name in a Python descriptor test fixture
+# (`def __get__(self, o, ot=None)`), not a misspelling.
+ot = "ot"

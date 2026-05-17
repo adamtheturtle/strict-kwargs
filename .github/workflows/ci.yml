@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           uv tool install ty
-          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+          uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH
         # Fail loudly if ty is missing so the ty-backed tests are actually

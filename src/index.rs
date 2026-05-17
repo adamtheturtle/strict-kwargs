@@ -363,9 +363,9 @@ fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
                 index_module(index, module_name, &clause.body);
             }
         }
-        Stmt::While(ast::StmtWhile { body, .. }) => index_module(index, module_name, body),
-        Stmt::For(ast::StmtFor { body, .. }) => index_module(index, module_name, body),
-        Stmt::With(ast::StmtWith { body, .. }) => index_module(index, module_name, body),
+        Stmt::While(ast::StmtWhile { body, .. })
+        | Stmt::For(ast::StmtFor { body, .. })
+        | Stmt::With(ast::StmtWith { body, .. }) => index_module(index, module_name, body),
         Stmt::Try(ast::StmtTry {
             body,
             handlers,

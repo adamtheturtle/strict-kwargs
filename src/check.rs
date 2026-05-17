@@ -25,6 +25,11 @@ use crate::ty_resolver::{
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
 };
 
+/// Check every Python file reachable from `paths` and return the violations.
+///
+/// # Errors
+///
+/// Returns [`CheckError`] if a source file cannot be read or parsed.
 pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
@@ -179,6 +184,13 @@ impl<'a> CallChecker<'a> {
     }
 
     fn current_scope(&mut self) -> &mut Scope {
+        // The scope stack is seeded with one `Scope` in `new` and every
+        // `pop_scope` is balanced with a prior `push_scope`, so it is never
+        // empty here.
+        #[allow(
+            clippy::expect_used,
+            reason = "scope stack invariant: always non-empty"
+        )]
         self.scopes.last_mut().expect("scope stack non-empty")
     }
 
@@ -476,7 +488,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::ClassDef(StmtClassDef { name, body, .. }) => {
                 let class_fullname = format!("{}.{}", self.module_name, name);
-                self.define(name, class_fullname.clone());
+                self.define(name, class_fullname);
                 self.push_scope();
                 for inner in body {
                     match inner {
@@ -742,7 +754,8 @@ fn emit_if_violation(
         .filter_map(|s| s.max_positional_at_call_site(fullname, false))
         .max()
         .unwrap_or(0);
-    let (line, column) = line_column(source, TextSize::new(call_start as u32));
+    let offset = u32::try_from(call_start).unwrap_or(u32::MAX);
+    let (line, column) = line_column(source, TextSize::new(offset));
     diagnostics.push(Diagnostic {
         path: path.to_path_buf(),
         line,

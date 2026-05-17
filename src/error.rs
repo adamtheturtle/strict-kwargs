@@ -2,9 +2,12 @@
 
 use ruff_python_parser::ParseError;
 
+/// Fatal error while reading or parsing a checked file.
 #[derive(Debug)]
 pub enum CheckError {
+    /// Filesystem error while reading a source file.
     Io(std::io::Error),
+    /// The Python source could not be parsed.
     Parse(ParseError),
 }
 

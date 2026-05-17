@@ -1,0 +1,15 @@
+# Strict Clippy configuration for `strict-kwargs`.
+#
+# The lint *levels* live in `[lints.clippy]` in `Cargo.toml`; this file only
+# tunes individual lint behaviour.
+
+# Minimum supported Rust version (kept in sync with `rust-version` in
+# `Cargo.toml`) so Clippy does not suggest newer-than-MSRV APIs.
+msrv = "1.83"
+
+# `unwrap`/`expect`/`panic` are idiomatic in test code; only enforce the
+# `restriction` lints against production code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true

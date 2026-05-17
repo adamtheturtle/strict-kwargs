@@ -126,6 +126,30 @@ For the full resolution pipeline (built-in resolver + embedded typeshed + the
 optional `ty` inference fallback), the support matrix, parity status, and the
 honest limitations, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Development
+
+This repo enforces a strict lint culture (pedantic + nursery Clippy with a
+small documented allow-list, `-D warnings`, doc coverage, spell-checking, and
+workflow hardening). Install the git hooks once so you catch the same failures
+locally that CI enforces:
+
+```bash
+prek install        # or: pre-commit install
+```
+
+That wires up both the **pre-commit** stage (fast: `cargo fmt`, `cargo clippy
+-D warnings`, `typos`, `actionlint`, `zizmor`, file hygiene) and the
+**pre-push** stage (`cargo test`). Run everything on demand:
+
+```bash
+prek run --all-files                          # commit-stage hooks
+prek run --all-files --hook-stage pre-push    # cargo test
+```
+
+The lint configuration lives in `Cargo.toml` (`[lints]`), `clippy.toml`,
+`rustfmt.toml`, `_typos.toml`, and `.pre-commit-config.yaml`. CI runs the same
+hooks (`.github/workflows/lint.yml`), so there is no local/CI drift.
+
 ## License
 
 MIT

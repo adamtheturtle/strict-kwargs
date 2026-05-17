@@ -1,0 +1,84 @@
+---
+# Developer tooling for this repo. Mirrors `.github/workflows/lint.yml` so
+# contributors catch the same failures locally that CI enforces.
+#
+# Install (one command):
+#
+#     prek install      # or: pre-commit install
+#
+# `prek install` wires up both the pre-commit and pre-push hook types
+# (see `default_install_hook_types`). Fast checks run on commit; the slower
+# `cargo test` runs on push.
+
+fail_fast: false
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: meta
+    hooks:
+      - id: check-useless-excludes
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-vcs-permalinks
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.46.2
+    hooks:
+      - id: typos
+        # Do not auto-apply fixes. When pre-commit passes explicit
+        # filenames, typos bypasses `_typos.toml`'s `extend-exclude`, so
+        # mirror those exclusions here.
+        args: []
+        exclude: '^(vendored/|Cargo\.lock$|uv\.lock$)'
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/woodruffw/zizmor-pre-commit
+    rev: v1.25.2
+    hooks:
+      - id: zizmor
+        # Rule policy lives in the repo-root `zizmor.yml` (mirrors
+        # mypy-strict-kwargs), so no severity flags are needed here.
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        stages: [pre-push]
+        entry: cargo test --all-features
+        language: system
+        types: [rust]
+        pass_filenames: false
