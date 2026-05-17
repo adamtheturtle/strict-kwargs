@@ -747,10 +747,18 @@ mod tests {
     // ----- Pure parsing/encoding helpers -------------------------------
 
     #[test]
-    fn ty_binary_present_detects_installed_ty() {
-        // The coverage gate guarantees `ty` is on PATH (CI asserts
-        // `ty version`); locally these tests likewise require it.
-        assert!(ty_binary_present());
+    fn ty_binary_present_matches_actual_environment() {
+        // Exercises `ty_binary_present` without requiring `ty` to be
+        // installed (the lint workflow's `cargo test` hook has no `ty`):
+        // assert it agrees with an independent probe of the same command,
+        // so it holds whether or not `ty` is on PATH.
+        let expected = Command::new("ty")
+            .arg("version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert_eq!(ty_binary_present(), expected);
     }
 
     #[test]
