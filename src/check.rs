@@ -920,12 +920,23 @@ fn signature_from_param_text(params: &str) -> Option<Signature> {
 /// argument binds to the receiver parameter and must not be counted against
 /// the positional limit. Drop the parameter and the receiver argument so only
 /// the *remaining* positional arguments are checked (issue #15).
-fn strip_unbound_receiver(signature: Signature, positional_count: usize) -> (Signature, usize) {
-    let first_is_receiver = signature
-        .parameters
-        .first()
-        .and_then(|p| p.name.as_deref())
-        .is_some_and(|name| name == "self" || name == "cls");
+///
+/// Only `def …` hovers (`is_def_hover`, i.e. ty reported no owner) can carry an
+/// unstripped receiver. A `bound method Owner.m(...)` hover already had its
+/// receiver removed by ty, so its leading parameter is genuine — stripping it
+/// would corrupt the count for a method whose first non-receiver parameter is
+/// itself literally named `self`/`cls` (e.g. `def m(self, cls, x)`).
+fn strip_unbound_receiver(
+    signature: Signature,
+    positional_count: usize,
+    is_def_hover: bool,
+) -> (Signature, usize) {
+    let first_is_receiver = is_def_hover
+        && signature
+            .parameters
+            .first()
+            .and_then(|p| p.name.as_deref())
+            .is_some_and(|name| name == "self" || name == "cls");
     if !first_is_receiver {
         return (signature, positional_count);
     }
@@ -1022,7 +1033,7 @@ fn resolve_pending_with_ty(
                 continue;
             };
             let (signature, positional_count) =
-                strip_unbound_receiver(signature, p.positional_count);
+                strip_unbound_receiver(signature, p.positional_count, sig.owner.is_none());
             let fullname = match &sig.owner {
                 Some(owner) => {
                     let owner = owner.split('[').next().unwrap_or(owner);
@@ -1170,14 +1181,14 @@ mod tests {
     fn strips_leading_self_and_the_explicit_receiver() {
         // `str.lower(key)`: ty hover keeps `self`; the explicit receiver fills
         // it and must not count (issue #15).
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1);
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
     }
 
     #[test]
     fn strips_leading_cls() {
-        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2);
+        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2, true);
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].name.as_deref(), Some("a"));
         assert_eq!(count, 1);
@@ -1187,16 +1198,28 @@ mod tests {
     fn leaves_bound_signature_untouched() {
         // ty already dropped the receiver for a bound call (`def upper()` /
         // `bound method T.m(...)`): no leading `self`/`cls`, nothing to strip.
-        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1);
+        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1, true);
         assert_eq!(s.parameters.len(), 2);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn keeps_cls_parameter_of_bound_method_hover() {
+        // `bound method Owner.m(...)` (owner present -> `is_def_hover` false):
+        // ty already stripped the real receiver, so a leading parameter that
+        // happens to be named `cls`/`self` (`def m(self, cls, x)`) is genuine
+        // and must not be dropped (PR #17 review).
+        let (s, count) = strip_unbound_receiver(sig(&["cls", "x"]), 2, false);
+        assert_eq!(s.parameters.len(), 2);
+        assert_eq!(s.parameters[0].name.as_deref(), Some("cls"));
+        assert_eq!(count, 2);
     }
 
     #[test]
     fn saturates_when_no_explicit_receiver_argument() {
         // Defensive: a leading `self` with zero positional args (e.g. a
         // keyword-only / malformed call) must not underflow the count.
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0);
+        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
     }
