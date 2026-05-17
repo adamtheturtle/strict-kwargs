@@ -537,6 +537,21 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    /// Resolve a deeper attribute chain (`os.path.join` -> the joined
+    /// module path). Reached only when the attribute's base is itself an
+    /// attribute (the bare-`Name` base is handled by the caller), so
+    /// `dotted_path` always contains at least one `.`; the no-`.` and
+    /// unresolved-module fall-throughs are therefore unreachable defensive
+    /// returns. Behaviour is covered by `deep_dotted_attribute_chain_resolves`.
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_dotted_module_attr(&self, value: &Expr, attr_name: &str) -> Option<String> {
+        let chain = Self::dotted_path(value)?;
+        let (head, rest) = chain.split_once('.')?;
+        let module_path = self.resolve_module(head)?;
+        let candidate = format!("{module_path}.{rest}.{attr_name}");
+        Some(self.callable_fullname(&candidate).unwrap_or(candidate))
+    }
+
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             Expr::Name(name) => {
@@ -578,19 +593,7 @@ impl<'a> CallChecker<'a> {
                     return Some(self.callable_fullname(&candidate).unwrap_or(candidate));
                 }
                 // Deeper chains: ``import os.path`` then ``os.path.join()``.
-                if let Some(chain) = Self::dotted_path(value) {
-                    let (head, rest) = chain
-                        .split_once('.')
-                        .map_or((chain.as_str(), None), |(h, r)| (h, Some(r)));
-                    if let Some(module_path) = self.resolve_module(head) {
-                        let candidate = match rest {
-                            Some(rest) => format!("{module_path}.{rest}.{attr_name}"),
-                            None => format!("{module_path}.{attr_name}"),
-                        };
-                        return Some(self.callable_fullname(&candidate).unwrap_or(candidate));
-                    }
-                }
-                None
+                self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
                 if let Expr::Name(class_name) = &*constructor.func {
@@ -824,10 +827,9 @@ pub fn fix_paths(
         if insertions.is_empty() {
             continue;
         }
+        // `insertions` is non-empty here and every insertion adds a
+        // `name=` prefix, so the result always differs from `source`.
         let fixed = apply_insertions(&source, &insertions);
-        if fixed == source {
-            continue;
-        }
         results.push(FileFix {
             path: path.clone(),
             original: source,

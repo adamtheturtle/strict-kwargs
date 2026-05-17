@@ -242,6 +242,23 @@ make()(1, 2)
     assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
 }
 
+/// `K()(1, 2)` where `K` is a locally-bound class *without* `__call__`:
+/// the constructor-call arm resolves the class but finds no `__call__` in
+/// the index, so it falls through to `None` (deferred to ty, not flagged).
+#[test]
+fn call_of_class_instance_without_dunder_call_is_unresolved() {
+    let messages = check_source(
+        r"
+class K:
+    pass
+
+
+K()(1, 2)
+",
+    );
+    assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+}
+
 /// A subscript callee (`registry["k"](1, 2)`) is not a resolvable
 /// name/attribute/call; it is deferred to ty and, unresolved, not flagged.
 #[test]
