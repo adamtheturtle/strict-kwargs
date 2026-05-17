@@ -55,9 +55,22 @@ jobs:
     # instructions of this process, so the optional ty subprocess fallback
     # would not be measured anyway, and the fixtures are fully resolvable by
     # the built-in resolver.
+    #
+    # The measured upload runs only when `CODSPEED_TOKEN` is configured (a
+    # repo secret). Without it the CodSpeed API rejects the upload with a
+    # 401, so the step is skipped rather than failing the build — fork PRs
+    # and repos that have not yet linked CodSpeed stay green. `cargo
+    # codspeed build` still runs unconditionally as a compile smoke test, so
+    # a broken benchmark is caught regardless. To enable measurement, add a
+    # `CODSPEED_TOKEN` secret from the CodSpeed dashboard for this repo.
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Job-level env may reference secrets; step `if` may reference `env`.
+    # This is the supported way to gate a step on a secret's presence
+    # (secrets are not usable in `if:` directly).
+    env:
+      CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
 
     steps:
       - uses: actions/checkout@v6
@@ -76,10 +89,11 @@ jobs:
         run: cargo codspeed build
 
       - name: Run the benchmarks
+        if: env.CODSPEED_TOKEN != ''
         uses: CodSpeedHQ/action@v3
         with:
           run: cargo codspeed run
-          token: ${{ secrets.CODSPEED_TOKEN }}
+          token: ${{ env.CODSPEED_TOKEN }}
 
   completion-ci:
     needs: build
