@@ -181,6 +181,22 @@ fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
 /// resolving relative imports against ``module_name``/``is_package``.
 fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collected) {
+    collect_scoped(stmts, module_name, is_package, true, out);
+}
+
+/// `module_scope` is true only at true module level. Imports nested inside a
+/// function or class body bind in that local/class namespace, *not* the
+/// module's, so they must not create module-level re-export edges (which
+/// would make ``module.name`` a false alias). Submodules are still queued for
+/// resolution everywhere — indexing an extra module is harmless and lets
+/// function-local calls be checked.
+fn collect_scoped(
+    stmts: &[Stmt],
+    module_name: &str,
+    is_package: bool,
+    module_scope: bool,
+    out: &mut Collected,
+) {
     for stmt in stmts {
         match stmt {
             Stmt::Import(ast::StmtImport { names, .. }) => {
@@ -213,8 +229,9 @@ fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collec
                 for alias in names {
                     let name = alias.name.as_str();
                     if name == "*" {
-                        // ``from base import *`` re-exports all of ``base``.
-                        if !base.is_empty() {
+                        // ``from base import *`` re-exports all of ``base``,
+                        // but only when written at module level.
+                        if module_scope && !base.is_empty() {
                             out.reexports.push((base.clone(), module_name.to_string()));
                         }
                         continue;
@@ -227,27 +244,36 @@ fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collec
                     // ``name`` may itself be a submodule.
                     out.modules.push(qualified.clone());
                     // ``from base import name as out`` makes ``module.out``
-                    // an alias of ``base.name``.
-                    let exported = alias.asname.as_ref().map_or(name, ast::Identifier::as_str);
-                    out.reexports
-                        .push((qualified, format!("{module_name}.{exported}")));
+                    // an alias of ``base.name`` — only at module level.
+                    if module_scope {
+                        let exported = alias.asname.as_ref().map_or(name, ast::Identifier::as_str);
+                        out.reexports
+                            .push((qualified, format!("{module_name}.{exported}")));
+                    }
                 }
             }
+            // Imports here bind in the function/class namespace, never the
+            // module's, so descend with ``module_scope = false``.
             Stmt::FunctionDef(ast::StmtFunctionDef { body, .. })
-            | Stmt::ClassDef(ast::StmtClassDef { body, .. })
-            | Stmt::While(ast::StmtWhile { body, .. })
+            | Stmt::ClassDef(ast::StmtClassDef { body, .. }) => {
+                collect_scoped(body, module_name, is_package, false, out);
+            }
+            // Control flow does not introduce a scope: a module-level
+            // ``if``/``try`` still re-exports (typeshed gates re-exports on
+            // ``sys.version_info``), so inherit the current scope.
+            Stmt::While(ast::StmtWhile { body, .. })
             | Stmt::For(ast::StmtFor { body, .. })
             | Stmt::With(ast::StmtWith { body, .. }) => {
-                collect(body, module_name, is_package, out);
+                collect_scoped(body, module_name, is_package, module_scope, out);
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                collect(body, module_name, is_package, out);
+                collect_scoped(body, module_name, is_package, module_scope, out);
                 for clause in elif_else_clauses {
-                    collect(&clause.body, module_name, is_package, out);
+                    collect_scoped(&clause.body, module_name, is_package, module_scope, out);
                 }
             }
             Stmt::Try(ast::StmtTry {
@@ -257,13 +283,13 @@ fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collec
                 finalbody,
                 ..
             }) => {
-                collect(body, module_name, is_package, out);
+                collect_scoped(body, module_name, is_package, module_scope, out);
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    collect(&handler.body, module_name, is_package, out);
+                    collect_scoped(&handler.body, module_name, is_package, module_scope, out);
                 }
-                collect(orelse, module_name, is_package, out);
-                collect(finalbody, module_name, is_package, out);
+                collect_scoped(orelse, module_name, is_package, module_scope, out);
+                collect_scoped(finalbody, module_name, is_package, module_scope, out);
             }
             _ => {}
         }

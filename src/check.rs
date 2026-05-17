@@ -21,7 +21,7 @@ use crate::index::{
 };
 use crate::signature::Signature;
 use crate::ty_resolver::{
-    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_hover_signature,
+    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_hover_signature, same_path,
     ty_binary_present, TyResolver,
 };
 
@@ -804,7 +804,7 @@ fn resolve_pending_with_ty(
         else {
             continue;
         };
-        let target = if loc.path == path {
+        let target = if same_path(&loc.path, path) {
             Some(source.to_string())
         } else {
             file_cache
