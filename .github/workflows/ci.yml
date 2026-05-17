@@ -47,6 +47,40 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  benchmarks:
+    # Continuous benchmarking (issue #30). Non-gating: it reports an
+    # instruction-count delta against `main` on every PR but does not fail
+    # the build, so a baseline can be established before any threshold is
+    # enforced. `ty` is intentionally not installed here — CodSpeed measures
+    # instructions of this process, so the optional ty subprocess fallback
+    # would not be measured anyway, and the fixtures are fully resolvable by
+    # the built-in resolver.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+
+      - name: Build the benchmark target
+        run: cargo codspeed build
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v3
+        with:
+          run: cargo codspeed run
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
   completion-ci:
     needs: build
     runs-on: ubuntu-latest
