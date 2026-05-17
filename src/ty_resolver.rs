@@ -265,6 +265,116 @@ pub fn parse_hover_signature(value: &str) -> Option<HoverSignature> {
     })
 }
 
+/// Split `s` on top-level `sep` (bracket/paren/brace depth 0 only).
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            c if c == sep && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// If `s` begins with `(` whose matching `)` is the final char, return the
+/// inside; else `None`.
+fn unwrap_enclosing_parens(s: &str) -> Option<&str> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return if i == s.len() - 1 {
+                        Some(&s[1..i])
+                    } else {
+                        None
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Balanced leading `(...)` group of `s`, if it is immediately followed
+/// (modulo spaces) by `->`. Returns the inside (the parameter-list text).
+fn leading_callable_params(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let rest = s[i + 1..].trim_start();
+                    return rest.starts_with("->").then(|| s[1..i].trim());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse ty hover text that is a *callable type* (not a `def`/`bound method`
+/// display): `(p) -> r` or `(Overload[(p1) -> r1, (p2) -> r2]) | Any`,
+/// optionally wrapped in a top-level union. Returns one parameter-list string
+/// per overload — `self` is already excluded, as ty renders bound-method
+/// types without it. Crucially this preserves typeshed positional-only `/`
+/// markers, which the goto-definition fallback loses when it lands on runtime
+/// stdlib `.py` source (see issue #14).
+pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
+    let head = value.split("\n---").next().unwrap_or(value).trim();
+
+    // Pick the callable arm of a top-level union (drop `Any`, `None`, …).
+    let Some(callable) = split_top_level(head, '|')
+        .into_iter()
+        .map(str::trim)
+        .find(|s| s.starts_with("Overload[") || (s.starts_with('(') && s.contains("->")))
+    else {
+        return Vec::new();
+    };
+
+    // `(Overload[…])` / `(… ) -> …` may be wrapped in one enclosing paren.
+    let callable = match unwrap_enclosing_parens(callable) {
+        Some(inner) if leading_callable_params(callable).is_none() => inner,
+        _ => callable,
+    };
+
+    let entries: Vec<&str> = if let Some(inner) = callable
+        .strip_prefix("Overload[")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        split_top_level(inner, ',')
+    } else {
+        vec![callable]
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|e| leading_callable_params(e).map(str::to_string))
+        .collect()
+}
+
 impl Drop for TyResolver {
     fn drop(&mut self) {
         let _ = self.send(json!({
@@ -502,6 +612,55 @@ mod tests {
     fn posix_path_uri_round_trips() {
         let uri = path_to_uri(Path::new("/home/u/a.py"));
         assert_eq!(uri_to_path_string(&uri).as_deref(), Some("/home/u/a.py"));
+    }
+
+    #[test]
+    fn callable_type_overloads_parses_overload_union() {
+        // The exact ty hover for `sys.stdout.write` (issue #14): the `/`
+        // positional-only markers must survive so the call is not flagged.
+        assert_eq!(
+            parse_callable_type_overloads(
+                "(Overload[(s: Buffer, /) -> int, (s: str, /) -> int]) | Any"
+            ),
+            vec!["s: Buffer, /".to_string(), "s: str, /".to_string()],
+        );
+    }
+
+    #[test]
+    fn callable_type_overloads_single_and_bare_overload() {
+        assert_eq!(
+            parse_callable_type_overloads("(x: int) -> str"),
+            vec!["x: int".to_string()],
+        );
+        assert_eq!(
+            parse_callable_type_overloads("Overload[(a: int, /) -> int, (a: str, /) -> str]"),
+            vec!["a: int, /".to_string(), "a: str, /".to_string()],
+        );
+        // Union in the return type, not the params.
+        assert_eq!(
+            parse_callable_type_overloads("(x: int) -> int | None"),
+            vec!["x: int".to_string()],
+        );
+    }
+
+    #[test]
+    fn callable_type_overloads_keeps_callable_typed_param_intact() {
+        // A callable-typed parameter must not be mistaken for a second
+        // overload — only the leading `(...) ->` group is the signature.
+        assert_eq!(
+            parse_callable_type_overloads("(cb: (int) -> str, /) -> None"),
+            vec!["cb: (int) -> str, /".to_string()],
+        );
+    }
+
+    #[test]
+    fn callable_type_overloads_rejects_non_callables() {
+        assert!(parse_callable_type_overloads("<class 'C'>").is_empty());
+        assert!(
+            parse_callable_type_overloads("<method-wrapper 'startswith' of string 'abc'>")
+                .is_empty()
+        );
+        assert!(parse_callable_type_overloads("list[int]").is_empty());
     }
 
     #[test]
