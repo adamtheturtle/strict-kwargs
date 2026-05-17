@@ -1,9 +1,5 @@
 //! CLI for ``strict-kwargs``.
 
-// See `lib.rs` for why this is gated on `coverage` rather than
-// `coverage_nightly`.
-#![cfg_attr(coverage, feature(coverage_attribute))]
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
