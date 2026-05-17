@@ -61,7 +61,19 @@ impl TyResolver {
     /// Start `ty server` and complete the LSP initialize handshake rooted at
     /// `project_root`. Returns `None` if ty is unavailable or misbehaves —
     /// the caller then runs without the inference fallback.
-    pub fn start(project_root: &Path) -> Option<Self> {
+    ///
+    /// `python_env`, when set, is the `--python` value (an interpreter, a
+    /// venv directory, or a `sys.prefix`, mirroring `ty check --python`). It
+    /// is forwarded to `ty server` so the inference fallback resolves
+    /// third-party imports against that environment without the user editing
+    /// ty's own config. `ty server` takes no CLI args, so this is delivered
+    /// over LSP via `initializationOptions.configuration.environment.python`
+    /// — the inline-config channel that mirrors ty's `[environment]` table
+    /// (see `docs/ARCHITECTURE.md`, "Forwarding an explicit environment").
+    /// A bad path is not validated here: ty just resolves nothing against
+    /// it, so the fallback fails closed (no wrong diagnostics) exactly as
+    /// when no env is configured.
+    pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = Command::new("ty")
             .arg("server")
             .stdin(Stdio::piped())
@@ -85,14 +97,25 @@ impl TyResolver {
             disabled: false,
         };
 
-        let id = resolver.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": path_to_uri(project_root),
-                "capabilities": {},
-            }),
-        )?;
+        let mut init_params = json!({
+            "processId": std::process::id(),
+            "rootUri": path_to_uri(project_root),
+            "capabilities": {},
+        });
+        if let Some(python) = python_env {
+            // Send an absolute path: ty resolves a relative
+            // `environment.python` against its workspace root, but a
+            // CLI-supplied value is relative to the user's cwd. `ty server`
+            // accepts dynamic options during initialize for clients (like
+            // this one) that do not implement `workspace/configuration`.
+            let abs = std::path::absolute(python).unwrap_or_else(|_| python.to_path_buf());
+            init_params["initializationOptions"] = json!({
+                "configuration": {
+                    "environment": { "python": abs.to_string_lossy() },
+                },
+            });
+        }
+        let id = resolver.request("initialize", init_params)?;
         resolver.collect(id, INIT_TIMEOUT)?;
         resolver.notify("initialized", json!({}))?;
         Some(resolver)

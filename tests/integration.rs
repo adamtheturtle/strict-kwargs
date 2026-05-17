@@ -36,7 +36,7 @@ impl TestProject {
     fn check(&self) -> Vec<String> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root);
-        let diagnostics = check_paths(&self.root, &[main], &config).expect("check");
+        let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
         diagnostics
             .iter()
             .map(|d| format!("main:{}: {}", d.line, d.message()))
@@ -346,7 +346,7 @@ fn directory_with_curdir_component() {
 
     let dir = root.join(".");
     let config = Config::load(&root);
-    let diagnostics = check_paths(&root, &[dir], &config).expect("check");
+    let diagnostics = check_paths(&root, &[dir], &config, None).expect("check");
     let messages: Vec<String> = diagnostics
         .iter()
         .map(|d| format!("{}: {}", d.line, d.message()))
@@ -382,7 +382,7 @@ fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
         paths.push(path);
     }
     let config = Config::load(&root);
-    let diagnostics = check_paths(&root, &paths, &config).expect("check");
+    let diagnostics = check_paths(&root, &paths, &config, None).expect("check");
     diagnostics
         .iter()
         .map(|d| {
@@ -588,7 +588,7 @@ fn check_with_aux(check: &[(&str, &str)], aux: &[(&str, &str)]) -> Vec<String> {
     }
     let paths: Vec<_> = check.iter().map(|(n, c)| write(n, c)).collect();
     let config = Config::load(&root);
-    check_paths(&root, &paths, &config)
+    check_paths(&root, &paths, &config, None)
         .expect("check")
         .iter()
         .map(|d| {
@@ -993,6 +993,145 @@ sys.stdout.write("hello\n")
 sys.stderr.write("oops\n")
 "#,
     );
+}
+
+/// Locate the `site-packages` directory inside a freshly created venv
+/// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
+fn venv_site_packages(venv: &std::path::Path) -> Option<PathBuf> {
+    let win = venv.join("Lib").join("site-packages");
+    if win.is_dir() {
+        return Some(win);
+    }
+    for entry in std::fs::read_dir(venv.join("lib")).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("python") {
+            let sp = entry.path().join("site-packages");
+            if sp.is_dir() {
+                return Some(sp);
+            }
+        }
+    }
+    None
+}
+
+/// Create a real (pip-less, fast, offline) venv at `dir`. Returns `None` if
+/// no `python` is available so the test can skip rather than fail.
+fn make_venv(dir: &std::path::Path) -> Option<PathBuf> {
+    for py in ["python3", "python"] {
+        let ok = std::process::Command::new(py)
+            .args(["-m", "venv", "--without-pip"])
+            .arg(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
+#[test]
+fn ty_forwards_external_python_env() {
+    // Issue #12: a venv outside the project root (not `$VIRTUAL_ENV`, not
+    // `<root>/.venv`) is invisible to the built-in resolver *and* to ty's
+    // auto-discovery. Passing the `--python` value forwards it to
+    // `ty server`, so the inference fallback resolves the third-party import
+    // and the positional call is flagged. With `None` (the default) nothing
+    // resolves and no diagnostic is produced — proving both that the flag is
+    // what enables resolution and that the unset path is unchanged.
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    let env_temp = tempfile::tempdir().expect("tempdir");
+    let Some(venv) = make_venv(&env_temp.path().join("ext-env")) else {
+        eprintln!("skipping: `python -m venv` unavailable");
+        return;
+    };
+    let Some(site) = venv_site_packages(&venv) else {
+        eprintln!("skipping: venv has no site-packages");
+        return;
+    };
+    // A typed third-party package that exists ONLY in the external venv.
+    let pkg = site.join("extdep");
+    std::fs::create_dir_all(&pkg).expect("mkdir pkg");
+    std::fs::write(pkg.join("py.typed"), "").expect("py.typed");
+    std::fs::write(
+        pkg.join("__init__.py"),
+        "def configure(host, port):\n    return (host, port)\n",
+    )
+    .expect("pkg init");
+
+    let proj = tempfile::tempdir().expect("tempdir");
+    let root = proj.path();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("pyproject");
+    let main = root.join("main.py");
+    std::fs::write(
+        &main,
+        "import extdep\n\nextdep.configure(\"localhost\", 8080)\nextdep.configure(host=\"localhost\", port=8080)\n",
+    )
+    .expect("main");
+    let config = Config::load(root);
+
+    // Unset: `extdep` is unresolvable -> no diagnostics (no regression).
+    let none = check_paths(root, std::slice::from_ref(&main), &config, None).expect("check");
+    assert!(
+        none.is_empty(),
+        "expected no diagnostics without --python, got: {none:?}"
+    );
+
+    // Forwarded: ty resolves `extdep.configure` against the external venv
+    // and flags the positional call (line 3); the keyword call (line 4) is
+    // fine.
+    let got = check_paths(root, &[main], &config, Some(venv.as_path())).expect("check");
+    let msgs: Vec<String> = got
+        .iter()
+        .map(|d| format!("{}: {}", d.line, d.message()))
+        .collect();
+    assert_eq!(got.len(), 1, "got: {msgs:?}");
+    assert_eq!(got[0].line, 3, "got: {msgs:?}");
+    assert!(msgs[0].contains("\"configure\""), "got: {msgs:?}");
+}
+
+#[test]
+fn ty_invalid_python_env_fails_closed() {
+    // A bad `--python` value must not produce wrong diagnostics: ty resolves
+    // nothing against it, so the run degrades to the built-in resolver
+    // exactly as if no env were configured. First-party code still resolves.
+    if !ty_available() {
+        eprintln!("skipping: `ty` not installed");
+        return;
+    }
+    let proj = tempfile::tempdir().expect("tempdir");
+    let root = proj.path();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("pyproject");
+    let main = root.join("main.py");
+    std::fs::write(
+        &main,
+        "def func(a, b):\n    return a\n\nfunc(1, 2)\nimport extdep\n\nextdep.configure(\"h\", 9)\n",
+    )
+    .expect("main");
+    let config = Config::load(root);
+    let bogus = root.join("does-not-exist-env");
+    let got = check_paths(root, &[main], &config, Some(bogus.as_path())).expect("check");
+    let msgs: Vec<String> = got
+        .iter()
+        .map(|d| format!("{}: {}", d.line, d.message()))
+        .collect();
+    // Only the first-party `func(1, 2)` is flagged; the unresolvable
+    // `extdep` import yields nothing rather than a wrong diagnostic.
+    assert_eq!(got.len(), 1, "got: {msgs:?}");
+    assert_eq!(got[0].line, 4, "got: {msgs:?}");
 }
 
 #[test]
