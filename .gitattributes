@@ -1,0 +1,5 @@
+# Normalize all text files to LF in the working tree on every platform.
+# Without this, Windows CI checks out CRLF and `cargo fmt --check` fails
+# against `rustfmt.toml`'s `newline_style = "Unix"` (and the pre-commit
+# `mixed-line-ending --fix=lf` hook).
+* text=auto eol=lf
