@@ -22,9 +22,7 @@ use crate::fix::{apply_insertions, FileFix, FixOutcome, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
-use crate::limits::{
-    parse_module_guarded, run_with_large_stack, with_large_stack_pool, STACK_SIZE,
-};
+use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
@@ -136,17 +134,19 @@ fn pipeline_phases(
         // finishes rather than being collected all at once. `tx` is moved in
         // and dropped when all workers finish, closing the channel.
         //
-        // The coordinator thread gets a large stack (same as `run_with_large_stack`)
-        // because `rayon::ThreadPool::install` may use the calling thread as
-        // a worker — on platforms with tiny default stacks (musl: 128 KiB)
-        // that would let a legitimately-accepted ~MAX_NESTING_DEPTH file
-        // overflow the coordinator's stack (issue #83 follow-up to #54).
+        // The coordinator thread only needs an explicit stack on platforms
+        // with small default thread stacks. On glibc Linux this keeps the
+        // hot benchmark path on the low-overhead `scope.spawn` implementation.
+        #[cfg(any(target_env = "musl", windows))]
         let scan_handle = std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
+            .stack_size(crate::limits::STACK_SIZE)
             .spawn_scoped(scope, || {
                 stream_scan_files(python_files, project_root, config, index, tx)
             })
             .map_err(CheckError::Io)?;
+        #[cfg(not(any(target_env = "musl", windows)))]
+        let scan_handle =
+            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
 
         for (i, path, result) in rx {
             if consumer_err.is_some() {
