@@ -489,6 +489,15 @@ fn singledispatch_call_not_rewritten() {
 }
 
 #[test]
+fn singledispatch_multi_arg_call_not_rewritten() {
+    // Multiple positional args to a @singledispatch function must not be
+    // rewritten: dispatch on the first positional arg would break (issue #81).
+    assert_unchanged(
+        "from functools import singledispatch\n\n@singledispatch\ndef fn(a, b):\n    return (a, b)\n\nfn(1, 2)\n",
+    );
+}
+
+#[test]
 fn does_not_double_insert_for_elif_in_function_body() {
     // Issue #80: walk_stmt in ruff 0.15.8 visits each `elif` test expression
     // twice (direct visit_expr + walk_elif_else_clause). The double insertion

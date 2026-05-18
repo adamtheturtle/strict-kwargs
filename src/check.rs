@@ -903,7 +903,10 @@ impl<'a> CallChecker<'a> {
         let Some(signatures) = self.index.get(&callee_fullname) else {
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.
-            self.record_ty_pending(call);
+            // Re-check is_excluded: `get` may have triggered lazy loading
+            // that discovered a @singledispatch decorator and added the
+            // function to `excluded` without adding it to `signatures`.
+            self.record_ty_pending_unless_lazily_excluded(&callee_fullname, call);
             return;
         };
         if is_typing_special_form_constructor(&callee_fullname) {
@@ -1009,6 +1012,21 @@ impl<'a> CallChecker<'a> {
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
         });
+    }
+
+    /// Record a ty fallback unless a lazy signature lookup just discovered
+    /// that the callee is excluded. In today's resolver paths the earlier
+    /// `resolve_callee` lookups usually discover that first; this remains a
+    /// defensive guard for future lazy-index paths.
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_ty_pending_unless_lazily_excluded(
+        &mut self,
+        callee_fullname: &str,
+        call: &ast::ExprCall,
+    ) {
+        if !self.index.is_excluded(callee_fullname) {
+            self.record_ty_pending(call);
+        }
     }
 
     /// Map a base name to the signature-bearing fullname to check: the name

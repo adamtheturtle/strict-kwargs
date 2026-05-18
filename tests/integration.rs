@@ -1694,6 +1694,53 @@ c.process(42)
     );
 }
 
+// --- issue #81: @singledispatch call sites with multiple positional arguments ---
+
+#[test]
+fn singledispatch_multi_arg_call_not_flagged() {
+    // Call sites to @singledispatch functions with multiple positional args
+    // must not be flagged.
+    assert_ok(
+        r"
+from functools import singledispatch
+
+@singledispatch
+def fn(a, b):
+    return (a, b)
+
+fn(1, 2)
+",
+    );
+}
+
+#[test]
+fn singledispatch_imported_multi_arg_call_not_flagged() {
+    // Cross-module: @singledispatch function defined in a sibling module that
+    // is resolved lazily (not eagerly indexed). The re-check after `get`
+    // returns None is required to catch this case (issue #81).
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "dispatch.py",
+            r"
+from functools import singledispatch
+
+@singledispatch
+def fn(a, b):
+    return (a, b)
+",
+        )
+        .main(
+            r"
+from dispatch import fn
+
+fn(1, 2)
+",
+        );
+    let messages = project.check();
+    assert!(messages.is_empty(), "expected no errors, got: {messages:?}");
+}
+
 // --- issue #71: false positives from Callable parameters / unbound locals ---
 
 /// A call through a `Callable`-typed parameter must not be attributed to a
