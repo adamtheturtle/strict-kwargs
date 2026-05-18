@@ -411,6 +411,11 @@ struct Scope {
     /// opposed to the class object itself. Lets `Class.method(recv, …)` be
     /// told apart from a bound `instance.method(…)` call (issue #27).
     instances: rustc_hash::FxHashSet<String>,
+    /// Parameter names for the function that owns this scope.  Calls through
+    /// a parameter (e.g. a `Callable`-typed arg) cannot be resolved to a
+    /// concrete indexed signature, so they are skipped rather than matched
+    /// against a homonymous module-level or nested function (issue #71).
+    opaque_params: rustc_hash::FxHashSet<String>,
 }
 
 impl<'a> CallChecker<'a> {
@@ -476,6 +481,25 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    fn mark_param_opaque(&mut self, name: &str) {
+        self.current_scope().opaque_params.insert(name.to_string());
+    }
+
+    /// Whether `name` is a function parameter in the innermost scope that
+    /// sees it.  A real `names` binding in the same or an inner scope shadows
+    /// any outer opaque entry (the parameter was re-assigned to a known def).
+    fn is_opaque_local(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.names.contains_key(name) {
+                return false;
+            }
+            if scope.opaque_params.contains(name) {
+                return true;
+            }
+        }
+        false
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -818,6 +842,12 @@ impl<'a> CallChecker<'a> {
         match func {
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                // A parameter or other opaque local cannot be resolved to a
+                // concrete indexed definition — skip it to avoid false
+                // positives from a same-named function elsewhere (issue #71).
+                if self.is_opaque_local(local) {
+                    return None;
+                }
                 if let Some(resolved) = self.resolve_local(local) {
                     let dunder_call = format!("{resolved}.__call__");
                     if self.index.get(&dunder_call).is_some() {
@@ -878,6 +908,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
         match stmt {
             Stmt::FunctionDef(StmtFunctionDef {
                 name,
+                parameters,
                 body,
                 decorator_list,
                 ..
@@ -890,6 +921,24 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.define(name, format!("{}.{}", self.module_name, name));
                 self.push_scope();
+                // Register every parameter as opaque so that calls through
+                // a Callable-typed (or otherwise unresolvable) parameter
+                // don't fall back to a module-level function with the same
+                // name (issue #71).
+                for param in parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(parameters.args.iter())
+                    .chain(parameters.kwonlyargs.iter())
+                {
+                    self.mark_param_opaque(param.parameter.name.as_str());
+                }
+                if let Some(vararg) = &parameters.vararg {
+                    self.mark_param_opaque(vararg.name.as_str());
+                }
+                if let Some(kwarg) = &parameters.kwarg {
+                    self.mark_param_opaque(kwarg.name.as_str());
+                }
                 for inner in body {
                     walk_stmt(self, inner);
                 }
@@ -910,6 +959,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 for inner in body {
                     match inner {
                         Stmt::FunctionDef(StmtFunctionDef {
+                            parameters: method_parameters,
                             body: method_body,
                             decorator_list: method_decorators,
                             ..
@@ -918,6 +968,20 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 self.visit_expr(&decorator.expression);
                             }
                             self.push_scope();
+                            for param in method_parameters
+                                .posonlyargs
+                                .iter()
+                                .chain(method_parameters.args.iter())
+                                .chain(method_parameters.kwonlyargs.iter())
+                            {
+                                self.mark_param_opaque(param.parameter.name.as_str());
+                            }
+                            if let Some(vararg) = &method_parameters.vararg {
+                                self.mark_param_opaque(vararg.name.as_str());
+                            }
+                            if let Some(kwarg) = &method_parameters.kwarg {
+                                self.mark_param_opaque(kwarg.name.as_str());
+                            }
                             for method_stmt in method_body {
                                 walk_stmt(self, method_stmt);
                             }
