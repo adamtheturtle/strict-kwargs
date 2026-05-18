@@ -14,6 +14,7 @@ mod diagnostic;
 mod error;
 mod fix;
 mod index;
+mod limits;
 mod resolve;
 mod signature;
 mod source;

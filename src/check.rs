@@ -22,6 +22,7 @@ use crate::fix::{apply_insertions, FileFix, FixOutcome, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
+use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
@@ -37,7 +38,20 @@ use crate::ty_resolver::{
 /// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
 /// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
 /// its server cannot start ([`CheckError::TyServerFailed`]).
+///
+/// The whole walk runs on a large dedicated stack so a deeply nested file
+/// cannot overflow it; one nested deeper than the supported limit is rejected
+/// up front ([`CheckError::TooDeeplyNested`]) instead of crashing (issue #54).
 pub fn check_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+    python_env: Option<&Path>,
+) -> Result<Vec<Diagnostic>, CheckError> {
+    run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
+}
+
+fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
@@ -55,14 +69,9 @@ pub fn check_paths(
     // Phase 1 (parallel): the built-in pass over every file. Each file is an
     // independent, pure-CPU unit of work sharing only the `Sync`
     // demand-driven index; this is the bulk of whole-project runtime and the
-    // residual issue #46 targets. `par_iter` preserves order, so `scans` —
-    // and therefore the `ty` phase and final output — stay deterministic.
-    let scans = python_files
-        .par_iter()
-        .map(|path| -> Result<(PathBuf, ScanOutcome), CheckError> {
-            Ok((path.clone(), scan_file(project_root, path, config, &index)?))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // residual issue #46 targets. Order is preserved, so `scans` — and
+    // therefore the `ty` phase and final output — stay deterministic.
+    let scans = scan_files(&python_files, project_root, config, &index)?;
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -131,6 +140,12 @@ pub fn check_paths(
 /// the serial caller warns about it (in deterministic file order) and moves
 /// on, so one stray file neither fails the whole run nor masks genuine
 /// violations elsewhere (issue #53). A real filesystem error stays fatal.
+///
+/// The file under check is parsed through [`parse_module_guarded`], so one
+/// nested deeper than the supported limit is rejected
+/// ([`CheckError::TooDeeplyNested`]) instead of overflowing the stack; this
+/// runs on a [`with_large_stack_pool`] worker, so legitimately-accepted deep
+/// nesting has the same large stack the serial path gets (issue #54 + #46).
 fn scan_file(
     project_root: &Path,
     path: &Path,
@@ -141,7 +156,7 @@ fn scan_file(
         Source::Decoded(source) => source,
         Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
     };
-    let parsed = parse_module(&source)?;
+    let parsed = parse_module_guarded(&source)?;
     let module_name = module_name_for_path(project_root, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
@@ -192,6 +207,82 @@ struct FileScan {
     pending: Vec<PendingTy>,
     fixes: Vec<Insertion>,
     fixed_calls: usize,
+}
+
+/// The auto-fixer's per-file rewrite, applied to a completed [`scan_file`]
+/// result. `Ok(None)` when there is nothing to rewrite (skipped/undecodable,
+/// or no insertions); `Ok(Some(fixed))` for the rewritten source; an error if
+/// the rewrite would not parse (issue #41 fail-safe — never silently corrupt
+/// a file). Pure CPU, so it runs inside the parallel phase, but kept as its
+/// own gated function (the orchestration around it is not) because this is
+/// deterministic, testable behaviour.
+fn plan_rewrite(path: &Path, outcome: &ScanOutcome) -> Result<Option<String>, CheckError> {
+    let scan = match outcome {
+        ScanOutcome::Scanned(scan) if !scan.fixes.is_empty() => scan,
+        _ => return Ok(None),
+    };
+    // Every insertion adds a `name=` prefix, so the result always differs
+    // from `source`.
+    let fixed = apply_insertions(&scan.source, &scan.fixes);
+    // Fail-safe (issue #41): never produce source that does not parse. The
+    // parenthesized-span fix should keep every rewrite valid, but a malformed
+    // result must abort with a report rather than silently corrupt the file.
+    if parse_module(&fixed).is_err() {
+        return Err(CheckError::FixProducedInvalidSyntax {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(Some(fixed))
+}
+
+/// Run [`scan_file`] over every file in parallel on the deep-stack worker
+/// pool (issue #46 phase 1; the stack also satisfies issue #54 for the
+/// parallel pass). `par_iter`/`collect` preserve input order, so the result
+/// — and every later phase — stays deterministic.
+///
+/// Excluded from the coverage gate for the same reason as
+/// [`run_with_large_stack`](crate::limits::run_with_large_stack): the per-file
+/// logic ([`scan_file`]) is a separate, fully gated function exercised by
+/// every integration test; what is excluded here is only the parallel-pool
+/// orchestration — the environment-only pool-construction failure and the
+/// scheduling-dependent path that surfaces one worker's error across the
+/// `par_iter` boundary — neither of which is deterministically reachable.
+#[cfg_attr(coverage, coverage(off))]
+fn scan_files(
+    python_files: &[PathBuf],
+    project_root: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
+    with_large_stack_pool(|| {
+        python_files
+            .par_iter()
+            .map(|path| Ok((path.clone(), scan_file(project_root, path, config, index)?)))
+            .collect()
+    })
+}
+
+/// Like [`scan_files`], but also computes each file's [`plan_rewrite`] in the
+/// same parallel pass (the fixer's per-file CPU work). Excluded from the
+/// coverage gate for the same reason as [`scan_files`]; the rewrite decision
+/// itself stays in the gated [`plan_rewrite`].
+#[cfg_attr(coverage, coverage(off))]
+fn scan_files_for_fix(
+    python_files: &[PathBuf],
+    project_root: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+) -> Result<Vec<(PathBuf, ScanOutcome, Option<String>)>, CheckError> {
+    with_large_stack_pool(|| {
+        python_files
+            .par_iter()
+            .map(|path| {
+                let outcome = scan_file(project_root, path, config, index)?;
+                let rewritten = plan_rewrite(path, &outcome)?;
+                Ok((path.clone(), outcome, rewritten))
+            })
+            .collect()
+    })
 }
 
 /// Collect the `.py`/`.pyi` files reachable from `paths`.
@@ -1021,8 +1112,20 @@ fn call_fix_insertions(
 /// Returns [`CheckError`] if a path argument does not exist
 /// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
 /// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
-/// its server cannot start ([`CheckError::TyServerFailed`]).
+/// its server cannot start ([`CheckError::TyServerFailed`]). A file nested
+/// deeper than the supported limit is rejected
+/// ([`CheckError::TooDeeplyNested`]) rather than overflowing the stack; the
+/// walk runs on a large dedicated stack (issue #54).
 pub fn fix_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+    python_env: Option<&Path>,
+) -> Result<FixOutcome, CheckError> {
+    run_with_large_stack(move || fix_paths_impl(project_root, paths, config, python_env))
+}
+
+fn fix_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
@@ -1037,35 +1140,7 @@ pub fn fix_paths(
     // pure-CPU rewrite (apply insertions, then re-parse to fail closed). Both
     // are per-file and share only the `Sync` index, so they parallelize; the
     // ty fallback and declined-count accounting stay serial below.
-    let scans = python_files
-        .par_iter()
-        .map(
-            |path| -> Result<(PathBuf, ScanOutcome, Option<String>), CheckError> {
-                let outcome = scan_file(project_root, path, config, &index)?;
-                let rewritten = match &outcome {
-                    ScanOutcome::Skipped(_) => None,
-                    ScanOutcome::Scanned(scan) if scan.fixes.is_empty() => None,
-                    ScanOutcome::Scanned(scan) => {
-                        // Every insertion adds a `name=` prefix, so the result
-                        // always differs from `source`.
-                        let fixed = apply_insertions(&scan.source, &scan.fixes);
-                        // Fail-safe (issue #41): never produce source that does
-                        // not parse. The parenthesized-span fix should keep
-                        // every rewrite valid, but a malformed result must
-                        // abort with a report rather than silently corrupt the
-                        // file.
-                        if parse_module(&fixed).is_err() {
-                            return Err(CheckError::FixProducedInvalidSyntax {
-                                path: path.clone(),
-                            });
-                        }
-                        Some(fixed)
-                    }
-                };
-                Ok((path.clone(), outcome, rewritten))
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?;
+    let scans = scan_files_for_fix(&python_files, project_root, config, &index)?;
 
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
@@ -1634,6 +1709,12 @@ fn resolve_pending_with_ty(
                 .clone()
         };
         let Some(target) = target else { continue };
+        // A `ty` goto-definition target is a dependency/stub, not user input:
+        // the explicit nesting *rejection* (issue #54) is reserved for the
+        // files the user asked to check (re-tokenizing every resolved stub
+        // just to depth-check it is the #54 perf regression). Overflow safety
+        // here comes from the large analysis stack `run_with_large_stack`
+        // provides; a parse failure is a silent skip, as before.
         let Ok(parsed) = parse_module(&target) else {
             continue;
         };

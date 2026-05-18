@@ -13,6 +13,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -31,6 +35,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-${{ matrix.platform }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -43,36 +52,27 @@ jobs:
         run: cargo doc --no-deps --all-features --document-private-items
 
   pre-commit:
-    # Runs the exact same hooks contributors run locally via `prek`
+    # Runs the same prek hooks contributors run locally
     # (see `.pre-commit-config.yaml`) so there is no drift between local
-    # and CI.
+    # and CI — *except* the `cargo-fmt`/`cargo-clippy`/`cargo-test` local
+    # hooks, which are skipped here because the `build` matrix job above
+    # and `ci.yml` already run the byte-for-byte identical `cargo`
+    # commands. Re-running them here meant a third cold clippy compile and
+    # a second cold full test build per CI run; skipping keeps coverage
+    # of those checks (via the dedicated jobs) with no drift while
+    # dropping the Rust/ty toolchain setup this job no longer needs.
     runs-on: ubuntu-latest
+
+    env:
+      SKIP: cargo-fmt,cargo-clippy,cargo-test
 
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
-
-      - name: Install ty (required backend; the pre-push hook runs cargo test)
-        # `ty` is a hard requirement, so the integration suite errors without
-        # it. The pre-push prek stage below runs `cargo test`, so `ty` must
-        # be on PATH here just as it is in `ci.yml`/`coverage.yml`.
-        shell: bash
-        run: |
-          uv tool install ty
-          uv tool dir --bin >> "$GITHUB_PATH"
-
-      - name: Verify ty is on PATH
-        shell: bash
-        run: ty version
 
       - name: Run prek hooks (commit stage)
         run: uvx prek run --all-files --hook-stage pre-commit

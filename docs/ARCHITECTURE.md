@@ -272,6 +272,15 @@ Tool-specific:
   forms, `attrs`, and `TypedDict` (keyword-only by definition) are out of
   scope; inherited base-class fields are not merged into the synthesized
   signature (limit is `0` regardless, so detection is unaffected).
+- **Expression nesting is bounded.** The analysis runs on a large dedicated
+  stack so a deeply nested file cannot overflow it, but a file nesting
+  `()`/`[]`/`{}` deeper than 1000 levels (CPython's own default recursion
+  limit; far beyond any realistic code) is rejected with an
+  `expression nesting too deep` error and exit code 2 rather than handed to
+  the recursion-unbounded vendored parser. This keeps a pathological or
+  hostile file a clean, bounded failure instead of a process-wide
+  `SIGABRT`, and the bound is deterministic across platforms/build profiles
+  (issue #54).
 - **Encoding.** UTF-8 (with or without a BOM) and a PEP 263
   `# -*- coding: <enc> -*-` declaration for `latin-1`/`iso-8859-1`,
   `ascii`, or explicit `utf-8` are decoded directly (no third-party codec

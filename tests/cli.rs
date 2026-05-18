@@ -187,6 +187,47 @@ fn check_unparsable_file_is_fatal_exit_two() {
     );
 }
 
+/// `f(f(f(…f(1)…)))` nested `depth` deep, plus the `f` it calls.
+fn deeply_nested_source(depth: usize) -> String {
+    format!(
+        "def f(a):\n    return a\n\n{}1{}\n",
+        "f(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
+#[test]
+fn check_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
+    // Issue #54: this used to overflow the stack and abort the process with
+    // SIGABRT (exit 134), taking a whole directory/pre-commit run down.
+    let project = Project::new().write("deep.py", &deeply_nested_source(5000));
+    let output = project.run(&["deep.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("nesting too deep"), "stderr: {err}");
+    assert!(err.contains("5000"), "stderr: {err}");
+}
+
+#[test]
+fn fix_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
+    let project = Project::new().write("deep.py", &deeply_nested_source(5000));
+    let output = project.run(&["fix", "deep.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("nesting too deep"));
+}
+
+#[test]
+fn check_nesting_at_the_limit_is_handled_on_the_large_stack() {
+    // Exactly at the bound: accepted and analysed. This depth would overflow
+    // the default thread stack on many platforms/build profiles; it succeeds
+    // only because the analysis runs on the large dedicated stack, so this
+    // pins that the bound is *deterministic* rather than crash-on-some-hosts.
+    let project = Project::new().write("deep.py", &deeply_nested_source(1000));
+    let output = project.run(&["deep.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("deep.py"));
+}
+
 /// Issue #53 part 1: one non-UTF-8 file must not abort the whole run (exit 2)
 /// nor mask genuine violations in every other file. It is skipped with a
 /// warning; the sibling's real violation is still reported.

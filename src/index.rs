@@ -10,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
+use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
 use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
@@ -186,6 +187,14 @@ impl DefinitionIndex {
         if *query_budget == 0 {
             return;
         }
+        // Lazily-resolved dependency modules (stdlib stubs, builtins,
+        // third-party) are *not* depth-guarded: the explicit nesting
+        // rejection (issue #54) is scoped to the files the user asked to
+        // check, and re-tokenizing every resolved stub here purely to
+        // measure its depth is a large hot-path regression (#54 follow-up).
+        // Overflow safety for these still holds — the whole analysis runs on
+        // the large stack `run_with_large_stack` provides — and a parse
+        // failure is already a silent, fail-closed skip.
         let Ok(parsed) = parse_module(&m.source) else {
             return;
         };
@@ -406,7 +415,7 @@ pub fn build_index(
         let Some(source) = read_python_source_lossy(path) else {
             continue;
         };
-        let parsed = parse_module(&source)?;
+        let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         index.lock().indexed.insert(module_name);
