@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+2026.5.18
+---------
+
+
 - Fix a false negative where a call in **decorator** position was never
   analyzed (issue #51). Decorator-factory calls with surplus positional
   arguments — ``@retry(3, 0.5)``, ``@functools.lru_cache(128)``,
