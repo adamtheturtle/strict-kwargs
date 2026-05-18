@@ -989,8 +989,8 @@ impl<'a> CallChecker<'a> {
         // known: overloaded callees may bind the same position to differently
         // named parameters, so a keyword rewrite would not be safe. A
         // synthesized ``@dataclass`` / ``NamedTuple`` constructor is likewise
-        // declined — it omits inherited base-class fields, so the
-        // position->name mapping is not guaranteed sound (issue #29).
+        // declined until its position->name mapping is guaranteed sound
+        // across every modeled constructor shape.
         if let ([signature], false) = (
             signatures.as_ref(),
             self.index.is_synthesized(&callee_fullname),

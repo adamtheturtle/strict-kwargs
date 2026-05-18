@@ -44,16 +44,31 @@ struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
-    /// ``def``. The auto-fixer declines these: a synthesized signature omits
-    /// inherited base-class fields (cross-module MRO is not resolved), so a
-    /// positional->keyword name mapping could be wrong.
+    /// ``def``. The auto-fixer declines these until the synthesized
+    /// positional->keyword mapping is proven sound across every supported
+    /// constructor shape.
     synthesized: FxHashSet<String>,
+    /// Field models for classes whose constructor is synthesized by
+    /// dataclasses / ``NamedTuple`` machinery, or inherited from such a base.
+    data_models: FxHashMap<String, ClassDataModel>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
     /// ``args[0].__class__``; a keyword first argument would raise
     /// ``TypeError`` at runtime.
     excluded: FxHashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassDataKind {
+    Dataclass,
+    NamedTuple,
+}
+
+#[derive(Debug, Clone)]
+struct ClassDataModel {
+    kind: ClassDataKind,
+    init_fields: Vec<String>,
 }
 
 impl Store {
@@ -142,8 +157,14 @@ impl DefinitionIndex {
     fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
         let mut collected = Collected::default();
         collect(stmts, module_name, is_package, &mut collected);
+        let mut query_budget = MAX_QUERY_MODULES;
+        for base in data_constructor_bases(stmts, module_name, &collected.bindings) {
+            if !same_module_or_nested(module_name, &base) {
+                self.ensure_for(&base, &mut query_budget);
+            }
+        }
         let mut inner = self.lock();
-        index_module(&mut inner.store, module_name, stmts);
+        index_module(&mut inner.store, module_name, is_package, stmts);
         Self::push_edges(&mut inner, collected.reexports);
         // Release before returning so a parallel worker's next query does not
         // wait on a guard the borrow checker would otherwise hold to scope
@@ -403,6 +424,7 @@ const MODULE_BUDGET: usize = 4000;
 #[derive(Default)]
 struct Collected {
     reexports: Vec<(String, String)>,
+    bindings: FxHashMap<String, String>,
 }
 
 pub fn build_index(
@@ -432,8 +454,10 @@ pub fn build_index(
         };
         let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
+        if !index.lock().indexed.insert(module_name.clone()) {
+            continue;
+        }
         index.index_source(&module_name, is_package_init(path), parsed.suite());
-        index.lock().indexed.insert(module_name);
     }
 
     Ok(index)
@@ -444,6 +468,7 @@ pub fn build_index(
 fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collected) {
     let mut bindings: FxHashMap<String, String> = FxHashMap::default();
     collect_scoped(stmts, module_name, is_package, true, &mut bindings, out);
+    out.bindings = bindings;
 }
 
 /// Flatten a pure name/attribute reference (``a`` or ``a.b.c``) into its
@@ -486,6 +511,104 @@ fn resolve_reference(
     } else {
         format!("{base}.{}", rest.join("."))
     })
+}
+
+fn same_module_or_nested(module_name: &str, fullname: &str) -> bool {
+    fullname == module_name
+        || fullname
+            .strip_prefix(module_name)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+fn base_reference(base: &Expr) -> &Expr {
+    match base {
+        Expr::Subscript(ast::ExprSubscript { value, .. }) => value.as_ref(),
+        other => other,
+    }
+}
+
+fn resolve_base_name(
+    base: &Expr,
+    scope_name: &str,
+    bindings: &FxHashMap<String, String>,
+) -> Option<String> {
+    reference_path(base_reference(base))
+        .and_then(|segments| resolve_reference(bindings, scope_name, &segments))
+}
+
+fn data_constructor_bases(
+    stmts: &[Stmt],
+    scope_name: &str,
+    bindings: &FxHashMap<String, String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_data_constructor_bases(stmts, scope_name, bindings, &mut out);
+    out
+}
+
+fn collect_data_constructor_bases(
+    stmts: &[Stmt],
+    scope_name: &str,
+    bindings: &FxHashMap<String, String>,
+    out: &mut Vec<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::ClassDef(class_def) => {
+                if dataclass_decorator(class_def).is_some()
+                    || is_namedtuple_class(class_def)
+                    || class_def.arguments.is_some()
+                {
+                    if let Some(arguments) = &class_def.arguments {
+                        out.extend(
+                            arguments
+                                .args
+                                .iter()
+                                .filter_map(|base| resolve_base_name(base, scope_name, bindings)),
+                        );
+                    }
+                }
+                let class_name = format!("{scope_name}.{}", class_def.name);
+                collect_data_constructor_bases(&class_def.body, &class_name, bindings, out);
+            }
+            Stmt::If(ast::StmtIf {
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                collect_data_constructor_bases(body, scope_name, bindings, out);
+                for clause in elif_else_clauses {
+                    collect_data_constructor_bases(&clause.body, scope_name, bindings, out);
+                }
+            }
+            Stmt::While(ast::StmtWhile { body, .. })
+            | Stmt::For(ast::StmtFor { body, .. })
+            | Stmt::With(ast::StmtWith { body, .. }) => {
+                collect_data_constructor_bases(body, scope_name, bindings, out);
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                collect_data_constructor_bases(body, scope_name, bindings, out);
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    collect_data_constructor_bases(&handler.body, scope_name, bindings, out);
+                }
+                collect_data_constructor_bases(orelse, scope_name, bindings, out);
+                collect_data_constructor_bases(finalbody, scope_name, bindings, out);
+            }
+            Stmt::Match(ast::StmtMatch { cases, .. }) => {
+                for case in cases {
+                    collect_data_constructor_bases(&case.body, scope_name, bindings, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// `module_scope` is true only at true module level. Imports nested inside a
@@ -569,6 +692,7 @@ fn collect_scoped(
                 {
                     for target in targets {
                         if let Expr::Name(name) = target {
+                            bind(bindings, name.id.as_str(), src.clone());
                             out.reexports
                                 .push((src.clone(), format!("{module_name}.{}", name.id)));
                         }
@@ -585,6 +709,7 @@ fn collect_scoped(
                     reference_path(value)
                         .and_then(|segments| resolve_reference(bindings, module_name, &segments)),
                 ) {
+                    bind(bindings, name.id.as_str(), src.clone());
                     out.reexports
                         .push((src, format!("{module_name}.{}", name.id)));
                 }
@@ -689,9 +814,20 @@ pub fn relative_base(
     Some(base)
 }
 
-fn index_module(store: &mut Store, module_name: &str, stmts: &[Stmt]) {
+fn index_module(store: &mut Store, module_name: &str, is_package: bool, stmts: &[Stmt]) {
+    let mut bindings = FxHashMap::default();
+    index_module_with_bindings(store, module_name, is_package, stmts, &mut bindings);
+}
+
+fn index_module_with_bindings(
+    store: &mut Store,
+    module_name: &str,
+    is_package: bool,
+    stmts: &[Stmt],
+    bindings: &mut FxHashMap<String, String>,
+) {
     for stmt in stmts {
-        index_stmt(store, module_name, stmt);
+        index_stmt(store, module_name, is_package, module_name, stmt, bindings);
     }
 }
 
@@ -709,8 +845,77 @@ fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
-fn index_stmt(store: &mut Store, module_name: &str, stmt: &Stmt) {
+fn index_stmt(
+    store: &mut Store,
+    module_name: &str,
+    is_package: bool,
+    scope_name: &str,
+    stmt: &Stmt,
+    bindings: &mut FxHashMap<String, String>,
+) {
     match stmt {
+        Stmt::Import(ast::StmtImport { names, .. }) => {
+            for alias in names {
+                let dotted = alias.name.as_str();
+                if let Some(asname) = &alias.asname {
+                    bind(bindings, asname.as_str(), dotted.to_string());
+                } else {
+                    let top = dotted.split('.').next().unwrap_or(dotted);
+                    bind(bindings, top, top.to_string());
+                }
+            }
+        }
+        Stmt::ImportFrom(ast::StmtImportFrom {
+            module,
+            names,
+            level,
+            ..
+        }) => {
+            if let Some(base) = relative_base(
+                module_name,
+                is_package,
+                *level,
+                module.as_ref().map(ast::Identifier::as_str),
+            ) {
+                for alias in names {
+                    let name = alias.name.as_str();
+                    if name == "*" {
+                        continue;
+                    }
+                    let qualified = if base.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{base}.{name}")
+                    };
+                    let local = alias.asname.as_ref().map_or(name, ast::Identifier::as_str);
+                    bind(bindings, local, qualified);
+                }
+            }
+        }
+        Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
+            if let Some(src) = reference_path(value)
+                .and_then(|segments| resolve_reference(bindings, scope_name, &segments))
+            {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        bind(bindings, name.id.as_str(), src.clone());
+                    }
+                }
+            }
+        }
+        Stmt::AnnAssign(ast::StmtAnnAssign {
+            target,
+            value: Some(value),
+            ..
+        }) => {
+            if let (Expr::Name(name), Some(src)) = (
+                target.as_ref(),
+                reference_path(value)
+                    .and_then(|segments| resolve_reference(bindings, scope_name, &segments)),
+            ) {
+                bind(bindings, name.id.as_str(), src);
+            }
+        }
         Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
             parameters,
@@ -720,30 +925,35 @@ fn index_stmt(store: &mut Store, module_name: &str, stmt: &Stmt) {
         }) => {
             let fullname = format!("{module_name}.{name}");
             if has_singledispatch_decorator(decorator_list) {
-                store.excluded.insert(fullname);
+                store.excluded.insert(fullname.clone());
             } else {
-                store.insert(fullname, signature_from_parameters(parameters));
+                store.insert(fullname.clone(), signature_from_parameters(parameters));
             }
-            index_module(store, module_name, body);
+            bind(bindings, name.as_str(), fullname);
+            let mut nested_bindings = bindings.clone();
+            index_module_with_bindings(store, module_name, is_package, body, &mut nested_bindings);
         }
         Stmt::ClassDef(class_def) => {
-            let class_name = format!("{module_name}.{}", class_def.name);
-            index_class_body(store, &class_name, &class_def.body);
-            synthesize_data_constructor(store, &class_name, class_def);
+            let class_name = format!("{scope_name}.{}", class_def.name);
+            index_class_body(store, &class_name, &class_def.body, bindings);
+            synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
+            bind(bindings, class_def.name.as_str(), class_name);
         }
         Stmt::If(ast::StmtIf {
             body,
             elif_else_clauses,
             ..
         }) => {
-            index_module(store, module_name, body);
+            index_module_with_bindings(store, module_name, is_package, body, bindings);
             for clause in elif_else_clauses {
-                index_module(store, module_name, &clause.body);
+                index_module_with_bindings(store, module_name, is_package, &clause.body, bindings);
             }
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => index_module(store, module_name, body),
+        | Stmt::With(ast::StmtWith { body, .. }) => {
+            index_module_with_bindings(store, module_name, is_package, body, bindings);
+        }
         Stmt::Try(ast::StmtTry {
             body,
             handlers,
@@ -751,24 +961,29 @@ fn index_stmt(store: &mut Store, module_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            index_module(store, module_name, body);
+            index_module_with_bindings(store, module_name, is_package, body, bindings);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module(store, module_name, &handler.body);
+                index_module_with_bindings(store, module_name, is_package, &handler.body, bindings);
             }
-            index_module(store, module_name, orelse);
-            index_module(store, module_name, finalbody);
+            index_module_with_bindings(store, module_name, is_package, orelse, bindings);
+            index_module_with_bindings(store, module_name, is_package, finalbody, bindings);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
-                index_module(store, module_name, &case.body);
+                index_module_with_bindings(store, module_name, is_package, &case.body, bindings);
             }
         }
         _ => {}
     }
 }
 
-fn index_class_body(store: &mut Store, class_name: &str, body: &[Stmt]) {
+fn index_class_body(
+    store: &mut Store,
+    class_name: &str,
+    body: &[Stmt],
+    bindings: &FxHashMap<String, String>,
+) {
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -784,21 +999,22 @@ fn index_class_body(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 } else {
                     store.insert(fullname, signature_from_parameters(parameters));
                 }
-                index_module(store, class_name, body);
+                let mut nested_bindings = bindings.clone();
+                index_module_with_bindings(store, class_name, false, body, &mut nested_bindings);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
-                index_class_body(store, &nested, &class_def.body);
-                synthesize_data_constructor(store, &nested, class_def);
+                index_class_body(store, &nested, &class_def.body, bindings);
+                synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                index_class_body(store, class_name, body);
+                index_class_body(store, class_name, body, bindings);
                 for clause in elif_else_clauses {
-                    index_class_body(store, class_name, &clause.body);
+                    index_class_body(store, class_name, &clause.body, bindings);
                 }
             }
             _ => {}
@@ -875,16 +1091,19 @@ fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
 /// Synthesize the compiler-generated constructor for ``@dataclass`` and
 /// ``NamedTuple`` classes, whose ``__init__`` / ``__new__`` is not written as
 /// a ``def`` and so is otherwise invisible to the resolver (issue #29). Each
-/// annotated field becomes a positional-or-keyword parameter, so positional
+/// constructor field becomes a positional-or-keyword parameter, so positional
 /// construction (`D(1, 2)`) is flagged while the keyword form (`D(x=1, y=2)`)
 /// is accepted.
 ///
-/// Scoped to the class's *own* fields: inherited base-class fields are not
-/// resolved (so the auto-fixer declines these — see [`Store::synthesized`]),
-/// but the positional limit is `0` either way, so the diagnostic stays
-/// correct. Out of scope: the functional ``NamedTuple("N", [...])`` /
-/// ``namedtuple`` forms, ``attrs``, and ``TypedDict`` (whose constructor is
-/// keyword-only by definition).
+/// Dataclass field models include dataclass base fields in runtime order:
+/// reverse direct-base order, each base's already-computed model, then the
+/// class's own eligible fields. ``NamedTuple`` subclasses inherit their base
+/// tuple fields but do not add newly annotated subclass fields at runtime.
+/// The auto-fixer still declines synthesized constructors (see
+/// [`Store::synthesized`]) until every synthesized mapping is proven sound
+/// across the full resolver surface. Out of scope: the functional
+/// ``NamedTuple("N", [...])`` / ``namedtuple`` forms, ``attrs``, and
+/// ``TypedDict`` (whose constructor is keyword-only by definition).
 //
 // Field-shape collection for synthesized constructors. Its behaviour is
 // covered end-to-end by the `@dataclass`/`NamedTuple` integration tests
@@ -894,39 +1113,120 @@ fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
 // reports exercised arms as missed). Excluded from the gate with that
 // rationale, consistent with the other documented exclusions.
 #[cfg_attr(coverage, coverage(off))]
-fn synthesize_data_constructor(store: &mut Store, class_name: &str, class_def: &ast::StmtClassDef) {
-    let is_namedtuple = is_namedtuple_class(class_def);
+fn synthesize_data_constructor(
+    store: &mut Store,
+    class_name: &str,
+    scope_name: &str,
+    class_def: &ast::StmtClassDef,
+    bindings: &FxHashMap<String, String>,
+) {
+    let directly_namedtuple = is_namedtuple_class(class_def);
     let decorator = dataclass_decorator(class_def);
-    if decorator.is_none() && !is_namedtuple {
+
+    let base_models: Vec<ClassDataModel> = class_def
+        .arguments
+        .as_ref()
+        .map(|arguments| {
+            arguments
+                .args
+                .iter()
+                .filter_map(|base| resolve_base_name(base, scope_name, bindings))
+                .filter_map(|base| store.data_models.get(&base).cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let inherits_dataclass = base_models
+        .iter()
+        .any(|model| model.kind == ClassDataKind::Dataclass);
+    let inherits_namedtuple = base_models
+        .iter()
+        .any(|model| model.kind == ClassDataKind::NamedTuple);
+
+    let Some(kind) = decorator
+        .map(|_| ClassDataKind::Dataclass)
+        .or_else(|| (inherits_dataclass).then_some(ClassDataKind::Dataclass))
+        .or_else(|| {
+            (directly_namedtuple || inherits_namedtuple).then_some(ClassDataKind::NamedTuple)
+        })
+    else {
+        return;
+    };
+
+    let mut init_fields = Vec::new();
+    for model in base_models.iter().rev().filter(|model| model.kind == kind) {
+        extend_unique(&mut init_fields, model.init_fields.iter().cloned());
+    }
+    if kind == ClassDataKind::Dataclass && decorator.is_some() {
+        extend_unique(
+            &mut init_fields,
+            own_constructor_fields(class_def, OwnFieldKind::Dataclass),
+        );
+    } else if kind == ClassDataKind::NamedTuple && directly_namedtuple {
+        extend_unique(
+            &mut init_fields,
+            own_constructor_fields(class_def, OwnFieldKind::NamedTuple),
+        );
+    }
+    store.data_models.insert(
+        class_name.to_string(),
+        ClassDataModel {
+            kind,
+            init_fields: init_fields.clone(),
+        },
+    );
+
+    let init_disabled =
+        matches!(decorator, Some(Expr::Call(call)) if keyword_is_false(call, "init"));
+    if kind == ClassDataKind::Dataclass && init_disabled {
         return;
     }
-    // ``@dataclass(init=False)`` generates no ``__init__``.
-    if let Some(Expr::Call(call)) = decorator {
-        if keyword_is_false(call, "init") {
-            return;
-        }
-    }
+
     // An explicitly written constructor wins: ``@dataclass`` / ``NamedTuple``
     // only synthesize one when the class defines none itself. Probe the
     // directly-bound definitions (not the lazy alias resolver, which is for
     // queries and would both pollute its memo mid-build and follow re-exports
     // that are irrelevant to "did this class write its own constructor").
-    if store
-        .signatures
-        .contains_key(&format!("{class_name}.__init__"))
-        || store
-            .signatures
-            .contains_key(&format!("{class_name}.__new__"))
-    {
+    if class_has_constructor(store, class_name) {
         return;
     }
 
+    let is_namedtuple = kind == ClassDataKind::NamedTuple;
     let receiver = if is_namedtuple { "cls" } else { "self" };
     let mut parameters = vec![Parameter {
         name: Some(receiver.to_string()),
         kind: ParameterKind::PositionalOrKeyword,
     }];
-    for stmt in &class_def.body {
+    parameters.extend(init_fields.into_iter().map(|field| Parameter {
+        name: Some(field),
+        kind: ParameterKind::PositionalOrKeyword,
+    }));
+
+    let ctor = if is_namedtuple { "__new__" } else { "__init__" };
+    let fullname = format!("{class_name}.{ctor}");
+    store.insert(fullname.clone(), Signature { parameters });
+    store.synthesized.insert(fullname);
+}
+
+fn class_has_constructor(store: &Store, class_name: &str) -> bool {
+    store
+        .signatures
+        .contains_key(&format!("{class_name}.__init__"))
+        || store
+            .signatures
+            .contains_key(&format!("{class_name}.__new__"))
+}
+
+#[derive(Clone, Copy)]
+enum OwnFieldKind {
+    Dataclass,
+    NamedTuple,
+}
+
+fn own_constructor_fields(
+    class_def: &ast::StmtClassDef,
+    kind: OwnFieldKind,
+) -> impl Iterator<Item = String> + '_ {
+    class_def.body.iter().filter_map(move |stmt| {
         let Stmt::AnnAssign(ast::StmtAnnAssign {
             target,
             annotation,
@@ -934,27 +1234,29 @@ fn synthesize_data_constructor(store: &mut Store, class_name: &str, class_def: &
             ..
         }) = stmt
         else {
-            continue;
+            return None;
         };
         let Expr::Name(name) = target.as_ref() else {
-            continue;
+            return None;
         };
         if is_class_var(annotation) {
-            continue;
+            return None;
         }
-        if !is_namedtuple && value.as_deref().is_some_and(dataclass_field_excluded) {
-            continue;
+        if matches!(kind, OwnFieldKind::Dataclass)
+            && value.as_deref().is_some_and(dataclass_field_excluded)
+        {
+            return None;
         }
-        parameters.push(Parameter {
-            name: Some(name.id.to_string()),
-            kind: ParameterKind::PositionalOrKeyword,
-        });
-    }
+        Some(name.id.to_string())
+    })
+}
 
-    let ctor = if is_namedtuple { "__new__" } else { "__init__" };
-    let fullname = format!("{class_name}.{ctor}");
-    store.insert(fullname.clone(), Signature { parameters });
-    store.synthesized.insert(fullname);
+fn extend_unique(fields: &mut Vec<String>, new_fields: impl IntoIterator<Item = String>) {
+    for field in new_fields {
+        if !fields.iter().any(|existing| existing == &field) {
+            fields.push(field);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -997,8 +1299,9 @@ impl DefinitionIndex {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use super::DefinitionIndex;
+    use super::{index_module, DefinitionIndex, Store};
     use crate::signature::{Parameter, ParameterKind, Signature};
+    use ruff_python_parser::parse_module;
 
     /// A signature with `n` positional-or-keyword parameters, so a test can
     /// tell which definition won an alias collision by its arity.
@@ -1035,6 +1338,32 @@ mod tests {
         index
             .get(key)
             .map(|sigs| sigs.first().map_or(0, |s| s.parameters.len()))
+    }
+
+    fn indexed_store(source: &str) -> Store {
+        let parsed = parse_module(source).expect("parse");
+        let mut store = Store::default();
+        index_module(&mut store, "main", false, parsed.suite());
+        store
+    }
+
+    fn parameter_names(store: &Store, fullname: &str) -> Vec<Option<String>> {
+        store
+            .signatures
+            .get(fullname)
+            .and_then(|sigs| sigs.first())
+            .expect("signature")
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect()
+    }
+
+    fn names(values: &[&str]) -> Vec<Option<String>> {
+        values
+            .iter()
+            .map(|value| Some((*value).to_string()))
+            .collect()
     }
 
     #[test]
@@ -1116,6 +1445,171 @@ mod tests {
         assert_eq!(arity(&index, "a.f"), Some(4));
         // A name reachable only through the pure cycle terminates as `None`.
         assert!(index.get("b.missing").is_none());
+    }
+
+    #[test]
+    fn dataclass_constructor_fields_include_base_fields_and_exclusions() {
+        let store = indexed_store(
+            r"
+from dataclasses import dataclass, field
+from typing import ClassVar
+
+@dataclass
+class Base:
+    base: int
+    class_only: ClassVar[int] = 0
+    hidden: int = field(init=False)
+
+@dataclass
+class Child(Base):
+    child: int
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.Child.__init__"),
+            names(&["self", "base", "child"])
+        );
+    }
+
+    #[test]
+    fn dataclass_base_resolution_uses_statement_order() {
+        let store = indexed_store(
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    local: int
+
+@dataclass
+class Child(Base):
+    child: int
+
+from other import Base
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.Child.__init__"),
+            names(&["self", "local", "child"])
+        );
+    }
+
+    #[test]
+    fn dataclass_init_false_class_has_fields_but_no_constructor() {
+        let store = indexed_store(
+            r"
+from dataclasses import dataclass
+
+@dataclass(init=False)
+class Base:
+    base: int
+
+@dataclass
+class Child(Base):
+    child: int
+",
+        );
+
+        assert!(!store.signatures.contains_key("main.Base.__init__"));
+        assert_eq!(
+            parameter_names(&store, "main.Child.__init__"),
+            names(&["self", "base", "child"])
+        );
+    }
+
+    #[test]
+    fn dataclass_constructor_fields_follow_multiple_inheritance_runtime_order() {
+        let store = indexed_store(
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Root:
+    root: int
+
+@dataclass
+class Left(Root):
+    left: int
+
+@dataclass
+class Right:
+    right: int
+
+@dataclass
+class Leaf(Left, Right):
+    leaf: int
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.Leaf.__init__"),
+            names(&["self", "right", "root", "left", "leaf"])
+        );
+    }
+
+    #[test]
+    fn dataclass_field_model_survives_mixed_handwritten_constructors() {
+        let store = indexed_store(
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    base: int
+
+    def __init__(self, custom: int) -> None:
+        ...
+
+@dataclass
+class Child(Base):
+    child: int
+
+@dataclass
+class HandwrittenChild(Base):
+    child: int
+
+    def __init__(self, only: int) -> None:
+        ...
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.Base.__init__"),
+            names(&["self", "custom"])
+        );
+        assert_eq!(
+            parameter_names(&store, "main.Child.__init__"),
+            names(&["self", "base", "child"])
+        );
+        assert_eq!(
+            parameter_names(&store, "main.HandwrittenChild.__init__"),
+            names(&["self", "only"])
+        );
+        assert!(store.synthesized.contains("main.Child.__init__"));
+        assert!(!store.synthesized.contains("main.Base.__init__"));
+        assert!(!store.synthesized.contains("main.HandwrittenChild.__init__"));
+    }
+
+    #[test]
+    fn namedtuple_subclass_constructor_inherits_base_fields_only() {
+        let store = indexed_store(
+            r"
+from typing import NamedTuple
+
+class Base(NamedTuple):
+    base: int
+
+class Child(Base):
+    child: int
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.Child.__new__"),
+            names(&["cls", "base"])
+        );
     }
 
     #[test]

@@ -701,3 +701,112 @@ D(1, 2)
         "dataclass synth must skip ClassVar/attribute fields; got: {messages:?}"
     );
 }
+
+#[test]
+fn dataclass_constructor_inherits_fields_from_imported_base() {
+    let project = TestProject::new()
+        .dep(
+            "models.py",
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    base: int
+",
+        )
+        .file(
+            "app.py",
+            r"
+from dataclasses import dataclass
+from models import Base
+
+@dataclass
+class Child(Base):
+    child: int
+
+Child(1)
+Child(base=1, child=2)
+",
+        );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:9:", "Too many positional"),
+        "imported dataclass base fields must be modeled; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "keyword construction should remain accepted; got: {messages:?}"
+    );
+}
+
+#[test]
+fn dataclass_constructor_inherits_fields_through_base_alias_assignment() {
+    let project = TestProject::new()
+        .dep(
+            "models.py",
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    base: int
+",
+        )
+        .file(
+            "app.py",
+            r"
+from dataclasses import dataclass
+from models import Base as ImportedBase
+
+Base = ImportedBase
+
+@dataclass
+class Child(Base):
+    child: int
+
+Child(1)
+Child(base=1, child=2)
+",
+        );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:11:", "Too many positional"),
+        "dataclass base aliases must be resolved before synthesis; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "keyword construction should remain accepted; got: {messages:?}"
+    );
+}
+
+#[test]
+fn namedtuple_subclass_uses_inherited_synthesized_constructor() {
+    let project = TestProject::new().file(
+        "app.py",
+        r"
+from typing import NamedTuple
+
+class Base(NamedTuple):
+    base: int
+
+class Child(Base):
+    child: int
+
+Child(1)
+Child(base=1)
+",
+    );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:10:", "Too many positional"),
+        "NamedTuple subclass constructor must inherit base fields; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "keyword construction should remain accepted; got: {messages:?}"
+    );
+}

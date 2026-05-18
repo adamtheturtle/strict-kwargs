@@ -119,10 +119,11 @@ resolve via a synthetic `builtins` module plus a bare-name fallback;
 written `__init__`/`__new__`, so one is synthesized from the class's
 annotated fields (each a positional-or-keyword parameter; `ClassVar` and
 `field(init=False)` excluded, `@dataclass(init=False)` synthesizes nothing, a
-hand-written constructor wins). Scoped to the class's *own* fields —
-inherited base-class fields are not merged, so the auto-fixer declines
-synthesized constructors (the position→name mapping is not guaranteed sound),
-but the positional limit is `0` regardless so the diagnostic stays correct.
+hand-written constructor wins). Dataclass models merge inherited dataclass
+fields in runtime constructor order; `NamedTuple` subclasses inherit their
+base tuple fields without adding newly annotated subclass fields. The
+auto-fixer still declines synthesized constructors until the position→name
+mapping is guaranteed sound across every modeled constructor shape.
 
 ### The ty fallback (`src/ty_resolver.rs`)
 
@@ -273,8 +274,9 @@ Tool-specific:
 - Synthesized constructors cover the **class form** of `@dataclass` and
   `NamedTuple` only. The functional `NamedTuple("N", [...])`/`namedtuple`
   forms, `attrs`, and `TypedDict` (keyword-only by definition) are out of
-  scope; inherited base-class fields are not merged into the synthesized
-  signature (limit is `0` regardless, so detection is unaffected).
+  scope. Dataclass base fields are merged into the synthesized signature in
+  runtime constructor order; `NamedTuple` subclasses reuse inherited tuple
+  fields and do not add newly annotated subclass fields.
 - **Expression nesting is bounded.** The analysis runs on a large dedicated
   stack so a deeply nested file cannot overflow it, but a file nesting
   `()`/`[]`/`{}` deeper than 1000 levels (CPython's own default recursion

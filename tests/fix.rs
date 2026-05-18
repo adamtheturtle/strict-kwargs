@@ -545,9 +545,8 @@ fn does_not_fix_descriptor_set_call() {
 
 #[test]
 fn synthesized_dataclass_constructor_not_rewritten() {
-    // Issue #29: the synthesized `__init__` omits inherited base-class
-    // fields, so the position->name mapping is not guaranteed sound. The
-    // checker still flags it; the fixer conservatively declines.
+    // Issue #29: synthesized constructors are reported by the checker but
+    // still conservatively declined by the fixer.
     let proj = project(
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
     );
@@ -559,6 +558,20 @@ fn synthesized_dataclass_constructor_not_rewritten() {
     assert_unchanged(
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
     );
+}
+
+#[test]
+fn inherited_synthesized_dataclass_constructor_not_rewritten() {
+    let source = "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n";
+    let proj = project(source);
+    assert!(
+        proj.check_main()
+            .iter()
+            .any(|m| m.contains(r#"for "Child""#)),
+        "expected the inherited dataclass call to be flagged: {:?}",
+        proj.check_main()
+    );
+    assert_unchanged(source);
 }
 
 #[test]
