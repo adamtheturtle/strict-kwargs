@@ -31,20 +31,27 @@ use crate::ty_resolver::{
 ///
 /// # Errors
 ///
-/// Returns [`CheckError`] if a source file cannot be read or parsed.
+/// Returns [`CheckError`] if a source file cannot be read or parsed, or if
+/// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
+/// server cannot start ([`CheckError::TyServerFailed`]).
 pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
+    // `ty` is a hard requirement. Verify it up front — before reading or
+    // parsing anything — so the outcome is deterministic and independent of
+    // file content: a codebase the built-in resolver fully handles still
+    // errors if `ty` is missing, so the same source can never resolve fewer
+    // calls on a machine that merely lacks `ty`.
+    require_ty_present()?;
     let python_files = collect_python_files(paths);
     let index = build_index(project_root, &python_files)?;
     // ty-grade resolution (inheritance/MRO, return types, annotated params,
-    // overloads) for calls the built-in resolver cannot resolve. Optional:
-    // absence of `ty` just disables the fallback. `python_env` (the
-    // `--python` value) only steers ty's third-party discovery; the built-in
-    // resolver's env discovery is unchanged.
+    // overloads) for calls the built-in resolver cannot resolve. `python_env`
+    // (the `--python` value) only steers ty's third-party discovery; the
+    // built-in resolver's env discovery is unchanged.
     //
     // Started lazily — only when a file actually has calls the built-in
     // resolver could not resolve. `ty server` indexes the whole project on
@@ -86,7 +93,7 @@ pub fn check_paths(
             &pending,
             &mut ty_file_cache,
             &mut diagnostics,
-        );
+        )?;
     }
     diagnostics.sort_by(|left, right| {
         left.path
@@ -858,7 +865,7 @@ fn call_fix_insertions(
 /// violation reachable from `paths`.
 ///
 /// Mirrors [`check_paths`]: it runs the same detection — built-in resolver
-/// *and*, for the calls that misses, the optional `ty` fallback steered by
+/// *and*, for the calls that misses, the (required) `ty` fallback steered by
 /// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
 /// stays conservative: only a call the built-in resolver pins to a single
 /// in-project signature is rewritten; overloads, synthesized constructors and
@@ -876,13 +883,17 @@ fn call_fix_insertions(
 ///
 /// # Errors
 ///
-/// Returns [`CheckError`] if a source file cannot be read or parsed.
+/// Returns [`CheckError`] if a source file cannot be read or parsed, or if
+/// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
+/// server cannot start ([`CheckError::TyServerFailed`]).
 pub fn fix_paths(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
 ) -> Result<FixOutcome, CheckError> {
+    // `ty` is a hard requirement; verify it up front (see `check_paths`).
+    require_ty_present()?;
     let python_files = collect_python_files(paths);
     let index = build_index(project_root, &python_files)?;
     let mut ty: Option<TyResolver> = None;
@@ -927,7 +938,7 @@ pub fn fix_paths(
             &pending,
             &mut ty_file_cache,
             &mut diagnostics,
-        );
+        )?;
         if insertions.is_empty() {
             continue;
         }
@@ -1266,6 +1277,36 @@ fn hover_text(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Fail unless a usable `ty` executable is on `PATH`.
+///
+/// `ty` is a hard requirement (see [`check_paths`]); this is the cheap,
+/// content-independent up-front probe (`ty version`). The actual server is
+/// still started lazily — only when a file has calls the built-in resolver
+/// could not resolve — so a fully-resolvable run never pays ty's
+/// project-indexing startup cost (issue #31).
+///
+/// The probe result is memoized for the process: `ty`'s presence on `PATH`
+/// cannot change mid-run, the real CLI calls this once anyway, and
+/// memoizing keeps the benchmark suite (which calls `check_paths` many times
+/// per process, issue #30) measuring the resolver rather than repeated
+/// `ty version` subprocess spawns.
+///
+/// Excluded from the coverage gate for the same reason as [`start_ty`]: the
+/// gate environment guarantees `ty` is present (`coverage.yml` asserts `ty
+/// version`), so the `Err` arm cannot be taken there. Its error value is
+/// covered directly by `error.rs`' unit tests and end-to-end by the
+/// `ty`-absent CLI test (which runs the binary with `ty` stripped from
+/// `PATH`).
+#[cfg_attr(coverage, coverage(off))]
+fn require_ty_present() -> Result<(), CheckError> {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *PRESENT.get_or_init(ty_binary_present) {
+        Ok(())
+    } else {
+        Err(CheckError::TyNotFound)
+    }
+}
+
 /// Per-file ty-fallback driver: lazily start `ty` on first need, then
 /// resolve this file's pending calls. The lazy-start and `ty`-available
 /// branches depend on the (environment-specific) `ty` subprocess, so this
@@ -1283,37 +1324,35 @@ fn resolve_file_with_ty(
     pending: &[PendingTy],
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> Result<(), CheckError> {
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        *ty = start_ty(project_root, python_env);
+        // The binary was verified up front (`require_ty_present`), so a
+        // failure here is the server not starting — fatal, not a silent
+        // downgrade, so results stay deterministic.
+        *ty = Some(start_ty(project_root, python_env)?);
     }
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(ty, path, source, pending, ty_file_cache, diagnostics);
     }
+    Ok(())
 }
 
-/// Start the `ty` language server once, warning if its binary is present but
-/// the server could not be launched.
+/// Start the `ty` language server once. `ty`'s binary is verified up front
+/// ([`require_ty_present`]); if the server still cannot be launched the run
+/// fails with [`CheckError::TyServerFailed`] rather than silently dropping
+/// the (now required) inference backend.
 ///
 /// Like [`TyResolver::start`], this is `ty`-subprocess orchestration whose
 /// outcome is environment-specific (the coverage gate guarantees `ty` is
-/// present and startable, so the not-started warning path cannot be taken
-/// there), so it is excluded from the gate.
+/// present and startable, so the failure path cannot be taken there), so it
+/// is excluded from the gate.
 #[cfg_attr(coverage, coverage(off))]
-fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Option<TyResolver> {
-    let ty = TyResolver::start(project_root, python_env);
-    if ty.is_none() && ty_binary_present() {
-        eprintln!(
-            "strict-kwargs: `ty` found but its language server could \
-             not be started; continuing without the type-inference \
-             fallback"
-        );
-    }
-    ty
+fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver, CheckError> {
+    TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver

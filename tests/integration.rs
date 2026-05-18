@@ -1112,23 +1112,14 @@ fn assignment_from_call_is_not_an_alias() {
     assert!(messages.is_empty(), "got: {messages:?}");
 }
 
-/// ty-backed tests need the `ty` binary; skip cleanly when it is absent so
-/// the suite is not environment-dependent.
-fn ty_available() -> bool {
-    std::process::Command::new("ty")
-        .arg("version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
+// `ty` is a hard requirement (it is verified up front by
+// `check_paths`/`fix_paths`), so the whole suite — not just these
+// `ty_`-prefixed tests — needs `ty` on `PATH`. There is therefore no
+// per-test availability guard: without `ty` every test fails, which is the
+// intended, deterministic behaviour. CI installs `ty` (see the workflows).
 
 #[test]
 fn ty_resolves_inherited_method() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     assert_error(
         r"
 class A:
@@ -1146,10 +1137,6 @@ B().method(1)
 
 #[test]
 fn ty_resolves_return_typed_and_annotated() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     let messages = check_source(
         r"
 class A:
@@ -1174,10 +1161,6 @@ A().method(a=1)
 
 #[test]
 fn ty_keyword_call_not_flagged() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     assert_ok(
         r"
 class A:
@@ -1193,10 +1176,6 @@ B().method(a=1)
 
 #[test]
 fn ty_overload_precision() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     // ty resolves the argument-matched overload; the call is flagged
     // because positional args should be keywords either way.
     assert_error(
@@ -1218,10 +1197,6 @@ f(1, 2)
 
 #[test]
 fn ty_stdlib_via_inferred_receiver() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     let messages = check_source(
         r"
 xs: list[int] = []
@@ -1238,10 +1213,6 @@ xs.append(1)
 
 #[test]
 fn ty_stdlib_keyword_ok() {
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     assert_ok(
         r#"
 s = "hello"
@@ -1257,10 +1228,6 @@ fn ty_unbound_method_receiver_not_flagged() {
     // (`def lower(self: ...) -> ...`); pre-fix that explicit receiver was
     // counted against the limit (`got 1, maximum 0`). The receiver must not
     // count, including in a comprehension (the real-world repro).
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     assert_ok(
         r#"
 key = "Content-Type"
@@ -1278,10 +1245,6 @@ fn ty_unbound_method_still_flags_real_extra_positional() {
     // is: `str.encode("hello", "utf-8")` == `"hello".encode("utf-8")`, where
     // `"utf-8"` should be `encoding=`. Only that one argument is counted
     // (`got 1`), not the receiver (issue #15).
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     let messages = check_source(
         r#"
 text = "hello"
@@ -1303,10 +1266,6 @@ fn ty_positional_only_inferred_receiver_not_flagged() {
     // so these calls cannot be rewritten and must not be flagged. (Pre-fix
     // this fell through to goto-definition on runtime stdlib source whose
     // signature drops the `/`, yielding a false positive.)
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     assert_ok(
         r#"
 import sys
@@ -1362,10 +1321,6 @@ fn ty_forwards_external_python_env() {
     // and the positional call is flagged. With `None` (the default) nothing
     // resolves and no diagnostic is produced — proving both that the flag is
     // what enables resolution and that the unset path is unchanged.
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     let env_temp = tempfile::tempdir().expect("tempdir");
     let Some(venv) = make_venv(&env_temp.path().join("ext-env")) else {
         eprintln!("skipping: `python -m venv` unavailable");
@@ -1425,10 +1380,6 @@ fn ty_invalid_python_env_fails_closed() {
     // A bad `--python` value must not produce wrong diagnostics: ty resolves
     // nothing against it, so the run degrades to the built-in resolver
     // exactly as if no env were configured. First-party code still resolves.
-    if !ty_available() {
-        eprintln!("skipping: `ty` not installed");
-        return;
-    }
     let proj = tempfile::tempdir().expect("tempdir");
     let root = proj.path();
     std::fs::write(

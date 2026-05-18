@@ -54,10 +54,12 @@ jobs:
     # Continuous benchmarking (issue #30). Non-gating: it reports an
     # instruction-count delta against `main` on every PR but does not fail
     # the build, so a baseline can be established before any threshold is
-    # enforced. `ty` is intentionally not installed here — CodSpeed measures
-    # instructions of this process, so the optional ty subprocess fallback
-    # would not be measured anyway, and the fixtures are fully resolvable by
-    # the built-in resolver.
+    # enforced. `ty` is now a hard requirement, so it must be installed for
+    # `check_paths`/`fix_paths` to run at all. Its presence is probed once
+    # per process (memoized in `require_ty_present`), so the benchmarks
+    # still measure the built-in resolver hot paths — the fixtures are
+    # fully resolvable by the built-in resolver, so `ty_pending` stays empty
+    # and the `ty server` subprocess is never started.
     #
     # This is a public repository, so the upload is tokenless: CodSpeed v4
     # authenticates via the GitHub OIDC token (`id-token: write` below), so
@@ -78,6 +80,19 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install ty (required backend; probed once per process)
+        shell: bash
+        run: |
+          uv tool install ty
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        shell: bash
+        run: ty version
 
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2

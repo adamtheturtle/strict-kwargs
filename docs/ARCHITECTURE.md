@@ -27,7 +27,7 @@ call site
   │      look up in the DefinitionIndex
   │      └─ found → apply the rule, emit diagnostic
   │
-  └─ 2. not resolvable statically → defer to ty (if available)
+  └─ 2. not resolvable statically → defer to ty (required backend)
          pipelined once per file:
            a. textDocument/hover  → parse the `def …(…)`/`bound method …`
               signature with our own parser, apply the rule
@@ -35,12 +35,28 @@ call site
               textDocument/definition → read & parse the target → apply rule
 ```
 
-The built-in path is primary (fast, offline, deterministic). `ty` is an
-**optional, additive fallback** for the cases static resolution structurally
-cannot do. Every ty failure mode yields *no diagnostic* (fails closed), never
-a wrong one. `ty server` is started **lazily** — only once a file actually
-has calls the built-in resolver could not resolve — so a run the built-in
-path fully handles never pays ty's project-indexing startup cost.
+The built-in path is primary (fast, offline, deterministic). `ty` is a
+**required backend** for the cases static resolution structurally cannot do.
+Every *per-call* ty failure (timeout, protocol hiccup, unparsable target)
+still yields *no diagnostic* (fails closed), never a wrong one. But ty being
+*unavailable at all* — the `ty` executable cannot be located, or `ty server`
+will not start — is a fatal error (`CheckError::TyNotFound` /
+`TyServerFailed`, exit 2), not a silent downgrade: a hard requirement is what
+makes results deterministic across machines, so the same source can never
+resolve fewer calls just because a machine lacks `ty`. `ty` is declared as a
+dependency of the PyPI wheel (`ty>=0.0.23` — a floor, not a pin: that is the
+version the integration was verified against; see `pyproject.toml`), so a
+`pip`/`uv` install ships it; the binary is located **next to our own
+executable** first
+(maturin + the dependency land in the same venv `bin`/`Scripts`, and `uv
+tool install` does *not* put a dependency's entry point on `PATH`), then via
+`PATH` (`cargo install`, activated venv). See `ty_command`. Presence is
+verified **up front** (a cheap `ty version`, independent of file content,
+memoized per process). The `ty server`
+itself is still started **lazily** — only once a file actually has calls the
+built-in resolver could not resolve — so a run the built-in path fully
+handles never pays ty's project-indexing startup cost; a server that fails
+to start at that point is the fatal `TyServerFailed`.
 
 ### The DefinitionIndex (`src/index.rs`)
 
@@ -106,13 +122,24 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   `<class 'A'>`, not a signature).
 - **Pipelined per file**: all requests for a file are sent, then collected —
   round-trip latency is hidden; out-of-order responses are buffered.
-- **Lazy start**: the subprocess is spawned on the first file with deferred
-  calls, not at the start of the run; the "ty present but server could not
-  start" note is likewise emitted only if the fallback was actually needed.
-- **Robust / fails closed**: bounded timeouts (5 s request, 15 s init); the
-  *first* failure latches ty OFF for the whole run (no timeout storms);
-  server→client requests are answered so ty never blocks; a one-time stderr
-  note is printed if `ty` is present but its server cannot start.
+- **Required, verified up front**: the `ty` executable is located next to
+  our own binary (the wheel dependency, `ty>=0.0.23`) or on `PATH`
+  (`ty_command`);
+  a cheap `ty version` probe runs before any file is read, memoized per
+  process; an unlocatable binary aborts the run with
+  `CheckError::TyNotFound` (exit 2) regardless of file content, so the
+  outcome is deterministic.
+- **Lazy start**: the *server* subprocess is still spawned only on the first
+  file with deferred calls, not at the start of the run (a fully-resolvable
+  run does not pay ty's project-indexing cost). If the server fails to start
+  there — binary present, server won't run — the run aborts with
+  `CheckError::TyServerFailed` rather than continuing degraded.
+- **Robust / fails closed (per call)**: bounded timeouts (5 s request, 15 s
+  init); the *first* in-run failure latches ty OFF for the rest of the run
+  (no timeout storms) and yields no diagnostic for the remaining deferred
+  calls; server→client requests are answered so ty never blocks. (Backend
+  *unavailability* is fatal — above — but a flaky *response* never produces
+  a wrong diagnostic.)
 - **Explicit environment (`--python`)**: forwarded to `ty server` over LSP
   (see *Forwarding an explicit environment* below) so the fallback can
   resolve third-party imports in environments ty would not auto-discover.
@@ -138,7 +165,8 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
 `site-packages` only via `$VIRTUAL_ENV` or `<project_root>/.venv` (Unix +
 Windows layouts). Other environments (Conda, a Poetry venv elsewhere, system
 site-packages, `PYTHONPATH`) are *not* found by the built-in resolver. `ty`
-covers them when present: it auto-discovers an activated virtualenv/Conda env
+(always available — it is a hard requirement) covers them: it auto-discovers
+an activated virtualenv/Conda env
 and `.venv`, reads `[tool.ty.environment] python = "…"` from
 `pyproject.toml`/`ty.toml` (strict-kwargs launches `ty server` rooted at the
 project, so that config applies automatically), **or** you point it at the
@@ -172,7 +200,7 @@ diagnostics) just as when no environment is configured.
 
 **Stability.** `ty` is pre-1.0 and its LSP settings surface is undocumented
 for embedding; the schema above was verified against the `ty_server` source
-and the locally pinned `ty` (`0.0.23`) and is exercised by the
+and `ty` `0.0.23` (the dependency floor) and is exercised by the
 `ty_forwards_external_python_env` / `ty_invalid_python_env_fails_closed`
 integration tests. If a future `ty` changes or rejects this channel, the
 fail-closed behaviour means the fallback degrades to today's
@@ -183,7 +211,7 @@ auto-discovery-only behaviour rather than emitting wrong diagnostics.
 - All integration tests **ported from the plugin's `test_plugin.yaml` pass**.
 - The major real-world gaps (inheritance, return/annotation-typed receivers,
   overload precision, stdlib via inferred receiver) are closed via the ty
-  fallback → **effective parity for ordinary OO code when `ty` is present**.
+  fallback (a hard requirement) → **effective parity for ordinary OO code**.
 - Not *provable* full parity: different engines, and the plugin is itself
   bounded by mypy. See [Known limits](#known-limits).
 
@@ -197,9 +225,12 @@ handles these):
 
 Tool-specific:
 
-- **ty is optional.** Without `ty` on `PATH`, inference-dependent cases
-  (inheritance, return/annotation-typed receivers, locals from calls) are not
-  resolved. Builtins/stdlib/own-code/first-party still work.
+- **ty is required.** `ty` must be on `PATH` (and its server must start);
+  otherwise strict-kwargs aborts (exit 2) instead of silently skipping the
+  inference-dependent cases (inheritance, return/annotation-typed receivers,
+  locals from calls). This is deliberate — it keeps results deterministic
+  across machines rather than letting the same source resolve fewer calls
+  where `ty` is absent.
 - **ty is pre-1.0.** Its hover/LSP behaviour can change between versions;
   hover parsing is best-effort and falls back to permissive (a miss, never a
   false positive).
@@ -259,13 +290,15 @@ signal, not an exit status — run `strict-kwargs` for the gate.
 ## Testing & CI
 
 - Unit and integration tests. Integration tests are ported from
-  `mypy-strict-kwargs`; ty-backed tests are guarded by a `ty` availability
-  check so the suite stays green for contributors without `ty`.
+  `mypy-strict-kwargs`. Since `ty` is now a hard requirement, the test
+  suite needs `ty` on `PATH` too (`check_paths`/`fix_paths` error without
+  it) — install it with `uv tool install ty` before `cargo test`.
 - Cross-platform URI handling has dedicated platform-independent unit tests.
 - CI (`.github/workflows/`) runs on **`ubuntu-latest` and `windows-latest`**:
   `ci.yml` installs `ty` (via `uv`) with a `ty version` gate so the
   ty-backed tests actually execute on every platform; `lint.yml` runs
-  `cargo fmt --check` and `cargo clippy -D warnings`.
+  `cargo fmt --check` and `cargo clippy -D warnings`, and installs `ty`
+  before its `prek` pre-push stage because that stage runs `cargo test`.
 - **Continuous benchmarking** (`benches/resolver.rs`, issue #30): a
   divan suite run under [CodSpeed](https://codspeed.io) by a non-gating
   `benchmarks` job in `ci.yml`, reporting an instruction-count delta against

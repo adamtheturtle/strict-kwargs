@@ -44,9 +44,38 @@ pub struct TyResolver {
     disabled: bool,
 }
 
-/// Whether a usable `ty` executable is on `PATH`.
+/// Build a [`Command`] for the `ty` executable.
+///
+/// strict-kwargs declares `ty` as a hard dependency of its wheel (see
+/// `pyproject.toml`), so `ty` normally lives in the *same*
+/// `bin`/`Scripts` directory as our own binary. `uv tool install` does
+/// **not** expose a dependency's entry point on `PATH`, so a bare `ty`
+/// would not be found for the recommended install. Prefer the co-located
+/// `ty[.exe]`; fall back to a bare `ty` (resolved via `PATH`) for `cargo
+/// install` users or an activated venv where it is on `PATH`.
+///
+/// Host-/install-layout-specific glue: which of the
+/// `current_exe`/parent/`is_file` arms is taken depends on how the binary
+/// was installed (the coverage environment runs the test harness, where no
+/// sibling `ty` exists, so only the PATH fallback is taken). Excluded from
+/// the gate for the same reason as the rest of the ty-subprocess glue;
+/// behaviour is exercised by the ty-backed integration tests and the
+/// `ty`-absent CLI test.
+#[cfg_attr(coverage, coverage(off))]
+fn ty_command() -> Command {
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join(if cfg!(windows) { "ty.exe" } else { "ty" }))
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("ty"));
+    Command::new(program)
+}
+
+/// Whether a usable `ty` executable can be located (next to our own binary,
+/// or on `PATH`; see [`ty_command`]).
 pub fn ty_binary_present() -> bool {
-    Command::new("ty")
+    ty_command()
         .arg("version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -112,7 +141,7 @@ impl TyResolver {
     // [`Self::from_parts`]. So exclude only this defensive shell.
     #[cfg_attr(coverage, coverage(off))]
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
-        let mut child = Command::new("ty")
+        let mut child = ty_command()
             .arg("server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -776,11 +805,12 @@ mod tests {
 
     #[test]
     fn ty_binary_present_matches_actual_environment() {
-        // Exercises `ty_binary_present` without requiring `ty` to be
-        // installed (the lint workflow's `cargo test` hook has no `ty`):
-        // assert it agrees with an independent probe of the same command,
-        // so it holds whether or not `ty` is on PATH.
-        let expected = Command::new("ty")
+        // `ty_binary_present` gates a hard requirement, so its correctness
+        // matters even though the rest of the suite now needs `ty`. Assert
+        // it agrees with an independent probe through the same resolution
+        // (`ty_command`), so the success→bool mapping is verified whether or
+        // not `ty` is reachable (this one test does not itself need `ty`).
+        let expected = ty_command()
             .arg("version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
