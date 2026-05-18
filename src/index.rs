@@ -22,8 +22,8 @@ const MAX_ALIAS_DEPTH: usize = 64;
 /// Backstop on the *new* modules a single `get` query may resolve+parse, and
 /// on its total `resolve_alias` calls. The structural defense against a
 /// `from X import *` web (`torch`'s) is the self-referential single-segment
-/// rule in [`Self::resolve_alias`]; with it even `torch.tensor` resolves in a
-/// few hops (measured: `numpy.array` 3 modules / 2 calls,
+/// rule in [`DefinitionIndex::resolve_alias`]; with it even `torch.tensor`
+/// resolves in a few hops (measured: `numpy.array` 3 modules / 2 calls,
 /// `torch.tensor` single-digit). These caps are pure insurance against an
 /// unforeseen pathology: on exhaustion the query yields `None` — the call
 /// defers to the `ty` fallback (or is left unchecked), exactly the documented
