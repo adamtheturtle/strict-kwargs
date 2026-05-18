@@ -48,6 +48,12 @@ struct Store {
     /// inherited base-class fields (cross-module MRO is not resolved), so a
     /// positional->keyword name mapping could be wrong.
     synthesized: FxHashSet<String>,
+    /// Function fullnames that must be skipped entirely (neither flagged nor
+    /// rewritten). Currently populated for ``@singledispatch`` /
+    /// ``@singledispatchmethod`` functions, whose dispatch reads
+    /// ``args[0].__class__``; a keyword first argument would raise
+    /// ``TypeError`` at runtime.
+    excluded: FxHashSet<String>,
 }
 
 impl Store {
@@ -354,6 +360,12 @@ impl DefinitionIndex {
     /// (see [`Store::synthesized`]).
     pub fn is_synthesized(&self, fullname: &str) -> bool {
         self.lock().store.synthesized.contains(fullname)
+    }
+
+    /// Whether `fullname` is a function that must be skipped entirely
+    /// (see [`Store::excluded`]).
+    pub fn is_excluded(&self, fullname: &str) -> bool {
+        self.lock().store.excluded.contains(fullname)
     }
 }
 
@@ -680,16 +692,35 @@ fn index_module(store: &mut Store, module_name: &str, stmts: &[Stmt]) {
     }
 }
 
+/// Whether `decorator_list` contains ``@singledispatch`` or
+/// ``@singledispatchmethod`` (bare name, attribute access, or call form).
+/// Those functions dispatch on ``args[0].__class__``; passing the first
+/// argument as a keyword leaves ``args`` empty and raises ``TypeError`` at
+/// runtime, so calls to them must not be flagged or rewritten.
+fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list.iter().any(|dec| {
+        matches!(
+            callee_tail(&dec.expression),
+            Some("singledispatch" | "singledispatchmethod")
+        )
+    })
+}
+
 fn index_stmt(store: &mut Store, module_name: &str, stmt: &Stmt) {
     match stmt {
         Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
             parameters,
+            decorator_list,
             body,
             ..
         }) => {
             let fullname = format!("{module_name}.{name}");
-            store.insert(fullname, signature_from_parameters(parameters));
+            if has_singledispatch_decorator(decorator_list) {
+                store.excluded.insert(fullname);
+            } else {
+                store.insert(fullname, signature_from_parameters(parameters));
+            }
             index_module(store, module_name, body);
         }
         Stmt::ClassDef(class_def) => {
@@ -740,11 +771,16 @@ fn index_class_body(store: &mut Store, class_name: &str, body: &[Stmt]) {
             Stmt::FunctionDef(ast::StmtFunctionDef {
                 name,
                 parameters,
+                decorator_list,
                 body,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
-                store.insert(fullname, signature_from_parameters(parameters));
+                if has_singledispatch_decorator(decorator_list) {
+                    store.excluded.insert(fullname);
+                } else {
+                    store.insert(fullname, signature_from_parameters(parameters));
+                }
                 index_module(store, class_name, body);
             }
             Stmt::ClassDef(class_def) => {
