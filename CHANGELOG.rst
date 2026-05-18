@@ -4,6 +4,14 @@ Changelog
 Next
 ----
 
+- Whole-project and directory runs are faster (issue #46). The per-file
+  built-in pass (read, parse, AST walk) now runs in parallel across files
+  instead of sequentially — on a multicore machine it is the bulk of
+  whole-project runtime once ignored directories are pruned. The ``ty``
+  fallback still runs serially against a single shared server, and output
+  is byte-identical and deterministic regardless of how the work is
+  scheduled.
+
 - Operational errors are no longer silently swallowed (issue #55).
   Previously a mistyped path made the run report "clean" (exit 0), a
   malformed or wrong-typed ``[tool.strict_kwargs]`` was ignored and the run

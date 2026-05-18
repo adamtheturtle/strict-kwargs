@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
 use ruff_python_ast::Expr;
@@ -50,41 +51,52 @@ pub fn check_paths(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
-    // ty-grade resolution (inheritance/MRO, return types, annotated params,
-    // overloads) for calls the built-in resolver cannot resolve. `python_env`
-    // (the `--python` value) only steers ty's third-party discovery; the
-    // built-in resolver's env discovery is unchanged.
+
+    // Phase 1 (parallel): the built-in pass over every file. Each file is an
+    // independent, pure-CPU unit of work sharing only the `Sync`
+    // demand-driven index; this is the bulk of whole-project runtime and the
+    // residual issue #46 targets. `par_iter` preserves order, so `scans` —
+    // and therefore the `ty` phase and final output — stay deterministic.
+    let scans = python_files
+        .par_iter()
+        .map(|path| -> Result<(PathBuf, ScanOutcome), CheckError> {
+            Ok((path.clone(), scan_file(project_root, path, config, &index)?))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
+    // annotated params, overloads) for calls the built-in pass deferred.
+    // `python_env` (the `--python` value) only steers ty's third-party
+    // discovery; the built-in resolver's env discovery is unchanged. A single
+    // `ty server` is shared across all files (one stdin/stdout subprocess),
+    // so this phase stays single-threaded.
     //
-    // Started lazily — only when a file actually has calls the built-in
-    // resolver could not resolve. `ty server` indexes the whole project on
-    // `initialize`, a multi-second fixed cost (issue #31); a run where the
-    // built-in resolver resolves everything (the common editor-on-save /
-    // pre-commit case on first-party code) must not pay it.
+    // The server is started lazily — only when some file actually has calls
+    // the built-in resolver could not resolve. `ty server` indexes the whole
+    // project on `initialize`, a multi-second fixed cost (issue #31); a run
+    // where the built-in resolver resolves everything (the common
+    // editor-on-save / pre-commit case on first-party code) must not pay it.
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
-    for path in &python_files {
-        let Some(source) = read_or_skip(path)? else {
-            continue;
+    for (path, outcome) in scans {
+        // Emit the undecodable-file warning here, not in the parallel phase,
+        // so its order is deterministic (issue #53 + #46): `python_files` is
+        // sorted, so warnings appear in a stable order regardless of which
+        // worker decoded which file.
+        let scan = match outcome {
+            ScanOutcome::Skipped(reason) => {
+                eprintln!(
+                    "strict-kwargs: warning: skipping {} ({reason})",
+                    path.display()
+                );
+                continue;
+            }
+            ScanOutcome::Scanned(scan) => scan,
         };
-        let parsed = parse_module(&source)?;
-        let module_name = module_name_for_path(project_root, path);
-        let mut checker = CallChecker::new(
-            path.clone(),
-            module_name,
-            is_package_init(path),
-            &source,
-            parsed.tokens(),
-            &index,
-            config,
-            &mut diagnostics,
-        );
-        for stmt in parsed.suite() {
-            checker.visit_stmt(stmt);
-        }
-        let pending = std::mem::take(&mut checker.ty_pending);
-        if pending.is_empty() {
+        diagnostics.extend(scan.diagnostics);
+        if scan.pending.is_empty() {
             continue;
         }
         resolve_file_with_ty(
@@ -92,9 +104,9 @@ pub fn check_paths(
             &mut ty_start_attempted,
             project_root,
             python_env,
-            path,
-            &source,
-            &pending,
+            &path,
+            &scan.source,
+            &scan.pending,
             &mut ty_file_cache,
             &mut diagnostics,
         )?;
@@ -108,24 +120,78 @@ pub fn check_paths(
     Ok(diagnostics)
 }
 
-/// Read a checked file's source, or `Ok(None)` to skip it.
+/// One file's built-in pass (issue #46 phase 1): read, decode, parse, and
+/// walk it. Pure CPU over the shared `Sync` [`DefinitionIndex`], producing
+/// only owned, `Send` data so the whole-project run can run this across files
+/// in parallel; the serial `ty` phase then consumes the result.
 ///
 /// A file that is not valid UTF-8 and carries no usable PEP 263 / BOM
 /// encoding declaration (a binary fixture, vendored data, an unsupported
-/// legacy encoding) is reported as a warning and skipped, so one stray file
-/// neither aborts the whole run with exit 2 nor masks genuine violations in
-/// every other file (issue #53). A real filesystem error stays fatal.
-fn read_or_skip(path: &Path) -> Result<Option<String>, CheckError> {
-    match read_python_source(path)? {
-        Source::Decoded(source) => Ok(Some(source)),
-        Source::Undecodable(reason) => {
-            eprintln!(
-                "strict-kwargs: warning: skipping {} ({reason})",
-                path.display()
-            );
-            Ok(None)
+/// legacy encoding) yields [`ScanOutcome::Skipped`] rather than aborting:
+/// the serial caller warns about it (in deterministic file order) and moves
+/// on, so one stray file neither fails the whole run nor masks genuine
+/// violations elsewhere (issue #53). A real filesystem error stays fatal.
+fn scan_file(
+    project_root: &Path,
+    path: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+) -> Result<ScanOutcome, CheckError> {
+    let source = match read_python_source(path)? {
+        Source::Decoded(source) => source,
+        Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
+    };
+    let parsed = parse_module(&source)?;
+    let module_name = module_name_for_path(project_root, path);
+    // Scope the checker so its borrows of `source`/`parsed` end before
+    // `source` is moved into the returned `FileScan`.
+    let (diagnostics, pending, fixes, fixed_calls) = {
+        let mut checker = CallChecker::new(
+            path.to_path_buf(),
+            module_name,
+            is_package_init(path),
+            &source,
+            parsed.tokens(),
+            index,
+            config,
+        );
+        for stmt in parsed.suite() {
+            checker.visit_stmt(stmt);
         }
-    }
+        (
+            std::mem::take(&mut checker.diagnostics),
+            std::mem::take(&mut checker.ty_pending),
+            std::mem::take(&mut checker.fixes),
+            checker.fixed_calls,
+        )
+    };
+    Ok(ScanOutcome::Scanned(FileScan {
+        source,
+        diagnostics,
+        pending,
+        fixes,
+        fixed_calls,
+    }))
+}
+
+/// Outcome of one file's parallel built-in pass: either the owned, `Send`
+/// scan result, or a skip with the human-readable reason the serial caller
+/// warns about (issue #53). Emitting the warning serially keeps its order
+/// deterministic under the parallel pass.
+enum ScanOutcome {
+    Scanned(FileScan),
+    Skipped(String),
+}
+
+/// Owned, `Send` result of one file's built-in pass ([`scan_file`]). The
+/// `ty` fallback and the auto-fixer consume `pending` / `fixes` afterwards on
+/// the main thread.
+struct FileScan {
+    source: String,
+    diagnostics: Vec<Diagnostic>,
+    pending: Vec<PendingTy>,
+    fixes: Vec<Insertion>,
+    fixed_calls: usize,
 }
 
 /// Collect the `.py`/`.pyi` files reachable from `paths`.
@@ -220,7 +286,11 @@ struct CallChecker<'a> {
     tokens: &'a Tokens,
     index: &'a DefinitionIndex,
     config: &'a Config,
-    diagnostics: &'a mut Vec<Diagnostic>,
+    /// Violations found in this file. Owned (not a shared `&mut`) so each
+    /// file's built-in pass is an independent, `Send` unit of work the
+    /// whole-project run executes in parallel (issue #46); the single-threaded
+    /// `ty` fallback then merges them.
+    diagnostics: Vec<Diagnostic>,
     scopes: Vec<Scope>,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
@@ -266,7 +336,6 @@ impl<'a> CallChecker<'a> {
         tokens: &'a Tokens,
         index: &'a DefinitionIndex,
         config: &'a Config,
-        diagnostics: &'a mut Vec<Diagnostic>,
     ) -> Self {
         Self {
             path,
@@ -276,7 +345,7 @@ impl<'a> CallChecker<'a> {
             tokens,
             index,
             config,
-            diagnostics,
+            diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
             ty_pending: Vec::new(),
             fixes: Vec::new(),
@@ -963,71 +1032,87 @@ pub fn fix_paths(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
+
+    // Phase 1 (parallel, see `check_paths`): the built-in pass plus the
+    // pure-CPU rewrite (apply insertions, then re-parse to fail closed). Both
+    // are per-file and share only the `Sync` index, so they parallelize; the
+    // ty fallback and declined-count accounting stay serial below.
+    let scans = python_files
+        .par_iter()
+        .map(
+            |path| -> Result<(PathBuf, ScanOutcome, Option<String>), CheckError> {
+                let outcome = scan_file(project_root, path, config, &index)?;
+                let rewritten = match &outcome {
+                    ScanOutcome::Skipped(_) => None,
+                    ScanOutcome::Scanned(scan) if scan.fixes.is_empty() => None,
+                    ScanOutcome::Scanned(scan) => {
+                        // Every insertion adds a `name=` prefix, so the result
+                        // always differs from `source`.
+                        let fixed = apply_insertions(&scan.source, &scan.fixes);
+                        // Fail-safe (issue #41): never produce source that does
+                        // not parse. The parenthesized-span fix should keep
+                        // every rewrite valid, but a malformed result must
+                        // abort with a report rather than silently corrupt the
+                        // file.
+                        if parse_module(&fixed).is_err() {
+                            return Err(CheckError::FixProducedInvalidSyntax {
+                                path: path.clone(),
+                            });
+                        }
+                        Some(fixed)
+                    }
+                };
+                Ok((path.clone(), outcome, rewritten))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     // Every violation the checker would report, across all files (built-in
     // and ty-resolved). Only used for the declined count; the rewrite is
-    // driven solely by `checker.fixes`.
+    // driven solely by each file's insertions.
     let mut diagnostics = Vec::new();
     let mut fixed_total = 0usize;
     let mut results = Vec::new();
-    for path in &python_files {
-        let Some(source) = read_or_skip(path)? else {
-            continue;
+    for (path, outcome, rewritten) in scans {
+        // Warn (deterministically, see `check_paths`) and skip an undecodable
+        // file; it produces no fix and no diagnostics (issue #53).
+        let scan = match outcome {
+            ScanOutcome::Skipped(reason) => {
+                eprintln!(
+                    "strict-kwargs: warning: skipping {} ({reason})",
+                    path.display()
+                );
+                continue;
+            }
+            ScanOutcome::Scanned(scan) => scan,
         };
-        let parsed = parse_module(&source)?;
-        let module_name = module_name_for_path(project_root, path);
-        let mut checker = CallChecker::new(
-            path.clone(),
-            module_name,
-            is_package_init(path),
-            &source,
-            parsed.tokens(),
-            &index,
-            config,
-            &mut diagnostics,
-        );
-        for stmt in parsed.suite() {
-            checker.visit_stmt(stmt);
-        }
-        let insertions = std::mem::take(&mut checker.fixes);
-        let count = checker.fixed_calls;
-        let pending = std::mem::take(&mut checker.ty_pending);
-        // `checker`'s `&mut diagnostics` borrow ends at its last use above;
-        // the ty fallback can now extend the same vec (detection only — it
-        // never produces fixes, mirroring `check_paths`).
+        diagnostics.extend(scan.diagnostics);
+        // The ty fallback only ever adds diagnostics (detection, never fixes,
+        // mirroring `check_paths`); it still runs for every file so the
+        // declined count below sees ty-resolved violations too.
         resolve_file_with_ty(
             &mut ty,
             &mut ty_start_attempted,
             project_root,
             python_env,
-            path,
-            &source,
-            &pending,
+            &path,
+            &scan.source,
+            &scan.pending,
             &mut ty_file_cache,
             &mut diagnostics,
         )?;
-        if insertions.is_empty() {
-            continue;
+        if let Some(fixed) = rewritten {
+            fixed_total += scan.fixed_calls;
+            results.push(FileFix {
+                path,
+                original: scan.source,
+                fixed,
+                count: scan.fixed_calls,
+            });
         }
-        // `insertions` is non-empty here and every insertion adds a
-        // `name=` prefix, so the result always differs from `source`.
-        let fixed = apply_insertions(&source, &insertions);
-        // Fail-safe (issue #41): never write source that does not parse.
-        // The parenthesized-span fix below should keep every rewrite valid,
-        // but a malformed result must abort *this* file with a report
-        // rather than silently corrupt it.
-        if parse_module(&fixed).is_err() {
-            return Err(CheckError::FixProducedInvalidSyntax { path: path.clone() });
-        }
-        fixed_total += count;
-        results.push(FileFix {
-            path: path.clone(),
-            original: source,
-            fixed,
-            count,
-        });
     }
     results.sort_by_key(|fix| fix.path.clone());
     // Each violation pushes exactly one diagnostic, then is rewritten or not;
@@ -1985,7 +2070,6 @@ while cond:
         let index = DefinitionIndex::for_test();
         let config = Config::default();
         let checker_parsed = parse_module("").expect("parse empty");
-        let mut diagnostics = Vec::new();
         let mut checker = CallChecker::new(
             PathBuf::from("test.py"),
             "test".to_string(),
@@ -1994,7 +2078,6 @@ while cond:
             checker_parsed.tokens(),
             &index,
             &config,
-            &mut diagnostics,
         );
         setup(&mut checker);
 
@@ -2086,7 +2169,6 @@ while cond:
         let index = DefinitionIndex::for_test();
         let config = Config::default();
         let parsed = parse_module("").expect("parse empty");
-        let mut diagnostics = Vec::new();
         let checker = CallChecker::new(
             PathBuf::from("test.py"),
             "test".to_string(),
@@ -2095,7 +2177,6 @@ while cond:
             parsed.tokens(),
             &index,
             &config,
-            &mut diagnostics,
         );
         assert!(!checker.binding_is_instance("never_bound"));
     }
