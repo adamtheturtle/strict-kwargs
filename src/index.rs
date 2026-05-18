@@ -193,15 +193,18 @@ impl DefinitionIndex {
         if *query_budget == 0 {
             return;
         }
-        // Lazily-resolved dependency modules (stdlib stubs, builtins,
-        // third-party) are *not* depth-guarded: the explicit nesting
-        // rejection (issue #54) is scoped to the files the user asked to
-        // check, and re-tokenizing every resolved stub here purely to
-        // measure its depth is a large hot-path regression (#54 follow-up).
-        // Overflow safety for these still holds — the whole analysis runs on
-        // the large stack `run_with_large_stack` provides — and a parse
-        // failure is already a silent, fail-closed skip.
-        let Ok(parsed) = parse_module(&m.source) else {
+        // File-backed dependencies are guarded: a deeply-nested dependency
+        // (e.g. a machine-generated first-party or site-packages stub) must be
+        // rejected gracefully, not crash the analysis thread (issue #83).
+        // Vendored typeshed is embedded, pinned, and trusted; keep it on the
+        // old direct parse path so every run does not rescan large bundled
+        // stubs such as `builtins.pyi`.
+        let parsed = if m.guard_nesting {
+            parse_module_guarded(&m.source)
+        } else {
+            parse_module(&m.source).map_err(CheckError::from)
+        };
+        let Ok(parsed) = parsed else {
             return;
         };
         *query_budget -= 1;

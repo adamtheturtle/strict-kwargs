@@ -46,13 +46,13 @@ impl ModuleResolver {
             .get_file(format!("{rel}.pyi"))
             .and_then(include_dir::File::contents_utf8)
         {
-            return Some(ResolvedModule::module(text));
+            return Some(ResolvedModule::stdlib_module(text));
         }
         if let Some(text) = TYPESHED_STDLIB
             .get_file(format!("{rel}/__init__.pyi"))
             .and_then(include_dir::File::contents_utf8)
         {
-            return Some(ResolvedModule::package(text));
+            return Some(ResolvedModule::stdlib_package(text));
         }
 
         // 3. Third-party in site-packages, honoring PEP 561 stub packages.
@@ -80,6 +80,7 @@ impl ModuleResolver {
 pub struct ResolvedModule {
     pub source: String,
     pub is_package: bool,
+    pub guard_nesting: bool,
 }
 
 impl ResolvedModule {
@@ -87,12 +88,28 @@ impl ResolvedModule {
         Self {
             source: source.into(),
             is_package: false,
+            guard_nesting: true,
         }
     }
     fn package(source: impl Into<String>) -> Self {
         Self {
             source: source.into(),
             is_package: true,
+            guard_nesting: true,
+        }
+    }
+    fn stdlib_module(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            is_package: false,
+            guard_nesting: false,
+        }
+    }
+    fn stdlib_package(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            is_package: true,
+            guard_nesting: false,
         }
     }
 }

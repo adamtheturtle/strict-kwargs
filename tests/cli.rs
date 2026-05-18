@@ -216,6 +216,28 @@ fn fix_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
     assert!(stderr(&output).contains("nesting too deep"));
 }
 
+/// Issue #83: a deeply-nested *dependency* (a module imported by a checked
+/// file, lazily resolved via the index) must also be skipped gracefully.
+/// Before the fix, lazy stub resolution called unguarded `parse_module` which
+/// could crash the analysis thread on a too-deep module; now it goes through
+/// `parse_module_guarded` so the stub is silently skipped (fail-closed).
+#[test]
+fn deeply_nested_dependency_is_skipped_not_sigabrt() {
+    // `caller.py` imports from `deep_dep.py` (depth 6000 > MAX_NESTING_DEPTH).
+    // The checker must not crash when lazily resolving the deep dependency.
+    let project = Project::new()
+        .write("deep_dep.py", &deeply_nested_source(6000))
+        .write("caller.py", "import deep_dep\ndeep_dep.f(1)\n");
+    let output = project.run(&["caller.py"]);
+    // Any graceful exit (0, 1, or 2) is acceptable; exit 134 (SIGABRT) is not.
+    assert_ne!(
+        code(&output),
+        134,
+        "crashed with SIGABRT; stderr: {}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn check_nesting_at_the_limit_is_handled_on_the_large_stack() {
     // Exactly at the bound: accepted and analysed. This depth would overflow
