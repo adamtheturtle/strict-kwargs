@@ -161,6 +161,15 @@ fn report_declined(declined: usize) {
     );
 }
 
+/// Return `true` when diff output should be colorized.
+///
+/// Colors are enabled only for an interactive terminal that has not opted out
+/// via the `NO_COLOR` convention (<https://no-color.org/>).
+#[cfg_attr(coverage, coverage(off))]
+fn diff_color() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
@@ -174,7 +183,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     }
 
     if args.diff {
-        let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let color = diff_color();
         for fix in fixes {
             print!(
                 "{}",

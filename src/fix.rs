@@ -201,6 +201,24 @@ mod tests {
     }
 
     #[test]
+    fn unified_diff_color_contains_ansi_codes() {
+        let original = "f(a)\n";
+        let fixed = "f(x=a)\n";
+        let diff = unified_diff(Path::new("m.py"), original, fixed, true);
+        // ANSI escape sequences are present in colored output.
+        assert!(
+            diff.contains("\x1b["),
+            "expected ANSI codes in colored diff"
+        );
+        // Structural markers still present (possibly wrapped in color codes).
+        assert!(diff.contains("---"));
+        assert!(diff.contains("+++"));
+        assert!(diff.contains("@@"));
+        assert!(diff.contains("f(a)"));
+        assert!(diff.contains("f(x=a)"));
+    }
+
+    #[test]
     fn unified_diff_splits_distant_changes_into_two_hunks() {
         let mut before = String::from("X\n");
         for _ in 0..20 {
