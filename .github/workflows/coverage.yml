@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust nightly (branch coverage needs an unstable rustc)
+      - name: Install Rust nightly (branch coverage + `#[coverage(off)]` need an unstable rustc)
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: llvm-tools-preview
@@ -44,8 +44,22 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Enforce 100% coverage (lines, regions, functions, branches)
-        run: ./scripts/coverage.sh
+      - name: Enforce 100% line + branch coverage
+        # Branch coverage needs `--branch` (unstable; nightly above).
+        # Collect once, then gate twice off the same profdata. Test
+        # modules and documented-unreachable helpers are `#[coverage(off)]`.
+        # `cargo-llvm-cov` has `--fail-under-lines` but no
+        # `--fail-under-branches`, so the branch threshold is read from the
+        # JSON summary and checked with `jq -e` (data via stdin, never
+        # interpolated into code).
+        shell: bash
+        run: |
+          cargo llvm-cov --no-report --branch --workspace
+          cargo llvm-cov report --branch --fail-under-lines 100
+          summary="$(cargo llvm-cov report --branch --json --summary-only)"
+          echo "Branch coverage: $(jq -r '.data[0].totals.branches.percent' <<<"$summary")%"
+          jq -e '.data[0].totals.branches.percent >= 100' >/dev/null <<<"$summary" \
+            || { echo "error: branch coverage is below the required 100%" >&2; exit 1; }
 
   completion-coverage:
     needs: coverage

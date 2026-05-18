@@ -105,7 +105,7 @@ impl TyResolver {
     // control flow is `?` early-returns for failures — `ty` not spawning, its
     // stdio pipes not materializing, or the initialize handshake timing out —
     // that cannot occur in the coverage environment, where `ty` is guaranteed
-    // present (CI asserts `ty version`; see `scripts/coverage.sh`). The
+    // present (CI asserts `ty version`; see `coverage.yml`). The
     // testable parts are factored out and unit-tested directly:
     // [`initialize_params`] (pure), and the RPC layer ([`Self::request`],
     // [`Self::collect`], [`Self::notify`], [`read_messages`]) via
