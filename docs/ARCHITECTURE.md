@@ -194,9 +194,13 @@ as `ty_project::metadata::Options`, so `environment.python` here is exactly
 sending (ty resolves a *relative* `environment.python` against its workspace
 root, but a CLI value is relative to the user's cwd). When `--python` is
 unset, no `initializationOptions` is sent and ty's auto-discovery is
-untouched. An invalid/unknown path is not validated by strict-kwargs: ty
-simply resolves nothing against it, so the fallback fails closed (no wrong
-diagnostics) just as when no environment is configured.
+untouched. A `--python` path that does not exist is reported on stderr and
+dropped (issue #55) — the run then behaves exactly as if `--python` were
+unset (ty's own auto-discovery), rather than silently forwarding a path ty
+resolves nothing against. A path that *exists* but is not a usable
+environment is still ty's concern, not strict-kwargs's: ty resolves nothing
+against it, so the fallback fails closed (no wrong diagnostics) just as when
+no environment is configured.
 
 **Stability.** `ty` is pre-1.0 and its LSP settings surface is undocumented
 for embedding; the schema above was verified against the `ty_server` source
@@ -282,13 +286,28 @@ ignore_names = ["main.func", "builtins.str"]   # fully-qualified; class form
 debug = false                                  # also covers Class.__init__
 ```
 
+A missing `pyproject.toml`, or one without a `[tool.strict_kwargs]` table,
+uses the defaults. One that exists but cannot be read/parsed, or whose
+`[tool.strict_kwargs]` has the wrong shape or value types (e.g.
+`ignore_names` not a list), is a hard error (`CheckError::ConfigInvalid`,
+exit 2) rather than a silent fall back to defaults — a misconfigured
+`ignore_names` must not pass unnoticed (issue #55). `Config::load` returns
+`Result<Config, CheckError>`.
+
 CLI: `strict-kwargs [PATHS...] [--project-root DIR] [--python PATH]`, plus
 `strict-kwargs fix [PATHS...] [--project-root DIR] [--diff] [--python PATH]`.
 `fix` writes in place (`--diff` previews instead) and reports a count of
 violations it detected but declined to rewrite.
-Exit codes (`check`): `0` clean, `1` violations, `2` internal error. `fix`
-exits `0` on success (`2` on internal error); the declined count is a stderr
-signal, not an exit status — run `strict-kwargs` for the gate.
+A path argument that does not exist is `CheckError::PathNotFound` (exit 2),
+like `ruff`, not a silent skip that would report "clean" (issue #55); an
+*existing* non-Python file passed directly is still a deliberate selection
+and is skipped. A nonexistent `--python` is reported on stderr and dropped,
+so the run falls back to `ty`'s own environment discovery instead of
+silently degrading detection (issue #55).
+Exit codes (`check`): `0` clean, `1` violations, `2` internal/operational
+error. `fix` exits `0` on success (`2` on internal/operational error); the
+declined count is a stderr signal, not an exit status — run `strict-kwargs`
+for the gate.
 
 ## Source map
 

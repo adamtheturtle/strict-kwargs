@@ -27,6 +27,24 @@ pub enum CheckError {
         /// The file whose rewrite was rejected.
         path: PathBuf,
     },
+    /// A path passed on the command line does not exist. A mistyped target
+    /// must not let the run report "clean" (a false pass in CI); like
+    /// `ruff`, it is a hard error instead of being silently skipped
+    /// (issue #55).
+    PathNotFound {
+        /// The nonexistent path as given on the command line.
+        path: PathBuf,
+    },
+    /// `pyproject.toml` (or its `[tool.strict_kwargs]` table) could not be
+    /// read or parsed, or has the wrong shape/value types. Reported instead
+    /// of silently running with defaults, which would hide a misconfigured
+    /// `ignore_names` (issue #55).
+    ConfigInvalid {
+        /// The offending `pyproject.toml`.
+        path: PathBuf,
+        /// What is wrong with it, phrased to follow the path.
+        message: String,
+    },
     /// The `ty` type-inference backend is a hard requirement, but no `ty`
     /// executable was found on `PATH`. Failing instead of silently
     /// degrading keeps results deterministic across machines (a run never
@@ -78,6 +96,12 @@ impl std::fmt::Display for CheckError {
                 "`ty` was found but its language server (`ty server`) could \
                  not be started; the type-inference backend is required"
             ),
+            Self::PathNotFound { path } => {
+                write!(formatter, "no such file or directory: {}", path.display())
+            }
+            Self::ConfigInvalid { path, message } => {
+                write!(formatter, "{}: {message}", path.display())
+            }
         }
     }
 }
@@ -148,6 +172,29 @@ mod tests {
         // Points at the documented install path.
         assert!(message.contains("uv tool install ty"));
         assert_eq!(format!("{error:?}"), "TyNotFound");
+    }
+
+    #[test]
+    fn path_not_found_names_the_path() {
+        let error = CheckError::PathNotFound {
+            path: PathBuf::from("typo_does_not_exist.py"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("no such file or directory"));
+        assert!(message.contains("typo_does_not_exist.py"));
+        assert!(format!("{error:?}").starts_with("PathNotFound"));
+    }
+
+    #[test]
+    fn config_invalid_shows_path_then_reason() {
+        let error = CheckError::ConfigInvalid {
+            path: PathBuf::from("pyproject.toml"),
+            message: "`[tool.strict_kwargs]` must be a table, found a string".to_owned(),
+        };
+        let message = error.to_string();
+        assert!(message.starts_with("pyproject.toml: "));
+        assert!(message.contains("must be a table"));
+        assert!(format!("{error:?}").starts_with("ConfigInvalid"));
     }
 
     #[test]

@@ -16,6 +16,25 @@ Next
   front with a clear ``expression nesting too deep`` message and exit code
   2 instead of crashing.
 
+- Operational errors are no longer silently swallowed (issue #55).
+  Previously a mistyped path made the run report "clean" (exit 0), a
+  malformed or wrong-typed ``[tool.strict_kwargs]`` was ignored and the run
+  proceeded with defaults, and an invalid ``--python`` silently disabled the
+  explicit environment — each a false pass or a silent downgrade in exactly
+  the automated contexts this tool targets. Now: a path that does not exist
+  is a hard error (exit 2), like ``ruff``, instead of being skipped (an
+  existing non-Python file passed directly is still a deliberate selection
+  and is skipped); a ``pyproject.toml`` that exists but cannot be read or
+  parsed, or whose ``[tool.strict_kwargs]`` has the wrong shape or value
+  types (e.g. ``ignore_names`` not a list), is a hard error (exit 2) rather
+  than a silent fall back to defaults — a missing ``pyproject.toml`` or one
+  without the table is still fine; and a nonexistent ``--python`` is
+  reported on stderr and dropped, so the run falls back to ``ty``'s own
+  environment discovery instead of degrading detection with no signal. The
+  library ``Config::load`` now returns ``Result<Config, CheckError>`` and
+  there are two new ``CheckError`` variants (``PathNotFound``,
+  ``ConfigInvalid``).
+
 - A single non-UTF-8 file no longer aborts the whole run or masks
   violations in every other file (issue #53). Previously one stray byte (a
   binary fixture, vendored data, a legacy-encoded module) failed the run

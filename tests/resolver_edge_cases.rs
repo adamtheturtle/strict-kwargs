@@ -54,7 +54,7 @@ impl TestProject {
     /// Diagnostics for `main.py`, formatted `main:<line>: <message>`.
     fn check(&self) -> Vec<String> {
         let main = self.root.join("main.py");
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
         diagnostics
             .iter()
@@ -64,7 +64,7 @@ impl TestProject {
 
     /// Diagnostics for the whole project directory (exercises directory walk).
     fn check_dir(&self) -> Vec<String> {
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let diagnostics = check_paths(&self.root, std::slice::from_ref(&self.root), &config, None)
             .expect("check");
         diagnostics
@@ -99,17 +99,34 @@ fn has_error_at(messages: &[String], line: usize, contains: &str) -> bool {
 
 // --- Directory discovery ---------------------------------------------------
 
-/// A path argument that is neither a file nor a directory (does not exist)
-/// and a non-Python file passed directly are both silently skipped — no
-/// panic, no diagnostics.
+/// A mistyped target (a path that is neither a file nor a directory) is a
+/// hard error, not a silent "clean" result that would pass unnoticed in CI
+/// (issue #55).
 #[test]
-fn nonexistent_and_non_python_paths_are_skipped() {
+fn nonexistent_path_is_a_hard_error() {
     let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
     let missing = project.root.join("does_not_exist.py");
+    let config = Config::load(&project.root).expect("valid config");
+    let error = check_paths(&project.root, &[missing], &config, None)
+        .expect_err("a nonexistent path must be a hard error");
+    let message = error.to_string();
+    assert!(
+        message.contains("no such file or directory"),
+        "message: {message}"
+    );
+    assert!(message.contains("does_not_exist.py"), "message: {message}");
+}
+
+/// A non-Python file passed *directly* exists, so it is a deliberate (if
+/// odd) selection rather than a mistake: it is skipped, not an error. This
+/// keeps the issue #55 hardening scoped to genuinely missing paths.
+#[test]
+fn non_python_file_passed_directly_is_skipped() {
+    let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
     let not_py = project.root.join("notes.txt");
     std::fs::write(&not_py, "plain text\n").expect("write");
-    let config = Config::load(&project.root);
-    let diagnostics = check_paths(&project.root, &[missing, not_py], &config, None).expect("check");
+    let config = Config::load(&project.root).expect("valid config");
+    let diagnostics = check_paths(&project.root, &[not_py], &config, None).expect("check");
     assert!(diagnostics.is_empty(), "got: {diagnostics:?}");
 }
 
@@ -177,7 +194,7 @@ fn over_deep_relative_import_returns_none() {
     let project = TestProject::new()
         .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("pkg/mod.py", "from ... import something\n\nsomething()\n");
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let modp = project.root.join("pkg/mod.py");
     let diagnostics = check_paths(&project.root, &[modp], &config, None).expect("check");
     assert!(
@@ -401,7 +418,7 @@ fn call_of_imported_callable_class_resolves_dunder_call() {
             "lib.py",
             "class Factory:\n    def __call__(self, a, b): ...\n",
         );
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
     assert!(
@@ -446,7 +463,7 @@ fn deep_dotted_attribute_chain_resolves() {
         .file("app.py", "import pkg.sub\n\npkg.sub.run(1, 2)\n")
         .file("pkg/__init__.py", "")
         .file("pkg/sub.py", "def run(a, b): ...\n");
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
     assert_eq!(diagnostics.len(), 1, "got: {diagnostics:?}");
@@ -485,7 +502,7 @@ fn assignment_from_attribute_constructor_is_not_recorded() {
             "import lib\n\nobj = lib.Factory()\nobj.run(1, 2)\n",
         )
         .file("lib.py", "class Factory:\n    def run(self, a, b): ...\n");
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let _ = check_paths(&project.root, &[app], &config, None).expect("check");
 }
@@ -532,7 +549,7 @@ fn call_to_non_callable_module_attribute_is_ignored() {
         .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("app.py", "import lib\n\nlib.thing(1, 2)\n")
         .file("lib.py", "thing = 5\n");
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
     assert!(
@@ -736,7 +753,7 @@ def get_thing_cls() -> type[Thing]:
     return Thing
 ",
         );
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
     assert!(
@@ -759,7 +776,7 @@ fn ty_resolves_cross_file_method_on_inferred_instance() {
             "lib.py",
             "class Thing:\n    def greet(self, a, b): ...\n\n\ndef make() -> Thing:\n    return Thing()\n",
         );
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
     assert!(
@@ -825,7 +842,7 @@ def build() -> Engine:
     return Engine()
 "#,
         );
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
     // Like the other cross-file ty tests, resolution of an inferred instance
     // is environment-dependent, so assert robustly: the run completes and any
@@ -856,7 +873,7 @@ fn ty_hover_callable_type_overloads_accept_varargs() {
 fn diagnostic_message_shape() {
     let project = plain_project("def func(a, b): ...\nfunc(1, 2)\n");
     let main = project.root.join("main.py");
-    let config = Config::load(&project.root);
+    let config = Config::load(&project.root).expect("valid config");
     let diags: Vec<Diagnostic> = check_paths(&project.root, &[main], &config, None).expect("check");
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message().contains("Too many positional"));
