@@ -116,6 +116,14 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
 - **Explicit environment (`--python`)**: forwarded to `ty server` over LSP
   (see *Forwarding an explicit environment* below) so the fallback can
   resolve third-party imports in environments ty would not auto-discover.
+  Accepted by both `check` and `fix`.
+- **`fix` uses it for detection only**: `fix_paths` runs the same built-in +
+  ty detection as `check_paths` (same lazy start), but the *rewrite* stays
+  conservative — overloaded, synthesized, and ty-only-resolved calls are
+  never edited (issue #7; a wrong parameter name would corrupt source, cf.
+  issue #41). Running detection in full lets `fix` report a `declined`
+  count equal to what a following `check` (same `--python`) still reports,
+  so the two no longer silently disagree (issue #42).
 
 ## Capability matrix
 
@@ -226,8 +234,13 @@ ignore_names = ["main.func", "builtins.str"]   # fully-qualified; class form
 debug = false                                  # also covers Class.__init__
 ```
 
-CLI: `strict-kwargs [PATHS...] [--project-root DIR]`.
-Exit codes: `0` clean, `1` violations, `2` internal error.
+CLI: `strict-kwargs [PATHS...] [--project-root DIR] [--python PATH]`, plus
+`strict-kwargs fix [PATHS...] [--project-root DIR] [--diff] [--python PATH]`.
+`fix` writes in place (`--diff` previews instead) and reports a count of
+violations it detected but declined to rewrite.
+Exit codes (`check`): `0` clean, `1` violations, `2` internal error. `fix`
+exits `0` on success (`2` on internal error); the declined count is a stderr
+signal, not an exit status — run `strict-kwargs` for the gate.
 
 ## Source map
 

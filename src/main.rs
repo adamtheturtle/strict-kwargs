@@ -71,6 +71,14 @@ struct FixArgs {
     /// Print the unified diff of what would change instead of writing it.
     #[arg(long)]
     diff: bool,
+
+    /// Python environment for the `ty` inference fallback (see
+    /// ``strict-kwargs --help``). The rewrite stays conservative and never
+    /// edits a `ty`-resolved call, but passing this lets ``fix`` *detect*
+    /// the same violations ``check`` would, so the "not rewritten" count it
+    /// reports — and a following ``strict-kwargs --python`` run — agree.
+    #[arg(long, value_name = "PATH")]
+    python: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -114,24 +122,43 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     }
 }
 
+/// Report violations `fix` detected but deliberately did not rewrite, so a
+/// following `strict-kwargs` run is no surprise (issue #42). Always to stderr
+/// — stdout is reserved for the `--diff` patch.
+fn report_declined(declined: usize) {
+    if declined == 0 {
+        return;
+    }
+    eprintln!(
+        "strict-kwargs: {declined} violation{} detected but not rewritten \
+         (overloaded, synthesized, or ty-resolved); run `strict-kwargs` to \
+         see {}",
+        if declined == 1 { "" } else { "s" },
+        if declined == 1 { "it" } else { "them" }
+    );
+}
+
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root);
-    let fixes = fix_paths(&project_root, &args.paths, &config)?;
+    let outcome = fix_paths(&project_root, &args.paths, &config, args.python.as_deref())?;
+    let fixes = &outcome.files;
     if fixes.is_empty() {
         eprintln!("strict-kwargs: no fixes to apply");
+        report_declined(outcome.declined);
         return Ok(ExitCode::from(0));
     }
 
     if args.diff {
-        for fix in &fixes {
+        for fix in fixes {
             print!("{}", unified_diff(&fix.path, &fix.original, &fix.fixed));
         }
+        report_declined(outcome.declined);
         return Ok(ExitCode::from(0));
     }
 
     let mut total = 0usize;
-    for fix in &fixes {
+    for fix in fixes {
         std::fs::write(&fix.path, &fix.fixed)?;
         total += fix.count;
         eprintln!(
@@ -147,6 +174,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
         fixes.len(),
         if fixes.len() == 1 { "" } else { "s" }
     );
+    report_declined(outcome.declined);
     Ok(ExitCode::from(0))
 }
 

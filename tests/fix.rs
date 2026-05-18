@@ -43,19 +43,24 @@ impl TestProject {
     fn fixed_main(&self) -> String {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root);
-        let fixes = fix_paths(&self.root, std::slice::from_ref(&main), &config).expect("fix");
-        fixes.into_iter().find(|f| f.path == main).map_or_else(
-            || std::fs::read_to_string(&main).expect("read"),
-            |f| f.fixed,
-        )
+        let outcome =
+            fix_paths(&self.root, std::slice::from_ref(&main), &config, None).expect("fix");
+        outcome
+            .files
+            .into_iter()
+            .find(|f| f.path == main)
+            .map_or_else(
+                || std::fs::read_to_string(&main).expect("read"),
+                |f| f.fixed,
+            )
     }
 
     /// Run the fixer over `main.py`, returning the raw result so a test can
     /// assert on the fail-safe error (issue #41).
-    fn fix_main_result(&self) -> Result<Vec<strict_kwargs::FileFix>, strict_kwargs::CheckError> {
+    fn fix_main_result(&self) -> Result<strict_kwargs::FixOutcome, strict_kwargs::CheckError> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root);
-        fix_paths(&self.root, std::slice::from_ref(&main), &config)
+        fix_paths(&self.root, std::slice::from_ref(&main), &config, None)
     }
 
     /// Diagnostics for `main.py`, formatted like the other test harness.
@@ -267,8 +272,9 @@ fn unchanged_file_not_reported() {
     let proj = project("def f(a: int) -> None: ...\nf(a=1)\n");
     let main = proj.root.join("main.py");
     let config = Config::load(&proj.root);
-    let fixes = fix_paths(&proj.root, &[main], &config).expect("fix");
-    assert!(fixes.is_empty());
+    let outcome = fix_paths(&proj.root, &[main], &config, None).expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 0);
 }
 
 #[test]
@@ -433,4 +439,24 @@ fn synthesized_namedtuple_constructor_not_rewritten() {
     assert_unchanged(
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
     );
+}
+
+#[test]
+fn declined_count_equals_violations_left_for_check() {
+    // The fixer rewrites the plain call but conservatively declines the
+    // synthesized dataclass constructor (issue #29). `declined` must equal
+    // the violations a following `check` still reports, so `fix` then
+    // `check` is predictable rather than silently inconsistent (issue #42).
+    let proj = project(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\ndef f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n",
+    );
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root);
+    let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].count, 1);
+    // Applying the fix leaves exactly `declined` violations behind.
+    std::fs::write(&main, &outcome.files[0].fixed).expect("write fixed");
+    assert_eq!(proj.check_main().len(), outcome.declined);
 }
