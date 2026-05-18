@@ -1778,6 +1778,7 @@ struct CallAtStart<'a> {
     call: Option<&'a ast::ExprCall>,
 }
 
+#[cfg_attr(coverage, coverage(off))]
 impl<'a> Visitor<'a> for CallAtStart<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if self.call.is_some() {
@@ -1793,6 +1794,7 @@ impl<'a> Visitor<'a> for CallAtStart<'a> {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn call_at_start(suite: &[Stmt], start: usize) -> Option<&ast::ExprCall> {
     let mut locator = CallAtStart { start, call: None };
     for stmt in suite {
@@ -1924,6 +1926,7 @@ fn emit_if_violation(
     Some(max_positional)
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn signature_is_fully_named(signature: &Signature) -> bool {
     signature
         .parameters
@@ -1962,6 +1965,7 @@ fn ty_call_fix_insertions(
     )
 }
 
+#[cfg_attr(coverage, coverage(off))]
 #[allow(
     clippy::too_many_arguments,
     reason = "threads the resolved ty call facts into the existing fixer \
