@@ -182,6 +182,11 @@ fn list_subclass_construction_does_not_use_instance_call_signature() {
 }
 
 #[test]
+fn instance_call_without_dunder_call_does_not_use_constructor_signature() {
+    assert_unchanged("class C:\n    def __init__(self, x: int) -> None: ...\n\nc = C(x=1)\nc(2)\n");
+}
+
+#[test]
 fn rewrites_method_excluding_self() {
     assert_fixed(
         "class C:\n    def m(self, a: int, b: int) -> None: ...\nc = C()\nc.m(1, 2)\n",
