@@ -64,6 +64,30 @@ impl Project {
             .output()
             .expect("spawn strict-kwargs")
     }
+
+    /// Run with `PATH` pointing at a fake `ty` that passes the up-front
+    /// `ty version` probe but whose `ty server` exits immediately, so the
+    /// lazy server start fails (`CheckError::TyServerFailed`). Unix-only
+    /// (shell shim); the coverage gate runs on Linux.
+    #[cfg(unix)]
+    fn run_with_broken_ty_server(&self, args: &[&str]) -> Output {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = self.root.join("__fake_ty__");
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let shim = bin.join("ty");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\ncase \"$1\" in\nversion) echo 'ty 0.0.0'; exit 0;;\n*) exit 1;;\nesac\n",
+        )
+        .expect("write shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Command::new(BIN)
+            .args(args)
+            .current_dir(&self.root)
+            .env("PATH", &bin)
+            .output()
+            .expect("spawn strict-kwargs")
+    }
 }
 
 fn code(output: &Output) -> i32 {
@@ -312,6 +336,44 @@ fn fix_without_ty_is_fatal_exit_two() {
         stderr(&output)
     );
     // The required-backend check is up front, so nothing was rewritten.
+    assert_eq!(project.read("main.py"), source);
+}
+
+// An inherited-method call the built-in resolver cannot resolve, so it is
+// deferred to `ty` — exercising the per-file driver where a failed lazy
+// server start becomes the fatal `TyServerFailed`.
+#[cfg(unix)]
+const TY_DEFERRED: &str =
+    "class A:\n    def m(self, a: int) -> None: ...\n\nclass B(A):\n    pass\n\nB().m(1)\n";
+
+#[cfg(unix)]
+#[test]
+fn check_with_unstartable_ty_server_is_fatal_exit_two() {
+    // `ty` is present (the `version` probe passes) but `ty server` will not
+    // start, so the run aborts rather than silently degrading.
+    let project = Project::new().write("main.py", TY_DEFERRED);
+    let output = project.run_with_broken_ty_server(&["main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(
+        err.contains("ty server") && err.contains("required"),
+        "stderr: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fix_with_unstartable_ty_server_is_fatal_exit_two() {
+    let project = Project::new().write("main.py", TY_DEFERRED);
+    let source = project.read("main.py");
+    let output = project.run_with_broken_ty_server(&["fix", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("ty server"),
+        "stderr: {}",
+        stderr(&output)
+    );
     assert_eq!(project.read("main.py"), source);
 }
 
