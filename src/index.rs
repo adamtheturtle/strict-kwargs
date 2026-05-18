@@ -13,6 +13,7 @@ use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
 use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
+use ruff_python_parser::parse_module;
 
 /// Safety bound on re-export alias chain length during lazy resolution. Real
 /// code converges in a handful of hops; this only stops a pathological or
