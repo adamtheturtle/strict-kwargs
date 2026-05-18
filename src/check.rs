@@ -2040,6 +2040,22 @@ while cond:
     }
 
     #[test]
+    fn unbound_guard_rejects_attribute_call_with_single_name_base_and_dunder() {
+        // `K.__init__(self, 0)`: explicit-receiver call with a single-name
+        // base and a dunder method — still excluded from unbound treatment
+        // (issue #27: the receiver is already stripped by
+        // `max_positional_at_call_site`; stripping it here would double-count).
+        assert!(!is_unbound(
+            "K.__init__(0)\n",
+            "pkg.K.__init__",
+            Some("self"),
+            |c| {
+                c.define("K", "pkg.K".to_string());
+            }
+        ));
+    }
+
+    #[test]
     fn unbound_guard_rejects_non_attribute_callee() {
         // A bare-name call (`f(0)`): no class object to call through.
         assert!(!is_unbound("f(0)\n", "test.f", Some("self"), |_| {}));
