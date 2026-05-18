@@ -2284,8 +2284,8 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, record_ty_fix, strip_unbound_receiver,
-        without_leading_self, PendingTy, TyFixes,
+        is_ignored_path, is_typing_special_form_constructor, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, without_leading_self, PendingTy, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2420,6 +2420,26 @@ mod tests {
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
         assert!(stripped);
+    }
+
+    #[test]
+    fn signature_full_name_check_covers_decline_shapes() {
+        assert!(signature_is_fully_named(&sig(&["a", "b"])));
+        assert!(signature_is_fully_named(&Signature {
+            parameters: Vec::new(),
+        }));
+        assert!(!signature_is_fully_named(&Signature {
+            parameters: vec![Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        }));
+        assert!(!signature_is_fully_named(&Signature {
+            parameters: vec![Parameter {
+                name: Some(String::new()),
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        }));
     }
 
     #[test]
