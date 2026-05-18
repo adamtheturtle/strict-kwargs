@@ -22,7 +22,9 @@ use crate::fix::{apply_insertions, FileFix, FixOutcome, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
-use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
+use crate::limits::{
+    parse_module_guarded, run_with_large_stack, with_large_stack_pool, STACK_SIZE,
+};
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
@@ -127,14 +129,24 @@ fn pipeline_phases(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
 
-    let scan_result = std::thread::scope(|scope| {
+    let scan_result = std::thread::scope(|scope| -> Result<(), CheckError> {
         // Phase 1 (parallel, background): the built-in pass over every file.
         // Each file is an independent, pure-CPU unit of work sharing only the
         // `Sync` demand-driven index; results are sent to `rx` as each worker
         // finishes rather than being collected all at once. `tx` is moved in
         // and dropped when all workers finish, closing the channel.
-        let scan_handle =
-            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
+        //
+        // The coordinator thread gets a large stack (same as `run_with_large_stack`)
+        // because `rayon::ThreadPool::install` may use the calling thread as
+        // a worker — on platforms with tiny default stacks (musl: 128 KiB)
+        // that would let a legitimately-accepted ~MAX_NESTING_DEPTH file
+        // overflow the coordinator's stack (issue #83 follow-up to #54).
+        let scan_handle = std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, || {
+                stream_scan_files(python_files, project_root, config, index, tx)
+            })
+            .map_err(CheckError::Io)?;
 
         for (i, path, result) in rx {
             if consumer_err.is_some() {
@@ -1940,13 +1952,14 @@ fn resolve_pending_with_ty(
                 .clone()
         };
         let Some(target) = target else { continue };
-        // A `ty` goto-definition target is a dependency/stub, not user input:
-        // the explicit nesting *rejection* (issue #54) is reserved for the
-        // files the user asked to check (re-tokenizing every resolved stub
-        // just to depth-check it is the #54 perf regression). Overflow safety
-        // here comes from the large analysis stack `run_with_large_stack`
-        // provides; a parse failure is a silent skip, as before.
-        let Ok(parsed) = parse_module(&target) else {
+        // A `ty` goto-definition target is a dependency/stub. Use the guarded
+        // parser so a deeply-nested target is rejected gracefully rather than
+        // crashing the analysis thread (issue #83 follow-up to #54). The
+        // two-stage pre-filter keeps typical stubs cheap (byte count only);
+        // only genuinely deep ones pay the tokeniser scan — and those would
+        // have crashed the old unguarded call. A too-deep or unparsable
+        // target is silently skipped, same fail-closed behaviour as before.
+        let Ok(parsed) = parse_module_guarded(&target) else {
             continue;
         };
         let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {
