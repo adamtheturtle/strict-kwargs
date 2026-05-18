@@ -1639,3 +1639,95 @@ def d(): ...
 ",
     );
 }
+
+// --- issue #71: false positives from Callable parameters / unbound locals ---
+
+/// A call through a `Callable`-typed parameter must not be attributed to a
+/// module-level or nested function with the same name (issue #71).
+#[test]
+fn callable_parameter_not_flagged() {
+    assert_ok(
+        r"
+from typing import Callable
+
+
+def make_transform(
+    *,
+    convert: Callable[[int], str],
+) -> str:
+    value = 42
+    return convert(value)
+",
+    );
+}
+
+/// Same check for a positional (non-keyword-only) Callable parameter.
+#[test]
+fn callable_positional_parameter_not_flagged() {
+    assert_ok(
+        r"
+from typing import Callable
+
+
+def apply(fn: Callable[[int], str], x: int) -> str:
+    return fn(x)
+",
+    );
+}
+
+/// A Callable-typed parameter whose name matches a real nested function in the
+/// same module must not be attributed to that nested function (issue #71).
+#[test]
+fn callable_parameter_shadowing_nested_function_not_flagged() {
+    assert_ok(
+        r"
+from typing import Callable
+
+
+def _make() -> None:
+    def transform(x: int) -> int:
+        return x
+
+
+def apply(transform: Callable[[int], int], x: int) -> int:
+    # `transform` here is the parameter, not the nested helper above.
+    return transform(x)
+",
+    );
+}
+
+/// A Callable-typed parameter on a *method* must not produce a false positive
+/// when there is a same-named function in the module (issue #71).
+#[test]
+fn callable_method_parameter_not_flagged() {
+    assert_ok(
+        r"
+from typing import Callable
+
+
+def helper(x: int) -> int:
+    return x
+
+
+class Processor:
+    def run(self, helper: Callable[[int], int]) -> int:
+        return helper(42)
+",
+    );
+}
+
+/// A real positional-argument violation through a local *function def* (not a
+/// parameter) must still be caught after the opaque-parameter fix (issue #71).
+#[test]
+fn nested_function_positional_violation_still_caught() {
+    assert_error(
+        r"
+def outer() -> None:
+    def inner(x: int) -> None: ...
+
+    inner(1)
+",
+        5,
+        "Too many positional",
+    );
+}
