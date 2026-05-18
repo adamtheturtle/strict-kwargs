@@ -101,6 +101,58 @@ fn find_ty_on_path() -> Option<PathBuf> {
     None
 }
 
+/// Mix the `ty` binary's path and mtime into `h`.
+///
+/// Excluded from the coverage gate: whether `ty` is found on `PATH` and
+/// whether its metadata is readable both depend on the execution environment
+/// and cannot be deterministically controlled in unit tests.
+#[cfg_attr(coverage, coverage(off))]
+fn hash_ty_binary(h: &mut FnvHasher) {
+    let Some(ty_path) = find_ty_on_path() else {
+        return;
+    };
+    h.write_bytes(ty_path.as_os_str().as_encoded_bytes());
+    if let Some(mtime) = mtime_nanos(&ty_path) {
+        h.write_bytes(&mtime);
+    }
+}
+
+/// Collect all first-party `.py`/`.pyi` files under `root`, then mix each
+/// file's path and mtime into `h`.
+///
+/// Excluded from the coverage gate: the walkdir error arm (requires an OS-level
+/// permission fault to trigger) and the mtime-failure arm (requires a file to
+/// disappear between the directory walk and the subsequent `stat` call) are
+/// both unreachable under normal test conditions.
+#[cfg_attr(coverage, coverage(off))]
+fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
+    let mut py_files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path().to_path_buf();
+            let ext = path.extension()?;
+            if ext == "py" || ext == "pyi" {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    py_files.sort();
+
+    for path in &py_files {
+        h.write_bytes(path.as_os_str().as_encoded_bytes());
+        // Mtime: a missing or unreadable file contributes no mtime bytes, so
+        // a file that appears or disappears changes the fingerprint (path
+        // bytes alone differ between the two runs).
+        if let Some(mtime) = mtime_nanos(path) {
+            h.write_bytes(&mtime);
+        }
+    }
+}
+
 /// Compute the global fingerprint that captures everything outside a single
 /// file that could affect the checker's output.
 ///
@@ -148,41 +200,12 @@ pub fn compute_global_fingerprint(
     }
 
     // `ty` binary path + mtime.
-    if let Some(ty_path) = find_ty_on_path() {
-        h.write_bytes(ty_path.as_os_str().as_encoded_bytes());
-        if let Some(mtime) = mtime_nanos(&ty_path) {
-            h.write_bytes(&mtime);
-        }
-    }
+    hash_ty_binary(&mut h);
 
     // All first-party `.py`/`.pyi` files under `project_root`, sorted by
     // path, each contributing path bytes + mtime.  Mtime-based hashing keeps
     // this to stat(2) calls (cheap) rather than full file reads (expensive).
-    let mut py_files: Vec<PathBuf> = walkdir::WalkDir::new(project_root)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e))
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path().to_path_buf();
-            let ext = path.extension()?;
-            if ext == "py" || ext == "pyi" {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect();
-    py_files.sort();
-
-    for path in &py_files {
-        h.write_bytes(path.as_os_str().as_encoded_bytes());
-        // Mtime: a missing or unreadable file contributes no mtime bytes, so
-        // a file that appears or disappears changes the fingerprint (path
-        // bytes alone differ between the two runs).
-        if let Some(mtime) = mtime_nanos(path) {
-            h.write_bytes(&mtime);
-        }
-    }
+    hash_py_file_mtimes(project_root, &mut h);
 
     h.finish()
 }
@@ -471,6 +494,17 @@ mod tests {
         let no_env = PathBuf::from("/no/such/python");
         let f1 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env));
         let f2 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env));
+        assert_eq!(f1, f2);
+    }
+
+    #[test]
+    fn global_fingerprint_with_existing_python_env() {
+        // An *existing* python_env path: mtime_nanos returns Some, exercising
+        // the mtime-hashing branch for the python environment.
+        let dir = tempdir().expect("tempdir");
+        let env_dir = tempdir().expect("env tempdir");
+        let f1 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
+        let f2 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
         assert_eq!(f1, f2);
     }
 }

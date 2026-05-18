@@ -1905,3 +1905,74 @@ fn cache_invalidated_on_file_change() {
         "cache must be invalidated after file change; got: {without_violation:?}"
     );
 }
+
+/// Undecodable-encoding files are never written to the cache — a skipped file
+/// must not produce a stale "no violations" cache hit on the next run.
+#[test]
+fn cache_does_not_cache_skipped_file() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    // A file with invalid UTF-8 and no PEP 263 declaration — scan_file returns
+    // ScanOutcome::Skipped, which means it must never be stored in the cache.
+    let binary_file = root.join("binary.py");
+    std::fs::write(&binary_file, [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
+
+    let config = Config::load(&root).expect("config");
+    // Cold run — binary.py is skipped; nothing should be cached for it.
+    check_paths(
+        &root,
+        std::slice::from_ref(&binary_file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+
+    // The cache directory must be empty: a skipped file must not produce an
+    // entry (which would be an empty-diagnostics hit on the next run, masking
+    // the skip warning).
+    let entries: Vec<_> = std::fs::read_dir(&cache_dir)
+        .expect("read cache dir")
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "skipped file must not produce a cache entry; got {entries:?}"
+    );
+}
+
+/// If the cache-dir path already exists as a regular file, opening the cache
+/// fails and `check_paths` propagates the I/O error.
+#[test]
+fn cache_dir_pointing_to_file_is_an_error() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    // A regular file where the cache directory would be created.
+    let cache_as_file = root.join("not_a_dir");
+    std::fs::write(&cache_as_file, b"block dir creation").expect("write file at cache path");
+
+    let config = Config::load(&root).expect("config");
+    let result = check_paths(&root, &[], &config, None, Some(&cache_as_file));
+    assert!(
+        result.is_err(),
+        "expected an error when cache-dir is a regular file"
+    );
+}
