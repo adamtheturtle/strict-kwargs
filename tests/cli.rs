@@ -49,6 +49,21 @@ impl Project {
             .output()
             .expect("spawn strict-kwargs")
     }
+
+    /// Run with `PATH` pointing at an empty directory so the required `ty`
+    /// backend cannot be found, regardless of whether the host has `ty`
+    /// installed. The binary itself is spawned by absolute path, so an empty
+    /// `PATH` only hides `ty` (the sole `PATH` lookup strict-kwargs does).
+    fn run_without_ty(&self, args: &[&str]) -> Output {
+        let empty = self.root.join("__no_ty__");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        Command::new(BIN)
+            .args(args)
+            .current_dir(&self.root)
+            .env("PATH", &empty)
+            .output()
+            .expect("spawn strict-kwargs")
+    }
 }
 
 fn code(output: &Output) -> i32 {
@@ -266,6 +281,38 @@ fn fix_write_failure_is_fatal_exit_two() {
         "stderr: {}",
         stderr(&output)
     );
+}
+
+#[test]
+fn check_without_ty_is_fatal_exit_two() {
+    // `ty` is a hard requirement: a missing backend aborts (exit 2) rather
+    // than silently resolving fewer calls. The probe is up front and
+    // content-independent, so even this fully built-in-resolvable file fails.
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run_without_ty(&["main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(
+        err.contains("`ty`") && err.contains("required"),
+        "stderr: {err}"
+    );
+    assert!(err.contains("PATH"), "stderr: {err}");
+}
+
+#[test]
+fn fix_without_ty_is_fatal_exit_two() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let source = project.read("main.py");
+    let output = project.run_without_ty(&["fix", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("required"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    // The required-backend check is up front, so nothing was rewritten.
+    assert_eq!(project.read("main.py"), source);
 }
 
 #[test]

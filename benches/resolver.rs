@@ -4,14 +4,15 @@
 //! (`.github/workflows/ci.yml`) so every PR gets an instruction-count delta
 //! against `main`.
 //!
-//! The `CodSpeed` job intentionally does **not** install `ty`: `CodSpeed`
-//! counts instructions of *this* process, and `ty` work happens in a
-//! subprocess that would not be measured anyway. Every fixture is therefore
-//! designed to be
-//! fully resolvable by the built-in resolver (project code + embedded
-//! typeshed), so `ty_pending` stays empty and the measured numbers are the
-//! deterministic parse / index / walk / resolve cost — exactly the hot paths
-//! every future resolver change touches.
+//! `ty` is a hard requirement, so the `CodSpeed` job installs it (otherwise
+//! `check_paths`/`fix_paths` would error out). Its presence is probed once
+//! per process and memoized (`require_ty_present`), so the benchmarks are
+//! not perturbed by repeated `ty version` spawns. Every fixture is designed
+//! to be fully resolvable by the built-in resolver (project code + embedded
+//! typeshed), so `ty_pending` stays empty and the `ty server` subprocess is
+//! never started — the measured numbers are the deterministic parse / index
+//! / walk / resolve cost, exactly the hot paths every future resolver change
+//! touches.
 
 // `expect`/`unwrap`/`panic` are idiomatic in a benchmark harness: a broken
 // fixture *should* abort with a clear message. A `[[bench]]` target is not
