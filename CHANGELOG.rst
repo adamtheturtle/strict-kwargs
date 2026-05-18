@@ -4,6 +4,18 @@ Changelog
 Next
 ----
 
+2026.5.18-post.3
+----------------
+
+
+2026.5.18-post.2
+----------------
+
+
+2026.5.18-post.1
+----------------
+
+
 - Whole-project and directory runs are faster (issue #46). The per-file
   built-in pass (read, parse, AST walk) now runs in parallel across files
   instead of sequentially — on a multicore machine it is the bulk of

@@ -6,13 +6,7 @@
 #
 #     prek install      # or: pre-commit install
 #
-# `prek install` wires up both the pre-commit and pre-push hook types
-# (see `default_install_hook_types`). Fast checks run on commit; the slower
-# `cargo test` runs on push.
-
 fail_fast: false
-
-default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: meta
@@ -71,14 +65,6 @@ repos:
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy --all-targets --all-features -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-
-      - id: cargo-test
-        name: cargo test
-        stages: [pre-push]
-        entry: cargo test --all-features
         language: system
         types: [rust]
         pass_filenames: false

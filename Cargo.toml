@@ -1,6 +1,6 @@
 [package]
 name = "strict-kwargs"
-version = "2026.5.18"
+version = "2026.5.18-post.3"
 edition = "2021"
 rust-version = "1.83"
 description = "Enforce using keyword arguments where possible (fast, ty/mypy-independent)"
@@ -21,6 +21,7 @@ harness = false
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 ignore = "0.4"
+owo-colors = "4"
 include_dir = "0.7"
 rayon = "1.12"
 rustc-hash = "2.1"
