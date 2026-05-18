@@ -10,8 +10,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::thread;
-use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_strict-kwargs");
 
@@ -78,20 +76,21 @@ impl Project {
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod strict-kwargs copy");
         }
-        for attempt in 0..20 {
-            match Command::new(&exe)
+        // A freshly-copied executable can fail to exec with ETXTBSY ("Text
+        // file busy", raw OS error 26): in this multithreaded test binary
+        // another thread's `fork` may still hold a write fd to the copy when
+        // we `exec` it. It is transient — retry a few times before failing.
+        for _ in 0..19 {
+            let result = Command::new(&exe)
                 .args(args)
                 .current_dir(&self.root)
                 .env("PATH", path_dir)
-                .output()
-            {
-                Ok(output) => return output,
-                Err(e) if e.raw_os_error() == Some(26) && attempt < 19 => {
-                    thread::sleep(Duration::from_millis(50));
+                .output();
+            match result {
+                Err(ref error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                Err(_) => {
-                    break;
-                }
+                other => return other.expect("spawn strict-kwargs"),
             }
         }
         Command::new(&exe)
@@ -99,7 +98,7 @@ impl Project {
             .current_dir(&self.root)
             .env("PATH", path_dir)
             .output()
-            .expect("spawn strict-kwargs")
+            .expect("spawn strict-kwargs (after ETXTBSY retries)")
     }
 
     /// Run with no discoverable `ty` at all, so the required-backend probe
@@ -185,6 +184,99 @@ fn check_unparsable_file_is_fatal_exit_two() {
         stderr(&output).starts_with("strict-kwargs: "),
         "stderr: {}",
         stderr(&output)
+    );
+}
+
+/// Issue #53 part 1: one non-UTF-8 file must not abort the whole run (exit 2)
+/// nor mask genuine violations in every other file. It is skipped with a
+/// warning; the sibling's real violation is still reported.
+#[test]
+fn non_utf8_file_is_skipped_with_warning_and_does_not_mask_others() {
+    let project = Project::new();
+    std::fs::create_dir_all(project.root.join("pkg")).expect("mkdir");
+    std::fs::write(
+        project.root.join("pkg/ok.py"),
+        "def f(a: int, b: int) -> None: ...\nf(1, 2)\n",
+    )
+    .expect("write ok.py");
+    // One stray non-UTF-8 byte, no PEP 263 declaration.
+    std::fs::write(project.root.join("pkg/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
+
+    let output = project.run(&["pkg"]);
+    let err = stderr(&output);
+    // Exit 1 (a real violation), not 2 (aborted).
+    assert_eq!(code(&output), 1, "stderr: {err}");
+    // ok.py's violation is still reported despite the stray sibling.
+    assert!(err.contains("Too many positional"), "stderr: {err}");
+    assert!(err.contains("ok.py"), "stderr: {err}");
+    // legacy.py is reported as a skipped-file warning, not a fatal error.
+    assert!(err.contains("warning: skipping"), "stderr: {err}");
+    assert!(err.contains("legacy.py"), "stderr: {err}");
+    assert!(
+        !err.contains("stream did not contain valid UTF-8"),
+        "stderr: {err}"
+    );
+}
+
+/// A run whose *only* input is undecodable is a warning, not a failure: the
+/// run proceeds, finds nothing, and exits 0 (issue #53).
+#[test]
+fn lone_non_utf8_file_warns_and_exits_zero() {
+    let project = Project::new();
+    std::fs::write(project.root.join("bin.py"), b"\x00\x01\xfe\xff").expect("write");
+    let output = project.run(&["bin.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("warning: skipping"));
+}
+
+/// Issue #53 part 2: a PEP 263 `coding:` declaration is honored, so a
+/// legacy-encoded but valid file is checked (and its violation reported)
+/// rather than rejected as an internal error.
+#[test]
+fn pep263_latin1_declaration_is_honored() {
+    let project = Project::new();
+    // `# -*- coding: latin-1 -*-`, a lone latin-1 (0xE9) byte in a comment,
+    // then a genuine violation. Without PEP 263 this is invalid UTF-8 (exit 2).
+    std::fs::write(
+        project.root.join("legacy.py"),
+        b"# -*- coding: latin-1 -*-\n# byte: \xe9\ndef f(a: int, b: int) -> None: ...\nf(1, 2)\n",
+    )
+    .expect("write");
+    let output = project.run(&["legacy.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 1, "stderr: {err}");
+    assert!(err.contains("Too many positional"), "stderr: {err}");
+    assert!(!err.contains("valid UTF-8"), "stderr: {err}");
+    assert!(!err.contains("warning: skipping"), "stderr: {err}");
+}
+
+/// `fix` is robust to the same stray file: the undecodable one is skipped
+/// with a warning while the fixable sibling is still rewritten (issue #53).
+#[test]
+fn fix_skips_non_utf8_file_and_still_fixes_others() {
+    let project = Project::new();
+    std::fs::create_dir_all(project.root.join("pkg")).expect("mkdir");
+    std::fs::write(
+        project.root.join("pkg/ok.py"),
+        "def f(a: int, b: int) -> None: ...\nf(1, 2)\n",
+    )
+    .expect("write ok.py");
+    std::fs::write(project.root.join("pkg/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
+
+    let output = project.run(&["fix", "pkg"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 0, "stderr: {err}");
+    assert!(err.contains("warning: skipping"), "stderr: {err}");
+    assert!(err.contains("legacy.py"), "stderr: {err}");
+    // The fixable sibling was still rewritten.
+    assert_eq!(
+        project.read("pkg/ok.py"),
+        "def f(a: int, b: int) -> None: ...\nf(a=1, b=2)\n"
+    );
+    // The stray file is left exactly as it was (untouched bytes).
+    assert_eq!(
+        std::fs::read(project.root.join("pkg/legacy.py")).expect("read"),
+        b"x = \"\xe9\"\n"
     );
 }
 

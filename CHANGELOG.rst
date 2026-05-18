@@ -4,9 +4,24 @@ Changelog
 Next
 ----
 
+- A single non-UTF-8 file no longer aborts the whole run or masks
+  violations in every other file (issue #53). Previously one stray byte (a
+  binary fixture, vendored data, a legacy-encoded module) failed the run
+  with exit 2 *and* suppressed real violations everywhere else. Now an
+  undecodable file is reported as a warning and skipped while the rest of
+  the run proceeds and still reports genuine violations, mirroring
+  ruff/pyright. A UTF-8 BOM and a `PEP 263
+  <https://peps.python.org/pep-0263/>`_ ``# -*- coding: <enc> -*-``
+  declaration in the first two lines are now honored, so legacy-encoded but
+  valid Python (``latin-1``/``iso-8859-1``, ``ascii``, explicit ``utf-8``)
+  is decoded and checked rather than rejected. Any other *declared* encoding
+  degrades to the same graceful skip (still no crash, no masking — just not
+  analysed); no third-party codec dependency is added. A genuine filesystem
+  error (missing file, permission denied) is still fatal — that is a real
+  error, not a stray file.
+
 2026.5.18
 ---------
-
 
 - Fix a false negative where a call in **decorator** position was never
   analyzed (issue #51). Decorator-factory calls with surplus positional

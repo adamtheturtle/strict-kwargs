@@ -22,6 +22,7 @@ use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
 use crate::signature::{ParameterKind, Signature};
+use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
@@ -63,7 +64,9 @@ pub fn check_paths(
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
     for path in &python_files {
-        let source = std::fs::read_to_string(path)?;
+        let Some(source) = read_or_skip(path)? else {
+            continue;
+        };
         let parsed = parse_module(&source)?;
         let module_name = module_name_for_path(project_root, path);
         let mut checker = CallChecker::new(
@@ -102,6 +105,26 @@ pub fn check_paths(
             .then(left.column.cmp(&right.column))
     });
     Ok(diagnostics)
+}
+
+/// Read a checked file's source, or `Ok(None)` to skip it.
+///
+/// A file that is not valid UTF-8 and carries no usable PEP 263 / BOM
+/// encoding declaration (a binary fixture, vendored data, an unsupported
+/// legacy encoding) is reported as a warning and skipped, so one stray file
+/// neither aborts the whole run with exit 2 nor masks genuine violations in
+/// every other file (issue #53). A real filesystem error stays fatal.
+fn read_or_skip(path: &Path) -> Result<Option<String>, CheckError> {
+    match read_python_source(path)? {
+        Source::Decoded(source) => Ok(Some(source)),
+        Source::Undecodable(reason) => {
+            eprintln!(
+                "strict-kwargs: warning: skipping {} ({reason})",
+                path.display()
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -930,7 +953,9 @@ pub fn fix_paths(
     let mut fixed_total = 0usize;
     let mut results = Vec::new();
     for path in &python_files {
-        let source = std::fs::read_to_string(path)?;
+        let Some(source) = read_or_skip(path)? else {
+            continue;
+        };
         let parsed = parse_module(&source)?;
         let module_name = module_name_for_path(project_root, path);
         let mut checker = CallChecker::new(
