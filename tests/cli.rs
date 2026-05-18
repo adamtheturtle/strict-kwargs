@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_strict-kwargs");
 
@@ -75,6 +77,22 @@ impl Project {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod strict-kwargs copy");
+        }
+        for attempt in 0..20 {
+            match Command::new(&exe)
+                .args(args)
+                .current_dir(&self.root)
+                .env("PATH", path_dir)
+                .output()
+            {
+                Ok(output) => return output,
+                Err(e) if e.raw_os_error() == Some(26) && attempt < 19 => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => {
+                    break;
+                }
+            }
         }
         Command::new(&exe)
             .args(args)
