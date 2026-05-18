@@ -356,6 +356,175 @@ fn whole_project() -> usize {
     check(whole_project_dir())
 }
 
+/// Packages in the ty-exercising whole-project fixture. Kept smaller than
+/// `WHOLE_PROJECT_PKGS` so Phase 1 bulk stays comparable to ty round-trip
+/// cost; the fixture is designed to show the pipelining overlap (issue #67).
+const WHOLE_PROJECT_TY_PKGS: usize = 3;
+/// Modules per package (first-party, fully resolved by the built-in pass).
+const WHOLE_PROJECT_TY_MODS_PER_PKG: usize = 20;
+/// Functions defined per first-party module.
+const WHOLE_PROJECT_TY_FUNCS_PER_MOD: usize = 5;
+/// Base/derived class pairs in the ty-deferred module. Each pair produces
+/// one inherited-method call the built-in resolver cannot resolve, deferring
+/// it to `ty` (same pattern as `TY_DEFERRED` in `tests/cli.rs`).
+const WHOLE_PROJECT_TY_INHERITED: usize = 10;
+
+/// A deterministic whole-project directory that mixes first-party Phase 1
+/// work with `ty`-deferred inherited-method calls (issue #67). The first-party
+/// packages are identical in shape to [`whole_project_dir`]; the extra
+/// `ty_pkg` package adds a `base.py` / `derived.py` / `caller.py` triple
+/// whose inherited calls the built-in resolver cannot resolve, so the `ty`
+/// server is started and exercised. The pipelining introduced in issue #67
+/// lets these `ty` round-trips overlap with the remaining Phase 1 work on
+/// the first-party packages.
+fn whole_project_ty_dir() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp =
+                tempfile::tempdir().expect("create whole-project-ty fixture tempdir");
+            let root = temp.path();
+            std::fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"whole-project-ty-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write pyproject.toml");
+
+            // First-party packages: independent modules, fully resolvable by
+            // the built-in pass (same structure as `whole_project_dir`).
+            for pkg_idx in 0..WHOLE_PROJECT_TY_PKGS {
+                let pkg_name = format!("pkg_{pkg_idx}");
+                let pkg_dir = root.join(&pkg_name);
+                std::fs::create_dir_all(&pkg_dir).expect("create package dir");
+                std::fs::write(pkg_dir.join("__init__.py"), "")
+                    .expect("write package __init__.py");
+                for mod_idx in 0..WHOLE_PROJECT_TY_MODS_PER_PKG {
+                    let mut src =
+                        format!("\"\"\"Generated module p{pkg_idx}m{mod_idx}.\"\"\"\n\n");
+                    for func_idx in 0..WHOLE_PROJECT_TY_FUNCS_PER_MOD {
+                        match func_idx % 3 {
+                            0 => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(alpha: int, beta: int, gamma: int = 0) -> int:\n    return alpha + beta + gamma\n"
+                            ),
+                            1 => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(x: str, y: str) -> str:\n    return x + y\n"
+                            ),
+                            _ => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(n: int) -> int:\n    return n\n"
+                            ),
+                        }
+                        .expect("format function def");
+                    }
+                    std::fs::write(
+                        pkg_dir.join(format!("mod_{mod_idx:03}.py")),
+                        src,
+                    )
+                    .expect("write generated module");
+                }
+            }
+
+            // `ty_pkg`: base classes, derived classes (inheriting without
+            // overriding), and a caller that invokes inherited methods
+            // positionally. The built-in resolver cannot trace inheritance,
+            // so each call is deferred to the `ty` server.
+            let ty_pkg = root.join("ty_pkg");
+            std::fs::create_dir_all(&ty_pkg).expect("create ty_pkg/");
+            std::fs::write(ty_pkg.join("__init__.py"), "")
+                .expect("write ty_pkg/__init__.py");
+
+            let mut base_src =
+                String::from("\"\"\"Base classes with typed methods.\"\"\"\n\n");
+            let mut derived_src = String::from(
+                "\"\"\"Derived classes inheriting without overriding.\"\"\"\n\nfrom ty_pkg.base import ",
+            );
+            for i in 0..WHOLE_PROJECT_TY_INHERITED {
+                if i > 0 {
+                    derived_src.push_str(", ");
+                }
+                write!(derived_src, "Base{i}").expect("format derived import");
+            }
+            derived_src.push('\n');
+            let mut caller_src = String::from(
+                "\"\"\"Calls inherited methods positionally — deferred to ty.\"\"\"\n\nfrom ty_pkg.derived import ",
+            );
+            for i in 0..WHOLE_PROJECT_TY_INHERITED {
+                if i > 0 {
+                    caller_src.push_str(", ");
+                }
+                write!(caller_src, "Derived{i}").expect("format caller import");
+            }
+            caller_src.push('\n');
+
+            for i in 0..WHOLE_PROJECT_TY_INHERITED {
+                writeln!(
+                    base_src,
+                    "class Base{i}:\n    def method{i}(self, alpha: int, beta: int) -> int:\n        return alpha + beta\n"
+                )
+                .expect("format base class");
+                writeln!(derived_src, "\nclass Derived{i}(Base{i}):\n    pass\n")
+                    .expect("format derived class");
+                // Positional call on an instance of a derived class: the
+                // built-in resolver can't resolve the inherited method, so
+                // this defers to `ty`.
+                writeln!(caller_src, "Derived{i}().method{i}(1, 2)")
+                    .expect("format caller call");
+            }
+            std::fs::write(ty_pkg.join("base.py"), base_src)
+                .expect("write ty_pkg/base.py");
+            std::fs::write(ty_pkg.join("derived.py"), derived_src)
+                .expect("write ty_pkg/derived.py");
+            std::fs::write(ty_pkg.join("caller.py"), caller_src)
+                .expect("write ty_pkg/caller.py");
+
+            // app.py: calls every first-party function positionally.
+            let mut app =
+                String::from("\"\"\"Entry point that exercises every first-party package.\"\"\"\n\n");
+            for pkg_idx in 0..WHOLE_PROJECT_TY_PKGS {
+                for mod_idx in 0..WHOLE_PROJECT_TY_MODS_PER_PKG {
+                    for func_idx in 0..WHOLE_PROJECT_TY_FUNCS_PER_MOD {
+                        let pkg = format!("pkg_{pkg_idx}");
+                        let mod_ = format!("mod_{mod_idx:03}");
+                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                        writeln!(app, "from {pkg}.{mod_} import {func}")
+                            .expect("format import");
+                    }
+                }
+            }
+            app.push('\n');
+            for pkg_idx in 0..WHOLE_PROJECT_TY_PKGS {
+                for mod_idx in 0..WHOLE_PROJECT_TY_MODS_PER_PKG {
+                    for func_idx in 0..WHOLE_PROJECT_TY_FUNCS_PER_MOD {
+                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                        match func_idx % 3 {
+                            0 => writeln!(app, "{func}(1, 2, 3)"),
+                            1 => writeln!(app, "{func}(\"a\", \"b\")"),
+                            _ => writeln!(app, "{func}(42)"),
+                        }
+                        .expect("format call");
+                    }
+                }
+            }
+            std::fs::write(root.join("app.py"), app).expect("write app.py");
+
+            temp
+        })
+        .path()
+}
+
+/// Whole-project run with a mix of built-in-resolvable first-party files and
+/// `ty`-deferred inherited-method calls (issue #67). Tracks whether the
+/// cross-file pipelining introduced in issue #67 improves wall-clock time
+/// relative to the sequential-phase baseline: the `ty` server startup and
+/// early-file round-trips should overlap with the remaining Phase 1 work on
+/// the first-party packages.
+#[divan::bench]
+fn whole_project_ty() -> usize {
+    check(whole_project_ty_dir())
+}
+
 /// The auto-fixer shares the index/parse/walk path with `check` and now runs
 /// the same detection, but adds the positional → keyword rewrite; it is
 /// tracked separately. The fixture is fully resolvable by the built-in

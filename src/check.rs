@@ -65,6 +65,132 @@ struct FileEntry {
     cache_key: Option<u64>,
 }
 
+/// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
+/// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty resolver
+/// ([`ScanOutcome::Scanned`]).
+///
+/// This is the gated business-logic counterpart to [`pipeline_phases`], which
+/// handles the non-deterministic threading orchestration that cannot be covered.
+#[allow(clippy::too_many_arguments)]
+fn process_scan_outcome_for_ty(
+    i: usize,
+    path: PathBuf,
+    outcome: ScanOutcome,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    project_root: &Path,
+    python_env: Option<&Path>,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    match outcome {
+        ScanOutcome::Skipped(reason) => {
+            // Collect skip warnings with their file index so they can be
+            // emitted in the original sorted-file order after both phases
+            // finish (issue #53 + #46).
+            skip_warnings.push((i, path, reason));
+        }
+        ScanOutcome::Scanned(scan) => {
+            diagnostics.extend(scan.diagnostics);
+            if !scan.pending.is_empty() {
+                resolve_file_with_ty(
+                    ty,
+                    ty_start_attempted,
+                    project_root,
+                    python_env,
+                    &path,
+                    &scan.source,
+                    &scan.pending,
+                    ty_file_cache,
+                    diagnostics,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
+/// Phase 1 workers to the serial Phase 2 ty consumer as each file's built-in
+/// pass finishes, overlapping the remaining Phase 1 work with early Phase 2
+/// ty round-trips. The final sort in [`check_paths_impl`] keeps output
+/// deterministic regardless of arrival order; the lazy ty-server start is
+/// preserved (only the first file with pending calls triggers it).
+///
+/// Excluded from the coverage gate for the same reason as
+/// [`stream_scan_files`]: what is excluded here is only the threading
+/// orchestration — the environment-only pool-construction failure, the
+/// scheduling-dependent drain path, a scan error arriving from a worker, and
+/// the unreachable thread-panic arm. The per-outcome business logic lives in
+/// the gated [`process_scan_outcome_for_ty`].
+#[cfg_attr(coverage, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+fn pipeline_phases(
+    python_files: &[PathBuf],
+    project_root: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+    python_env: Option<&Path>,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut consumer_err: Option<CheckError> = None;
+
+    let scan_result = std::thread::scope(|scope| {
+        // Phase 1 (parallel, background): the built-in pass over every file.
+        // Each file is an independent, pure-CPU unit of work sharing only the
+        // `Sync` demand-driven index; results are sent to `rx` as each worker
+        // finishes rather than being collected all at once. `tx` is moved in
+        // and dropped when all workers finish, closing the channel.
+        let scan_handle =
+            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
+
+        for (i, path, result) in rx {
+            if consumer_err.is_some() {
+                // A ty or scan error has already been recorded; drain the
+                // remaining items so the background thread can finish.
+                continue;
+            }
+            let outcome = match result {
+                Ok(o) => o,
+                Err(e) => {
+                    consumer_err = Some(e);
+                    continue;
+                }
+            };
+            if let Err(e) = process_scan_outcome_for_ty(
+                i,
+                path,
+                outcome,
+                ty,
+                ty_start_attempted,
+                project_root,
+                python_env,
+                ty_file_cache,
+                diagnostics,
+                skip_warnings,
+            ) {
+                consumer_err = Some(e);
+            }
+        }
+
+        match scan_handle.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    });
+    scan_result?;
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -90,16 +216,16 @@ fn check_paths_impl(
         })
         .transpose()?;
 
-    // For each file: compute cache key, look up. Hits go straight to diagnostics;
-    // misses are queued for scanning. `files_to_scan` preserves the order of misses
-    // so `scan_iter` below can be consumed in lock-step.
+    // Partition files into cache hits and misses. Hits bypass the pipeline;
+    // misses are queued for scanning. `files_to_scan` preserves the order of
+    // misses so the pipeline's file indices map consistently to skip_warnings.
     let mut entries: Vec<FileEntry> = Vec::with_capacity(python_files.len());
     let mut files_to_scan: Vec<PathBuf> = Vec::new();
 
     for path in &python_files {
         if let Some((ref cache, fp)) = cache_and_fp {
             // The cache key is derived from the path and the global
-            // fingerprint.  The global fingerprint already includes every
+            // fingerprint. The global fingerprint already includes every
             // first-party file's mtime, so any content change (which updates
             // the mtime) changes the fingerprint and therefore this key.
             // This avoids reading the file twice (once here, once in
@@ -125,14 +251,6 @@ fn check_paths_impl(
         }
     }
 
-    // Phase 1 (parallel): the built-in pass over uncached files only. Each file is an
-    // independent, pure-CPU unit of work sharing only the `Sync`
-    // demand-driven index; this is the bulk of whole-project runtime and the
-    // residual issue #46 targets. Order is preserved, so `scans` — and
-    // therefore the `ty` phase and final output — stay deterministic.
-    let scans = scan_files(&files_to_scan, project_root, config, &index)?;
-    let mut scan_iter = scans.into_iter();
-
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
     // `python_env` (the `--python` value) only steers ty's third-party
@@ -148,58 +266,62 @@ fn check_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut diagnostics = Vec::new();
+    // Collect skip warnings with their file index so they can be emitted in
+    // the original sorted-file order after both phases finish (issue #53 + #46).
+    let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
+    // Cache hits bypass the pipeline; their diagnostics are added directly.
     for entry in &entries {
         if let Some(cached) = &entry.cache_hit {
-            // Cache hit: skip all work for this file.
             diagnostics.extend_from_slice(cached);
-            continue;
         }
+    }
 
-        // Cache miss: consume the next scan result (invariant: same order as files_to_scan).
-        let Some((_, outcome)) = scan_iter.next() else {
-            continue;
-        };
+    // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
+    pipeline_phases(
+        &files_to_scan,
+        project_root,
+        config,
+        &index,
+        python_env,
+        &mut ty,
+        &mut ty_start_attempted,
+        &mut ty_file_cache,
+        &mut diagnostics,
+        &mut skip_warnings,
+    )?;
 
-        // Emit the undecodable-file warning here, not in the parallel phase,
-        // so its order is deterministic (issue #53 + #46): `python_files` is
-        // sorted, so warnings appear in a stable order regardless of which
-        // worker decoded which file.
-        let scan = match outcome {
-            ScanOutcome::Skipped(reason) => {
-                eprintln!(
-                    "strict-kwargs: warning: skipping {} ({reason})",
-                    entry.path.display()
-                );
-                // Don't cache skipped files; the skip reason may be transient.
+    // Emit skip warnings in the original sorted-file order (issue #53 + #46).
+    skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
+    let skipped_paths: Vec<&PathBuf> = skip_warnings.iter().map(|(_, p, _)| p).collect();
+    for (_, path, reason) in &skip_warnings {
+        eprintln!(
+            "strict-kwargs: warning: skipping {} ({reason})",
+            path.display()
+        );
+    }
+
+    // Store miss results in cache after the pipeline completes. Attribute each
+    // file's diagnostics by path (Diagnostic::path is always the source file).
+    // Skipped files are excluded — the skip reason may be transient.
+    if let Some((ref cache, _)) = cache_and_fp {
+        for entry in entries
+            .iter()
+            .filter(|e| e.cache_hit.is_none() && e.cache_key.is_some())
+        {
+            if skipped_paths.contains(&&entry.path) {
                 continue;
             }
-            ScanOutcome::Scanned(scan) => scan,
-        };
-
-        // Collect this file's diagnostics together so they can be cached atomically.
-        let mut file_diags = scan.diagnostics;
-        if !scan.pending.is_empty() {
-            resolve_file_with_ty(
-                &mut ty,
-                &mut ty_start_attempted,
-                project_root,
-                python_env,
-                &entry.path,
-                &scan.source,
-                &scan.pending,
-                &mut ty_file_cache,
-                &mut file_diags,
-            )?;
+            let file_diags: Vec<Diagnostic> = diagnostics
+                .iter()
+                .filter(|d| d.path == entry.path)
+                .cloned()
+                .collect();
+            if let Some(key) = entry.cache_key {
+                cache.put(key, &file_diags);
+            }
         }
-
-        // Store in cache before extending the global accumulator.
-        if let (Some((ref cache, _)), Some(key)) = (&cache_and_fp, entry.cache_key) {
-            cache.put(key, &file_diags);
-        }
-
-        diagnostics.extend(file_diags);
     }
 
     diagnostics.sort_by(|left, right| {
@@ -317,37 +439,48 @@ fn plan_rewrite(path: &Path, outcome: &ScanOutcome) -> Result<Option<String>, Ch
     Ok(Some(fixed))
 }
 
-/// Run [`scan_file`] over every file in parallel on the deep-stack worker
-/// pool (issue #46 phase 1; the stack also satisfies issue #54 for the
-/// parallel pass). `par_iter`/`collect` preserve input order, so the result
-/// — and every later phase — stays deterministic.
+/// Like [`scan_file`] but sends each result to `tx` as the worker finishes
+/// rather than collecting all results first. This lets the ty phase in
+/// [`check_paths_impl`] start working on completed files while Phase 1
+/// workers are still running over the rest of the project (cross-file
+/// pipelining, issue #67).
+///
+/// `tx` is moved in and dropped when all workers finish, closing the channel
+/// and signalling the consumer that no more items are coming.
 ///
 /// Excluded from the coverage gate for the same reason as
-/// [`run_with_large_stack`]: the per-file
-/// logic ([`scan_file`]) is a separate, fully gated function exercised by
-/// every integration test; what is excluded here is only the parallel-pool
-/// orchestration — the environment-only pool-construction failure and the
-/// scheduling-dependent path that surfaces one worker's error across the
-/// `par_iter` boundary — neither of which is deterministically reachable.
+/// [`run_with_large_stack`]: the per-file logic ([`scan_file`]) is a
+/// separate, fully gated function exercised by every integration test; what
+/// is excluded here is only the parallel-pool orchestration — the
+/// environment-only pool-construction failure and the scheduling-dependent
+/// path that surfaces one worker's error — neither of which is
+/// deterministically reachable.
 #[cfg_attr(coverage, coverage(off))]
-fn scan_files(
+fn stream_scan_files(
     python_files: &[PathBuf],
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
-) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
-    with_large_stack_pool(|| {
+    tx: std::sync::mpsc::Sender<(usize, PathBuf, Result<ScanOutcome, CheckError>)>,
+) -> Result<(), CheckError> {
+    with_large_stack_pool(move || {
         python_files
             .par_iter()
-            .map(|path| Ok((path.clone(), scan_file(project_root, path, config, index)?)))
-            .collect()
+            .enumerate()
+            .for_each_with(tx, |tx, (i, path)| {
+                let result = scan_file(project_root, path, config, index);
+                // Ignore send errors: the consumer has exited early (e.g. a
+                // ty error was already recorded).
+                let _ = tx.send((i, path.clone(), result));
+            });
+        Ok(())
     })
 }
 
-/// Like [`scan_files`], but also computes each file's [`plan_rewrite`] in the
-/// same parallel pass (the fixer's per-file CPU work). Excluded from the
-/// coverage gate for the same reason as [`scan_files`]; the rewrite decision
-/// itself stays in the gated [`plan_rewrite`].
+/// Like [`stream_scan_files`], but also computes each file's [`plan_rewrite`]
+/// in the same parallel pass (the fixer's per-file CPU work). Excluded from
+/// the coverage gate for the same reason as [`stream_scan_files`]; the rewrite
+/// decision itself stays in the gated [`plan_rewrite`].
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
     python_files: &[PathBuf],
@@ -493,6 +626,11 @@ struct Scope {
     /// opposed to the class object itself. Lets `Class.method(recv, …)` be
     /// told apart from a bound `instance.method(…)` call (issue #27).
     instances: rustc_hash::FxHashSet<String>,
+    /// Parameter names for the function that owns this scope.  Calls through
+    /// a parameter (e.g. a `Callable`-typed arg) cannot be resolved to a
+    /// concrete indexed signature, so they are skipped rather than matched
+    /// against a homonymous module-level or nested function (issue #71).
+    opaque_params: rustc_hash::FxHashSet<String>,
 }
 
 impl<'a> CallChecker<'a> {
@@ -558,6 +696,25 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    fn mark_param_opaque(&mut self, name: &str) {
+        self.current_scope().opaque_params.insert(name.to_string());
+    }
+
+    /// Whether `name` is a function parameter in the innermost scope that
+    /// sees it.  A real `names` binding in the same or an inner scope shadows
+    /// any outer opaque entry (the parameter was re-assigned to a known def).
+    fn is_opaque_local(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.names.contains_key(name) {
+                return false;
+            }
+            if scope.opaque_params.contains(name) {
+                return true;
+            }
+        }
+        false
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -900,6 +1057,12 @@ impl<'a> CallChecker<'a> {
         match func {
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                // A parameter or other opaque local cannot be resolved to a
+                // concrete indexed definition — skip it to avoid false
+                // positives from a same-named function elsewhere (issue #71).
+                if self.is_opaque_local(local) {
+                    return None;
+                }
                 if let Some(resolved) = self.resolve_local(local) {
                     let dunder_call = format!("{resolved}.__call__");
                     if self.index.get(&dunder_call).is_some() {
@@ -960,6 +1123,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
         match stmt {
             Stmt::FunctionDef(StmtFunctionDef {
                 name,
+                parameters,
                 body,
                 decorator_list,
                 ..
@@ -972,6 +1136,24 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.define(name, format!("{}.{}", self.module_name, name));
                 self.push_scope();
+                // Register every parameter as opaque so that calls through
+                // a Callable-typed (or otherwise unresolvable) parameter
+                // don't fall back to a module-level function with the same
+                // name (issue #71).
+                for param in parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(parameters.args.iter())
+                    .chain(parameters.kwonlyargs.iter())
+                {
+                    self.mark_param_opaque(param.parameter.name.as_str());
+                }
+                if let Some(vararg) = &parameters.vararg {
+                    self.mark_param_opaque(vararg.name.as_str());
+                }
+                if let Some(kwarg) = &parameters.kwarg {
+                    self.mark_param_opaque(kwarg.name.as_str());
+                }
                 for inner in body {
                     walk_stmt(self, inner);
                 }
@@ -992,6 +1174,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 for inner in body {
                     match inner {
                         Stmt::FunctionDef(StmtFunctionDef {
+                            parameters: method_parameters,
                             body: method_body,
                             decorator_list: method_decorators,
                             ..
@@ -1000,6 +1183,20 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 self.visit_expr(&decorator.expression);
                             }
                             self.push_scope();
+                            for param in method_parameters
+                                .posonlyargs
+                                .iter()
+                                .chain(method_parameters.args.iter())
+                                .chain(method_parameters.kwonlyargs.iter())
+                            {
+                                self.mark_param_opaque(param.parameter.name.as_str());
+                            }
+                            if let Some(vararg) = &method_parameters.vararg {
+                                self.mark_param_opaque(vararg.name.as_str());
+                            }
+                            if let Some(kwarg) = &method_parameters.kwarg {
+                                self.mark_param_opaque(kwarg.name.as_str());
+                            }
                             for method_stmt in method_body {
                                 walk_stmt(self, method_stmt);
                             }
