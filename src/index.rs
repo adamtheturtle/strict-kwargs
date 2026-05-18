@@ -1,7 +1,7 @@
 //! Index of callable definitions discovered in the project.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
@@ -33,6 +33,12 @@ const MAX_QUERY_MODULES: usize = 200;
 /// See [`MAX_QUERY_MODULES`]. Counts every call (not just distinct names) so
 /// branching cannot multiply the work past this bound.
 const MAX_QUERY_STEPS: usize = 1500;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModuleState {
+    Indexing,
+    Indexed,
+}
 
 /// The real definitions discovered so far: fully-qualified name -> one or
 /// more signatures (multiple for ``@overload`` stubs / redefinitions), plus
@@ -81,10 +87,12 @@ struct Inner {
     /// of O(total edges) — the latter is thousands for a `torch`-sized
     /// star-import web. No-op/empty edges are dropped before being inserted.
     by_dst: FxHashMap<String, Vec<String>>,
-    /// Modules already resolved+indexed (or attempted), so a module — and the
-    /// heavy third-party closure behind it — is parsed at most once. Misses
-    /// are memoized too.
-    indexed: FxHashSet<String>,
+    /// Modules already being resolved or fully resolved+indexed (or attempted),
+    /// so a module — and the heavy third-party closure behind it — is parsed at
+    /// most once. Misses are memoized too. An `Indexing` entry is a claim held
+    /// by one worker; other workers wait for it to become `Indexed` before they
+    /// use the store/cache state that module may populate.
+    modules: FxHashMap<String, ModuleState>,
     /// Remaining lazy-module-resolution budget: a pathological dependency
     /// graph cannot blow up time/memory even though resolution is on demand.
     budget: usize,
@@ -99,6 +107,23 @@ pub struct DefinitionIndex {
     /// drive the edge/signature logic directly (no module resolution).
     resolver: Option<ModuleResolver>,
     inner: Mutex<Inner>,
+    module_ready: Condvar,
+}
+
+struct ModuleIndexClaim<'a> {
+    index: &'a DefinitionIndex,
+    dotted: String,
+}
+
+impl Drop for ModuleIndexClaim<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.index.lock();
+        inner
+            .modules
+            .insert(self.dotted.clone(), ModuleState::Indexed);
+        drop(inner);
+        self.index.module_ready.notify_all();
+    }
 }
 
 impl DefinitionIndex {
@@ -109,6 +134,7 @@ impl DefinitionIndex {
                 budget: MODULE_BUDGET,
                 ..Inner::default()
             }),
+            module_ready: Condvar::new(),
         }
     }
 
@@ -119,10 +145,16 @@ impl DefinitionIndex {
     /// over deterministic resolution, so a half-updated entry is at worst a
     /// redundant re-resolve, never unsoundness — strictly better than turning
     /// every other worker's access into a panic. Every hold is short (a map
-    /// lookup/insert); the one longer hold, `ensure_module`'s parse, is
-    /// memoized so it happens at most once per module across the whole run.
+    /// lookup/insert); module parsing happens outside the mutex, with
+    /// `module_ready` coordinating other workers that need the same module.
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait_for_module<'a>(&self, guard: MutexGuard<'a, Inner>) -> MutexGuard<'a, Inner> {
+        self.module_ready
+            .wait(guard)
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Record re-export edges into the by-destination index, dropping no-ops
@@ -172,15 +204,27 @@ impl DefinitionIndex {
     // callees, `synthesize_data_constructor`).
     #[cfg_attr(coverage, coverage(off))]
     fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
-        {
+        let claim = {
             let mut inner = self.lock();
-            if !inner.indexed.insert(dotted.to_string()) {
-                return;
+            loop {
+                match inner.modules.get(dotted).copied() {
+                    Some(ModuleState::Indexed) => return,
+                    Some(ModuleState::Indexing) => {
+                        inner = self.wait_for_module(inner);
+                    }
+                    None => {
+                        inner
+                            .modules
+                            .insert(dotted.to_string(), ModuleState::Indexing);
+                        drop(inner);
+                        break ModuleIndexClaim {
+                            index: self,
+                            dotted: dotted.to_string(),
+                        };
+                    }
+                }
             }
-            if inner.budget == 0 {
-                return;
-            }
-        }
+        };
         let Some(resolver) = self.resolver.as_ref() else {
             return;
         };
@@ -193,6 +237,14 @@ impl DefinitionIndex {
         if *query_budget == 0 {
             return;
         }
+        {
+            let mut inner = self.lock();
+            if inner.budget == 0 {
+                return;
+            }
+            inner.budget -= 1;
+        }
+        *query_budget -= 1;
         // File-backed dependencies are guarded: a deeply-nested dependency
         // (e.g. a machine-generated first-party or site-packages stub) must be
         // rejected gracefully, not crash the analysis thread (issue #83).
@@ -207,9 +259,8 @@ impl DefinitionIndex {
         let Ok(parsed) = parsed else {
             return;
         };
-        *query_budget -= 1;
-        self.lock().budget -= 1;
         self.index_source(dotted, m.is_package, parsed.suite());
+        drop(claim);
     }
 
     /// Ensure every dotted prefix of `name` (parents first) and `name` itself
@@ -433,7 +484,10 @@ pub fn build_index(
         let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
-        index.lock().indexed.insert(module_name);
+        index
+            .lock()
+            .modules
+            .insert(module_name, ModuleState::Indexed);
     }
 
     Ok(index)
@@ -966,6 +1020,7 @@ impl DefinitionIndex {
         Self {
             resolver: None,
             inner: Mutex::new(Inner::default()),
+            module_ready: Condvar::new(),
         }
     }
 
@@ -997,7 +1052,10 @@ impl DefinitionIndex {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use super::DefinitionIndex;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    use super::{DefinitionIndex, ModuleState};
     use crate::signature::{Parameter, ParameterKind, Signature};
 
     /// A signature with `n` positional-or-keyword parameters, so a test can
@@ -1162,5 +1220,43 @@ mod tests {
         let mut index = DefinitionIndex::for_test();
         index.set_edges(edges);
         assert!(index.get("L0.f").is_none());
+    }
+
+    #[test]
+    fn waits_for_in_progress_module_before_caching_a_miss() {
+        let index = Arc::new(DefinitionIndex::for_test());
+        {
+            let mut inner = index.lock();
+            inner
+                .modules
+                .insert("pkg".to_string(), ModuleState::Indexing);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_index = Arc::clone(&index);
+        std::thread::spawn(move || {
+            tx.send(arity(&worker_index, "pkg.f")).expect("send result");
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "query returned while the defining module was still being indexed"
+        );
+
+        {
+            let mut inner = index.lock();
+            inner.store.insert("pkg.f".to_string(), sig(2));
+            inner
+                .modules
+                .insert("pkg".to_string(), ModuleState::Indexed);
+        }
+        index.module_ready.notify_all();
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("worker result"),
+            Some(2)
+        );
+        assert_eq!(arity(&index, "pkg.f"), Some(2));
     }
 }
