@@ -91,6 +91,27 @@ fn main() -> ExitCode {
     }
 }
 
+/// Resolve the `--python` value before it reaches the `ty` fallback.
+///
+/// An invalid (nonexistent) `--python` used to be forwarded to `ty`
+/// verbatim and silently ignored there, so the explicit environment was
+/// disabled with no signal — detection silently degraded (issue #55). Now a
+/// nonexistent path is reported on stderr and dropped, so the run falls
+/// back to `ty`'s own environment discovery (the same as if `--python`
+/// were unset) rather than silently degrading detection.
+fn resolve_python_env(python: Option<PathBuf>) -> Option<PathBuf> {
+    let path = python?;
+    if path.exists() {
+        return Some(path);
+    }
+    eprintln!(
+        "strict-kwargs: --python {} does not exist; ignoring it and falling \
+         back to ty's own environment discovery",
+        path.display()
+    );
+    None
+}
+
 fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> PathBuf {
     explicit.unwrap_or_else(|| {
         let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
@@ -108,8 +129,9 @@ fn run() -> Result<ExitCode, CheckError> {
 
 fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
-    let config = Config::load(&project_root);
-    let diagnostics = check_paths(&project_root, &args.paths, &config, args.python.as_deref())?;
+    let config = Config::load(&project_root)?;
+    let python_env = resolve_python_env(args.python);
+    let diagnostics = check_paths(&project_root, &args.paths, &config, python_env.as_deref())?;
     let mut failed = false;
     for diagnostic in &diagnostics {
         eprintln!("{}", diagnostic.display_path());
@@ -140,8 +162,9 @@ fn report_declined(declined: usize) {
 
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
-    let config = Config::load(&project_root);
-    let outcome = fix_paths(&project_root, &args.paths, &config, args.python.as_deref())?;
+    let config = Config::load(&project_root)?;
+    let python_env = resolve_python_env(args.python);
+    let outcome = fix_paths(&project_root, &args.paths, &config, python_env.as_deref())?;
     let fixes = &outcome.files;
     if fixes.is_empty() {
         eprintln!("strict-kwargs: no fixes to apply");
@@ -209,5 +232,26 @@ mod tests {
         // defaults `paths` to `.`, but covered here for completeness).
         let root = project_root_for(None, &[]);
         assert_eq!(root, find_project_root(&PathBuf::from(".")));
+    }
+
+    #[test]
+    fn python_env_unset_stays_unset() {
+        assert_eq!(resolve_python_env(None), None);
+    }
+
+    #[test]
+    fn python_env_existing_path_is_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        assert_eq!(resolve_python_env(Some(path.clone())), Some(path));
+    }
+
+    #[test]
+    fn python_env_nonexistent_path_is_dropped() {
+        // Nonexistent `--python`: dropped (so the run falls back to ty's own
+        // discovery) rather than silently forwarded and ignored (issue #55).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no_such_python");
+        assert_eq!(resolve_python_env(Some(missing)), None);
     }
 }

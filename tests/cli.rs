@@ -281,6 +281,60 @@ fn fix_skips_non_utf8_file_and_still_fixes_others() {
 }
 
 #[test]
+fn check_nonexistent_path_is_fatal_exit_two() {
+    // A mistyped target must not report "clean" (exit 0) in CI; like ruff,
+    // it is a hard error (issue #55).
+    let project = Project::new();
+    let output = project.run(&["typo_does_not_exist.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
+}
+
+#[test]
+fn check_invalid_config_is_fatal_exit_two() {
+    // `ignore_names` is a string, not a list: running with defaults would
+    // silently not apply the user's config. Reported as a hard error
+    // instead (issue #55).
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nignore_names = \"not-a-list\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("pyproject.toml"), "stderr: {err}");
+    assert!(
+        err.contains("invalid `[tool.strict_kwargs]` table"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn check_invalid_python_warns_but_continues() {
+    // A nonexistent `--python` no longer silently disables the explicit
+    // environment: it is reported, then the run falls back to ty's own
+    // discovery (issue #55). The file is clean, so the run still exits 0.
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["--python", "/no/such/python", "main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("--python /no/such/python does not exist"),
+        "stderr: {err}"
+    );
+    assert!(
+        err.contains("ty's own environment discovery"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
 fn fix_reports_when_nothing_to_fix() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let output = project.run(&["fix", "main.py"]);

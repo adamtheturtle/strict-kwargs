@@ -70,7 +70,7 @@ impl TestProject {
     /// Run `check_paths` over the explicitly-added files and return
     /// diagnostics formatted as ``<filename>:<line>: <message>``.
     fn check(&self) -> Vec<String> {
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let diagnostics = check_paths(&self.root, &self.paths, &config, None).expect("check");
         diagnostics
             .iter()

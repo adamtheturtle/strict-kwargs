@@ -27,6 +27,7 @@ strict-kwargs --python .venv .  # point the ty fallback at an environment
 
 `fix` is conservative: it never rewrites a call it would not report, and leaves overloaded callees, `*args`/`**kwargs` unpacking, and `ty`-only-resolved calls untouched (reporting how many it declined).
 `--python` accepts an interpreter, venv, or `sys.prefix` (mirrors `ty check --python`) for third-party packages outside an activated venv or `<project>/.venv`.
+A path that does not exist is a hard error (exit 2), like `ruff`, rather than a silent "clean" result; a nonexistent `--python` is reported on stderr and the run falls back to `ty`'s own environment discovery.
 
 ## pre-commit
 
@@ -50,6 +51,9 @@ In `pyproject.toml`:
 ignore_names = ["main.func", "builtins.str"]  # fully-qualified names to ignore
 debug = false                                  # log debug info and AST dumps to stderr
 ```
+
+A missing `pyproject.toml`, or one without a `[tool.strict_kwargs]` table, is fine and uses the defaults.
+A `pyproject.toml` that exists but cannot be parsed, or whose `[tool.strict_kwargs]` has the wrong shape or value types (e.g. `ignore_names` not a list), is a hard error (exit 2) rather than a silent fall back to defaults.
 
 ## Comparison with mypy-strict-kwargs
 
