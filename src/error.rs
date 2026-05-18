@@ -1,5 +1,7 @@
 //! Error types for ``strict-kwargs``.
 
+use std::path::PathBuf;
+
 use ruff_python_parser::ParseError;
 
 /// Fatal error while reading or parsing a checked file.
@@ -9,6 +11,12 @@ pub enum CheckError {
     Io(std::io::Error),
     /// The Python source could not be parsed.
     Parse(ParseError),
+    /// A fix would have written syntactically invalid Python; the file was
+    /// left untouched rather than corrupted (issue #41).
+    FixProducedInvalidSyntax {
+        /// The file whose rewrite was rejected.
+        path: PathBuf,
+    },
 }
 
 impl From<std::io::Error> for CheckError {
@@ -28,6 +36,11 @@ impl std::fmt::Display for CheckError {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Parse(error) => write!(formatter, "{error}"),
+            Self::FixProducedInvalidSyntax { path } => write!(
+                formatter,
+                "refusing to write {}: the rewrite would not parse (file left unchanged)",
+                path.display()
+            ),
         }
     }
 }
@@ -62,5 +75,17 @@ mod tests {
         let error = CheckError::from(parse_error());
         assert!(!error.to_string().is_empty());
         assert!(format!("{error:?}").starts_with("Parse("));
+    }
+
+    #[test]
+    fn fix_invalid_syntax_displays_path_and_reassures() {
+        let error = CheckError::FixProducedInvalidSyntax {
+            path: PathBuf::from("pkg/m.py"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("pkg/m.py"));
+        assert!(message.contains("would not parse"));
+        assert!(message.contains("left unchanged"));
+        assert!(format!("{error:?}").starts_with("FixProducedInvalidSyntax"));
     }
 }

@@ -50,6 +50,14 @@ impl TestProject {
         )
     }
 
+    /// Run the fixer over `main.py`, returning the raw result so a test can
+    /// assert on the fail-safe error (issue #41).
+    fn fix_main_result(&self) -> Result<Vec<strict_kwargs::FileFix>, strict_kwargs::CheckError> {
+        let main = self.root.join("main.py");
+        let config = Config::load(&self.root);
+        fix_paths(&self.root, std::slice::from_ref(&main), &config)
+    }
+
     /// Diagnostics for `main.py`, formatted like the other test harness.
     fn check_main(&self) -> Vec<String> {
         let main = self.root.join("main.py");
@@ -312,6 +320,64 @@ fn does_not_fix_generator_argument() {
 fn does_not_fix_walrus_argument() {
     // `func(y := 1)` — a walrus argument likewise cannot be prefixed.
     assert_unchanged("def func(a): ...\nfunc(y := 1)\n");
+}
+
+#[test]
+fn rewrites_redundantly_parenthesized_argument() {
+    // Issue #41: the Ruff parser drops redundant parentheses, so the arg's
+    // AST span starts *inside* them. The `name=` prefix must land before the
+    // parentheses (`f(a=(1), ...)`), not inside them (`f((a=1), ...)` — a
+    // `SyntaxError`).
+    assert_fixed(
+        "def f(a, b): ...\nf((1), (2))\n",
+        "def f(a, b): ...\nf(a=(1), b=(2))\n",
+    );
+    assert_fixed(
+        "def f(a, b): ...\nf((1), 2)\n",
+        "def f(a, b): ...\nf(a=(1), b=2)\n",
+    );
+    // Doubly parenthesized: the prefix goes before the *outermost* `(`.
+    assert_fixed(
+        "def f(a, b): ...\nf(((1)), 2)\n",
+        "def f(a, b): ...\nf(a=((1)), b=2)\n",
+    );
+}
+
+#[test]
+fn redundantly_parenthesized_argument_round_trips() {
+    // The rewrite must itself be clean and re-checkable (no corruption,
+    // idempotent) — the core symptom reported in issue #41.
+    assert_round_trips("def f(a, b): ...\nf((1), (2))\n");
+}
+
+#[test]
+fn parenthesized_tuple_argument_is_not_unwrapped() {
+    // A genuine parenthesized tuple is the tuple's own delimiter, not a
+    // redundant wrapper, so it is preserved verbatim.
+    assert_fixed(
+        "def f(a, b): ...\nf((1, 2), 3)\n",
+        "def f(a, b): ...\nf(a=(1, 2), b=3)\n",
+    );
+}
+
+#[test]
+fn fail_safe_rejects_a_rewrite_that_would_not_parse() {
+    // Issue #41 (independent ask): if a rewrite would produce invalid
+    // Python, the file must be left untouched and an error reported rather
+    // than silently corrupted. `add(1, a=2)` would rewrite to
+    // `add(a=1, a=2)` — a duplicate-keyword `SyntaxError`.
+    let proj = project("def add(a, b): ...\nadd(1, a=2)\n");
+    let err = proj
+        .fix_main_result()
+        .expect_err("rewrite must be rejected, not applied");
+    let message = err.to_string();
+    assert!(
+        message.contains("would not parse") && message.contains("left unchanged"),
+        "unexpected error message: {message}"
+    );
+    // `fix_paths` never writes; the source on disk is exactly as authored.
+    let on_disk = std::fs::read_to_string(proj.root.join("main.py")).expect("read");
+    assert_eq!(on_disk, "def add(a, b): ...\nadd(1, a=2)\n");
 }
 
 #[test]

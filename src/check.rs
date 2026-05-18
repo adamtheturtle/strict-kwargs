@@ -2,10 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
 use ruff_python_ast::Expr;
 use ruff_python_ast::{self as ast};
-use ruff_python_ast::{Stmt, StmtClassDef, StmtFunctionDef};
+use ruff_python_ast::{AnyNodeRef, ExprRef, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use rustc_hash::FxHashMap;
@@ -63,6 +64,7 @@ pub fn check_paths(
             module_name,
             is_package_init(path),
             &source,
+            parsed.tokens(),
             &index,
             config,
             &mut diagnostics,
@@ -140,6 +142,10 @@ struct CallChecker<'a> {
     /// the anchor for its own relative imports.
     is_package: bool,
     source: &'a str,
+    /// Lexer tokens for `source`, used to recover the parenthesized span of a
+    /// call argument so the `name=` prefix lands *before* any redundant outer
+    /// parentheses (issue #41) rather than inside them.
+    tokens: &'a Tokens,
     index: &'a DefinitionIndex,
     config: &'a Config,
     diagnostics: &'a mut Vec<Diagnostic>,
@@ -175,11 +181,17 @@ struct Scope {
 }
 
 impl<'a> CallChecker<'a> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "per-file context wiring; grouping into a struct would just \
+                  move the argument list to its constructor"
+    )]
     fn new(
         path: PathBuf,
         module_name: String,
         is_package: bool,
         source: &'a str,
+        tokens: &'a Tokens,
         index: &'a DefinitionIndex,
         config: &'a Config,
         diagnostics: &'a mut Vec<Diagnostic>,
@@ -189,6 +201,7 @@ impl<'a> CallChecker<'a> {
             module_name,
             is_package,
             source,
+            tokens,
             index,
             config,
             diagnostics,
@@ -492,6 +505,7 @@ impl<'a> CallChecker<'a> {
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
             if let Some(insertions) = call_fix_insertions(
                 call,
+                self.tokens,
                 &callee_fullname,
                 signature,
                 max_positional,
@@ -717,8 +731,14 @@ fn call_exceeds_positional_limit(
 // cases in `tests/fix.rs`; excluded from the gate for the same
 // multi-instantiation reason as `call_exceeds_positional_limit`.
 #[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "resolved call facts threaded in from the visitor; a parameter \
+              struct would only relocate the same list"
+)]
 fn call_fix_insertions(
     call: &ast::ExprCall,
+    tokens: &Tokens,
     callee_fullname: &str,
     signature: &Signature,
     max_positional: usize,
@@ -792,8 +812,22 @@ fn call_fix_insertions(
         ) {
             return None;
         }
+        // A redundantly parenthesized argument (`f((1))`) has an AST span
+        // that starts *inside* the parentheses, since the Ruff parser drops
+        // them. Prefixing there yields `f((name=1))` — a `SyntaxError`
+        // (issue #41). Recover the span including any such parentheses so the
+        // `name=` lands before them: `f(name=(1))`. The `Arguments` parent
+        // keeps the call's own `(`/`)` from being mistaken for wrapping.
+        let arg_start = match parenthesized_range(
+            ExprRef::from(arg),
+            AnyNodeRef::from(&call.arguments),
+            tokens,
+        ) {
+            Some(range) => range.start(),
+            None => arg.range().start(),
+        };
         insertions.push(Insertion {
-            at: arg.range().start().to_usize(),
+            at: arg_start.to_usize(),
             text: format!("{name}="),
         });
     }
@@ -828,6 +862,7 @@ pub fn fix_paths(
             module_name,
             is_package_init(path),
             &source,
+            parsed.tokens(),
             &index,
             config,
             &mut diagnostics,
@@ -843,6 +878,13 @@ pub fn fix_paths(
         // `insertions` is non-empty here and every insertion adds a
         // `name=` prefix, so the result always differs from `source`.
         let fixed = apply_insertions(&source, &insertions);
+        // Fail-safe (issue #41): never write source that does not parse.
+        // The parenthesized-span fix below should keep every rewrite valid,
+        // but a malformed result must abort *this* file with a report
+        // rather than silently corrupt it.
+        if parse_module(&fixed).is_err() {
+            return Err(CheckError::FixProducedInvalidSyntax { path: path.clone() });
+        }
         results.push(FileFix {
             path: path.clone(),
             original: source,
