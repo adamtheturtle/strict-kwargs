@@ -648,6 +648,29 @@ fn debug_flag_emits_and_still_checks() {
     );
 }
 
+/// A class nested inside another class is indexed (the `index_class_body`
+/// recurses into the inner `ClassDef`), so a positional call to the inner
+/// class's constructor through the outer is resolved and flagged.
+#[test]
+fn nested_class_constructor_is_resolved() {
+    let messages = check_source(
+        "class Outer:\n\
+         \x20   class Inner:\n\
+         \x20       def __init__(self, alpha, beta):\n\
+         \x20           ...\n\
+         \n\
+         Outer.Inner(1, 2)\n",
+    );
+    assert!(
+        has_error_at(&messages, 6, "Too many positional"),
+        "nested-class constructor call must be flagged, got: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("\"Inner\"")),
+        "constructor diagnostic should name the inner class, got: {messages:?}"
+    );
+}
+
 // --- `ty` type-inference fallback ------------------------------------------
 
 /// A stdlib free function the built-in resolver cannot index is resolved by

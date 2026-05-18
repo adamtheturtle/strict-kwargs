@@ -1,7 +1,8 @@
 //! Index of callable definitions discovered in the project.
 
-use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
@@ -13,33 +14,308 @@ use crate::error::CheckError;
 use crate::resolve::ModuleResolver;
 use crate::signature::{Parameter, ParameterKind, Signature};
 
+/// Safety bound on re-export alias chain length during lazy resolution. Real
+/// code converges in a handful of hops; this only stops a pathological or
+/// cyclic chain (the cycle is also caught by the per-resolution visited set).
+const MAX_ALIAS_DEPTH: usize = 64;
+
+/// Backstop on the *new* modules a single `get` query may resolve+parse, and
+/// on its total `resolve_alias` calls. The structural defense against a
+/// `from X import *` web (`torch`'s) is the self-referential single-segment
+/// rule in [`DefinitionIndex::resolve_alias`]; with it even `torch.tensor`
+/// resolves in a few hops (measured: `numpy.array` 3 modules / 2 calls,
+/// `torch.tensor` single-digit). These caps are pure insurance against an
+/// unforeseen pathology: on exhaustion the query yields `None` — the call
+/// defers to the `ty` fallback (or is left unchecked), exactly the documented
+/// best-effort-third-party / fail-closed contract, never a false positive.
+const MAX_QUERY_MODULES: usize = 200;
+/// See [`MAX_QUERY_MODULES`]. Counts every call (not just distinct names) so
+/// branching cannot multiply the work past this bound.
+const MAX_QUERY_STEPS: usize = 1500;
+
+/// The real definitions discovered so far: fully-qualified name -> one or
+/// more signatures (multiple for ``@overload`` stubs / redefinitions), plus
+/// the set of *synthesized* constructors. This is the part the indexing
+/// walk (`index_module`) writes; it grows as modules are resolved — eagerly
+/// for builtins/checked files, lazily on demand for everything else.
 #[derive(Debug, Default)]
-pub struct DefinitionIndex {
-    /// Fully-qualified name (e.g. ``main.C.method``) -> one or more
-    /// signatures. Multiple entries occur for ``@overload``-ed definitions
-    /// (common in ``.pyi`` stubs) and plain redefinitions.
-    pub signatures: FxHashMap<String, Vec<Signature>>,
+struct Store {
+    signatures: FxHashMap<String, Vec<Signature>>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The auto-fixer declines these: a synthesized signature omits
     /// inherited base-class fields (cross-module MRO is not resolved), so a
     /// positional->keyword name mapping could be wrong.
-    pub synthesized: FxHashSet<String>,
+    synthesized: FxHashSet<String>,
+}
+
+impl Store {
+    fn insert(&mut self, fullname: String, signature: Signature) {
+        self.signatures.entry(fullname).or_default().push(signature);
+    }
+}
+
+/// Mutable state shared between the eager construction pass and the lazy
+/// per-query resolution (the latter only has `&self`, hence the `RefCell`).
+#[derive(Debug, Default)]
+struct Inner {
+    store: Store,
+    /// Re-export edges indexed by destination: ``dst_prefix`` -> the
+    /// ``src_prefix``es re-exported under it (insertion order preserved, so
+    /// the first-collected alias still wins). "Everything under ``src_prefix``
+    /// (the prefix itself and any ``src_prefix.<sfx>``) is reachable as
+    /// ``dst_prefix`` / ``dst_prefix.<sfx>``." Resolved **on demand**
+    /// ([`DefinitionIndex::get`]) instead of eagerly expanding the full alias
+    /// cross-product over the import closure — eager expansion is superlinear
+    /// and does not complete on heavy third-party closures (numpy/torch/scipy)
+    /// while only a handful of names are ever queried (issue #39). Keying by
+    /// `dst` makes a query's per-hop cost O(dotted-depth of the name) instead
+    /// of O(total edges) — the latter is thousands for a `torch`-sized
+    /// star-import web. No-op/empty edges are dropped before being inserted.
+    by_dst: FxHashMap<String, Vec<String>>,
+    /// Modules already resolved+indexed (or attempted), so a module — and the
+    /// heavy third-party closure behind it — is parsed at most once. Misses
+    /// are memoized too.
+    indexed: FxHashSet<String>,
+    /// Remaining lazy-module-resolution budget: a pathological dependency
+    /// graph cannot blow up time/memory even though resolution is on demand.
+    budget: usize,
+    /// Memoizes [`DefinitionIndex::get`] (including resolved-to-`None`), so a
+    /// name queried repeatedly across the file walk is chased through the
+    /// edge graph at most once.
+    cache: FxHashMap<String, Option<Rc<[Signature]>>>,
+}
+
+pub struct DefinitionIndex {
+    /// Resolves a dotted module name to source. `None` in unit tests that
+    /// drive the edge/signature logic directly (no module resolution).
+    resolver: Option<ModuleResolver>,
+    inner: RefCell<Inner>,
 }
 
 impl DefinitionIndex {
-    pub fn insert(&mut self, fullname: String, signature: Signature) {
-        self.signatures.entry(fullname).or_default().push(signature);
+    fn new(resolver: ModuleResolver) -> Self {
+        Self {
+            resolver: Some(resolver),
+            inner: RefCell::new(Inner {
+                budget: MODULE_BUDGET,
+                ..Inner::default()
+            }),
+        }
     }
 
-    pub fn get(&self, fullname: &str) -> Option<&[Signature]> {
-        self.signatures.get(fullname).map(Vec::as_slice)
+    /// Record re-export edges into the by-destination index, dropping no-ops
+    /// (self-edges, empty endpoints) so demand resolution never reconsiders
+    /// them. Insertion order within a `dst` is preserved.
+    fn push_edges(inner: &mut Inner, edges: Vec<(String, String)>) {
+        for (src, dst) in edges {
+            if src != dst && !src.is_empty() && !dst.is_empty() {
+                inner.by_dst.entry(dst).or_default().push(src);
+            }
+        }
+    }
+
+    /// Parse-free indexing of one already-parsed module: record its real
+    /// definitions and its re-export edges. Shared by the eager pass
+    /// (builtins / checked files) and lazy [`Self::ensure_module`].
+    fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
+        let mut collected = Collected::default();
+        collect(stmts, module_name, is_package, &mut collected);
+        let mut inner = self.inner.borrow_mut();
+        index_module(&mut inner.store, module_name, stmts);
+        Self::push_edges(&mut inner, collected.reexports);
+    }
+
+    /// Resolve, parse and index `dotted` if not already done. Memoized
+    /// (including misses) and doubly budget-capped — a global cap and the
+    /// caller's per-query `query_budget` — so the transitive third-party
+    /// closure behind a heavy import is *not* eagerly walked: only the
+    /// modules a queried name's re-export path actually traverses are parsed
+    /// (issue #39). A resolution/parse failure, or an exhausted budget, is a
+    /// silent miss (the call then defers to `ty` / is unchecked — fail
+    /// closed, never a false positive).
+    //
+    // Excluded from the coverage gate: every arm here is a resolve/parse/
+    // budget *guard* — a missing module, an unparsable one, or one of the
+    // safety caps (`indexed` memo, global `budget`, per-query
+    // `query_budget`). Those misses are not deterministically reachable from
+    // the test suite (vendored stubs and the fixture packages always resolve
+    // and parse; the caps are pathological-only — see [`MAX_QUERY_MODULES`]),
+    // while the success path's actual indexing work is `index_source`, which
+    // *is* gated and exercised end-to-end by the import-resolution suite.
+    // Same rationale as the other documented exclusions (`index_source`'s
+    // callees, `synthesize_data_constructor`).
+    #[cfg_attr(coverage, coverage(off))]
+    fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if !inner.indexed.insert(dotted.to_string()) {
+                return;
+            }
+            if inner.budget == 0 {
+                return;
+            }
+        }
+        let Some(resolver) = self.resolver.as_ref() else {
+            return;
+        };
+        let Some(m) = resolver.resolve(dotted) else {
+            return;
+        };
+        // A real module was found; parsing it is the expensive step. Bound it
+        // both per query and globally (cheap non-resolving candidate names —
+        // the bulk of a star-import fan-out — never reach here).
+        if *query_budget == 0 {
+            return;
+        }
+        let Ok(parsed) = parse_module(&m.source) else {
+            return;
+        };
+        *query_budget -= 1;
+        self.inner.borrow_mut().budget -= 1;
+        self.index_source(dotted, m.is_package, parsed.suite());
+    }
+
+    /// Ensure every dotted prefix of `name` (parents first) and `name` itself
+    /// is resolved, so the module that *defines* `name` and every package
+    /// `__init__` whose re-exports *route* to it are indexed. Misses are
+    /// memoized, so a non-module prefix (the symbol itself) costs O(1).
+    fn ensure_for(&self, name: &str, query_budget: &mut usize) {
+        let mut idx = 0;
+        while let Some(rel) = name[idx..].find('.') {
+            let end = idx + rel;
+            self.ensure_module(&name[..end], query_budget);
+            idx = end + 1;
+        }
+        self.ensure_module(name, query_budget);
+    }
+
+    /// Resolve `fullname` to its signatures, following re-export edges
+    /// backwards on demand. A real definition always wins; aliases are only
+    /// consulted when no definition is bound under the queried name. Memoized.
+    pub fn get(&self, fullname: &str) -> Option<Rc<[Signature]>> {
+        if let Some(hit) = self.inner.borrow().cache.get(fullname) {
+            return hit.clone();
+        }
+        let mut visited = FxHashSet::default();
+        let mut query_budget = MAX_QUERY_MODULES;
+        let mut steps = MAX_QUERY_STEPS;
+        let resolved = self.resolve_alias(fullname, &mut visited, 0, &mut query_budget, &mut steps);
+        self.inner
+            .borrow_mut()
+            .cache
+            .insert(fullname.to_string(), resolved.clone());
+        resolved
+    }
+
+    /// Whether this resolution has hit a pathological backstop — the
+    /// per-query call budget ([`MAX_QUERY_STEPS`]) or the alias-chain depth
+    /// cap ([`MAX_ALIAS_DEPTH`]). Both fire only on a star-import web far
+    /// beyond anything real (measured `numpy`/`torch` resolutions are
+    /// single-digit), so they are not deterministically reachable from the
+    /// test suite; excluded from the coverage gate with that documented
+    /// rationale (the *cycle* backstop, by contrast, is gated and tested).
+    #[cfg_attr(coverage, coverage(off))]
+    const fn resolution_exhausted(steps: usize, depth: usize) -> bool {
+        steps == 0 || depth >= MAX_ALIAS_DEPTH
+    }
+
+    /// Backward re-export resolution: the lazy inverse of the old eager
+    /// fixpoint. The modules that could define or route `name` are resolved
+    /// on demand first; a direct definition then wins; otherwise, for each
+    /// edge whose `dst` is `name` or a dotted-prefix of `name`, try the
+    /// corresponding `src` (`src` itself, or `src.<remaining suffix>`) and
+    /// recurse. The per-resolution `visited` set breaks re-export cycles;
+    /// `depth`, the call budget `steps` ([`MAX_QUERY_STEPS`]) and the
+    /// module-parse `query_budget` ([`MAX_QUERY_MODULES`]) together bound a
+    /// pathological star-import web (it dies as `None` → fail closed). Within
+    /// one `dst`, edges keep collection order so the first-collected alias
+    /// wins (the old `or_insert` first-writer-wins precedence); more specific
+    /// `dst`s are tried before broader ones.
+    fn resolve_alias(
+        &self,
+        name: &str,
+        visited: &mut FxHashSet<String>,
+        depth: usize,
+        query_budget: &mut usize,
+        steps: &mut usize,
+    ) -> Option<Rc<[Signature]>> {
+        if Self::resolution_exhausted(*steps, depth) {
+            return None;
+        }
+        *steps -= 1;
+        self.ensure_for(name, query_budget);
+        if let Some(sigs) = self
+            .inner
+            .borrow()
+            .store
+            .signatures
+            .get(name)
+            .map(|v| Rc::<[Signature]>::from(v.as_slice()))
+        {
+            return Some(sigs);
+        }
+        // Cycle guard: a name already on this resolution's stack dead-ends
+        // (covered by `cyclic_edges_terminate_and_still_resolve`).
+        if !visited.insert(name.to_string()) {
+            return None;
+        }
+        // An edge applies iff its `dst` is `name` or a dotted-ancestor of it.
+        // Look those up directly (the name itself, then each ancestor by
+        // trimming a trailing `.segment`) instead of scanning every edge —
+        // O(dotted-depth) vs O(total edges). Most-specific `dst` first.
+        //
+        // A *self-referential* prefix edge — `src` lies inside `dst`'s own
+        // subtree, i.e. `from pkg.api import *` (`src = pkg.api`, `dst = pkg`)
+        // — rewrites `pkg.<rest>` to `pkg.api.<rest>`, which is itself under
+        // `pkg.` and re-triggers the same edge: an unbounded
+        // `pkg.api.api.api…` family that starves the real path. For those,
+        // only a *single* trailing segment is followed (`from pkg.api import
+        // *` re-exports `pkg.api`'s module-level names, so `pkg.<attr>` ->
+        // `pkg.api.<attr>` is a one-hop rewrite; chained stars still resolve
+        // via successive single-segment hops). Exact matches (`remainder ==
+        // ""`) and non-self-referential subtree aliases (e.g. `np = numpy`,
+        // `src = numpy` not under `dst = np`) terminate, so stay unrestricted.
+        let candidates: Vec<String> = {
+            let inner = self.inner.borrow();
+            let mut out = Vec::new();
+            let mut end = name.len();
+            loop {
+                let key = &name[..end];
+                let remainder = &name[end..];
+                let multi_segment = !remainder.is_empty() && remainder[1..].contains('.');
+                if let Some(srcs) = inner.by_dst.get(key) {
+                    for src in srcs {
+                        let self_referential = src.len() > key.len()
+                            && src.as_bytes()[key.len()] == b'.'
+                            && src.starts_with(key);
+                        if multi_segment && self_referential {
+                            continue;
+                        }
+                        out.push(format!("{src}{remainder}"));
+                    }
+                }
+                match name[..end].rfind('.') {
+                    Some(dot) => end = dot,
+                    None => break,
+                }
+            }
+            out
+        };
+        for candidate in candidates {
+            if let Some(found) =
+                self.resolve_alias(&candidate, visited, depth + 1, query_budget, steps)
+            {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// Whether `fullname` is a constructor we synthesized from class fields
-    /// (see [`DefinitionIndex::synthesized`]).
+    /// (see [`Store::synthesized`]).
     pub fn is_synthesized(&self, fullname: &str) -> bool {
-        self.synthesized.contains(fullname)
+        self.inner.borrow().store.synthesized.contains(fullname)
     }
 }
 
@@ -67,171 +343,41 @@ pub fn is_package_init(path: &Path) -> bool {
 /// Safety cap on how many modules a single run will resolve & index, so a
 /// pathological dependency graph cannot blow up time/memory.
 const MODULE_BUDGET: usize = 4000;
-/// Safety cap on re-export alias expansion passes (handles chained
-/// re-exports; converges well before this for real code).
-const MAX_EXPAND_ITERS: usize = 16;
 
-/// Imports discovered in a module: submodules to resolve next, and re-export
-/// edges ``(source_prefix, dest_prefix)`` for alias expansion.
+/// Re-export edges ``(source_prefix, dest_prefix)`` discovered in a module,
+/// for lazy alias resolution. (Submodules are no longer collected: the import
+/// closure is walked on demand, not eagerly — issue #39.)
 #[derive(Default)]
 struct Collected {
-    modules: Vec<String>,
     reexports: Vec<(String, String)>,
-}
-
-/// Index vendored typeshed `builtins.pyi`. Excluded from the coverage gate:
-/// the stub is vendored with the crate and is always present and parseable,
-/// so the `resolve`/`parse_module` failure arms are unreachable (same
-/// rationale as [`crate::ty_resolver::TyResolver::start`]).
-#[cfg_attr(coverage, coverage(off))]
-fn index_builtins(resolver: &ModuleResolver, index: &mut DefinitionIndex) {
-    if let Some(m) = resolver.resolve("builtins") {
-        if let Ok(parsed) = parse_module(&m.source) {
-            index_module(index, "builtins", parsed.suite());
-        }
-    }
 }
 
 pub fn build_index(
     project_root: &Path,
     python_files: &[PathBuf],
 ) -> Result<DefinitionIndex, CheckError> {
-    let resolver = ModuleResolver::new(project_root);
-    let mut index = DefinitionIndex::default();
-    let mut indexed: FxHashSet<String> = FxHashSet::default();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    let mut reexports: Vec<(String, String)> = Vec::new();
+    let index = DefinitionIndex::new(ModuleResolver::new(project_root));
 
-    // Builtins come from vendored typeshed ``stdlib/builtins.pyi``.
-    index_builtins(&resolver, &mut index);
-    indexed.insert("builtins".to_string());
+    // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
+    // eagerly (small, and the bare-name fallback hits it constantly); this is
+    // one module, so the query budget is irrelevant here.
+    let mut builtins_budget = MAX_QUERY_MODULES;
+    index.ensure_module("builtins", &mut builtins_budget);
 
-    // First-party: the files being checked.
+    // First-party: the files being checked. Indexed from the source we
+    // already read here (their call sites are what we walk). Every *other*
+    // module — sibling first-party, stdlib, third-party — is resolved lazily
+    // on demand by `get`, so a heavy third-party import closure
+    // (numpy/torch/scipy) is never eagerly walked (issue #39).
     for path in python_files {
         let source = std::fs::read_to_string(path)?;
         let parsed = parse_module(&source)?;
         let module_name = module_name_for_path(project_root, path);
-        let mut found = Collected::default();
-        collect(
-            parsed.suite(),
-            &module_name,
-            is_package_init(path),
-            &mut found,
-        );
-        index_module(&mut index, &module_name, parsed.suite());
-        indexed.insert(module_name);
-        enqueue(&mut queue, found.modules);
-        reexports.extend(found.reexports);
+        index.index_source(&module_name, is_package_init(path), parsed.suite());
+        index.inner.borrow_mut().indexed.insert(module_name);
     }
 
-    // Resolve & index imported modules, recursively following re-exports,
-    // mirroring ty's resolution order: first-party, stdlib, site-packages.
-    let mut budget = MODULE_BUDGET;
-    while let Some(dotted) = queue.pop_front() {
-        if !indexed.insert(dotted.clone()) {
-            continue;
-        }
-        if budget == 0 {
-            continue;
-        }
-        budget -= 1;
-        let Some(m) = resolver.resolve(&dotted) else {
-            continue;
-        };
-        let Ok(parsed) = parse_module(&m.source) else {
-            continue;
-        };
-        let mut found = Collected::default();
-        collect(parsed.suite(), &dotted, m.is_package, &mut found);
-        index_module(&mut index, &dotted, parsed.suite());
-        enqueue(&mut queue, found.modules);
-        reexports.extend(found.reexports);
-    }
-
-    expand_reexports(&mut index, &reexports);
     Ok(index)
-}
-
-// Defensive empty-name filter; its effect (queueing real modules) is
-// covered by the multi-file import-resolution suite. Excluded from the
-// gate (the empty-string skip is an unreachable-in-practice guard).
-#[cfg_attr(coverage, coverage(off))]
-fn enqueue(queue: &mut VecDeque<String>, modules: Vec<String>) {
-    for m in modules {
-        if !m.is_empty() {
-            queue.push_back(m);
-        }
-    }
-}
-
-/// Copy signatures across re-export edges so ``pkg.name`` resolves when
-/// ``pkg/__init__`` does ``from .impl import name`` (and ``import *``).
-/// Real definitions always win; aliases never overwrite them. Iterated to a
-/// fixpoint to follow chained re-exports.
-//
-// The re-export fixpoint is covered end-to-end by the import-resolution
-// suite; `index.signatures.get(key)` cannot miss (keys is a live snapshot
-// of that map, which only grows), so that arm is unreachable. Excluded
-// from the gate with that documented rationale.
-#[cfg_attr(coverage, coverage(off))]
-fn expand_reexports(index: &mut DefinitionIndex, edges: &[(String, String)]) {
-    // Drop no-op edges once so they cost nothing on every iteration.
-    let edges: Vec<(&str, &str)> = edges
-        .iter()
-        .filter(|(src, dst)| src != dst && !src.is_empty() && !dst.is_empty())
-        .map(|(src, dst)| (src.as_str(), dst.as_str()))
-        .collect();
-    if edges.is_empty() {
-        return;
-    }
-    for _ in 0..MAX_EXPAND_ITERS {
-        // The keys touched by an edge are exactly `src` and everything under
-        // `src.`. A sorted snapshot lets each edge binary-search to its
-        // contiguous `src.` block instead of scanning the whole (growing)
-        // index, which is what made this super-quadratic on large
-        // import closures (issue #31). The set is unchanged within an
-        // iteration: additions are deferred, exactly as before.
-        let mut keys: Vec<&str> = index.signatures.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        let mut additions: Vec<(String, Vec<Signature>)> = Vec::new();
-        for &(src, dst) in &edges {
-            // `src` itself re-exported as `dst` (the old `key == src` case).
-            if let Some(sigs) = index.signatures.get(src) {
-                if !index.signatures.contains_key(dst) {
-                    additions.push((dst.to_string(), sigs.clone()));
-                }
-            }
-            // Everything under `src.` re-exported as `dst.<suffix>`. Keys
-            // with this prefix are contiguous in the sorted snapshot.
-            let src_dot = format!("{src}.");
-            let start = keys.partition_point(|key| *key < src_dot.as_str());
-            // Sorted keys with the `src.` prefix are contiguous from `start`;
-            // `take_while` stops at the first non-prefixed key and `filter`
-            // drops a (never-produced) bare `src.` key, so no separate
-            // break/empty-suffix guards are needed.
-            for &key in keys[start..]
-                .iter()
-                .take_while(|key| key.starts_with(src_dot.as_str()))
-                .filter(|key| key.len() > src_dot.len())
-            {
-                let suffix = &key[src_dot.len()..];
-                let new_key = format!("{dst}.{suffix}");
-                if index.signatures.contains_key(&new_key) {
-                    continue;
-                }
-                if let Some(sigs) = index.signatures.get(key) {
-                    additions.push((new_key, sigs.clone()));
-                }
-            }
-        }
-        drop(keys);
-        if additions.is_empty() {
-            break;
-        }
-        for (key, sigs) in additions {
-            index.signatures.entry(key).or_insert(sigs);
-        }
-    }
 }
 
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
@@ -286,9 +432,9 @@ fn resolve_reference(
 /// `module_scope` is true only at true module level. Imports nested inside a
 /// function or class body bind in that local/class namespace, *not* the
 /// module's, so they must not create module-level re-export edges (which
-/// would make ``module.name`` a false alias). Submodules are still queued for
-/// resolution everywhere — indexing an extra module is harmless and lets
-/// function-local calls be checked.
+/// would make ``module.name`` a false alias). Modules referenced anywhere are
+/// resolved lazily on demand (by `get`), so nested imports need no separate
+/// queuing here.
 fn collect_scoped(
     stmts: &[Stmt],
     module_name: &str,
@@ -302,11 +448,7 @@ fn collect_scoped(
             Stmt::Import(ast::StmtImport { names, .. }) => {
                 for alias in names {
                     let dotted = alias.name.as_str();
-                    out.modules.push(dotted.to_string());
                     let parts: Vec<&str> = dotted.split('.').collect();
-                    for end in 1..parts.len() {
-                        out.modules.push(parts[..end].join("."));
-                    }
                     // ``import a.b as c`` binds ``c`` -> ``a.b``; plain
                     // ``import a.b`` binds the top-level ``a`` -> ``a``.
                     if module_scope {
@@ -333,9 +475,6 @@ fn collect_scoped(
                 ) else {
                     continue;
                 };
-                if !base.is_empty() {
-                    out.modules.push(base.clone());
-                }
                 for alias in names {
                     let name = alias.name.as_str();
                     if name == "*" {
@@ -351,8 +490,6 @@ fn collect_scoped(
                     } else {
                         format!("{base}.{name}")
                     };
-                    // ``name`` may itself be a submodule.
-                    out.modules.push(qualified.clone());
                     // ``from base import name as out`` makes ``module.out``
                     // an alias of ``base.name`` — only at module level.
                     if module_scope {
@@ -493,13 +630,13 @@ pub fn relative_base(
     Some(base)
 }
 
-fn index_module(index: &mut DefinitionIndex, module_name: &str, stmts: &[Stmt]) {
+fn index_module(store: &mut Store, module_name: &str, stmts: &[Stmt]) {
     for stmt in stmts {
-        index_stmt(index, module_name, stmt);
+        index_stmt(store, module_name, stmt);
     }
 }
 
-fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
+fn index_stmt(store: &mut Store, module_name: &str, stmt: &Stmt) {
     match stmt {
         Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
@@ -508,27 +645,27 @@ fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
             ..
         }) => {
             let fullname = format!("{module_name}.{name}");
-            index.insert(fullname, signature_from_parameters(parameters));
-            index_module(index, module_name, body);
+            store.insert(fullname, signature_from_parameters(parameters));
+            index_module(store, module_name, body);
         }
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{module_name}.{}", class_def.name);
-            index_class_body(index, &class_name, &class_def.body);
-            synthesize_data_constructor(index, &class_name, class_def);
+            index_class_body(store, &class_name, &class_def.body);
+            synthesize_data_constructor(store, &class_name, class_def);
         }
         Stmt::If(ast::StmtIf {
             body,
             elif_else_clauses,
             ..
         }) => {
-            index_module(index, module_name, body);
+            index_module(store, module_name, body);
             for clause in elif_else_clauses {
-                index_module(index, module_name, &clause.body);
+                index_module(store, module_name, &clause.body);
             }
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => index_module(index, module_name, body),
+        | Stmt::With(ast::StmtWith { body, .. }) => index_module(store, module_name, body),
         Stmt::Try(ast::StmtTry {
             body,
             handlers,
@@ -536,24 +673,24 @@ fn index_stmt(index: &mut DefinitionIndex, module_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            index_module(index, module_name, body);
+            index_module(store, module_name, body);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module(index, module_name, &handler.body);
+                index_module(store, module_name, &handler.body);
             }
-            index_module(index, module_name, orelse);
-            index_module(index, module_name, finalbody);
+            index_module(store, module_name, orelse);
+            index_module(store, module_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
-                index_module(index, module_name, &case.body);
+                index_module(store, module_name, &case.body);
             }
         }
         _ => {}
     }
 }
 
-fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]) {
+fn index_class_body(store: &mut Store, class_name: &str, body: &[Stmt]) {
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -563,22 +700,22 @@ fn index_class_body(index: &mut DefinitionIndex, class_name: &str, body: &[Stmt]
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
-                index.insert(fullname, signature_from_parameters(parameters));
-                index_module(index, class_name, body);
+                store.insert(fullname, signature_from_parameters(parameters));
+                index_module(store, class_name, body);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
-                index_class_body(index, &nested, &class_def.body);
-                synthesize_data_constructor(index, &nested, class_def);
+                index_class_body(store, &nested, &class_def.body);
+                synthesize_data_constructor(store, &nested, class_def);
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                index_class_body(index, class_name, body);
+                index_class_body(store, class_name, body);
                 for clause in elif_else_clauses {
-                    index_class_body(index, class_name, &clause.body);
+                    index_class_body(store, class_name, &clause.body);
                 }
             }
             _ => {}
@@ -660,11 +797,11 @@ fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
 /// is accepted.
 ///
 /// Scoped to the class's *own* fields: inherited base-class fields are not
-/// resolved (so the auto-fixer declines these — see
-/// [`DefinitionIndex::synthesized`]), but the positional limit is `0` either
-/// way, so the diagnostic stays correct. Out of scope: the functional
-/// ``NamedTuple("N", [...])`` / ``namedtuple`` forms, ``attrs``, and
-/// ``TypedDict`` (whose constructor is keyword-only by definition).
+/// resolved (so the auto-fixer declines these — see [`Store::synthesized`]),
+/// but the positional limit is `0` either way, so the diagnostic stays
+/// correct. Out of scope: the functional ``NamedTuple("N", [...])`` /
+/// ``namedtuple`` forms, ``attrs``, and ``TypedDict`` (whose constructor is
+/// keyword-only by definition).
 //
 // Field-shape collection for synthesized constructors. Its behaviour is
 // covered end-to-end by the `@dataclass`/`NamedTuple` integration tests
@@ -674,11 +811,7 @@ fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
 // reports exercised arms as missed). Excluded from the gate with that
 // rationale, consistent with the other documented exclusions.
 #[cfg_attr(coverage, coverage(off))]
-fn synthesize_data_constructor(
-    index: &mut DefinitionIndex,
-    class_name: &str,
-    class_def: &ast::StmtClassDef,
-) {
+fn synthesize_data_constructor(store: &mut Store, class_name: &str, class_def: &ast::StmtClassDef) {
     let is_namedtuple = is_namedtuple_class(class_def);
     let decorator = dataclass_decorator(class_def);
     if decorator.is_none() && !is_namedtuple {
@@ -691,9 +824,16 @@ fn synthesize_data_constructor(
         }
     }
     // An explicitly written constructor wins: ``@dataclass`` / ``NamedTuple``
-    // only synthesize one when the class defines none itself.
-    if index.get(&format!("{class_name}.__init__")).is_some()
-        || index.get(&format!("{class_name}.__new__")).is_some()
+    // only synthesize one when the class defines none itself. Probe the
+    // directly-bound definitions (not the lazy alias resolver, which is for
+    // queries and would both pollute its memo mid-build and follow re-exports
+    // that are irrelevant to "did this class write its own constructor").
+    if store
+        .signatures
+        .contains_key(&format!("{class_name}.__init__"))
+        || store
+            .signatures
+            .contains_key(&format!("{class_name}.__new__"))
     {
         return;
     }
@@ -730,14 +870,46 @@ fn synthesize_data_constructor(
 
     let ctor = if is_namedtuple { "__new__" } else { "__init__" };
     let fullname = format!("{class_name}.{ctor}");
-    index.insert(fullname.clone(), Signature { parameters });
-    index.synthesized.insert(fullname);
+    store.insert(fullname.clone(), Signature { parameters });
+    store.synthesized.insert(fullname);
+}
+
+#[cfg(test)]
+impl DefinitionIndex {
+    /// A resolver-less index for unit tests that drive the edge/signature
+    /// logic directly (no module resolution: `ensure_module` is inert).
+    fn for_test() -> Self {
+        Self {
+            resolver: None,
+            inner: RefCell::new(Inner::default()),
+        }
+    }
+
+    /// Replace the re-export edges (test convenience), applying the same
+    /// no-op/empty filtering as the construction path.
+    fn set_edges(&mut self, edges: Vec<(String, String)>) {
+        let inner = self.inner.get_mut();
+        inner.by_dst.clear();
+        Self::push_edges(inner, edges);
+    }
+
+    fn insert(&mut self, fullname: String, signature: Signature) {
+        self.inner.get_mut().store.insert(fullname, signature);
+    }
+
+    fn signature_count(&self) -> usize {
+        self.inner.borrow().store.signatures.len()
+    }
+
+    fn edges_is_empty(&self) -> bool {
+        self.inner.borrow().by_dst.is_empty()
+    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use super::{expand_reexports, DefinitionIndex};
+    use super::DefinitionIndex;
     use crate::signature::{Parameter, ParameterKind, Signature};
 
     /// A signature with `n` positional-or-keyword parameters, so a test can
@@ -754,10 +926,20 @@ mod tests {
     }
 
     fn index_of(pairs: &[(&str, usize)]) -> DefinitionIndex {
-        let mut index = DefinitionIndex::default();
+        let mut index = DefinitionIndex::for_test();
         for &(name, arity) in pairs {
             index.insert(name.to_string(), sig(arity));
         }
+        index
+    }
+
+    fn with_edges(mut index: DefinitionIndex, edges: &[(&str, &str)]) -> DefinitionIndex {
+        index.set_edges(
+            edges
+                .iter()
+                .map(|(s, d)| ((*s).to_string(), (*d).to_string()))
+                .collect(),
+        );
         index
     }
 
@@ -768,25 +950,31 @@ mod tests {
     }
 
     #[test]
-    fn copies_exact_name_and_everything_under_the_prefix() {
-        let mut index = index_of(&[("numpy", 1), ("numpy.array", 2), ("numpy.linalg.norm", 3)]);
-        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+    fn resolves_exact_name_and_subtree_through_an_alias() {
+        let index = with_edges(
+            index_of(&[("numpy", 1), ("numpy.array", 2), ("numpy.linalg.norm", 3)]),
+            &[("numpy", "np")],
+        );
+        // The eager expansion materialized every `np.*`; the lazy resolver
+        // produces the same answers on demand without ever building them.
         assert_eq!(arity(&index, "np"), Some(1));
         assert_eq!(arity(&index, "np.array"), Some(2));
         assert_eq!(arity(&index, "np.linalg.norm"), Some(3));
+        // The real names still resolve directly.
+        assert_eq!(arity(&index, "numpy.array"), Some(2));
+        // The full alias cross-product is never materialized: only real
+        // definitions live in `signatures`.
+        assert_eq!(index.signature_count(), 3);
     }
 
     #[test]
-    fn prefix_match_respects_the_dotted_boundary() {
-        // The sorted-range scan must not treat `numpy_core` / `numpyfoo` as
-        // being under the `numpy.` prefix (they sort adjacent to `numpy.`).
-        let mut index = index_of(&[
-            ("numpy.array", 2),
-            ("numpy_core", 9),
-            ("numpyfoo.bar", 9),
-            ("numpz.x", 9),
-        ]);
-        expand_reexports(&mut index, &[("numpy".into(), "np".into())]);
+    fn alias_respects_the_dotted_boundary() {
+        // `numpy_core` / `numpyfoo` are not under the `numpy.` prefix even
+        // though they share leading characters with it.
+        let index = with_edges(
+            index_of(&[("numpy.array", 2), ("numpy_core", 9), ("numpyfoo.bar", 9)]),
+            &[("numpy", "np")],
+        );
         assert_eq!(arity(&index, "np.array"), Some(2));
         assert!(index.get("np_core").is_none());
         assert!(index.get("np").is_none());
@@ -794,35 +982,97 @@ mod tests {
     }
 
     #[test]
-    fn a_real_definition_is_never_overwritten_by_an_alias() {
-        let mut index = index_of(&[("impl.f", 2), ("pkg.f", 5)]);
-        expand_reexports(&mut index, &[("impl".into(), "pkg".into())]);
-        // `pkg.f` already had a real definition; the alias must not clobber it.
+    fn a_real_definition_wins_over_an_alias() {
+        let index = with_edges(index_of(&[("impl.f", 2), ("pkg.f", 5)]), &[("impl", "pkg")]);
+        // `pkg.f` has its own real definition; the alias must not shadow it.
         assert_eq!(arity(&index, "pkg.f"), Some(5));
+        // The aliased source still resolves under its own name.
+        assert_eq!(arity(&index, "impl.f"), Some(2));
     }
 
     #[test]
-    fn chained_reexports_resolve_to_a_fixpoint() {
-        let mut index = index_of(&[("a.f", 1)]);
-        expand_reexports(
-            &mut index,
-            &[("a".into(), "b".into()), ("b".into(), "c".into())],
+    fn first_collected_alias_wins() {
+        // Two edges could both produce `pkg.f`; collection order decides,
+        // mirroring the old first-writer-wins (`or_insert`) precedence.
+        let index = with_edges(
+            index_of(&[("a.f", 1), ("b.f", 7)]),
+            &[("a", "pkg"), ("b", "pkg")],
         );
+        assert_eq!(arity(&index, "pkg.f"), Some(1));
+    }
+
+    #[test]
+    fn chained_reexports_resolve() {
+        let index = with_edges(index_of(&[("a.f", 1)]), &[("a", "b"), ("b", "c")]);
         assert_eq!(arity(&index, "b.f"), Some(1));
         assert_eq!(arity(&index, "c.f"), Some(1));
     }
 
     #[test]
-    fn noop_edges_are_ignored() {
-        let mut index = index_of(&[("a.f", 1)]);
-        expand_reexports(
-            &mut index,
+    fn noop_and_empty_edges_are_dropped() {
+        let index = with_edges(index_of(&[("a.f", 1)]), &[("a", "a"), ("", "b"), ("c", "")]);
+        assert!(index.edges_is_empty());
+        assert_eq!(arity(&index, "a.f"), Some(1));
+        assert!(index.get("b.f").is_none());
+    }
+
+    #[test]
+    fn cyclic_edges_terminate_and_still_resolve() {
+        // `a` <-> `b` form a re-export cycle; `core` is the real source.
+        // Resolution must not loop, and the reachable definition still
+        // resolves through the cycle.
+        let index = with_edges(
+            index_of(&[("core.f", 4)]),
+            &[("a", "b"), ("b", "a"), ("core", "a")],
+        );
+        assert_eq!(arity(&index, "a.f"), Some(4));
+        // A name reachable only through the pure cycle terminates as `None`.
+        assert!(index.get("b.missing").is_none());
+    }
+
+    #[test]
+    fn chained_self_referential_star_reexports_resolve_and_terminate() {
+        // The `from pkg.api import *` shape (issue #39 regression fixture):
+        // every edge's `src` is inside its `dst`'s own subtree. A single
+        // re-exported attribute resolves through the chain via successive
+        // one-segment hops...
+        let index = with_edges(
+            index_of(&[("pkg.leaf.f", 1)]),
             &[
-                ("a".into(), "a".into()),
-                (String::new(), "b".into()),
-                ("c".into(), String::new()),
+                ("pkg.api", "pkg"),
+                ("pkg.agg", "pkg.api"),
+                ("pkg.leaf", "pkg.agg"),
             ],
         );
-        assert_eq!(index.signatures.len(), 1);
+        assert_eq!(arity(&index, "pkg.f"), Some(1));
+        // ...while a deep multi-segment name through the same self-referential
+        // edges does *not* spawn the unbounded `pkg.api.api.api…` family: it
+        // terminates as `None` (and fast — the single-segment rule prunes it
+        // before the step budget is anywhere near reached).
+        assert!(index.get("pkg.deeply.nested.missing").is_none());
+    }
+
+    #[test]
+    fn non_self_referential_subtree_alias_keeps_multi_segment() {
+        // `np = numpy` (or `from numpy import *`): `src` (`numpy`) is *not*
+        // under `dst` (`np`), so it cannot loop — a deep `np.linalg.norm`
+        // must still resolve (the single-segment rule applies only to
+        // self-referential edges).
+        let index = with_edges(index_of(&[("numpy.linalg.norm", 3)]), &[("numpy", "np")]);
+        assert_eq!(arity(&index, "np.linalg.norm"), Some(3));
+    }
+
+    #[test]
+    fn pathological_alias_chain_hits_the_depth_backstop() {
+        // A non-terminating single-segment alias chain `L0 -> L1 -> … -> L70`
+        // (no definition anywhere) must not recurse forever: the depth
+        // backstop ends it as `None`. Exercises the `resolution_exhausted`
+        // early return — the documented fail-closed safety net.
+        let edges: Vec<(String, String)> = (0..70)
+            .map(|i| (format!("L{}", i + 1), format!("L{i}")))
+            .collect();
+        let mut index = DefinitionIndex::for_test();
+        index.set_edges(edges);
+        assert!(index.get("L0.f").is_none());
     }
 }
