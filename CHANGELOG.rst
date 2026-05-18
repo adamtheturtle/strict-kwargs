@@ -23,6 +23,20 @@ Next
   there are two new ``CheckError`` variants (``PathNotFound``,
   ``ConfigInvalid``).
 
+2026.5.18
+---------
+
+
+- Fix a false negative where a call in **decorator** position was never
+  analyzed (issue #51). Decorator-factory calls with surplus positional
+  arguments — ``@retry(3, 0.5)``, ``@functools.lru_cache(128)``,
+  ``@app.route("/x", 200)``, including attribute-chain and method
+  decorators — are now flagged exactly like the same call in statement
+  position, and ``fix`` rewrites them (``@retry(times=3, delay=0.5)``)
+  with the same conservative rules. The call-site walker previously
+  descended only into function/class bodies and skipped their decorator
+  lists entirely.
+
 - ``ty`` is now a hard requirement instead of an optional fallback. When
   ``ty`` cannot be located (next to the ``strict-kwargs`` binary or on
   ``PATH``) or its language server will not start, the run aborts with exit

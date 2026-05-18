@@ -16,10 +16,6 @@ add(1, 2)      # error: too many positional args  ->  fix rewrites to add(a=1, b
 uv tool install strict-kwargs   # or: pip install strict-kwargs
 ```
 
-[`ty`](https://docs.astral.sh/ty/) is a hard requirement and is pulled in automatically as a dependency of the PyPI package.
-strict-kwargs locates it next to its own binary or on `PATH`; if it cannot be found it exits with an error rather than silently resolving fewer calls.
-`cargo install` does not pull it — then install it yourself with `uv tool install ty`.
-
 ## Usage
 
 ```bash
@@ -58,21 +54,3 @@ debug = false
 
 A missing `pyproject.toml`, or one without a `[tool.strict_kwargs]` table, is fine and uses the defaults.
 A `pyproject.toml` that exists but cannot be parsed, or whose `[tool.strict_kwargs]` has the wrong shape or value types (e.g. `ignore_names` not a list), is a hard error (exit 2) rather than a silent fall back to defaults.
-
-## Architecture
-
-A built-in resolver (Ruff parser + embedded [typeshed](https://github.com/python/typeshed), offline) with a required `ty` inference fallback for the cases static analysis cannot resolve (inheritance/MRO, return/annotation-typed receivers, locals bound from calls).
-For the full pipeline, capability matrix, parity status, and limitations, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## Development
-
-```bash
-prek install         # or: pre-commit install — runs the same hooks as CI
-uv tool install ty   # the test suite needs `ty` on PATH
-```
-
-`prek run --all-files` runs the commit hooks; `--hook-stage pre-push` runs `cargo test`.
-
-## License
-
-MIT
