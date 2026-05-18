@@ -60,7 +60,7 @@ jobs:
         run: ty version
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   benchmarks:
     # Continuous benchmarking (issue #30). Non-gating: it reports an
@@ -110,6 +110,9 @@ jobs:
       - name: Verify ty is on PATH
         shell: bash
         run: ty version
+
+      - name: Check Cargo.lock freshness
+        run: cargo metadata --locked --format-version 1
 
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2

@@ -65,9 +65,9 @@ jobs:
         # interpolated into code).
         shell: bash
         run: |
-          cargo llvm-cov --no-report --branch --workspace
-          cargo llvm-cov report --branch --fail-under-lines 100
-          summary="$(cargo llvm-cov report --branch --json --summary-only)"
+          cargo llvm-cov --locked --no-report --branch --workspace
+          cargo llvm-cov report --locked --branch --fail-under-lines 100
+          summary="$(cargo llvm-cov report --locked --branch --json --summary-only)"
           echo "Branch coverage: $(jq -r '.data[0].totals.branches.percent' <<<"$summary")%"
           jq -e '.data[0].totals.branches.percent >= 100' >/dev/null <<<"$summary" \
             || { echo "error: branch coverage is below the required 100%" >&2; exit 1; }

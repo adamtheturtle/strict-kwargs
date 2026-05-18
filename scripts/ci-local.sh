@@ -3,8 +3,9 @@
 # Reproduce *every* CI job locally so failures are caught before pushing.
 # Mirrors `.github/workflows/{lint,ci,coverage}.yml`:
 #
-#   - lint.yml `build`  : cargo fmt --check, clippy, docs
-#   - ci.yml   `build`  : cargo test --all-features
+#   - lint.yml `build`  : cargo fmt --check, clippy, docs, cargo audit
+#   - lint.yml `pre-commit`: uv lock --check
+#   - ci.yml   `build`  : cargo test --locked --all-features
 #   - coverage.yml      : cargo llvm-cov (100% line + branch coverage)
 #
 # Run this before any push. Windows-only behaviour can't be reproduced
@@ -18,14 +19,20 @@ step() { printf '\n=== %s ===\n' "$1"; }
 step "rustfmt (lint.yml)"
 cargo fmt --all -- --check
 
+step "Python lockfile (lint.yml)"
+uv lock --check
+
 step "clippy (lint.yml)"
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
 
 step "docs (lint.yml)"
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --document-private-items
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features --document-private-items
+
+step "Rust dependency audit (lint.yml)"
+cargo audit --deny warnings
 
 step "tests (ci.yml)"
-cargo test --all-features
+cargo test --locked --all-features
 
 step "coverage gate (coverage.yml)"
 # CI runs this on nightly; locally `RUSTC_BOOTSTRAP=1` lets a stable
@@ -43,9 +50,9 @@ if [ -z "${LLVM_COV:-}" ]; then
   done
 fi
 export RUSTC_BOOTSTRAP=1
-cargo llvm-cov --no-report --branch --workspace
-cargo llvm-cov report --branch --fail-under-lines 100
-summary="$(cargo llvm-cov report --branch --json --summary-only)"
+cargo llvm-cov --locked --no-report --branch --workspace
+cargo llvm-cov report --locked --branch --fail-under-lines 100
+summary="$(cargo llvm-cov report --locked --branch --json --summary-only)"
 echo "Branch coverage: $(jq -r '.data[0].totals.branches.percent' <<<"$summary")%"
 jq -e '.data[0].totals.branches.percent >= 100' >/dev/null <<<"$summary" \
   || { echo "error: branch coverage is below the required 100%" >&2; exit 1; }
