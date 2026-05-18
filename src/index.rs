@@ -13,6 +13,7 @@ use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
 use crate::signature::{Parameter, ParameterKind, Signature};
+use crate::source::read_python_source_lossy;
 
 /// Safety bound on re-export alias chain length during lazy resolution. Real
 /// code converges in a handful of hops; this only stops a pathological or
@@ -374,7 +375,13 @@ pub fn build_index(
     // on demand by `get`, so a heavy third-party import closure
     // (numpy/torch/scipy) is never eagerly walked (issue #39).
     for path in python_files {
-        let source = std::fs::read_to_string(path)?;
+        // A file that cannot be decoded (non-UTF-8 with no usable PEP 263
+        // declaration) is skipped here silently; the check/fix loop reads the
+        // same set and emits the single user-facing warning (issue #53). Its
+        // definitions just don't get indexed — same as if it were absent.
+        let Some(source) = read_python_source_lossy(path) else {
+            continue;
+        };
         let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         index.index_source(&module_name, is_package_init(path), parsed.suite());

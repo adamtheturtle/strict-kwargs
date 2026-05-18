@@ -261,6 +261,14 @@ Tool-specific:
   hostile file a clean, bounded failure instead of a process-wide
   `SIGABRT`, and the bound is deterministic across platforms/build profiles
   (issue #54).
+- **Encoding.** UTF-8 (with or without a BOM) and a PEP 263
+  `# -*- coding: <enc> -*-` declaration for `latin-1`/`iso-8859-1`,
+  `ascii`, or explicit `utf-8` are decoded directly (no third-party codec
+  dependency). Any other *declared* encoding (e.g. `shift_jis`, `cp1252`),
+  or a file that is non-UTF-8 with no usable declaration, is reported as a
+  warning and skipped — robust (one stray file never aborts the run or
+  masks other files' violations, issue #53) but not analysed. A genuine
+  filesystem error stays fatal.
 - Cosmetic: module-qualified functions display as `"f" of "module"` (mypy
   wording differs slightly); detection is correct.
 
@@ -289,6 +297,7 @@ signal, not an exit status — run `strict-kwargs` for the gate.
 | `src/check.rs` | call visitor, name/import/scope resolution, rule application, ty deferral |
 | `src/index.rs` | DefinitionIndex, lazy demand-driven module + re-export resolution |
 | `src/resolve.rs` | module resolver (first-party / embedded typeshed / site-packages, PEP 561) |
+| `src/source.rs` | source reading: UTF-8 BOM / PEP 263 decoding, undecodable-file skip |
 | `src/ty_resolver.rs` | LSP client, hover/definition, pipelining, robustness, URI handling |
 | `src/signature.rs` | the positional/keyword rule and `max_positional` logic |
 | `src/ast_util.rs` | AST → signature, argument counting, line/column |

@@ -17,6 +17,7 @@ mod index;
 mod limits;
 mod resolve;
 mod signature;
+mod source;
 // The `ty` type-inference fallback is an *optional*, environment-dependent
 // subprocess integration: real `ty` only ever drives the happy paths, while
 // the error/edge branches (disabled latch, malformed frames, timeouts,
