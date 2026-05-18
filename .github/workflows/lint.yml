@@ -43,8 +43,9 @@ jobs:
         run: cargo doc --no-deps --all-features --document-private-items
 
   pre-commit:
-    # Runs the exact same hooks contributors run locally (see
-    # `.pre-commit-config.yaml`) so there is no drift between local and CI.
+    # Runs the exact same hooks contributors run locally via `prek`
+    # (see `.pre-commit-config.yaml`) so there is no drift between local
+    # and CI.
     runs-on: ubuntu-latest
 
     steps:
@@ -60,12 +61,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Run pre-commit hooks (commit stage)
-        run: uvx pre-commit run --all-files --show-diff-on-failure --color=always
+      - name: Run prek hooks (commit stage)
+        run: uvx prek run --all-files --hook-stage pre-commit
+          --show-diff-on-failure --color=always --verbose
 
-      - name: Run pre-commit hooks (push stage)
-        run: uvx pre-commit run --all-files --hook-stage pre-push
-          --show-diff-on-failure --color=always
+      - name: Run prek hooks (push stage)
+        run: uvx prek run --all-files --hook-stage pre-push
+          --show-diff-on-failure --color=always --verbose
 
   completion-lint:
     needs: [build, pre-commit]
