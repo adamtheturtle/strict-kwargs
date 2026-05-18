@@ -50,24 +50,55 @@ impl Project {
             .expect("spawn strict-kwargs")
     }
 
-    /// Run with `PATH` pointing at an empty directory so the required `ty`
-    /// backend cannot be found, regardless of whether the host has `ty`
-    /// installed. The binary itself is spawned by absolute path, so an empty
-    /// `PATH` only hides `ty` (the sole `PATH` lookup strict-kwargs does).
-    fn run_without_ty(&self, args: &[&str]) -> Output {
-        let empty = self.root.join("__no_ty__");
-        std::fs::create_dir_all(&empty).expect("mkdir");
-        Command::new(BIN)
+    /// Run a *copy* of the built binary out of `bin_subdir`, with `PATH` set
+    /// to `path_dir`, so the only `ty` that can be resolved is one `path_dir`
+    /// provides.
+    ///
+    /// Running a copy (rather than `BIN` under `target/`) is load-bearing:
+    /// `ty_command` looks for a `ty` next to the *running executable* before
+    /// it consults `PATH`, so controlling `PATH` alone would not hide a `ty`
+    /// that happened to sit beside `strict-kwargs` in `target/debug`. The
+    /// copy lives in a directory containing nothing but itself, so that
+    /// sibling-discovery step finds no `ty` and `PATH` becomes the sole
+    /// source — exactly the invariant these tests depend on.
+    fn run_isolated(&self, args: &[&str], bin_subdir: &str, path_dir: &Path) -> Output {
+        let bin_dir = self.root.join(bin_subdir);
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        let exe = bin_dir.join(if cfg!(windows) {
+            "strict-kwargs.exe"
+        } else {
+            "strict-kwargs"
+        });
+        std::fs::copy(BIN, &exe).expect("copy strict-kwargs");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod strict-kwargs copy");
+        }
+        Command::new(&exe)
             .args(args)
             .current_dir(&self.root)
-            .env("PATH", &empty)
+            .env("PATH", path_dir)
             .output()
             .expect("spawn strict-kwargs")
     }
 
+    /// Run with no discoverable `ty` at all, so the required-backend probe
+    /// must fail regardless of whether the host has `ty` installed: `PATH`
+    /// is an empty directory and the binary copy has no sibling `ty` (see
+    /// [`Self::run_isolated`]).
+    fn run_without_ty(&self, args: &[&str]) -> Output {
+        let empty = self.root.join("__no_ty_path__");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        self.run_isolated(args, "__no_ty_bin__", &empty)
+    }
+
     /// Run with `PATH` pointing at a fake `ty` that passes the up-front
     /// `ty version` probe but whose `ty server` exits immediately, so the
-    /// lazy server start fails (`CheckError::TyServerFailed`). Unix-only
+    /// lazy server start fails (`CheckError::TyServerFailed`). The shim is
+    /// the *only* discoverable `ty`: the strict-kwargs copy sits in its own
+    /// directory with no sibling `ty` (see [`Self::run_isolated`]). Unix-only
     /// (shell shim); the coverage gate runs on Linux.
     #[cfg(unix)]
     fn run_with_broken_ty_server(&self, args: &[&str]) -> Output {
@@ -81,12 +112,7 @@ impl Project {
         )
         .expect("write shim");
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        Command::new(BIN)
-            .args(args)
-            .current_dir(&self.root)
-            .env("PATH", &bin)
-            .output()
-            .expect("spawn strict-kwargs")
+        self.run_isolated(args, "__sk_bin__", &bin)
     }
 }
 
