@@ -8,6 +8,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 mod ast_util;
+mod cache;
 mod check;
 mod config;
 mod diagnostic;
