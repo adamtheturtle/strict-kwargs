@@ -127,6 +127,35 @@ fn import_inside_function_is_non_module_scope() {
     );
 }
 
+/// Function-local imports nested in `if` / `elif` / `else` branches still bind
+/// in the function namespace, not the module namespace.
+#[test]
+fn import_inside_function_if_is_non_module_scope() {
+    let project = TestProject::new()
+        .dep("svc.py", "def run(a: int) -> None: ...\n")
+        .dep("api.py", "def call(a: int) -> None: ...\n")
+        .file(
+            "app.py",
+            r"
+def driver(flag: bool) -> None:
+    if flag:
+        import svc
+        svc.run(1)
+    elif flag:
+        from api import call
+        call(1)
+    else:
+        import svc as renamed
+        renamed.run(1)
+",
+        );
+    let messages = project.check();
+    assert!(
+        messages.is_empty(),
+        "if-nested function-local imports must not resolve as module-level targets; got: {messages:?}"
+    );
+}
+
 /// A module-level `for` / `while` / `with` does not open a new scope, so
 /// imports inside them still produce module-level re-export aliases.
 #[test]

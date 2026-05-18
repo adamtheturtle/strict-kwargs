@@ -31,6 +31,12 @@ use crate::ty_resolver::{
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
 };
 
+#[derive(Clone, Copy)]
+enum IfBranchTraversal {
+    Module,
+    LocalBody,
+}
+
 /// Check every Python file reachable from `paths` and return the violations.
 ///
 /// # Errors
@@ -1136,25 +1142,56 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn visit_if_branch_stmt(&mut self, stmt: &'a Stmt, traversal: IfBranchTraversal) {
+        match traversal {
+            IfBranchTraversal::Module => self.visit_stmt(stmt),
+            IfBranchTraversal::LocalBody => self.visit_body_stmt(stmt),
+        }
+    }
+
+    /// `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each `elif`
+    /// test expression twice: once via a direct `visit_expr` call and again
+    /// inside `walk_elif_else_clause`. Override `Stmt::If` to traverse each test
+    /// and body exactly once. Branch statements use the caller's traversal mode
+    /// so module-level imports are still recorded while function-local imports
+    /// stay local.
+    fn visit_if_stmt(&mut self, if_stmt: &'a ast::StmtIf, traversal: IfBranchTraversal) {
+        let ast::StmtIf {
+            test,
+            body,
+            elif_else_clauses,
+            ..
+        } = if_stmt;
+        self.visit_expr(test);
+        for inner in body {
+            self.visit_if_branch_stmt(inner, traversal);
+        }
+        for clause in elif_else_clauses {
+            if let Some(clause_test) = &clause.test {
+                self.visit_expr(clause_test);
+            }
+            for inner in &clause.body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
+        }
+    }
+
     /// Walk a statement that appears in the body of a function, class, or
     /// control-flow branch. Statements that carry custom `visit_stmt` logic
-    /// (`If`, `Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
-    /// through `visit_stmt` so instance tracking, definition registration, and
-    /// the double-elif-test fix all fire correctly. Everything else (e.g.
-    /// `Import` / `ImportFrom`) goes through `walk_stmt` directly;
-    /// function-local imports are intentionally not registered.
+    /// (`Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
+    /// through `visit_stmt` so instance tracking and definition registration
+    /// fire correctly. `If` uses the custom branch traversal so the
+    /// double-elif-test fix still fires without registering function-local
+    /// imports. Everything else (e.g. `Import` / `ImportFrom`) goes through
+    /// `walk_stmt` directly; function-local imports are intentionally not
+    /// registered.
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
-        if matches!(
-            stmt,
-            Stmt::If(_)
-                | Stmt::Assign(_)
-                | Stmt::AnnAssign(_)
-                | Stmt::FunctionDef(_)
-                | Stmt::ClassDef(_)
-        ) {
-            self.visit_stmt(stmt);
-        } else {
-            walk_stmt(self, stmt);
+        match stmt {
+            Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody),
+            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+                self.visit_stmt(stmt);
+            }
+            _ => walk_stmt(self, stmt),
         }
     }
 }
@@ -1270,32 +1307,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 walk_stmt(self, stmt);
             }
-            // `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each
-            // `elif` test expression twice: once via a direct `visit_expr` call
-            // and again inside `walk_elif_else_clause`. Override `Stmt::If` to
-            // traverse each test and body exactly once. Body statements still
-            // route through `visit_stmt`, matching `walk_stmt`'s normal
-            // statement-body dispatch for imports, assignments, definitions,
-            // and nested `if`/`elif` chains.
-            Stmt::If(ast::StmtIf {
-                test,
-                body,
-                elif_else_clauses,
-                ..
-            }) => {
-                self.visit_expr(test);
-                for inner in body {
-                    self.visit_stmt(inner);
-                }
-                for clause in elif_else_clauses {
-                    if let Some(clause_test) = &clause.test {
-                        self.visit_expr(clause_test);
-                    }
-                    for inner in &clause.body {
-                        self.visit_stmt(inner);
-                    }
-                }
-            }
+            Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
