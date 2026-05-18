@@ -509,6 +509,37 @@ fn fix_accepts_python_flag() {
 }
 
 #[test]
+fn fix_elif_test_call_is_rewritten_exactly_once() {
+    // Regression: the ruff visitor walked `elif` test expressions twice,
+    // causing the fixer to insert `name=` twice and produce `name=name=value`
+    // which fails to parse. Verify the rewrite is applied exactly once.
+    let source = "\
+def f(a: int) -> None: ...
+
+x = True
+if x:
+    pass
+elif f(1):
+    pass
+";
+    let project = Project::new().write("main.py", source);
+    let output = project.run(&["fix", "main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("main.py"),
+        "\
+def f(a: int) -> None: ...
+
+x = True
+if x:
+    pass
+elif f(a=1):
+    pass
+"
+    );
+}
+
+#[test]
 fn fix_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
     let output = project.run(&["fix", "broken.py"]);

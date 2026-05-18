@@ -1139,6 +1139,29 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 walk_stmt(self, stmt);
             }
+            // `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each
+            // `elif` test expression twice: once via a direct `visit_expr` call
+            // and again inside `walk_elif_else_clause`. Override `Stmt::If` to
+            // traverse each test and body exactly once.
+            Stmt::If(ast::StmtIf {
+                test,
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                self.visit_expr(test);
+                for inner in body {
+                    walk_stmt(self, inner);
+                }
+                for clause in elif_else_clauses {
+                    if let Some(clause_test) = &clause.test {
+                        self.visit_expr(clause_test);
+                    }
+                    for inner in &clause.body {
+                        walk_stmt(self, inner);
+                    }
+                }
+            }
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
