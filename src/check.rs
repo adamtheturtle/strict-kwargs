@@ -108,6 +108,7 @@ fn process_scan_outcome_for_ty(
                     &scan.pending,
                     ty_file_cache,
                     diagnostics,
+                    None,
                 )?;
             }
         }
@@ -420,21 +421,19 @@ struct FileScan {
     fixed_calls: usize,
 }
 
-/// The auto-fixer's per-file rewrite, applied to a completed [`scan_file`]
-/// result. `Ok(None)` when there is nothing to rewrite (skipped/undecodable,
-/// or no insertions); `Ok(Some(fixed))` for the rewritten source; an error if
-/// the rewrite would not parse (issue #41 fail-safe — never silently corrupt
-/// a file). Pure CPU, so it runs inside the parallel phase, but kept as its
-/// own gated function (the orchestration around it is not) because this is
-/// deterministic, testable behaviour.
-fn plan_rewrite(path: &Path, outcome: &ScanOutcome) -> Result<Option<String>, CheckError> {
-    let scan = match outcome {
-        ScanOutcome::Scanned(scan) if !scan.fixes.is_empty() => scan,
-        _ => return Ok(None),
-    };
+/// Apply `insertions` to `source` and validate that the result remains valid
+/// Python. Shared by the built-in and ty-backed fixer paths.
+fn plan_rewrite_insertions(
+    path: &Path,
+    source: &str,
+    insertions: &[Insertion],
+) -> Result<Option<String>, CheckError> {
+    if insertions.is_empty() {
+        return Ok(None);
+    }
     // Every insertion adds a `name=` prefix, so the result always differs
     // from `source`.
-    let fixed = apply_insertions(&scan.source, &scan.fixes);
+    let fixed = apply_insertions(source, insertions);
     // Fail-safe (issue #41): never produce source that does not parse. The
     // parenthesized-span fix should keep every rewrite valid, but a malformed
     // result must abort with a report rather than silently corrupt the file.
@@ -484,24 +483,23 @@ fn stream_scan_files(
     })
 }
 
-/// Like [`stream_scan_files`], but also computes each file's [`plan_rewrite`]
-/// in the same parallel pass (the fixer's per-file CPU work). Excluded from
-/// the coverage gate for the same reason as [`stream_scan_files`]; the rewrite
-/// decision itself stays in the gated [`plan_rewrite`].
+/// Like [`stream_scan_files`], but collects the completed scans for the fixer.
+/// Excluded from the coverage gate for the same reason as [`stream_scan_files`]:
+/// the per-file scan logic is covered elsewhere, while this is only
+/// parallel-pool orchestration.
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
     python_files: &[PathBuf],
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
-) -> Result<Vec<(PathBuf, ScanOutcome, Option<String>)>, CheckError> {
+) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
     with_large_stack_pool(|| {
         python_files
             .par_iter()
             .map(|path| {
                 let outcome = scan_file(project_root, path, config, index)?;
-                let rewritten = plan_rewrite(path, &outcome)?;
-                Ok((path.clone(), outcome, rewritten))
+                Ok((path.clone(), outcome))
             })
             .collect()
     })
@@ -1470,12 +1468,14 @@ fn call_fix_insertions(
 /// Mirrors [`check_paths`]: it runs the same detection — built-in resolver
 /// *and*, for the calls that misses, the (required) `ty` fallback steered by
 /// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
-/// stays conservative: only a call the built-in resolver pins to a single
-/// in-project signature is rewritten; overloads, synthesized constructors and
-/// `ty`-only resolutions are left alone (a wrong parameter name would corrupt
-/// source, cf. issue #41).
+/// stays conservative: a call is rewritten only when the parameter mapping is
+/// unambiguous. For `ty`-resolved calls that means a single concrete hover
+/// signature with complete parameter names; overloads, synthesized
+/// constructors, ambiguous callable displays, and goto-definition-only
+/// resolutions are left alone (a wrong parameter name would corrupt source,
+/// cf. issue #41).
 ///
-/// Running the `ty` fallback here is detection-only: it lets the returned
+/// Running the `ty` fallback here also lets the returned
 /// [`FixOutcome::declined`] account for *every* violation `check` would
 /// report, so `fix` then `check` (with the same `--python`) is predictable
 /// rather than silently inconsistent (issue #42). The fallback still starts
@@ -1513,22 +1513,21 @@ fn fix_paths_impl(
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
 
-    // Phase 1 (parallel, see `check_paths`): the built-in pass plus the
-    // pure-CPU rewrite (apply insertions, then re-parse to fail closed). Both
-    // are per-file and share only the `Sync` index, so they parallelize; the
-    // ty fallback and declined-count accounting stay serial below.
+    // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
+    // file. Rewrites are planned serially below after the ty fallback has a
+    // chance to add safe single-signature hover fixes.
     let scans = scan_files_for_fix(&python_files, project_root, config, &index)?;
 
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     // Every violation the checker would report, across all files (built-in
-    // and ty-resolved). Only used for the declined count; the rewrite is
-    // driven solely by each file's insertions.
+    // and ty-resolved). Used for the declined count; ty may also append safe
+    // hover-derived insertions to the built-in rewrite plan.
     let mut diagnostics = Vec::new();
     let mut fixed_total = 0usize;
     let mut results = Vec::new();
-    for (path, outcome, rewritten) in scans {
+    for (path, outcome) in scans {
         // Warn (deterministically, see `check_paths`) and skip an undecodable
         // file; it produces no fix and no diagnostics (issue #53).
         let scan = match outcome {
@@ -1542,9 +1541,12 @@ fn fix_paths_impl(
             ScanOutcome::Scanned(scan) => scan,
         };
         diagnostics.extend(scan.diagnostics);
-        // The ty fallback only ever adds diagnostics (detection, never fixes,
-        // mirroring `check_paths`); it still runs for every file so the
-        // declined count below sees ty-resolved violations too.
+        let mut insertions = scan.fixes;
+        let mut fixed_calls = scan.fixed_calls;
+        // The ty fallback adds diagnostics, and for a single concrete named
+        // hover signature can now add the same conservative `name=` insertions
+        // as the built-in resolver. Ambiguous ty displays remain diagnostics
+        // only, so the declined count still matches a following `check`.
         resolve_file_with_ty(
             &mut ty,
             &mut ty_start_attempted,
@@ -1555,14 +1557,18 @@ fn fix_paths_impl(
             &scan.pending,
             &mut ty_file_cache,
             &mut diagnostics,
+            Some(TyFixes {
+                insertions: &mut insertions,
+                fixed_calls: &mut fixed_calls,
+            }),
         )?;
-        if let Some(fixed) = rewritten {
-            fixed_total += scan.fixed_calls;
+        if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
+            fixed_total += fixed_calls;
             results.push(FileFix {
                 path,
                 original: scan.source,
                 fixed,
-                count: scan.fixed_calls,
+                count: fixed_calls,
             });
         }
     }
@@ -1767,6 +1773,39 @@ fn identifier_at(source: &str, offset: usize) -> Option<String> {
     (end > 0).then(|| rest[..end].to_string())
 }
 
+struct CallAtStart<'a> {
+    start: usize,
+    call: Option<&'a ast::ExprCall>,
+}
+
+#[cfg_attr(coverage, coverage(off))]
+impl<'a> Visitor<'a> for CallAtStart<'a> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if self.call.is_some() {
+            return;
+        }
+        if let Expr::Call(call) = expr {
+            if call.start().to_usize() == self.start {
+                self.call = Some(call);
+                return;
+            }
+        }
+        walk_expr(self, expr);
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn call_at_start(suite: &[Stmt], start: usize) -> Option<&ast::ExprCall> {
+    let mut locator = CallAtStart { start, call: None };
+    for stmt in suite {
+        locator.visit_stmt(stmt);
+        if locator.call.is_some() {
+            break;
+        }
+    }
+    locator.call
+}
+
 /// Parse a ty-reported parameter list (`a: int, b: int = ..., /`) into a
 /// signature by reusing the real parser. `None` if it doesn't parse.
 // Only reached from the (excluded) `resolve_pending_with_ty` ty path, and
@@ -1803,7 +1842,7 @@ fn strip_unbound_receiver(
     signature: Signature,
     positional_count: usize,
     is_def_hover: bool,
-) -> (Signature, usize) {
+) -> (Signature, usize, bool) {
     let first_is_receiver = is_def_hover
         && signature
             .parameters
@@ -1811,11 +1850,15 @@ fn strip_unbound_receiver(
             .and_then(|p| p.name.as_deref())
             .is_some_and(|name| name == "self" || name == "cls");
     if !first_is_receiver {
-        return (signature, positional_count);
+        return (signature, positional_count, false);
     }
     let mut parameters = signature.parameters;
     parameters.remove(0);
-    (Signature { parameters }, positional_count.saturating_sub(1))
+    (
+        Signature { parameters },
+        positional_count.saturating_sub(1),
+        true,
+    )
 }
 
 /// Drop a leading `self` parameter — the explicitly-passed receiver of an
@@ -1834,6 +1877,32 @@ fn without_leading_self(signature: &Signature) -> Signature {
 
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
+fn violation_max_positional(
+    fullname: &str,
+    signatures: &[Signature],
+    positional_count: usize,
+) -> Option<usize> {
+    if is_typing_special_form_constructor(fullname) {
+        return None;
+    }
+    if signatures.is_empty()
+        || signatures
+            .iter()
+            .any(|s| !call_exceeds_positional_limit(s, fullname, false, positional_count))
+    {
+        return None;
+    }
+    Some(
+        signatures
+            .iter()
+            .filter_map(|s| s.max_positional_at_call_site(fullname, false))
+            .max()
+            .unwrap_or(0),
+    )
+}
+
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
 fn emit_if_violation(
     fullname: &str,
     signatures: &[Signature],
@@ -1842,22 +1911,8 @@ fn emit_if_violation(
     call_start: usize,
     path: &Path,
     diagnostics: &mut Vec<Diagnostic>,
-) {
-    if is_typing_special_form_constructor(fullname) {
-        return;
-    }
-    if signatures.is_empty()
-        || signatures
-            .iter()
-            .any(|s| !call_exceeds_positional_limit(s, fullname, false, positional_count))
-    {
-        return;
-    }
-    let max_positional = signatures
-        .iter()
-        .filter_map(|s| s.max_positional_at_call_site(fullname, false))
-        .max()
-        .unwrap_or(0);
+) -> Option<usize> {
+    let max_positional = violation_max_positional(fullname, signatures, positional_count)?;
     let offset = u32::try_from(call_start).unwrap_or(u32::MAX);
     let (line, column) = line_column(source, TextSize::new(offset));
     diagnostics.push(Diagnostic {
@@ -1868,6 +1923,80 @@ fn emit_if_violation(
         positional_count,
         max_positional,
     });
+    Some(max_positional)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn signature_is_fully_named(signature: &Signature) -> bool {
+    signature
+        .parameters
+        .iter()
+        .all(|param| param.name.as_deref().is_some_and(|name| !name.is_empty()))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn ty_call_fix_insertions(
+    source: &str,
+    pending: &PendingTy,
+    callee_fullname: &str,
+    signature: &Signature,
+    max_positional: usize,
+    positional_count: usize,
+    receiver_is_explicit: bool,
+) -> Option<Vec<Insertion>> {
+    if !signature_is_fully_named(signature) {
+        return None;
+    }
+    let parsed = parse_module(source).ok()?;
+    let call = call_at_start(parsed.suite(), pending.call_start)?;
+    // Ty hovers are already call-site oriented for bound methods, so avoid
+    // the built-in resolver's attribute-name receiver heuristic here. The one
+    // exception is an unbound `def` hover with leading `self`/`cls`, where
+    // `strip_unbound_receiver` proved the first positional is explicit.
+    call_fix_insertions(
+        call,
+        parsed.tokens(),
+        callee_fullname,
+        signature,
+        max_positional,
+        positional_count,
+        false,
+        receiver_is_explicit,
+    )
+}
+
+#[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "threads the resolved ty call facts into the existing fixer \
+              insertion helper"
+)]
+fn record_ty_fix(
+    fixes: &mut Option<TyFixes<'_>>,
+    source: &str,
+    pending: &PendingTy,
+    callee_fullname: &str,
+    signature: &Signature,
+    max_positional: usize,
+    positional_count: usize,
+    receiver_is_explicit: bool,
+) {
+    let Some(fixes) = fixes.as_mut() else {
+        return;
+    };
+    let Some(insertions) = ty_call_fix_insertions(
+        source,
+        pending,
+        callee_fullname,
+        signature,
+        max_positional,
+        positional_count,
+        receiver_is_explicit,
+    ) else {
+        return;
+    };
+    fixes.insertions.extend(insertions);
+    *fixes.fixed_calls += 1;
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -1930,6 +2059,7 @@ fn resolve_file_with_ty(
     pending: &[PendingTy],
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
+    fixes: Option<TyFixes<'_>>,
 ) -> Result<(), CheckError> {
     if pending.is_empty() {
         return Ok(());
@@ -1942,7 +2072,7 @@ fn resolve_file_with_ty(
         *ty = Some(start_ty(project_root, python_env)?);
     }
     if let Some(ty) = ty.as_mut() {
-        resolve_pending_with_ty(ty, path, source, pending, ty_file_cache, diagnostics);
+        resolve_pending_with_ty(ty, path, source, pending, ty_file_cache, diagnostics, fixes);
     }
     Ok(())
 }
@@ -1959,6 +2089,11 @@ fn resolve_file_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver, CheckError> {
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
+}
+
+struct TyFixes<'a> {
+    insertions: &'a mut Vec<Insertion>,
+    fixed_calls: &'a mut usize,
 }
 
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver
@@ -1984,6 +2119,7 @@ fn resolve_pending_with_ty(
     pending: &[PendingTy],
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
+    mut fixes: Option<TyFixes<'_>>,
 ) {
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
@@ -2014,8 +2150,8 @@ fn resolve_pending_with_ty(
             let Some(signature) = signature_from_param_text(&sig.params) else {
                 continue;
             };
-            let (signature, positional_count) =
-                strip_unbound_receiver(signature, p.positional_count, sig.owner.is_none());
+            let (effective_signature, positional_count, receiver_is_explicit) =
+                strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
             let fullname = match &sig.owner {
                 Some(owner) => {
                     let owner = owner.split('[').next().unwrap_or(owner);
@@ -2024,15 +2160,36 @@ fn resolve_pending_with_ty(
                 }
                 None => format!("ty.{}", sig.name),
             };
-            emit_if_violation(
+            if let Some(max_positional) = emit_if_violation(
                 &fullname,
-                &[signature],
+                std::slice::from_ref(&effective_signature),
                 positional_count,
                 source,
                 p.call_start,
                 path,
                 diagnostics,
-            );
+            ) {
+                let fix_signature = if receiver_is_explicit {
+                    &signature
+                } else {
+                    &effective_signature
+                };
+                let fix_positional_count = if receiver_is_explicit {
+                    p.positional_count
+                } else {
+                    positional_count
+                };
+                record_ty_fix(
+                    &mut fixes,
+                    source,
+                    p,
+                    &fullname,
+                    fix_signature,
+                    max_positional,
+                    fix_positional_count,
+                    receiver_is_explicit,
+                );
+            }
             continue;
         }
 
@@ -2050,15 +2207,29 @@ fn resolve_pending_with_ty(
             continue;
         }
         let name = identifier_at(source, p.callee_offset).unwrap_or_default();
-        emit_if_violation(
-            &format!("ty.{name}"),
+        let fullname = format!("ty.{name}");
+        if let Some(max_positional) = emit_if_violation(
+            &fullname,
             &overloads,
             p.positional_count,
             source,
             p.call_start,
             path,
             diagnostics,
-        );
+        ) {
+            if let [signature] = overloads.as_slice() {
+                record_ty_fix(
+                    &mut fixes,
+                    source,
+                    p,
+                    &fullname,
+                    signature,
+                    max_positional,
+                    p.positional_count,
+                    false,
+                );
+            }
+        }
     }
 
     // Phase B: pipeline goto-definition for hover misses (constructors).
@@ -2117,8 +2288,8 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, strip_unbound_receiver,
-        without_leading_self,
+        is_ignored_path, is_typing_special_form_constructor, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, without_leading_self, PendingTy, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2189,26 +2360,29 @@ mod tests {
     fn strips_leading_self_and_the_explicit_receiver() {
         // `str.lower(key)`: ty hover keeps `self`; the explicit receiver fills
         // it and must not count (issue #15).
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 1, true);
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["self"]), 1, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
+        assert!(stripped);
     }
 
     #[test]
     fn strips_leading_cls() {
-        let (s, count) = strip_unbound_receiver(sig(&["cls", "a"]), 2, true);
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["cls", "a"]), 2, true);
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].name.as_deref(), Some("a"));
         assert_eq!(count, 1);
+        assert!(stripped);
     }
 
     #[test]
     fn leaves_bound_signature_untouched() {
         // ty already dropped the receiver for a bound call (`def upper()` /
         // `bound method T.m(...)`): no leading `self`/`cls`, nothing to strip.
-        let (s, count) = strip_unbound_receiver(sig(&["a", "b"]), 1, true);
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["a", "b"]), 1, true);
         assert_eq!(s.parameters.len(), 2);
         assert_eq!(count, 1);
+        assert!(!stripped);
     }
 
     #[test]
@@ -2235,19 +2409,86 @@ mod tests {
         // ty already stripped the real receiver, so a leading parameter that
         // happens to be named `cls`/`self` (`def m(self, cls, x)`) is genuine
         // and must not be dropped (PR #17 review).
-        let (s, count) = strip_unbound_receiver(sig(&["cls", "x"]), 2, false);
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["cls", "x"]), 2, false);
         assert_eq!(s.parameters.len(), 2);
         assert_eq!(s.parameters[0].name.as_deref(), Some("cls"));
         assert_eq!(count, 2);
+        assert!(!stripped);
     }
 
     #[test]
     fn saturates_when_no_explicit_receiver_argument() {
         // Defensive: a leading `self` with zero positional args (e.g. a
         // keyword-only / malformed call) must not underflow the count.
-        let (s, count) = strip_unbound_receiver(sig(&["self"]), 0, true);
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["self"]), 0, true);
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
+        assert!(stripped);
+    }
+
+    #[test]
+    fn signature_full_name_check_covers_decline_shapes() {
+        assert!(signature_is_fully_named(&sig(&["a", "b"])));
+        assert!(signature_is_fully_named(&Signature {
+            parameters: Vec::new(),
+        }));
+        assert!(!signature_is_fully_named(&Signature {
+            parameters: vec![Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        }));
+        assert!(!signature_is_fully_named(&Signature {
+            parameters: vec![Parameter {
+                name: Some(String::new()),
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        }));
+    }
+
+    #[test]
+    fn ty_fix_recording_decline_branches_are_explicit() {
+        let pending = PendingTy {
+            callee_offset: 0,
+            call_start: 0,
+            positional_count: 1,
+        };
+        let named = sig(&["a"]);
+
+        // `check_paths` passes no fix context. The ty path still considers
+        // the violation, but rewrite recording must be a no-op.
+        let mut no_fix_context = None;
+        record_ty_fix(
+            &mut no_fix_context,
+            "f(1)\n",
+            &pending,
+            "ty.f",
+            &named,
+            0,
+            1,
+            false,
+        );
+
+        // A fix run may also have a context but an unsafe signature mapping
+        // (for example an unnamed parameter). It remains declined without
+        // recording a call or insertion.
+        let unnamed = Signature {
+            parameters: vec![Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        };
+        let mut insertions = Vec::new();
+        let mut fixed_calls = 0usize;
+        let mut fixes = Some(TyFixes {
+            insertions: &mut insertions,
+            fixed_calls: &mut fixed_calls,
+        });
+        record_ty_fix(
+            &mut fixes, "f(1)\n", &pending, "ty.f", &unnamed, 0, 1, false,
+        );
+        assert!(insertions.is_empty());
+        assert_eq!(fixed_calls, 0);
     }
 
     // ----- ty goto-definition resolution internals --------------------
