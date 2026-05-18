@@ -45,7 +45,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 fn check(root: &Path) -> usize {
     let config = Config::load(root).expect("valid benchmark-fixture config");
     let paths = [root.to_path_buf()];
-    check_paths(root, &paths, &config, None)
+    check_paths(root, &paths, &config, None, None)
         .expect("check_paths over a benchmark fixture must succeed")
         .len()
 }
@@ -539,4 +539,64 @@ fn fix_first_party_closure() -> usize {
         .expect("fix_paths over a benchmark fixture must succeed")
         .files
         .len()
+}
+
+// ---------------------------------------------------------------------------
+// Cache benchmarks (issue #68)
+//
+// Each pair measures the same fixture cold (no cache, same as the existing
+// bench) vs warm (all entries already in cache, so Phase 1 + Phase 2 are
+// fully skipped — only fingerprint hashing + cache reads remain).
+// ---------------------------------------------------------------------------
+
+/// Run `check_paths` with a cache directory.
+fn check_cached(root: &Path, cache_dir: &Path) -> usize {
+    let config = Config::load(root).expect("valid benchmark-fixture config");
+    let paths = [root.to_path_buf()];
+    check_paths(root, &paths, &config, None, Some(cache_dir))
+        .expect("check_paths must succeed")
+        .len()
+}
+
+/// First-party closure — cold run with cache infrastructure enabled (measures
+/// global-fingerprint + key-computation overhead on top of the normal scan).
+#[divan::bench]
+fn first_party_closure_cache_cold(bencher: divan::Bencher) {
+    let root = first_party_project();
+    bencher.bench(|| {
+        let cache = tempfile::tempdir().expect("tempdir");
+        check_cached(root, cache.path())
+    });
+}
+
+/// First-party closure — warm run (cache fully populated before measurement).
+/// Measures only fingerprint hashing + cache-file reads; Phase 1 and Phase 2
+/// are completely skipped.
+#[divan::bench]
+fn first_party_closure_cache_warm(bencher: divan::Bencher) {
+    let root = first_party_project();
+    let cache = tempfile::tempdir().expect("tempdir");
+    // Prime: one cold run to populate every cache entry.
+    check_cached(root, cache.path());
+    bencher.bench(|| check_cached(root, cache.path()));
+}
+
+/// Whole-project directory — cold run with cache infrastructure enabled.
+#[divan::bench]
+fn whole_project_cache_cold(bencher: divan::Bencher) {
+    let root = whole_project_dir();
+    bencher.bench(|| {
+        let cache = tempfile::tempdir().expect("tempdir");
+        check_cached(root, cache.path())
+    });
+}
+
+/// Whole-project directory — warm run (cache fully populated before measurement).
+#[divan::bench]
+fn whole_project_cache_warm(bencher: divan::Bencher) {
+    let root = whole_project_dir();
+    let cache = tempfile::tempdir().expect("tempdir");
+    // Prime: one cold run to populate every cache entry.
+    check_cached(root, cache.path());
+    bencher.bench(|| check_cached(root, cache.path()));
 }

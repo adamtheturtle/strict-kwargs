@@ -15,6 +15,7 @@ use rustc_hash::FxHashMap;
 use ruff_text_size::TextSize;
 
 use crate::ast_util::{line_column, positional_argument_count, signature_from_parameters};
+use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
@@ -47,8 +48,19 @@ pub fn check_paths(
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
-    run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
+    run_with_large_stack(move || {
+        check_paths_impl(project_root, paths, config, python_env, cache_dir)
+    })
+}
+
+/// Per-file entry used in `check_paths_impl` to track cache state.
+///
+/// Populated before the parallel scan pass: cache hits carry the previously
+/// stored diagnostics; misses are fed to the pipeline.
+struct FileEntry {
+    cache_hit: Option<Vec<Diagnostic>>,
 }
 
 /// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
@@ -182,6 +194,7 @@ fn check_paths_impl(
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
     // `ty` is a hard requirement. Verify it up front — before reading or
     // parsing anything — so the outcome is deterministic and independent of
@@ -191,6 +204,46 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
+
+    // Optional persistent cache: open it and compute the global fingerprint once.
+    let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
+        .map(|dir| -> Result<_, CheckError> {
+            let config_json = serde_json::to_string(config).unwrap_or_default();
+            let fp = compute_global_fingerprint(project_root, &config_json, python_env);
+            Ok((DiagnosticCache::open(dir)?, fp))
+        })
+        .transpose()?;
+
+    // Partition files into cache hits and misses. Hits bypass the pipeline;
+    // misses are queued for scanning. `files_to_scan` preserves the order of
+    // misses so the pipeline's file indices map consistently to skip_warnings.
+    // `cache_miss_keys` pairs each miss with its cache key for writing back
+    // after the pipeline; stored separately so the write loop needs no Option.
+    let mut entries: Vec<FileEntry> = Vec::with_capacity(python_files.len());
+    let mut files_to_scan: Vec<PathBuf> = Vec::new();
+    let mut cache_miss_keys: Vec<(u64, PathBuf)> = Vec::new();
+
+    for path in &python_files {
+        if let Some((ref cache, fp)) = cache_and_fp {
+            // The cache key is derived from the path and the global
+            // fingerprint. The global fingerprint already includes every
+            // first-party file's mtime, so any content change (which updates
+            // the mtime) changes the fingerprint and therefore this key.
+            // This avoids reading the file twice (once here, once in
+            // scan_file); warm runs need only stat(2) calls + cache reads.
+            let key = file_cache_key(path, fp);
+            let hit = cache.get(key);
+            let is_hit = hit.is_some();
+            entries.push(FileEntry { cache_hit: hit });
+            if !is_hit {
+                files_to_scan.push(path.clone());
+                cache_miss_keys.push((key, path.clone()));
+            }
+        } else {
+            entries.push(FileEntry { cache_hit: None });
+            files_to_scan.push(path.clone());
+        }
+    }
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -209,11 +262,19 @@ fn check_paths_impl(
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
     // Collect skip warnings with their file index so they can be emitted in
-    // the original sorted-file order after both phases finish (issue #53).
+    // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
+    // Cache hits bypass the pipeline; their diagnostics are added directly.
+    for entry in &entries {
+        if let Some(cached) = &entry.cache_hit {
+            diagnostics.extend_from_slice(cached);
+        }
+    }
+
+    // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
     pipeline_phases(
-        &python_files,
+        &files_to_scan,
         project_root,
         config,
         &index,
@@ -227,11 +288,29 @@ fn check_paths_impl(
 
     // Emit skip warnings in the original sorted-file order (issue #53 + #46).
     skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
-    for (_, path, reason) in skip_warnings {
+    let skipped_paths: Vec<&PathBuf> = skip_warnings.iter().map(|(_, p, _)| p).collect();
+    for (_, path, reason) in &skip_warnings {
         eprintln!(
             "strict-kwargs: warning: skipping {} ({reason})",
             path.display()
         );
+    }
+
+    // Store miss results in cache after the pipeline completes. Attribute each
+    // file's diagnostics by path (Diagnostic::path is always the source file).
+    // Skipped files are excluded — the skip reason may be transient.
+    if let Some((ref cache, _)) = cache_and_fp {
+        for (key, path) in &cache_miss_keys {
+            if skipped_paths.contains(&path) {
+                continue;
+            }
+            let file_diags: Vec<Diagnostic> = diagnostics
+                .iter()
+                .filter(|d| &d.path == path)
+                .cloned()
+                .collect();
+            cache.put(*key, &file_diags);
+        }
     }
 
     diagnostics.sort_by(|left, right| {
@@ -471,7 +550,7 @@ fn is_python_file(path: &Path) -> bool {
 /// every file beneath it (`.git`, `.venv` and other dot-directories,
 /// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
 /// lock-step with the component rule in [`is_ignored_path`].
-fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
+pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
@@ -1032,6 +1111,20 @@ impl<'a> CallChecker<'a> {
             _ => None,
         }
     }
+
+    /// Walk a statement that appears in the body of a function, class, or
+    /// control-flow branch. `Stmt::If` is dispatched through `visit_stmt` so
+    /// our override fires and avoids the double-elif-test bug present in
+    /// `walk_stmt` for ruff 0.15.8. Every other statement type keeps using the
+    /// raw `walk_stmt` to preserve existing behaviour (e.g. function-local
+    /// imports are intentionally not registered).
+    fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
+        if matches!(stmt, Stmt::If(_)) {
+            self.visit_stmt(stmt);
+        } else {
+            walk_stmt(self, stmt);
+        }
+    }
 }
 
 impl<'a> Visitor<'a> for CallChecker<'a> {
@@ -1071,7 +1164,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.mark_param_opaque(kwarg.name.as_str());
                 }
                 for inner in body {
-                    walk_stmt(self, inner);
+                    self.visit_body_stmt(inner);
                 }
                 self.pop_scope();
             }
@@ -1114,11 +1207,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 self.mark_param_opaque(kwarg.name.as_str());
                             }
                             for method_stmt in method_body {
-                                walk_stmt(self, method_stmt);
+                                self.visit_body_stmt(method_stmt);
                             }
                             self.pop_scope();
                         }
-                        _ => walk_stmt(self, inner),
+                        _ => self.visit_body_stmt(inner),
                     }
                 }
                 self.pop_scope();
@@ -1148,7 +1241,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             // `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each
             // `elif` test expression twice: once via a direct `visit_expr` call
             // and again inside `walk_elif_else_clause`. Override `Stmt::If` to
-            // traverse each test and body exactly once.
+            // traverse each test and body exactly once. Body statements are
+            // dispatched through `visit_body_stmt` so that any nested
+            // `if`/`elif` chains are also protected against the double visit.
             Stmt::If(ast::StmtIf {
                 test,
                 body,
@@ -1157,14 +1252,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }) => {
                 self.visit_expr(test);
                 for inner in body {
-                    walk_stmt(self, inner);
+                    self.visit_body_stmt(inner);
                 }
                 for clause in elif_else_clauses {
                     if let Some(clause_test) = &clause.test {
                         self.visit_expr(clause_test);
                     }
                     for inner in &clause.body {
-                        walk_stmt(self, inner);
+                        self.visit_body_stmt(inner);
                     }
                 }
             }

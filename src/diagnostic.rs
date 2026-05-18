@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// A reported violation: a call site with too many positional arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
     /// File containing the offending call.
     pub path: PathBuf,

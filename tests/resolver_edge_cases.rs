@@ -55,7 +55,7 @@ impl TestProject {
     fn check(&self) -> Vec<String> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
         diagnostics
             .iter()
             .map(|d| format!("main:{}: {}", d.line, d.message()))
@@ -65,8 +65,14 @@ impl TestProject {
     /// Diagnostics for the whole project directory (exercises directory walk).
     fn check_dir(&self) -> Vec<String> {
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, std::slice::from_ref(&self.root), &config, None)
-            .expect("check");
+        let diagnostics = check_paths(
+            &self.root,
+            std::slice::from_ref(&self.root),
+            &config,
+            None,
+            None,
+        )
+        .expect("check");
         diagnostics
             .iter()
             .map(|d| {
@@ -107,7 +113,7 @@ fn nonexistent_path_is_a_hard_error() {
     let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
     let missing = project.root.join("does_not_exist.py");
     let config = Config::load(&project.root).expect("valid config");
-    let error = check_paths(&project.root, &[missing], &config, None)
+    let error = check_paths(&project.root, &[missing], &config, None, None)
         .expect_err("a nonexistent path must be a hard error");
     let message = error.to_string();
     assert!(
@@ -126,7 +132,7 @@ fn non_python_file_passed_directly_is_skipped() {
     let not_py = project.root.join("notes.txt");
     std::fs::write(&not_py, "plain text\n").expect("write");
     let config = Config::load(&project.root).expect("valid config");
-    let diagnostics = check_paths(&project.root, &[not_py], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[not_py], &config, None, None).expect("check");
     assert!(diagnostics.is_empty(), "got: {diagnostics:?}");
 }
 
@@ -196,7 +202,7 @@ fn over_deep_relative_import_returns_none() {
         .file("pkg/mod.py", "from ... import something\n\nsomething()\n");
     let config = Config::load(&project.root).expect("valid config");
     let modp = project.root.join("pkg/mod.py");
-    let diagnostics = check_paths(&project.root, &[modp], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[modp], &config, None, None).expect("check");
     assert!(
         diagnostics.is_empty(),
         "unexpected diagnostics: {diagnostics:?}"
@@ -420,7 +426,7 @@ fn call_of_imported_callable_class_resolves_dunder_call() {
         );
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert!(
         diagnostics.iter().any(|d| d.line == 3),
         "expected __call__ violation, got: {diagnostics:?}"
@@ -465,7 +471,7 @@ fn deep_dotted_attribute_chain_resolves() {
         .file("pkg/sub.py", "def run(a, b): ...\n");
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert_eq!(diagnostics.len(), 1, "got: {diagnostics:?}");
     assert_eq!(diagnostics[0].line, 3);
 }
@@ -504,7 +510,7 @@ fn assignment_from_attribute_constructor_is_not_recorded() {
         .file("lib.py", "class Factory:\n    def run(self, a, b): ...\n");
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let _ = check_paths(&project.root, &[app], &config, None).expect("check");
+    let _ = check_paths(&project.root, &[app], &config, None, None).expect("check");
 }
 
 // --- Diagnostic display formatting -----------------------------------------
@@ -551,7 +557,7 @@ fn call_to_non_callable_module_attribute_is_ignored() {
         .file("lib.py", "thing = 5\n");
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert!(
         diagnostics.is_empty(),
         "non-callable attribute must not be flagged, got: {diagnostics:?}"
@@ -755,7 +761,7 @@ def get_thing_cls() -> type[Thing]:
         );
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert!(
         diagnostics.iter().all(|d| d.path.ends_with("app.py")),
         "diagnostics must point at the call site (app.py), got: {diagnostics:?}"
@@ -778,7 +784,7 @@ fn ty_resolves_cross_file_method_on_inferred_instance() {
         );
     let config = Config::load(&project.root).expect("valid config");
     let app = project.root.join("app.py");
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert!(
         diagnostics.iter().all(|d| d.path.ends_with("app.py")),
         "diagnostics must point at app.py, got: {diagnostics:?}"
@@ -848,7 +854,7 @@ def build() -> Engine:
     // is environment-dependent, so assert robustly: the run completes and any
     // diagnostics point at the call site. The control-flow def-walk is still
     // exercised whenever ty resolves into `lib.py`.
-    let diagnostics = check_paths(&project.root, &[app], &config, None).expect("check");
+    let diagnostics = check_paths(&project.root, &[app], &config, None, None).expect("check");
     assert!(
         diagnostics.iter().all(|d| d.path.ends_with("app.py")),
         "diagnostics must point at the call site (app.py), got: {diagnostics:?}"
@@ -874,7 +880,8 @@ fn diagnostic_message_shape() {
     let project = plain_project("def func(a, b): ...\nfunc(1, 2)\n");
     let main = project.root.join("main.py");
     let config = Config::load(&project.root).expect("valid config");
-    let diags: Vec<Diagnostic> = check_paths(&project.root, &[main], &config, None).expect("check");
+    let diags: Vec<Diagnostic> =
+        check_paths(&project.root, &[main], &config, None, None).expect("check");
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message().contains("Too many positional"));
 }

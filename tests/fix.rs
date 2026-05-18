@@ -67,7 +67,7 @@ impl TestProject {
     fn check_main(&self) -> Vec<String> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
         diagnostics.iter().map(Diagnostic::message).collect()
     }
 }
@@ -494,5 +494,25 @@ fn singledispatch_multi_arg_call_not_rewritten() {
     // rewritten: dispatch on the first positional arg would break (issue #81).
     assert_unchanged(
         "from functools import singledispatch\n\n@singledispatch\ndef fn(a, b):\n    return (a, b)\n\nfn(1, 2)\n",
+    );
+}
+
+#[test]
+fn does_not_double_insert_for_elif_in_function_body() {
+    // Issue #80: walk_stmt in ruff 0.15.8 visits each `elif` test expression
+    // twice (direct visit_expr + walk_elif_else_clause). The double insertion
+    // at the same byte offset produced `name=name=arg`, which does not parse.
+    assert_fixed(
+        "def f(x: int) -> bool: ...\n\ndef caller():\n    if f(1):\n        pass\n    elif f(2):\n        pass\n",
+        "def f(x: int) -> bool: ...\n\ndef caller():\n    if f(x=1):\n        pass\n    elif f(x=2):\n        pass\n",
+    );
+}
+
+#[test]
+fn does_not_double_insert_for_elif_nested_in_if_body() {
+    // Nested if/elif chains inside an if branch must also be protected.
+    assert_fixed(
+        "def f(x: int) -> bool: ...\n\nif True:\n    if f(1):\n        pass\n    elif f(2):\n        pass\n",
+        "def f(x: int) -> bool: ...\n\nif True:\n    if f(x=1):\n        pass\n    elif f(x=2):\n        pass\n",
     );
 }
