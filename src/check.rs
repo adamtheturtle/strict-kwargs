@@ -15,6 +15,7 @@ use rustc_hash::FxHashMap;
 use ruff_text_size::TextSize;
 
 use crate::ast_util::{line_column, positional_argument_count, signature_from_parameters};
+use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
@@ -47,8 +48,21 @@ pub fn check_paths(
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
-    run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
+    run_with_large_stack(move || {
+        check_paths_impl(project_root, paths, config, python_env, cache_dir)
+    })
+}
+
+/// Per-file entry used in `check_paths_impl` to track cache state.
+///
+/// Populated before the parallel scan pass: cache hits carry the previously
+/// stored diagnostics; misses carry the key to write back after the scan.
+struct FileEntry {
+    path: PathBuf,
+    cache_hit: Option<Vec<Diagnostic>>,
+    cache_key: Option<u64>,
 }
 
 fn check_paths_impl(
@@ -56,6 +70,7 @@ fn check_paths_impl(
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>, CheckError> {
     // `ty` is a hard requirement. Verify it up front — before reading or
     // parsing anything — so the outcome is deterministic and independent of
@@ -66,12 +81,57 @@ fn check_paths_impl(
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
 
-    // Phase 1 (parallel): the built-in pass over every file. Each file is an
+    // Optional persistent cache: open it and compute the global fingerprint once.
+    let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
+        .map(|dir| -> Result<_, CheckError> {
+            let config_json = serde_json::to_string(config).unwrap_or_default();
+            let fp = compute_global_fingerprint(project_root, &config_json, python_env);
+            Ok((DiagnosticCache::open(dir)?, fp))
+        })
+        .transpose()?;
+
+    // For each file: compute cache key, look up. Hits go straight to diagnostics;
+    // misses are queued for scanning. `files_to_scan` preserves the order of misses
+    // so `scan_iter` below can be consumed in lock-step.
+    let mut entries: Vec<FileEntry> = Vec::with_capacity(python_files.len());
+    let mut files_to_scan: Vec<PathBuf> = Vec::new();
+
+    for path in &python_files {
+        if let Some((ref cache, fp)) = cache_and_fp {
+            // The cache key is derived from the path and the global
+            // fingerprint.  The global fingerprint already includes every
+            // first-party file's mtime, so any content change (which updates
+            // the mtime) changes the fingerprint and therefore this key.
+            // This avoids reading the file twice (once here, once in
+            // scan_file); warm runs need only stat(2) calls + cache reads.
+            let key = file_cache_key(path, fp);
+            let hit = cache.get(key);
+            let is_hit = hit.is_some();
+            entries.push(FileEntry {
+                path: path.clone(),
+                cache_hit: hit,
+                cache_key: Some(key),
+            });
+            if !is_hit {
+                files_to_scan.push(path.clone());
+            }
+        } else {
+            entries.push(FileEntry {
+                path: path.clone(),
+                cache_hit: None,
+                cache_key: None,
+            });
+            files_to_scan.push(path.clone());
+        }
+    }
+
+    // Phase 1 (parallel): the built-in pass over uncached files only. Each file is an
     // independent, pure-CPU unit of work sharing only the `Sync`
     // demand-driven index; this is the bulk of whole-project runtime and the
     // residual issue #46 targets. Order is preserved, so `scans` — and
     // therefore the `ty` phase and final output — stay deterministic.
-    let scans = scan_files(&python_files, project_root, config, &index)?;
+    let scans = scan_files(&files_to_scan, project_root, config, &index)?;
+    let mut scan_iter = scans.into_iter();
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -88,8 +148,20 @@ fn check_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut diagnostics = Vec::new();
-    for (path, outcome) in scans {
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+    for entry in &entries {
+        if let Some(cached) = &entry.cache_hit {
+            // Cache hit: skip all work for this file.
+            diagnostics.extend_from_slice(cached);
+            continue;
+        }
+
+        // Cache miss: consume the next scan result (invariant: same order as files_to_scan).
+        let Some((_, outcome)) = scan_iter.next() else {
+            continue;
+        };
+
         // Emit the undecodable-file warning here, not in the parallel phase,
         // so its order is deterministic (issue #53 + #46): `python_files` is
         // sorted, so warnings appear in a stable order regardless of which
@@ -98,28 +170,38 @@ fn check_paths_impl(
             ScanOutcome::Skipped(reason) => {
                 eprintln!(
                     "strict-kwargs: warning: skipping {} ({reason})",
-                    path.display()
+                    entry.path.display()
                 );
+                // Don't cache skipped files; the skip reason may be transient.
                 continue;
             }
             ScanOutcome::Scanned(scan) => scan,
         };
-        diagnostics.extend(scan.diagnostics);
-        if scan.pending.is_empty() {
-            continue;
+
+        // Collect this file's diagnostics together so they can be cached atomically.
+        let mut file_diags = scan.diagnostics;
+        if !scan.pending.is_empty() {
+            resolve_file_with_ty(
+                &mut ty,
+                &mut ty_start_attempted,
+                project_root,
+                python_env,
+                &entry.path,
+                &scan.source,
+                &scan.pending,
+                &mut ty_file_cache,
+                &mut file_diags,
+            )?;
         }
-        resolve_file_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            python_env,
-            &path,
-            &scan.source,
-            &scan.pending,
-            &mut ty_file_cache,
-            &mut diagnostics,
-        )?;
+
+        // Store in cache before extending the global accumulator.
+        if let (Some((ref cache, _)), Some(key)) = (&cache_and_fp, entry.cache_key) {
+            cache.put(key, &file_diags);
+        }
+
+        diagnostics.extend(file_diags);
     }
+
     diagnostics.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -346,7 +428,7 @@ fn is_python_file(path: &Path) -> bool {
 /// every file beneath it (`.git`, `.venv` and other dot-directories,
 /// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
 /// lock-step with the component rule in [`is_ignored_path`].
-fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
+pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }

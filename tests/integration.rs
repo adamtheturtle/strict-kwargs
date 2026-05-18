@@ -41,7 +41,7 @@ impl TestProject {
     fn check(&self) -> Vec<String> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
         diagnostics
             .iter()
             .map(|d| format!("main:{}: {}", d.line, d.message()))
@@ -471,7 +471,7 @@ fn directory_with_curdir_component() {
 
     let dir = root.join(".");
     let config = Config::load(&root).expect("valid config");
-    let diagnostics = check_paths(&root, &[dir], &config, None).expect("check");
+    let diagnostics = check_paths(&root, &[dir], &config, None, None).expect("check");
     let messages: Vec<String> = diagnostics
         .iter()
         .map(|d| format!("{}: {}", d.line, d.message()))
@@ -523,7 +523,7 @@ fn directory_walk_skips_venv_git_and_dunder_pycache() {
 
     let config = Config::load(&root).expect("valid config");
     let diagnostics =
-        check_paths(&root, std::slice::from_ref(&root), &config, None).expect("check");
+        check_paths(&root, std::slice::from_ref(&root), &config, None, None).expect("check");
     let files: Vec<String> = diagnostics
         .iter()
         .map(|d| {
@@ -565,7 +565,7 @@ fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
         paths.push(path);
     }
     let config = Config::load(&root).expect("valid config");
-    let diagnostics = check_paths(&root, &paths, &config, None).expect("check");
+    let diagnostics = check_paths(&root, &paths, &config, None, None).expect("check");
     diagnostics
         .iter()
         .map(|d| {
@@ -797,7 +797,7 @@ fn check_with_aux(check: &[(&str, &str)], aux: &[(&str, &str)]) -> Vec<String> {
     }
     let paths: Vec<_> = check.iter().map(|(n, c)| write(n, c)).collect();
     let config = Config::load(&root).expect("valid config");
-    check_paths(&root, &paths, &config, None)
+    check_paths(&root, &paths, &config, None, None)
         .expect("check")
         .iter()
         .map(|d| {
@@ -1356,7 +1356,7 @@ fn ty_forwards_external_python_env() {
     let config = Config::load(root).expect("valid config");
 
     // Unset: `extdep` is unresolvable -> no diagnostics (no regression).
-    let none = check_paths(root, std::slice::from_ref(&main), &config, None).expect("check");
+    let none = check_paths(root, std::slice::from_ref(&main), &config, None, None).expect("check");
     assert!(
         none.is_empty(),
         "expected no diagnostics without --python, got: {none:?}"
@@ -1365,7 +1365,7 @@ fn ty_forwards_external_python_env() {
     // Forwarded: ty resolves `extdep.configure` against the external venv
     // and flags the positional call (line 3); the keyword call (line 4) is
     // fine.
-    let got = check_paths(root, &[main], &config, Some(venv.as_path())).expect("check");
+    let got = check_paths(root, &[main], &config, Some(venv.as_path()), None).expect("check");
     let msgs: Vec<String> = got
         .iter()
         .map(|d| format!("{}: {}", d.line, d.message()))
@@ -1395,7 +1395,7 @@ fn ty_invalid_python_env_fails_closed() {
     .expect("main");
     let config = Config::load(root).expect("valid config");
     let bogus = root.join("does-not-exist-env");
-    let got = check_paths(root, &[main], &config, Some(bogus.as_path())).expect("check");
+    let got = check_paths(root, &[main], &config, Some(bogus.as_path()), None).expect("check");
     let msgs: Vec<String> = got
         .iter()
         .map(|d| format!("{}: {}", d.line, d.message()))
@@ -1691,5 +1691,99 @@ class C:
 c = C()
 c.process(42)
 ",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Persistent cache (issue #68)
+// ---------------------------------------------------------------------------
+
+/// Warm run with an unchanged file returns byte-identical diagnostics.
+#[test]
+fn cache_warm_run_returns_same_diagnostics() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let file = root.join("main.py");
+    std::fs::write(&file, "def f(a, b, c): ...\nf(1, 2, 3)\n").expect("write main");
+
+    let config = Config::load(&root).expect("config");
+    // First (cold) run — populates the cache.
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    // Second (warm) run — should hit the cache.
+    let warm = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check");
+
+    assert_eq!(
+        cold, warm,
+        "warm run must return byte-identical diagnostics to the cold run"
+    );
+}
+
+/// Modifying a checked file invalidates the cache entry.
+#[test]
+fn cache_invalidated_on_file_change() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let file = root.join("main.py");
+    // First: file with a violation.
+    std::fs::write(&file, "def f(a, b, c): ...\nf(1, 2, 3)\n").expect("write main v1");
+
+    let config = Config::load(&root).expect("config");
+    let with_violation = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check v1");
+    assert!(!with_violation.is_empty(), "expected a violation");
+
+    // Second: rewrite the file to fix the violation.
+    std::fs::write(&file, "def f(a, b, c): ...\nf(a=1, b=2, c=3)\n").expect("write main v2");
+    let without_violation = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check v2");
+    assert!(
+        without_violation.is_empty(),
+        "cache must be invalidated after file change; got: {without_violation:?}"
     );
 }
