@@ -51,6 +51,132 @@ pub fn check_paths(
     run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
 }
 
+/// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
+/// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty resolver
+/// ([`ScanOutcome::Scanned`]).
+///
+/// This is the gated business-logic counterpart to [`pipeline_phases`], which
+/// handles the non-deterministic threading orchestration that cannot be covered.
+#[allow(clippy::too_many_arguments)]
+fn process_scan_outcome_for_ty(
+    i: usize,
+    path: PathBuf,
+    outcome: ScanOutcome,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    project_root: &Path,
+    python_env: Option<&Path>,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    match outcome {
+        ScanOutcome::Skipped(reason) => {
+            // Collect skip warnings with their file index so they can be
+            // emitted in the original sorted-file order after both phases
+            // finish (issue #53 + #46).
+            skip_warnings.push((i, path, reason));
+        }
+        ScanOutcome::Scanned(scan) => {
+            diagnostics.extend(scan.diagnostics);
+            if !scan.pending.is_empty() {
+                resolve_file_with_ty(
+                    ty,
+                    ty_start_attempted,
+                    project_root,
+                    python_env,
+                    &path,
+                    &scan.source,
+                    &scan.pending,
+                    ty_file_cache,
+                    diagnostics,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
+/// Phase 1 workers to the serial Phase 2 ty consumer as each file's built-in
+/// pass finishes, overlapping the remaining Phase 1 work with early Phase 2
+/// ty round-trips. The final sort in [`check_paths_impl`] keeps output
+/// deterministic regardless of arrival order; the lazy ty-server start is
+/// preserved (only the first file with pending calls triggers it).
+///
+/// Excluded from the coverage gate for the same reason as
+/// [`stream_scan_files`]: what is excluded here is only the threading
+/// orchestration — the environment-only pool-construction failure, the
+/// scheduling-dependent drain path, a scan error arriving from a worker, and
+/// the unreachable thread-panic arm. The per-outcome business logic lives in
+/// the gated [`process_scan_outcome_for_ty`].
+#[cfg_attr(coverage, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+fn pipeline_phases(
+    python_files: &[PathBuf],
+    project_root: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+    python_env: Option<&Path>,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut consumer_err: Option<CheckError> = None;
+
+    let scan_result = std::thread::scope(|scope| {
+        // Phase 1 (parallel, background): the built-in pass over every file.
+        // Each file is an independent, pure-CPU unit of work sharing only the
+        // `Sync` demand-driven index; results are sent to `rx` as each worker
+        // finishes rather than being collected all at once. `tx` is moved in
+        // and dropped when all workers finish, closing the channel.
+        let scan_handle =
+            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
+
+        for (i, path, result) in rx {
+            if consumer_err.is_some() {
+                // A ty or scan error has already been recorded; drain the
+                // remaining items so the background thread can finish.
+                continue;
+            }
+            let outcome = match result {
+                Ok(o) => o,
+                Err(e) => {
+                    consumer_err = Some(e);
+                    continue;
+                }
+            };
+            if let Err(e) = process_scan_outcome_for_ty(
+                i,
+                path,
+                outcome,
+                ty,
+                ty_start_attempted,
+                project_root,
+                python_env,
+                ty_file_cache,
+                diagnostics,
+                skip_warnings,
+            ) {
+                consumer_err = Some(e);
+            }
+        }
+
+        match scan_handle.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    });
+    scan_result?;
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -65,8 +191,6 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
-
-    let (tx, rx) = std::sync::mpsc::channel();
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -87,75 +211,19 @@ fn check_paths_impl(
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
-    let mut consumer_err: Option<CheckError> = None;
 
-    // Pipeline phases 1 and 2 (issue #67): stream ScanOutcomes from parallel
-    // Phase 1 workers to the serial Phase 2 ty consumer as each file's
-    // built-in pass finishes, overlapping the remaining Phase 1 work with
-    // early Phase 2 ty round-trips. The final sort keeps output deterministic
-    // regardless of arrival order; the lazy ty-server start is preserved
-    // (only the first file with pending calls triggers it).
-    let scan_result = std::thread::scope(|scope| {
-        // Phase 1 (parallel, background): the built-in pass over every file.
-        // Each file is an independent, pure-CPU unit of work sharing only the
-        // `Sync` demand-driven index; results are sent to `rx` as each worker
-        // finishes rather than being collected all at once. `tx` is moved in
-        // and dropped when all workers finish, closing the channel.
-        let scan_handle =
-            scope.spawn(|| stream_scan_files(&python_files, project_root, config, &index, tx));
-
-        for (i, path, result) in rx {
-            if consumer_err.is_some() {
-                // A ty or scan error has already been recorded; drain the
-                // remaining items so the background thread can finish.
-                continue;
-            }
-            let outcome = match result {
-                Ok(o) => o,
-                Err(e) => {
-                    consumer_err = Some(e);
-                    continue;
-                }
-            };
-            // Collect skip warnings rather than emitting immediately (issue #53 + #46):
-            // workers finish in scheduling order, but warnings must appear in
-            // sorted-file order. The emit loop below sorts and emits them after
-            // both phases finish.
-            match outcome {
-                ScanOutcome::Skipped(reason) => {
-                    skip_warnings.push((i, path, reason));
-                }
-                ScanOutcome::Scanned(scan) => {
-                    diagnostics.extend(scan.diagnostics);
-                    if scan.pending.is_empty() {
-                        continue;
-                    }
-                    if let Err(e) = resolve_file_with_ty(
-                        &mut ty,
-                        &mut ty_start_attempted,
-                        project_root,
-                        python_env,
-                        &path,
-                        &scan.source,
-                        &scan.pending,
-                        &mut ty_file_cache,
-                        &mut diagnostics,
-                    ) {
-                        consumer_err = Some(e);
-                    }
-                }
-            }
-        }
-
-        match scan_handle.join() {
-            Ok(result) => result,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    });
-    scan_result?;
-    if let Some(e) = consumer_err {
-        return Err(e);
-    }
+    pipeline_phases(
+        &python_files,
+        project_root,
+        config,
+        &index,
+        python_env,
+        &mut ty,
+        &mut ty_start_attempted,
+        &mut ty_file_cache,
+        &mut diagnostics,
+        &mut skip_warnings,
+    )?;
 
     // Emit skip warnings in the original sorted-file order (issue #53 + #46).
     skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
