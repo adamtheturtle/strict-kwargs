@@ -613,27 +613,40 @@ impl<'a> CallChecker<'a> {
         if first_param != Some("self") {
             return false;
         }
-        if DUNDER_RECEIVERS
-            .iter()
-            .any(|suffix| callee_fullname.ends_with(suffix))
-        {
-            return false;
-        }
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
             return false;
         };
-        let Expr::Name(base) = &**value else {
-            return false;
-        };
-        let base = base.id.as_str();
-        // `base` must resolve to the class that *directly* owns `attr` (the
-        // method itself — not a constructor or nested type, whose receiver
-        // is implicit) and must denote the class object, not an instance of
-        // it (`k.method(…)` is an ordinary bound call).
-        let Some(resolved) = self.resolve_local(base) else {
-            return false;
-        };
-        callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+        if let Expr::Name(base) = &**value {
+            // Dunder-receiver methods called through a *single-name* base
+            // are excluded: `max_positional_at_call_site` already strips
+            // their leading receiver itself, so also stripping it here
+            // would double-count the first real parameter (issue #27).
+            if DUNDER_RECEIVERS
+                .iter()
+                .any(|suffix| callee_fullname.ends_with(suffix))
+            {
+                return false;
+            }
+            let base = base.id.as_str();
+            // `base` must resolve to the class that *directly* owns `attr`
+            // and must denote the class object, not an instance of it
+            // (`k.method(…)` is an ordinary bound call).
+            let Some(resolved) = self.resolve_local(base) else {
+                return false;
+            };
+            callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+        } else {
+            // Multi-level attribute chain (e.g. `module.Class.method(self, …)`):
+            // if the leftmost name resolves as a module, the expression
+            // denotes a class reached through a module path, making the
+            // call unbound.  Non-dotted-path bases (e.g. `f().m(self, …)`)
+            // are not unbound calls.
+            let Some(chain) = Self::dotted_path(value) else {
+                return false;
+            };
+            self.resolve_module(chain.split('.').next().unwrap_or(""))
+                .is_some()
+        }
     }
 
     fn class_from_constructor(&self, expr: &Expr) -> Option<String> {
@@ -2191,16 +2204,70 @@ while cond:
     }
 
     #[test]
+    fn unbound_guard_rejects_attribute_call_with_single_name_base_and_dunder() {
+        // `K.__init__(self, 0)`: explicit-receiver call with a single-name
+        // base and a dunder method — still excluded from unbound treatment
+        // (issue #27: the receiver is already stripped by
+        // `max_positional_at_call_site`; stripping it here would double-count).
+        assert!(!is_unbound(
+            "K.__init__(0)\n",
+            "pkg.K.__init__",
+            Some("self"),
+            |c| {
+                c.define("K", "pkg.K".to_string());
+            }
+        ));
+    }
+
+    #[test]
     fn unbound_guard_rejects_non_attribute_callee() {
         // A bare-name call (`f(0)`): no class object to call through.
         assert!(!is_unbound("f(0)\n", "test.f", Some("self"), |_| {}));
     }
 
     #[test]
-    fn unbound_guard_rejects_non_name_base() {
-        // `a.b.m(0)`: the receiver of `.m` is `a.b` (an attribute), not a
-        // bare name, so it cannot denote a class object.
+    fn unbound_guard_rejects_non_name_base_when_head_is_not_a_module() {
+        // `a.b.m(0)`: the base `a.b` is a multi-level attribute chain, but
+        // `a` is not a known module, so we cannot confirm it is an unbound
+        // class-object call.
         assert!(!is_unbound("a.b.m(0)\n", "pkg.x.m", Some("self"), |_| {}));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_call_expression_base() {
+        // `f().m(0)`: the base is a call expression, not a dotted-name path,
+        // so `dotted_path` returns None and we conservatively return false.
+        assert!(!is_unbound("f().m(0)\n", "pkg.f.m", Some("self"), |_| {}));
+    }
+
+    #[test]
+    fn unbound_guard_accepts_dotted_module_class_method_call() {
+        // `mod.Class.method(self, 0)`: `mod` is a module; the base `mod.Class`
+        // is a class reached through a module path, so the call is unbound
+        // (issue #55 follow-up: multi-level dotted bases through modules).
+        assert!(is_unbound(
+            "mod.Class.method(self, 0)\n",
+            "mod.Class.method",
+            Some("self"),
+            |c| {
+                c.define_module("mod", "mod".to_string());
+            }
+        ));
+    }
+
+    #[test]
+    fn unbound_guard_accepts_dotted_module_dunder_call() {
+        // `mod.Class.__init__(self, 0)`: dunder through a module-accessed
+        // class is still an unbound call. The single-name-base dunder
+        // exclusion does not apply to multi-level chains.
+        assert!(is_unbound(
+            "mod.Class.__init__(self, 0)\n",
+            "mod.Class.__init__",
+            Some("self"),
+            |c| {
+                c.define_module("mod", "mod".to_string());
+            }
+        ));
     }
 
     #[test]
