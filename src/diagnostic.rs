@@ -41,3 +41,45 @@ impl Diagnostic {
         )
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn sample() -> Diagnostic {
+        Diagnostic {
+            path: PathBuf::from("pkg/mod.py"),
+            line: 7,
+            column: 3,
+            callee: "pkg.mod.func".to_string(),
+            positional_count: 4,
+            max_positional: 2,
+        }
+    }
+
+    #[test]
+    fn message_and_display_path_render() {
+        let diagnostic = sample();
+        assert_eq!(
+            diagnostic.message(),
+            "Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
+        );
+        assert_eq!(
+            diagnostic.display_path(),
+            "pkg/mod.py:7:3: error: \
+             Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
+        );
+    }
+
+    #[test]
+    fn derives_are_exercised() {
+        let diagnostic = sample();
+        let clone = diagnostic.clone();
+        assert_eq!(diagnostic, clone);
+        let mut other = sample();
+        other.line = 8;
+        assert_ne!(diagnostic, other);
+        assert!(format!("{diagnostic:?}").contains("pkg.mod.func"));
+    }
+}

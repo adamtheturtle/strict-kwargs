@@ -1,5 +1,17 @@
 //! CLI for ``strict-kwargs``.
 
+// `cargo llvm-cov` builds with `--cfg coverage`; under it the inline
+// `#[cfg(test)] mod tests` is marked `#[coverage(off)]` (test code is not
+// measured). That attribute is the *only* use of `coverage_attribute` in
+// this crate root, and it lives behind `#[cfg(test)]` — so the feature is
+// only actually used when building the test harness. Gating the `feature`
+// on `all(coverage, test)` keeps the non-test binary build (which the
+// coverage job also compiles) from declaring an unused feature, which
+// nightly rejects under `-D unused-features`. `coverage` (not
+// `coverage_nightly`) keeps local (stable + `RUSTC_BOOTSTRAP=1`) and CI
+// (nightly) identical. See `lib.rs` for the library-crate rationale.
+#![cfg_attr(all(coverage, test), feature(coverage_attribute))]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -136,4 +148,38 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
         if fixes.len() == 1 { "" } else { "s" }
     );
     Ok(ExitCode::from(0))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_root_uses_explicit_when_given() {
+        let explicit = PathBuf::from("/some/explicit/root");
+        assert_eq!(
+            project_root_for(Some(explicit.clone()), &[PathBuf::from("x.py")]),
+            explicit
+        );
+    }
+
+    #[test]
+    fn project_root_discovers_from_first_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").expect("write");
+        let nested = dir.path().join("pkg");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let file = nested.join("m.py");
+        std::fs::write(&file, "").expect("write");
+        assert_eq!(project_root_for(None, &[file]), dir.path());
+    }
+
+    #[test]
+    fn project_root_falls_back_to_dot_when_no_paths() {
+        // `paths.first()` is `None` (unreachable from the CLI because clap
+        // defaults `paths` to `.`, but covered here for completeness).
+        let root = project_root_for(None, &[]);
+        assert_eq!(root, find_project_root(&PathBuf::from(".")));
+    }
 }

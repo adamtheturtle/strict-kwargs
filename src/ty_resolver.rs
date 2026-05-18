@@ -56,6 +56,35 @@ pub fn ty_binary_present() -> bool {
 
 type FxPending = std::collections::HashMap<i64, Value>;
 
+/// Build the LSP `initialize` params, optionally forwarding an explicit
+/// `--python` environment.
+///
+/// `python_env`, when set, is the `--python` value (an interpreter, a venv
+/// directory, or a `sys.prefix`, mirroring `ty check --python`). It is sent as
+/// an absolute path: ty resolves a relative `environment.python` against its
+/// workspace root, but a CLI-supplied value is relative to the user's cwd.
+/// `ty server` accepts dynamic options during initialize for clients (like
+/// this one) that do not implement `workspace/configuration`. A bad path is
+/// not validated here: ty just resolves nothing against it, so the fallback
+/// fails closed (no wrong diagnostics) exactly as when no env is configured
+/// (see `docs/ARCHITECTURE.md`, "Forwarding an explicit environment").
+fn initialize_params(project_root: &Path, python_env: Option<&Path>) -> Value {
+    let mut params = json!({
+        "processId": std::process::id(),
+        "rootUri": path_to_uri(project_root),
+        "capabilities": {},
+    });
+    if let Some(python) = python_env {
+        let abs = std::path::absolute(python).unwrap_or_else(|_| python.to_path_buf());
+        params["initializationOptions"] = json!({
+            "configuration": {
+                "environment": { "python": abs.to_string_lossy() },
+            },
+        });
+    }
+    params
+}
+
 impl TyResolver {
     /// Start `ty server` and complete the LSP initialize handshake rooted at
     /// `project_root`. Returns `None` if ty is unavailable or misbehaves —
@@ -72,6 +101,16 @@ impl TyResolver {
     /// A bad path is not validated here: ty just resolves nothing against
     /// it, so the fallback fails closed (no wrong diagnostics) exactly as
     /// when no env is configured.
+    // `start` is exercised by the ty-backed integration tests, but its only
+    // control flow is `?` early-returns for failures — `ty` not spawning, its
+    // stdio pipes not materializing, or the initialize handshake timing out —
+    // that cannot occur in the coverage environment, where `ty` is guaranteed
+    // present (CI asserts `ty version`; see `scripts/coverage.sh`). The
+    // testable parts are factored out and unit-tested directly:
+    // [`initialize_params`] (pure), and the RPC layer ([`Self::request`],
+    // [`Self::collect`], [`Self::notify`], [`read_messages`]) via
+    // [`Self::from_parts`]. So exclude only this defensive shell.
+    #[cfg_attr(coverage, coverage(off))]
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = Command::new("ty")
             .arg("server")
@@ -86,38 +125,27 @@ impl TyResolver {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || read_messages(stdout, &tx));
 
-        let mut resolver = Self {
-            child,
-            stdin,
-            incoming: rx,
-            next_id: 1,
-            opened: HashSet::new(),
-            pending: FxPending::new(),
-            disabled: false,
-        };
+        let mut resolver = Self::from_parts(child, stdin, rx);
 
-        let mut init_params = json!({
-            "processId": std::process::id(),
-            "rootUri": path_to_uri(project_root),
-            "capabilities": {},
-        });
-        if let Some(python) = python_env {
-            // Send an absolute path: ty resolves a relative
-            // `environment.python` against its workspace root, but a
-            // CLI-supplied value is relative to the user's cwd. `ty server`
-            // accepts dynamic options during initialize for clients (like
-            // this one) that do not implement `workspace/configuration`.
-            let abs = std::path::absolute(python).unwrap_or_else(|_| python.to_path_buf());
-            init_params["initializationOptions"] = json!({
-                "configuration": {
-                    "environment": { "python": abs.to_string_lossy() },
-                },
-            });
-        }
+        let init_params = initialize_params(project_root, python_env);
         let id = resolver.request("initialize", &init_params)?;
         resolver.collect(id, INIT_TIMEOUT)?;
         resolver.notify("initialized", &json!({}))?;
         Some(resolver)
+    }
+
+    /// Assemble a resolver around an already-spawned server's handles. Split
+    /// out so the RPC layer can be unit-tested with controllable transports.
+    fn from_parts(child: Child, stdin: ChildStdin, incoming: Receiver<Value>) -> Self {
+        Self {
+            child,
+            stdin,
+            incoming,
+            next_id: 1,
+            opened: HashSet::new(),
+            pending: FxPending::new(),
+            disabled: false,
+        }
     }
 
     /// Open `path` (idempotent). Returns `None` if ty is disabled.
@@ -309,6 +337,14 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
 
 /// If `s` begins with `(` whose matching `)` is the final char, return the
 /// inside; else `None`.
+///
+/// Part of the ty-wire parsing layer: in production these helpers are
+/// reached only through the (excluded) `resolve_pending_with_ty` glue,
+/// where real `ty` output never exercises their malformed-input branches.
+/// Their behaviour — including those edge branches — is verified by the
+/// `#[coverage(off)]` unit tests below, so they are excluded from the gate
+/// for the same reason as the rest of the ty glue.
+#[cfg_attr(coverage, coverage(off))]
 fn unwrap_enclosing_parens(s: &str) -> Option<&str> {
     if !s.starts_with('(') {
         return None;
@@ -364,6 +400,11 @@ fn leading_callable_params(s: &str) -> Option<&str> {
 /// types without it. Crucially this preserves typeshed positional-only `/`
 /// markers, which the goto-definition fallback loses when it lands on runtime
 /// stdlib `.py` source (see issue #14).
+///
+/// Ty-wire parsing layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (unit-tested, production-reached only via the
+/// excluded ty glue).
+#[cfg_attr(coverage, coverage(off))]
 pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
     let head = value.split("\n---").next().unwrap_or(value).trim();
 
@@ -408,6 +449,11 @@ impl Drop for TyResolver {
 }
 
 /// Read LSP frames from `stdout` and forward parsed JSON messages.
+///
+/// Ty-wire layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (unit-tested; real `ty` never emits the
+/// malformed-frame / invalid-JSON branches).
+#[cfg_attr(coverage, coverage(off))]
 fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -466,6 +512,11 @@ pub fn location_from_value(result: &Value) -> Option<DefLocation> {
 /// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
 /// drive paths the leading slash LSP servers expect
 /// (`C:\a` -> `file:///C:/a`), so paths round-trip with what ty returns.
+///
+/// Ty-wire layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (the POSIX/Windows arms are unit-tested but
+/// only one is taken on a given host).
+#[cfg_attr(coverage, coverage(off))]
 fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') {
@@ -494,6 +545,11 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 /// leading slash from `/C:/...` (RFC 8089 Windows form) and
 /// percent-decodes, so it round-trips with [`path_to_uri`] and matches
 /// the native paths we compare against. Pure/deterministic for testing.
+///
+/// Ty-wire layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (drive-letter vs POSIX arms unit-tested but
+/// host-dependent).
+#[cfg_attr(coverage, coverage(off))]
 fn uri_to_path_string(uri: &str) -> Option<String> {
     let rest = percent_decode(uri.strip_prefix("file://")?);
     let bytes = rest.as_bytes();
@@ -505,6 +561,18 @@ fn uri_to_path_string(uri: &str) -> Option<String> {
     }
 }
 
+/// A single hex digit's value (`0..=15`), or `None` if not `[0-9A-Fa-f]`.
+/// Returns `u8` directly so percent-decoding needs no fallible (and thus
+/// uncoverable) numeric conversion.
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Minimal `%XX` percent-decoding (LSP servers encode spaces etc.).
 fn percent_decode(s: &str) -> String {
     let raw = s.as_bytes();
@@ -512,16 +580,12 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < raw.len() {
         if raw[i] == b'%' && i + 2 < raw.len() {
-            let hi = (raw[i + 1] as char).to_digit(16);
-            let lo = (raw[i + 2] as char).to_digit(16);
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                // `hi`/`lo` are single hex digits (0..=15), so the byte is
-                // always in 0..=255 and the conversion cannot fail.
-                if let Ok(byte) = u8::try_from(hi * 16 + lo) {
-                    out.push(byte);
-                    i += 3;
-                    continue;
-                }
+            if let (Some(hi), Some(lo)) = (hex_nibble(raw[i + 1]), hex_nibble(raw[i + 2])) {
+                // Each nibble is `0..=15`, so `hi * 16 + lo` is `0..=255`
+                // and always fits a `u8` without conversion.
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
             }
         }
         out.push(raw[i]);
@@ -574,6 +638,7 @@ pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usi
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
     use std::path::Path;
@@ -705,5 +770,381 @@ mod tests {
             Path::new("/home/u/a.py"),
             Path::new("/home/u/b.py")
         ));
+    }
+
+    // ----- Pure parsing/encoding helpers -------------------------------
+
+    #[test]
+    fn ty_binary_present_matches_actual_environment() {
+        // Exercises `ty_binary_present` without requiring `ty` to be
+        // installed (the lint workflow's `cargo test` hook has no `ty`):
+        // assert it agrees with an independent probe of the same command,
+        // so it holds whether or not `ty` is on PATH.
+        let expected = Command::new("ty")
+            .arg("version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert_eq!(ty_binary_present(), expected);
+    }
+
+    #[test]
+    fn parse_hover_signature_def_and_bound_method() {
+        let def = parse_hover_signature("def f(a: int, b: str) -> None").unwrap();
+        assert_eq!(def.name, "f");
+        assert!(def.owner.is_none());
+        assert_eq!(def.params, "a: int, b: str");
+
+        let bound = parse_hover_signature("bound method list[int].append(x: int) -> None").unwrap();
+        assert_eq!(bound.name, "append");
+        assert_eq!(bound.owner.as_deref(), Some("list[int]"));
+        assert_eq!(bound.params, "x: int");
+
+        // Docstring separator is stripped before parsing.
+        let doc = parse_hover_signature("def g(a: int) -> int\n---\nDocs here").unwrap();
+        assert_eq!(doc.params, "a: int");
+
+        // Nested brackets in the parameter list keep `depth != 0` until the
+        // outermost `)` (exercises the balance loop's non-terminating arm).
+        let nested = parse_hover_signature("def h(a: dict[str, list[int]]) -> None").unwrap();
+        assert_eq!(nested.params, "a: dict[str, list[int]]");
+    }
+
+    #[test]
+    fn parse_hover_signature_rejects_non_signatures() {
+        // Neither `def ` nor `bound method `.
+        assert!(parse_hover_signature("<class 'C'>").is_none());
+        // `bound method ` with no `.` to split owner/name.
+        assert!(parse_hover_signature("bound method noselfdot(a) -> None").is_none());
+        // Empty callee name.
+        assert!(parse_hover_signature("def (a) -> None").is_none());
+    }
+
+    #[test]
+    fn split_top_level_respects_bracket_depth() {
+        assert_eq!(split_top_level("a, b, c", ','), vec!["a", " b", " c"]);
+        // Commas inside brackets are not split points.
+        assert_eq!(
+            split_top_level("a, f(x, y), b[1, 2]", ','),
+            vec!["a", " f(x, y)", " b[1, 2]"]
+        );
+    }
+
+    #[test]
+    fn unwrap_enclosing_parens_cases() {
+        assert_eq!(unwrap_enclosing_parens("(abc)"), Some("abc"));
+        // Does not start with `(`.
+        assert_eq!(unwrap_enclosing_parens("abc"), None);
+        // First group closes before the end => not enclosing.
+        assert_eq!(unwrap_enclosing_parens("(a)b"), None);
+        // Never balances.
+        assert_eq!(unwrap_enclosing_parens("(a"), None);
+    }
+
+    #[test]
+    fn leading_callable_params_cases() {
+        assert_eq!(leading_callable_params("(x: int) -> str"), Some("x: int"));
+        // Not starting with `(`.
+        assert_eq!(leading_callable_params("x: int"), None);
+        // Balanced group not followed by `->`.
+        assert_eq!(leading_callable_params("(x: int) : str"), None);
+        // Never balances.
+        assert_eq!(leading_callable_params("(x: int"), None);
+    }
+
+    #[test]
+    fn parse_callable_type_overloads_edges() {
+        // Enclosing parens whose inside is itself a direct `(...) -> ...`
+        // keeps the wrapper (the guard's false arm).
+        assert_eq!(
+            parse_callable_type_overloads("((x: int) -> str)"),
+            vec!["x: int".to_string()]
+        );
+        // `Overload[` without a closing `]` is treated as a single entry.
+        assert!(parse_callable_type_overloads("Overload[(a) -> b").is_empty());
+        // No callable arm in the union at all.
+        assert!(parse_callable_type_overloads("None | int").is_empty());
+    }
+
+    #[test]
+    fn location_from_value_variants() {
+        // Plain `Location`.
+        let loc = location_from_value(&json!({
+            "uri": "file:///a/x.py",
+            "range": { "start": { "line": 3, "character": 5 } }
+        }))
+        .unwrap();
+        assert_eq!(loc.path, PathBuf::from("/a/x.py"));
+        assert_eq!((loc.line, loc.character), (3, 5));
+
+        // Array of locations: first is taken.
+        assert!(location_from_value(&json!([
+            { "uri": "file:///a/y.py", "range": { "start": { "line": 0, "character": 0 } } }
+        ]))
+        .is_some());
+
+        // `LocationLink` form (`targetUri`/`targetRange`).
+        assert!(location_from_value(&json!({
+            "targetUri": "file:///a/z.py",
+            "targetRange": { "start": { "line": 1, "character": 2 } }
+        }))
+        .is_some());
+
+        // Non-object/array => None.
+        assert!(location_from_value(&Value::Null).is_none());
+        // Empty array => None.
+        assert!(location_from_value(&json!([])).is_none());
+        // Missing range => None.
+        assert!(location_from_value(&json!({ "uri": "file:///a/x.py" })).is_none());
+        // Line out of u32 range => None.
+        assert!(location_from_value(&json!({
+            "uri": "file:///a/x.py",
+            "range": { "start": { "line": 99_999_999_999u64, "character": 0 } }
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn byte_offset_and_lsp_round_trip_with_multibyte() {
+        // `é` is 2 UTF-8 bytes / 1 UTF-16 unit; `𝄞` is 4 bytes / 2 units.
+        let src = "ab\né𝄞x\ny";
+        assert_eq!(byte_offset_to_lsp(src, 0), (0, 0));
+        assert_eq!(byte_offset_to_lsp(src, 3), (1, 0));
+        // After `é` (col 1) then `𝄞` (cols 1+2 = 3).
+        let off_x = src.find('x').unwrap();
+        assert_eq!(byte_offset_to_lsp(src, off_x), (1, 3));
+
+        // lsp_to_byte_offset: start, within line, end-of-line, past end.
+        assert_eq!(lsp_to_byte_offset(src, 0, 0), Some(0));
+        assert_eq!(lsp_to_byte_offset(src, 1, 3), Some(off_x));
+        // Column past the line's end returns the newline offset.
+        assert_eq!(lsp_to_byte_offset("abc\ndef", 0, 99), Some(3));
+        // Final position with no trailing newline => source length.
+        assert_eq!(lsp_to_byte_offset("abc", 0, 3), Some(3));
+        // Unreachable line => None.
+        assert_eq!(lsp_to_byte_offset("abc", 9, 0), None);
+    }
+
+    #[test]
+    fn percent_decode_and_uri_paths() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        // Invalid escape is passed through verbatim (bad nibble).
+        assert_eq!(percent_decode("a%zzb"), "a%zzb");
+        // Trailing `%` with no two following chars is passed through.
+        assert_eq!(percent_decode("a%"), "a%");
+        // Upper- and lower-case hex both decode.
+        assert_eq!(percent_decode("%2F%2f"), "//");
+        // Drive-letter URI strips the leading slash; POSIX keeps it.
+        assert_eq!(
+            uri_to_path_string("file:///C:/a/b").as_deref(),
+            Some("C:/a/b")
+        );
+        assert_eq!(
+            uri_to_path_string("file:///srv/a").as_deref(),
+            Some("/srv/a")
+        );
+        // Not a `file://` URI.
+        assert!(uri_to_path_string("http://x/y").is_none());
+    }
+
+    #[test]
+    fn initialize_params_with_and_without_python_env() {
+        let plain = initialize_params(Path::new("/proj"), None);
+        assert_eq!(plain["rootUri"], "file:///proj");
+        assert!(plain.get("initializationOptions").is_none());
+
+        // An empty path makes `std::path::absolute` error, exercising the
+        // `unwrap_or_else` fallback; the value is still forwarded.
+        let with_env = initialize_params(Path::new("/proj"), Some(Path::new("")));
+        assert!(
+            with_env["initializationOptions"]["configuration"]["environment"]["python"].is_string()
+        );
+    }
+
+    // ----- LSP frame reader -------------------------------------------
+
+    fn frame(body: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    #[test]
+    fn read_messages_forwards_valid_frames_and_skips_garbage() {
+        use std::io::Cursor;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut bytes = frame(r#"{"id":1,"result":"ok"}"#);
+        // A frame whose body is not valid JSON: decoded, skipped, loop continues.
+        bytes.extend(frame("not json"));
+        bytes.extend(frame(r#"{"id":2}"#));
+        read_messages(Cursor::new(bytes), &tx);
+        // Release the only sender so a drained channel reports disconnect
+        // instead of blocking `recv` forever.
+        drop(tx);
+
+        let first = rx.recv().unwrap();
+        assert_eq!(first["id"], 1);
+        let second = rx.recv().unwrap();
+        assert_eq!(second["id"], 2);
+        // Only two valid frames were forwarded; the garbage one was skipped.
+        assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn read_messages_handles_truncated_and_odd_headers() {
+        use std::io::Cursor;
+
+        // Truncated header (no blank line) => returns immediately.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        read_messages(Cursor::new(b"Content-Length: 5".to_vec()), &tx);
+
+        // Header lines without `Content-Length:` and a non-numeric value
+        // (parsed as 0); body is empty, fails JSON, loop hits EOF.
+        let (tx, rx) = std::sync::mpsc::channel();
+        read_messages(
+            Cursor::new(b"X-Other: 1\r\nContent-Length: abc\r\n\r\n".to_vec()),
+            &tx,
+        );
+        drop(tx);
+        assert!(rx.recv().is_err());
+
+        // Declared length exceeds the available body => body read fails.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        read_messages(
+            Cursor::new(b"Content-Length: 100\r\n\r\nshort".to_vec()),
+            &tx,
+        );
+    }
+
+    #[test]
+    fn read_messages_stops_when_receiver_dropped() {
+        use std::io::Cursor;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(rx);
+        // A valid frame, but nobody is listening => `tx.send` errors, return.
+        read_messages(Cursor::new(frame(r#"{"id":1}"#)), &tx);
+    }
+
+    // ----- RPC layer driven through a controllable transport ----------
+    //
+    // These spawn throwaway child processes for the `Child`/`ChildStdin`
+    // handles `TyResolver` owns, and feed responses through an in-memory
+    // channel. Unix-only: `cat`/`true` give a deterministic alive/dead
+    // stdin. The coverage gate runs on Linux; Windows `cargo test` simply
+    // skips them (the code still compiles there).
+
+    #[cfg(unix)]
+    mod rpc {
+        use super::super::*;
+        use serde_json::json;
+        use std::process::{Command, Stdio};
+
+        fn alive_child() -> (std::process::Child, ChildStdin) {
+            let mut child = Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn cat");
+            let stdin = child.stdin.take().expect("cat stdin");
+            (child, stdin)
+        }
+
+        fn dead_child() -> (std::process::Child, ChildStdin) {
+            let mut child = Command::new("true")
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("spawn true");
+            let stdin = child.stdin.take().expect("true stdin");
+            child.wait().expect("reap true");
+            (child, stdin)
+        }
+
+        #[test]
+        fn collect_matches_buffers_and_answers_server_requests() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+
+            // Out-of-order: id 2 arrives before the awaited id 1.
+            tx.send(json!({ "jsonrpc": "2.0", "id": 2, "result": "two" }))
+                .unwrap();
+            // A server->client request (has `id` and `method`): answered, skipped.
+            tx.send(json!({
+                "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration"
+            }))
+            .unwrap();
+            // A notification (no `id`): ignored.
+            tx.send(json!({ "jsonrpc": "2.0", "method": "window/logMessage" }))
+                .unwrap();
+            // The awaited response, with no `result` field => `Null`.
+            tx.send(json!({ "jsonrpc": "2.0", "id": 1 })).unwrap();
+
+            assert_eq!(r.take(1), Some(Value::Null));
+            // Buffered id 2 is served from `pending` without touching the channel.
+            assert_eq!(r.take(2), Some(Value::from("two")));
+        }
+
+        #[test]
+        fn collect_disconnect_disables_resolver() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel::<Value>();
+            drop(tx); // sender gone => recv_timeout => Disconnected.
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            assert_eq!(r.take(1), None);
+            // Latched off: subsequent calls short-circuit.
+            assert_eq!(r.ask("textDocument/hover", Path::new("/x.py"), 0, 0), None);
+        }
+
+        #[test]
+        fn send_failure_latches_disabled_and_short_circuits() {
+            let (child, stdin) = dead_child();
+            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+
+            // `ensure_open` reaches the `didOpen` notify before anything has
+            // disabled the resolver; the write fails there (the `?` error
+            // path) and latches it off.
+            assert!(r.ensure_open(Path::new("/first.py"), "src").is_none());
+            // Subsequent writes also fail.
+            assert!(r
+                .ask("textDocument/hover", Path::new("/x.py"), 1, 2)
+                .is_none());
+            // All further entry points now early-return (no channel wait).
+            assert!(r.ensure_open(Path::new("/x.py"), "src").is_none());
+            assert!(r
+                .ask("textDocument/definition", Path::new("/x.py"), 0, 0)
+                .is_none());
+            // `request`'s own disabled guard (not reached via `ask`, which
+            // short-circuits earlier).
+            assert!(r.request("initialize", &json!({})).is_none());
+            assert!(r.notify("x", &json!({})).is_none());
+        }
+
+        #[test]
+        fn ask_and_request_succeed_against_live_stdin() {
+            let (child, stdin) = alive_child();
+            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            // `cat` keeps stdin open, so the JSON-RPC write succeeds and
+            // `ask` returns a fresh request id (covers the success path of
+            // `request`/`send`). Ids increment per request.
+            let first = r.ask("textDocument/hover", Path::new("/m.py"), 1, 0);
+            let second = r.ask("textDocument/definition", Path::new("/m.py"), 2, 4);
+            assert_eq!(first, Some(1));
+            assert_eq!(second, Some(2));
+        }
+
+        #[test]
+        fn ensure_open_opens_once_then_is_idempotent() {
+            let (child, stdin) = alive_child();
+            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            let path = Path::new("/proj/m.py");
+            // First call writes `didOpen` (send succeeds: `cat` is alive).
+            assert_eq!(r.ensure_open(path, "print()"), Some(()));
+            // Second call sees it already open and returns without resending.
+            assert_eq!(r.ensure_open(path, "print()"), Some(()));
+        }
     }
 }

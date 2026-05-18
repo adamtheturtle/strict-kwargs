@@ -33,3 +33,34 @@ impl std::fmt::Display for CheckError {
 }
 
 impl std::error::Error for CheckError {}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+    use ruff_python_parser::parse_module;
+
+    fn parse_error() -> ParseError {
+        // `def f(:` is an unrecoverable syntax error.
+        parse_module("def f(:\n").expect_err("expected a parse error")
+    }
+
+    #[test]
+    fn io_error_converts_and_displays() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let error = CheckError::from(io);
+        assert_eq!(error.to_string(), "missing");
+        // The `Debug` derive identifies the variant without a `matches!`
+        // (whose synthesized non-matching arm would be uncoverable).
+        // Also exercises the `std::error::Error` impl.
+        let _: &dyn std::error::Error = &error;
+        assert!(format!("{error:?}").starts_with("Io("));
+    }
+
+    #[test]
+    fn parse_error_converts_and_displays() {
+        let error = CheckError::from(parse_error());
+        assert!(!error.to_string().is_empty());
+        assert!(format!("{error:?}").starts_with("Parse("));
+    }
+}
