@@ -1287,6 +1287,12 @@ fn synthesize_data_constructor(
 ) {
     let directly_namedtuple = is_namedtuple_class(class_def);
     let decorator = dataclass_decorator(class_def);
+    if decorator.is_none()
+        && !directly_namedtuple
+        && (store.data_models.is_empty() || class_def.arguments.is_none())
+    {
+        return;
+    }
 
     let base_models: Vec<ClassDataModel> = class_def
         .arguments
