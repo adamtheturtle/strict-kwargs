@@ -460,3 +460,21 @@ fn declined_count_equals_violations_left_for_check() {
     std::fs::write(&main, &outcome.files[0].fixed).expect("write fixed");
     assert_eq!(proj.check_main().len(), outcome.declined);
 }
+
+#[test]
+fn rewrites_decorator_factory_call() {
+    // Issue #51: once `check` sees the decorator-position call, `fix`
+    // rewrites it exactly as it would the same call in statement position.
+    assert_fixed(
+        "def retry(times: int, delay: float):\n    def w(fn): return fn\n    return w\n\n@retry(3, 0.5)\ndef a(): ...\n",
+        "def retry(times: int, delay: float):\n    def w(fn): return fn\n    return w\n\n@retry(times=3, delay=0.5)\ndef a(): ...\n",
+    );
+}
+
+#[test]
+fn rewrites_method_decorator_factory_call() {
+    assert_fixed(
+        "def tag(a: int, b: int):\n    def w(fn): return fn\n    return w\n\nclass C:\n    @tag(1, 2)\n    def m(self): ...\n",
+        "def tag(a: int, b: int):\n    def w(fn): return fn\n    return w\n\nclass C:\n    @tag(a=1, b=2)\n    def m(self): ...\n",
+    );
+}

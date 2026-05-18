@@ -1544,3 +1544,98 @@ fn functional_namedtuple_form_out_of_scope() {
         "from typing import NamedTuple\n\nNT = NamedTuple(\"NT\", [(\"a\", int), (\"b\", int)])\n",
     );
 }
+
+#[test]
+fn decorator_factory_call_flagged() {
+    // Issue #51: a call in decorator position is a call like any other and
+    // its surplus positional arguments must be flagged.
+    assert_error(
+        r"
+def retry(times: int, delay: float):
+    def w(fn): return fn
+    return w
+
+
+@retry(3, 0.5)
+def a(): ...
+",
+        7,
+        "retry",
+    );
+}
+
+#[test]
+fn attribute_chain_decorator_factory_flagged() {
+    // The decorator expression is an attribute-chain call (`obj.deco(...)`),
+    // resolved through the recorded instance like any other method call.
+    assert_error(
+        r"
+class R:
+    def deco(self, a: int, b: int):
+        def w(fn): return fn
+        return w
+
+
+r = R()
+
+
+@r.deco(1, 2)
+def c(): ...
+",
+        11,
+        "deco",
+    );
+}
+
+#[test]
+fn method_decorator_factory_flagged() {
+    // The blind spot also covered methods inside a class body, whose own
+    // decorator list was previously skipped.
+    assert_error(
+        r"
+def tag(a: int, b: int):
+    def w(fn): return fn
+    return w
+
+
+class C:
+    @tag(1, 2)
+    def m(self): ...
+",
+        8,
+        "tag",
+    );
+}
+
+#[test]
+fn class_decorator_factory_flagged() {
+    assert_error(
+        r#"
+def register(name: str, order: int):
+    def w(cls): return cls
+    return w
+
+
+@register("widgets", 1)
+class W: ...
+"#,
+        7,
+        "register",
+    );
+}
+
+#[test]
+fn keyword_decorator_factory_ok() {
+    // The compliant form (already keyword) must not be flagged.
+    assert_ok(
+        r"
+def retry(times: int, delay: float):
+    def w(fn): return fn
+    return w
+
+
+@retry(times=3, delay=0.5)
+def d(): ...
+",
+    );
+}
