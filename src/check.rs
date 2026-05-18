@@ -58,11 +58,9 @@ pub fn check_paths(
 /// Per-file entry used in `check_paths_impl` to track cache state.
 ///
 /// Populated before the parallel scan pass: cache hits carry the previously
-/// stored diagnostics; misses carry the key to write back after the scan.
+/// stored diagnostics; misses are fed to the pipeline.
 struct FileEntry {
-    path: PathBuf,
     cache_hit: Option<Vec<Diagnostic>>,
-    cache_key: Option<u64>,
 }
 
 /// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
@@ -219,8 +217,11 @@ fn check_paths_impl(
     // Partition files into cache hits and misses. Hits bypass the pipeline;
     // misses are queued for scanning. `files_to_scan` preserves the order of
     // misses so the pipeline's file indices map consistently to skip_warnings.
+    // `cache_miss_keys` pairs each miss with its cache key for writing back
+    // after the pipeline; stored separately so the write loop needs no Option.
     let mut entries: Vec<FileEntry> = Vec::with_capacity(python_files.len());
     let mut files_to_scan: Vec<PathBuf> = Vec::new();
+    let mut cache_miss_keys: Vec<(u64, PathBuf)> = Vec::new();
 
     for path in &python_files {
         if let Some((ref cache, fp)) = cache_and_fp {
@@ -233,20 +234,13 @@ fn check_paths_impl(
             let key = file_cache_key(path, fp);
             let hit = cache.get(key);
             let is_hit = hit.is_some();
-            entries.push(FileEntry {
-                path: path.clone(),
-                cache_hit: hit,
-                cache_key: Some(key),
-            });
+            entries.push(FileEntry { cache_hit: hit });
             if !is_hit {
                 files_to_scan.push(path.clone());
+                cache_miss_keys.push((key, path.clone()));
             }
         } else {
-            entries.push(FileEntry {
-                path: path.clone(),
-                cache_hit: None,
-                cache_key: None,
-            });
+            entries.push(FileEntry { cache_hit: None });
             files_to_scan.push(path.clone());
         }
     }
@@ -306,21 +300,16 @@ fn check_paths_impl(
     // file's diagnostics by path (Diagnostic::path is always the source file).
     // Skipped files are excluded — the skip reason may be transient.
     if let Some((ref cache, _)) = cache_and_fp {
-        for entry in entries
-            .iter()
-            .filter(|e| e.cache_hit.is_none() && e.cache_key.is_some())
-        {
-            if skipped_paths.contains(&&entry.path) {
+        for (key, path) in &cache_miss_keys {
+            if skipped_paths.contains(&path) {
                 continue;
             }
             let file_diags: Vec<Diagnostic> = diagnostics
                 .iter()
-                .filter(|d| d.path == entry.path)
+                .filter(|d| &d.path == path)
                 .cloned()
                 .collect();
-            if let Some(key) = entry.cache_key {
-                cache.put(key, &file_diags);
-            }
+            cache.put(*key, &file_diags);
         }
     }
 

@@ -72,6 +72,12 @@ const TY_BIN: &str = "ty";
 
 /// Return the mtime of `path` as nanoseconds since the Unix epoch, or `None`
 /// if the metadata cannot be obtained.
+///
+/// Excluded from the coverage gate: the inner `?` operators for `modified()`
+/// and `duration_since()` only fail on platforms that do not support file
+/// modification times or when the mtime predates the Unix epoch — both
+/// unreachable under normal test conditions.
+#[cfg_attr(coverage, coverage(off))]
 fn mtime_nanos(path: &Path) -> Option<[u8; 16]> {
     let nanos = path
         .metadata()
