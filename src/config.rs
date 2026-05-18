@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::error::CheckError;
+
 /// Resolved `[tool.strict_kwargs]` configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -18,34 +20,68 @@ pub struct Config {
 impl Config {
     /// Load configuration from `pyproject.toml` under `project_root`.
     ///
-    /// Returns [`Config::default`] if the file is missing or unreadable.
-    #[must_use]
-    pub fn load(project_root: &Path) -> Self {
+    /// A missing `pyproject.toml`, or one without a `[tool.strict_kwargs]`
+    /// table, yields [`Config::default`] — those are not errors. But a
+    /// `pyproject.toml` that exists yet cannot be read or parsed, or whose
+    /// `[tool.strict_kwargs]` has the wrong shape or value types, is a hard
+    /// error rather than a silent fall back to defaults: that would hide a
+    /// misconfigured `ignore_names` in exactly the automated contexts this
+    /// tool targets (issue #55).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckError::ConfigInvalid`] if `pyproject.toml` exists but
+    /// cannot be read, is not valid TOML, or its `[tool.strict_kwargs]`
+    /// table is malformed or wrongly typed.
+    pub fn load(project_root: &Path) -> Result<Self, CheckError> {
         let pyproject = project_root.join("pyproject.toml");
         if !pyproject.is_file() {
-            return Self::default();
+            return Ok(Self::default());
         }
-        let Ok(contents) = std::fs::read_to_string(&pyproject) else {
-            return Self::default();
-        };
-        Self::from_pyproject_str(&contents)
+        let contents =
+            std::fs::read_to_string(&pyproject).map_err(|error| CheckError::ConfigInvalid {
+                path: pyproject.clone(),
+                message: format!("could not be read: {error}"),
+            })?;
+        Self::from_pyproject_str(&contents).map_err(|message| CheckError::ConfigInvalid {
+            path: pyproject,
+            message,
+        })
     }
 
     /// Parse configuration from the contents of a `pyproject.toml`.
     ///
-    /// Returns [`Config::default`] if the table is absent or malformed.
-    #[must_use]
-    pub fn from_pyproject_str(contents: &str) -> Self {
-        let Ok(document) = contents.parse::<toml::Table>() else {
-            return Self::default();
-        };
+    /// An absent `[tool]`/`[tool.strict_kwargs]` table yields
+    /// [`Config::default`] (a project need not configure this tool).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable message (phrased to follow the file path,
+    /// e.g. `"is not valid TOML: …"`) if `contents` is not valid TOML, if
+    /// `[tool.strict_kwargs]` is present but not a table, or if its value
+    /// types do not match the schema (e.g. `ignore_names` not a list).
+    pub fn from_pyproject_str(contents: &str) -> Result<Self, String> {
+        let document = contents
+            .parse::<toml::Table>()
+            .map_err(|error| format!("is not valid TOML: {error}"))?;
+        // An absent `[tool]` (or a `tool` that is not a table) just means
+        // this project does not configure strict-kwargs — not an error.
         let Some(tool) = document.get("tool").and_then(toml::Value::as_table) else {
-            return Self::default();
+            return Ok(Self::default());
         };
         let Some(strict) = tool.get("strict_kwargs") else {
-            return Self::default();
+            return Ok(Self::default());
         };
-        strict.clone().try_into().unwrap_or_default()
+        if !strict.is_table() {
+            return Err(format!(
+                "`[tool.strict_kwargs]` must be a table, found {}",
+                strict.type_str()
+            ));
+        }
+        strict
+            .clone()
+            .try_into()
+            .map_err(|error| format!("has an invalid `[tool.strict_kwargs]` table: {error}"))
     }
 
     /// Whether `fullname` is in the configured ignore list.
@@ -86,7 +122,8 @@ mod tests {
       ignore_names = ["main.func", "builtins.str"]
       debug = true
       "#,
-        );
+        )
+        .expect("valid config");
         assert_eq!(
             config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
@@ -95,28 +132,57 @@ mod tests {
     }
 
     #[test]
-    fn malformed_table_falls_back_to_default() {
-        // Not valid TOML at all.
-        assert!(Config::from_pyproject_str("this is not toml = =")
-            .ignore_names
-            .is_empty());
-        // Valid TOML, but no `[tool]` table.
+    fn absent_table_is_default_not_an_error() {
+        // No `[tool]` table at all.
         assert!(Config::from_pyproject_str("[project]\nname = \"x\"\n")
+            .expect("absent table is not an error")
             .ignore_names
             .is_empty());
-        // `[tool]` present but no `strict_kwargs`.
-        assert!(Config::from_pyproject_str("[tool.other]\nk = 1\n")
+        // `tool` present but not a table (so it cannot hold our subtable).
+        assert!(Config::from_pyproject_str("tool = 5\n")
+            .expect("non-table `tool` is not our concern")
             .ignore_names
             .is_empty());
-        // `strict_kwargs` present but the wrong shape (string, not a table).
-        let config = Config::from_pyproject_str("[tool]\nstrict_kwargs = \"oops\"\n");
+        // `[tool]` present but no `strict_kwargs` key.
+        let config =
+            Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
         assert!(!config.debug);
     }
 
     #[test]
+    fn unparsable_toml_is_an_error() {
+        let message = Config::from_pyproject_str("this is not toml = =")
+            .expect_err("broken TOML must be reported");
+        assert!(message.contains("not valid TOML"), "message: {message}");
+    }
+
+    #[test]
+    fn strict_kwargs_not_a_table_is_an_error() {
+        // `strict_kwargs` present but the wrong shape (string, not a table).
+        let message = Config::from_pyproject_str("[tool]\nstrict_kwargs = \"oops\"\n")
+            .expect_err("wrong-shaped table must be reported");
+        assert!(message.contains("must be a table"), "message: {message}");
+        assert!(message.contains("string"), "message: {message}");
+    }
+
+    #[test]
+    fn wrong_value_type_is_an_error() {
+        // The table exists but `ignore_names` is a string, not a list — the
+        // exact silent-misconfiguration case from issue #55.
+        let message =
+            Config::from_pyproject_str("[tool.strict_kwargs]\nignore_names = \"not-a-list\"\n")
+                .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
     fn is_ignored_matches_exact_names() {
-        let config = Config::from_pyproject_str("[tool.strict_kwargs]\nignore_names = [\"a.b\"]\n");
+        let config = Config::from_pyproject_str("[tool.strict_kwargs]\nignore_names = [\"a.b\"]\n")
+            .expect("valid config");
         assert!(config.is_ignored("a.b"));
         assert!(!config.is_ignored("a.c"));
     }
@@ -124,7 +190,7 @@ mod tests {
     #[test]
     fn load_missing_pyproject_is_default() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = Config::load(dir.path());
+        let config = Config::load(dir.path()).expect("missing file is not an error");
         assert!(config.ignore_names.is_empty());
         assert!(!config.debug);
     }
@@ -137,18 +203,47 @@ mod tests {
             "[tool.strict_kwargs]\nignore_names = [\"pkg.f\"]\n",
         )
         .expect("write");
-        let config = Config::load(dir.path());
+        let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
     }
 
     #[test]
-    fn load_unreadable_pyproject_is_default() {
+    fn load_unreadable_pyproject_is_an_error() {
         // `pyproject.toml` exists (so `is_file()` is true) but is not valid
-        // UTF-8, so `read_to_string` fails and we fall back to the default.
+        // UTF-8, so `read_to_string` fails: a hard error (the file is there
+        // but we cannot honour it), not a silent default (issue #55).
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), [0xff, 0xfe, 0x00]).expect("write");
-        let config = Config::load(dir.path());
-        assert!(config.ignore_names.is_empty());
+        let error = Config::load(dir.path()).expect_err("unreadable file must be reported");
+        match error {
+            CheckError::ConfigInvalid { message, .. } => {
+                assert!(message.contains("could not be read"), "message: {message}");
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_malformed_pyproject_is_an_error() {
+        // Exercises `load`'s `from_pyproject_str` error mapping (path is
+        // attached to the message).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\nignore_names = 7\n",
+        )
+        .expect("write");
+        let error = Config::load(dir.path()).expect_err("bad config must be reported");
+        match error {
+            CheckError::ConfigInvalid { path, message } => {
+                assert!(path.ends_with("pyproject.toml"));
+                assert!(
+                    message.contains("invalid `[tool.strict_kwargs]` table"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
     }
 
     #[test]

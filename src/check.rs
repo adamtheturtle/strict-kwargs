@@ -31,9 +31,10 @@ use crate::ty_resolver::{
 ///
 /// # Errors
 ///
-/// Returns [`CheckError`] if a source file cannot be read or parsed, or if
-/// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
-/// server cannot start ([`CheckError::TyServerFailed`]).
+/// Returns [`CheckError`] if a path argument does not exist
+/// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
+/// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
+/// its server cannot start ([`CheckError::TyServerFailed`]).
 pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
@@ -46,7 +47,7 @@ pub fn check_paths(
     // errors if `ty` is missing, so the same source can never resolve fewer
     // calls on a machine that merely lacks `ty`.
     require_ty_present()?;
-    let python_files = collect_python_files(paths);
+    let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
     // ty-grade resolution (inheritance/MRO, return types, annotated params,
     // overloads) for calls the built-in resolver cannot resolve. `python_env`
@@ -104,11 +105,25 @@ pub fn check_paths(
     Ok(diagnostics)
 }
 
-fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+/// Collect the `.py`/`.pyi` files reachable from `paths`.
+///
+/// A path that is neither a file nor a directory does not exist: that is a
+/// hard error ([`CheckError::PathNotFound`]), like `ruff`, rather than a
+/// silent skip that would let a mistyped target report "clean" in CI
+/// (issue #55). An *existing* file passed directly that is not Python is
+/// still skipped — that is a deliberate selection, not a mistake.
+///
+/// # Errors
+///
+/// Returns [`CheckError::PathNotFound`] for the first path that does not
+/// exist.
+fn collect_python_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, CheckError> {
     let mut files = Vec::new();
     for path in paths {
-        if path.is_file() && is_python_file(path) {
-            files.push(path.clone());
+        if path.is_file() {
+            if is_python_file(path) {
+                files.push(path.clone());
+            }
         } else if path.is_dir() {
             // Prune `.venv`/`.git`/`__pycache__`/dot-directories instead of
             // descending into them and discarding their files one by one: a
@@ -131,11 +146,15 @@ fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
                     files.push(entry_path);
                 }
             }
+        } else {
+            // Neither a file nor a directory: the path does not exist (a
+            // mistyped target). Fail loudly instead of reporting "clean".
+            return Err(CheckError::PathNotFound { path: path.clone() });
         }
     }
     files.sort();
     files.dedup();
-    files
+    Ok(files)
 }
 
 fn is_python_file(path: &Path) -> bool {
@@ -883,9 +902,10 @@ fn call_fix_insertions(
 ///
 /// # Errors
 ///
-/// Returns [`CheckError`] if a source file cannot be read or parsed, or if
-/// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
-/// server cannot start ([`CheckError::TyServerFailed`]).
+/// Returns [`CheckError`] if a path argument does not exist
+/// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
+/// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
+/// its server cannot start ([`CheckError::TyServerFailed`]).
 pub fn fix_paths(
     project_root: &Path,
     paths: &[PathBuf],
@@ -894,7 +914,7 @@ pub fn fix_paths(
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
-    let python_files = collect_python_files(paths);
+    let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;

@@ -43,7 +43,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 /// Run the full check pipeline over `root` and return the diagnostic count
 /// (returned so divan black-boxes it and the work is not optimised away).
 fn check(root: &Path) -> usize {
-    let config = Config::load(root);
+    let config = Config::load(root).expect("valid benchmark-fixture config");
     let paths = [root.to_path_buf()];
     check_paths(root, &paths, &config, None)
         .expect("check_paths over a benchmark fixture must succeed")
@@ -241,7 +241,7 @@ fn reexport_closure() -> usize {
 #[divan::bench]
 fn fix_first_party_closure() -> usize {
     let root = first_party_project();
-    let config = Config::load(root);
+    let config = Config::load(root).expect("valid benchmark-fixture config");
     let paths = [root.to_path_buf()];
     fix_paths(root, &paths, &config, None)
         .expect("fix_paths over a benchmark fixture must succeed")

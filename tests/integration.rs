@@ -40,7 +40,7 @@ impl TestProject {
 
     fn check(&self) -> Vec<String> {
         let main = self.root.join("main.py");
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
         diagnostics
             .iter()
@@ -470,7 +470,7 @@ fn directory_with_curdir_component() {
     .expect("write main");
 
     let dir = root.join(".");
-    let config = Config::load(&root);
+    let config = Config::load(&root).expect("valid config");
     let diagnostics = check_paths(&root, &[dir], &config, None).expect("check");
     let messages: Vec<String> = diagnostics
         .iter()
@@ -521,7 +521,7 @@ fn directory_walk_skips_venv_git_and_dunder_pycache() {
         std::fs::write(&file, violation).expect("write");
     }
 
-    let config = Config::load(&root);
+    let config = Config::load(&root).expect("valid config");
     let diagnostics =
         check_paths(&root, std::slice::from_ref(&root), &config, None).expect("check");
     let files: Vec<String> = diagnostics
@@ -564,7 +564,7 @@ fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
         std::fs::write(&path, content).expect("write file");
         paths.push(path);
     }
-    let config = Config::load(&root);
+    let config = Config::load(&root).expect("valid config");
     let diagnostics = check_paths(&root, &paths, &config, None).expect("check");
     diagnostics
         .iter()
@@ -796,7 +796,7 @@ fn check_with_aux(check: &[(&str, &str)], aux: &[(&str, &str)]) -> Vec<String> {
         write(n, c);
     }
     let paths: Vec<_> = check.iter().map(|(n, c)| write(n, c)).collect();
-    let config = Config::load(&root);
+    let config = Config::load(&root).expect("valid config");
     check_paths(&root, &paths, &config, None)
         .expect("check")
         .iter()
@@ -1353,7 +1353,7 @@ fn ty_forwards_external_python_env() {
         "import extdep\n\nextdep.configure(\"localhost\", 8080)\nextdep.configure(host=\"localhost\", port=8080)\n",
     )
     .expect("main");
-    let config = Config::load(root);
+    let config = Config::load(root).expect("valid config");
 
     // Unset: `extdep` is unresolvable -> no diagnostics (no regression).
     let none = check_paths(root, std::slice::from_ref(&main), &config, None).expect("check");
@@ -1393,7 +1393,7 @@ fn ty_invalid_python_env_fails_closed() {
         "def func(a, b):\n    return a\n\nfunc(1, 2)\nimport extdep\n\nextdep.configure(\"h\", 9)\n",
     )
     .expect("main");
-    let config = Config::load(root);
+    let config = Config::load(root).expect("valid config");
     let bogus = root.join("does-not-exist-env");
     let got = check_paths(root, &[main], &config, Some(bogus.as_path())).expect("check");
     let msgs: Vec<String> = got

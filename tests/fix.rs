@@ -42,7 +42,7 @@ impl TestProject {
     /// original when nothing was fixed).
     fn fixed_main(&self) -> String {
         let main = self.root.join("main.py");
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let outcome =
             fix_paths(&self.root, std::slice::from_ref(&main), &config, None).expect("fix");
         outcome
@@ -59,14 +59,14 @@ impl TestProject {
     /// assert on the fail-safe error (issue #41).
     fn fix_main_result(&self) -> Result<strict_kwargs::FixOutcome, strict_kwargs::CheckError> {
         let main = self.root.join("main.py");
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         fix_paths(&self.root, std::slice::from_ref(&main), &config, None)
     }
 
     /// Diagnostics for `main.py`, formatted like the other test harness.
     fn check_main(&self) -> Vec<String> {
         let main = self.root.join("main.py");
-        let config = Config::load(&self.root);
+        let config = Config::load(&self.root).expect("valid config");
         let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
         diagnostics.iter().map(Diagnostic::message).collect()
     }
@@ -271,7 +271,7 @@ fn fixes_only_surplus_positionals() {
 fn unchanged_file_not_reported() {
     let proj = project("def f(a: int) -> None: ...\nf(a=1)\n");
     let main = proj.root.join("main.py");
-    let config = Config::load(&proj.root);
+    let config = Config::load(&proj.root).expect("valid config");
     let outcome = fix_paths(&proj.root, &[main], &config, None).expect("fix");
     assert!(outcome.files.is_empty());
     assert_eq!(outcome.declined, 0);
@@ -451,7 +451,7 @@ fn declined_count_equals_violations_left_for_check() {
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\ndef f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n",
     );
     let main = proj.root.join("main.py");
-    let config = Config::load(&proj.root);
+    let config = Config::load(&proj.root).expect("valid config");
     let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
     assert_eq!(outcome.declined, 1);
     assert_eq!(outcome.files.len(), 1);
