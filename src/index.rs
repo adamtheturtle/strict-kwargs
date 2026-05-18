@@ -878,7 +878,8 @@ fn synthesize_data_constructor(store: &mut Store, class_name: &str, class_def: &
 impl DefinitionIndex {
     /// A resolver-less index for unit tests that drive the edge/signature
     /// logic directly (no module resolution: `ensure_module` is inert).
-    fn for_test() -> Self {
+    /// `pub(crate)` so `check`'s unit tests can build a bare `CallChecker`.
+    pub(crate) fn for_test() -> Self {
         Self {
             resolver: None,
             inner: RefCell::new(Inner::default()),
