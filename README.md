@@ -1,7 +1,7 @@
 # strict-kwargs
 
 Fast enforcement of **keyword arguments at call sites**, without mypy or ty plugins.
-Companion to [mypy-strict-kwargs](https://github.com/adamtheturtle/mypy-strict-kwargs); a fast standalone linter for teams that type-check with [ty](https://docs.astral.sh/ty/).
+Detects positional arguments and rewrites them to keyword arguments automatically.
 
 ```python
 def add(a: int, b: int) -> int: ...
@@ -47,6 +47,11 @@ In `pyproject.toml`:
 
 ```toml
 [tool.strict_kwargs]
-ignore_names = ["main.func", "builtins.str"]  # fully-qualified, as in mypy-strict-kwargs
-debug = false
+ignore_names = ["main.func", "builtins.str"]  # fully-qualified names to ignore
+debug = false                                  # log debug info and AST dumps to stderr
 ```
+
+## Comparison with mypy-strict-kwargs
+
+[mypy-strict-kwargs](https://github.com/adamtheturtle/mypy-strict-kwargs) is a mypy plugin that enforces the same rule.
+Use strict-kwargs if you type-check with [ty](https://docs.astral.sh/ty/) or prefer a standalone linter without plugins.
