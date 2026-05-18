@@ -335,6 +335,44 @@ fn check_nonexistent_path_is_fatal_exit_two() {
 }
 
 #[test]
+fn check_nonexistent_dir_is_fatal_exit_two() {
+    // A mistyped directory target must not report "clean" (exit 0); like a
+    // mistyped file it is a hard error (issue #84).
+    let project = Project::new();
+    let output = project.run(&["no_such_dir/"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("no_such_dir"), "stderr: {err}");
+}
+
+#[test]
+fn fix_nonexistent_path_is_fatal_exit_two() {
+    // A mistyped target passed to `fix` must not exit 0 silently (issue #84).
+    let project = Project::new();
+    let output = project.run(&["fix", "typo_does_not_exist.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
+}
+
+#[test]
+fn fix_nonexistent_dir_is_fatal_exit_two() {
+    // A mistyped directory target passed to `fix` must not exit 0 silently
+    // (issue #84).
+    let project = Project::new();
+    let output = project.run(&["fix", "no_such_dir/"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("no_such_dir"), "stderr: {err}");
+}
+
+#[test]
 fn check_invalid_config_is_fatal_exit_two() {
     // `ignore_names` is a string, not a list: running with defaults would
     // silently not apply the user's config. Reported as a hard error
