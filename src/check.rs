@@ -1164,14 +1164,21 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    /// Walk a statement that appears in a function or method body. `Stmt::If`
-    /// is handled by our custom traversal to avoid the double-elif-test bug
-    /// present in `walk_stmt` for ruff 0.15.8. Every other statement type keeps
-    /// using the raw `walk_stmt` to preserve existing behaviour (e.g.
-    /// function-local imports are intentionally not registered).
+    /// Walk a statement that appears in the body of a function, class, or
+    /// control-flow branch. Statements that carry custom `visit_stmt` logic
+    /// (`Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
+    /// through `visit_stmt` so instance tracking and definition registration
+    /// fire correctly. `If` uses the custom branch traversal so the
+    /// double-elif-test fix still fires without registering function-local
+    /// imports. Everything else (e.g. `Import` / `ImportFrom`) goes through
+    /// `walk_stmt` directly; function-local imports are intentionally not
+    /// registered.
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody),
+            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+                self.visit_stmt(stmt);
+            }
             _ => walk_stmt(self, stmt),
         }
     }
