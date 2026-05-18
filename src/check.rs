@@ -336,10 +336,9 @@ impl<'a> CallChecker<'a> {
     ///
     /// [`resolve_local`]: Self::resolve_local
     ///
-    /// Only consulted by the excluded [`Self::is_unbound_class_method_call`];
-    /// excluded for the same reason (behaviour covered via the fixer's
-    /// `unbound_class_method_*` tests).
-    #[cfg_attr(coverage, coverage(off))]
+    /// Consulted by [`Self::is_unbound_class_method_call`] to tell
+    /// `Class.method(recv, …)` (an unbound call through the class object)
+    /// apart from an ordinary bound `instance.method(…)` call.
     fn binding_is_instance(&self, name: &str) -> bool {
         for scope in self.scopes.iter().rev() {
             if scope.names.contains_key(name) {
@@ -368,11 +367,9 @@ impl<'a> CallChecker<'a> {
     /// instance-method call) and keep their existing dedicated handling.
     // A defensive predicate: every arm but the final one is an early
     // `return false` guard for a call shape that is not an unbound
-    // class-method call. Its observable behaviour (the issue #27
-    // explicit-receiver handling) is covered end-to-end by the fixer's
-    // `unbound_class_method_*` tests; the individual guard arms are not
-    // worth contriving inputs for, so exclude it from the gate.
-    #[cfg_attr(coverage, coverage(off))]
+    // class-method call. It is core built-in-resolver logic (issue #27),
+    // so every guard arm is exercised by the gate — see the
+    // `unbound_class_method_*` and guard-arm tests.
     fn is_unbound_class_method_call(
         &self,
         func: &Expr,
@@ -1186,8 +1183,6 @@ fn strip_unbound_receiver(
 /// resolver analogue of [`strip_unbound_receiver`]. The caller has already
 /// established (via [`CallChecker::is_unbound_class_method_call`]) that the
 /// first parameter is `self`; anything else is returned unchanged.
-// ty-fallback helper; excluded (see `collect_defs`).
-#[cfg_attr(coverage, coverage(off))]
 fn without_leading_self(signature: &Signature) -> Signature {
     match signature.parameters.split_first() {
         Some((first, rest)) if first.name.as_deref() == Some("self") => Signature {
@@ -1812,5 +1807,147 @@ while cond:
         assert_eq!(hover_text(&json!({})), None);
         // `contents` present but neither a string nor a `.value` string.
         assert_eq!(hover_text(&json!({"contents": {"x": 1}})), None);
+    }
+
+    // ----- issue #27 unbound-class-method guard arms ------------------
+    //
+    // `is_unbound_class_method_call` / `binding_is_instance` are core
+    // built-in-resolver logic, not ty-fallback helpers. The fixer's
+    // `unbound_class_method_*` tests cover the happy path; these drive
+    // each early-`return false` guard directly, so every branch is
+    // visible to the coverage gate (issue #43).
+
+    use super::CallChecker;
+    use crate::config::Config;
+    use crate::index::DefinitionIndex;
+    use ruff_python_ast::Expr;
+    use std::path::PathBuf;
+
+    /// Build a bare `CallChecker`, let `setup` populate its scopes, then
+    /// evaluate `is_unbound_class_method_call` for the single call in
+    /// `call_src`. The index/config/tokens are inert: this predicate only
+    /// reads `func`, `callee`, `first_param`, and the scope stack.
+    fn is_unbound(
+        call_src: &str,
+        callee: &str,
+        first_param: Option<&str>,
+        setup: impl FnOnce(&mut CallChecker),
+    ) -> bool {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let mut diagnostics = Vec::new();
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            &mut diagnostics,
+        );
+        setup(&mut checker);
+
+        let call_parsed = parse_module(call_src).expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        checker.is_unbound_class_method_call(&call.func, callee, first_param)
+    }
+
+    #[test]
+    fn unbound_guard_rejects_non_self_first_parameter() {
+        // A classmethod / staticmethod / free function: `cls` (or anything
+        // but `self`) is auto-bound or passes no receiver.
+        assert!(!is_unbound("K.m(0)\n", "pkg.K.m", Some("cls"), |c| {
+            c.define("K", "pkg.K".to_string());
+        }));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_dunder_receiver() {
+        // `Signature::max_positional_at_call_site` already drops a dunder's
+        // leading receiver, so it must not be stripped a second time here.
+        assert!(!is_unbound("K(0)\n", "pkg.K.__init__", Some("self"), |c| {
+            c.define("K", "pkg.K".to_string());
+        }));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_non_attribute_callee() {
+        // A bare-name call (`f(0)`): no class object to call through.
+        assert!(!is_unbound("f(0)\n", "test.f", Some("self"), |_| {}));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_non_name_base() {
+        // `a.b.m(0)`: the receiver of `.m` is `a.b` (an attribute), not a
+        // bare name, so it cannot denote a class object.
+        assert!(!is_unbound("a.b.m(0)\n", "pkg.x.m", Some("self"), |_| {}));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_unresolved_base() {
+        // `Unknown` is not bound in any scope.
+        assert!(!is_unbound(
+            "Unknown.m(0)\n",
+            "test.Unknown.m",
+            Some("self"),
+            |_| {}
+        ));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_callee_owned_by_a_different_class() {
+        // `K` resolves, but the call's resolved callee is not `pkg.K.m`
+        // (e.g. an inherited method owned by a base class): not the
+        // class that directly owns `m`.
+        assert!(!is_unbound("K.m(0)\n", "pkg.Base.m", Some("self"), |c| {
+            c.define("K", "pkg.K".to_string());
+        }));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_bound_instance_call() {
+        // `k` is an *instance* of `pkg.K`: `k.m(…)` is an ordinary bound
+        // call, the receiver is implicit (`binding_is_instance` is true).
+        assert!(!is_unbound("k.m(0)\n", "pkg.K.m", Some("self"), |c| {
+            c.record_instance("k", "pkg.K".to_string());
+        }));
+    }
+
+    #[test]
+    fn unbound_guard_accepts_class_object_call() {
+        // `K.m(K(), …)` through the class object itself: the explicit
+        // receiver fills `self` (issue #27).
+        assert!(is_unbound("K.m(0)\n", "pkg.K.m", Some("self"), |c| {
+            c.define("K", "pkg.K".to_string());
+        }));
+    }
+
+    #[test]
+    fn binding_is_instance_is_false_for_an_unbound_name() {
+        // The guard's `name`-not-found fall-through: with `resolve_local`
+        // already succeeding for every real caller, only a direct call
+        // reaches it.
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let mut diagnostics = Vec::new();
+        let checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            &mut diagnostics,
+        );
+        assert!(!checker.binding_is_instance("never_bound"));
     }
 }
