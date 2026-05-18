@@ -44,12 +44,26 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Docs (warnings are errors)
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --all-features --document-private-items
+        run: cargo doc --locked --no-deps --all-features --document-private-items
+
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit Rust dependencies
+        run: cargo audit --deny warnings
 
   pre-commit:
     # Runs the same prek hooks contributors run locally
@@ -83,16 +97,18 @@ jobs:
           --show-diff-on-failure --color=always --verbose
 
   completion-lint:
-    needs: [build, pre-commit]
+    needs: [build, audit, pre-commit]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
       - name: Check job statuses
         env:
           BUILD_RESULT: ${{ needs.build.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
           PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
         run: |-
           if [ "$BUILD_RESULT" != "success" ] \
+            || [ "$AUDIT_RESULT" != "success" ] \
             || [ "$PRE_COMMIT_RESULT" != "success" ]; then
             echo "One or more lint jobs failed"
             exit 1

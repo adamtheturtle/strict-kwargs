@@ -47,6 +47,9 @@ jobs:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       # Calver without Cargo-safe patch bumps (use -post.N when re-releasing same day).
       - name: Compute release version
         id: version
@@ -98,12 +101,14 @@ jobs:
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" Cargo.toml
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
           rm -f Cargo.toml.bak pyproject.toml.bak
+          cargo metadata --format-version 1 >/dev/null
+          uv lock
 
       - uses: stefanzweifel/git-auto-commit-action@v7
         id: commit
         with:
           commit_message: Bump CHANGELOG and version for release
-          file_pattern: CHANGELOG.rst Cargo.toml pyproject.toml
+          file_pattern: CHANGELOG.rst Cargo.toml Cargo.lock pyproject.toml uv.lock
           skip_dirty_check: true
 
       - name: Bump version and push tag
@@ -242,7 +247,7 @@ jobs:
       - name: Check wheels
         run: |
           ls -la dist/
-          uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
+          uv run --locked --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       # We use PyPI trusted publishing rather than a PyPI API token.
       # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
@@ -287,7 +292,7 @@ jobs:
       - name: Check wheels
         run: |
           ls -la dist/
-          uv run --extra release check-wheel-contents --ignore W007 dist/*.whl
+          uv run --locked --extra release check-wheel-contents --ignore W007 dist/*.whl
 
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
