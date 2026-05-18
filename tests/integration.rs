@@ -484,6 +484,59 @@ fn directory_with_curdir_component() {
     );
 }
 
+/// A directory walk must not look inside `.venv`, `.git`, `__pycache__`, or
+/// other dot-directories: violations in real source are reported while
+/// identical violations under those skipped trees are not. This pins the
+/// result set that the directory-pruning optimization must leave unchanged
+/// (it only stops the walk descending into trees every file of which is
+/// excluded anyway).
+#[test]
+fn directory_walk_skips_venv_git_and_dunder_pycache() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let violation = "\ndef func(a: int) -> None: ...\nfunc(1)\n";
+    for path in [
+        "src/real.py",
+        ".venv/lib/python3.12/site-packages/dep.py",
+        ".git/hooks/hook.py",
+        "venv/lib/legacy.py",
+        "src/__pycache__/cached.py",
+        ".hidden/secret.py",
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
+        std::fs::write(&file, violation).expect("write");
+    }
+
+    let config = Config::load(&root);
+    let diagnostics =
+        check_paths(&root, std::slice::from_ref(&root), &config, None).expect("check");
+    let files: Vec<String> = diagnostics
+        .iter()
+        .map(|d| {
+            d.path
+                .strip_prefix(&root)
+                .unwrap_or(&d.path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+
+    assert_eq!(
+        files,
+        vec!["src/real.py".to_string()],
+        "only real source should be checked; got {files:?}"
+    );
+}
+
 /// Build a non-dotted project dir, write the given files, and check them all
 /// (passing explicit file paths so directory-ignore rules don't interfere).
 fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
