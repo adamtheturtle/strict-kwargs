@@ -51,6 +51,7 @@ for every violation it can resolve to a single known signature — project code
 strict-kwargs fix .             # rewrite files in place
 strict-kwargs fix src/foo.py    # fix a single file
 strict-kwargs fix --diff .      # print the unified diff, write nothing
+strict-kwargs fix --python .venv .   # detect ty-resolved violations too
 ```
 
 ```python
@@ -61,9 +62,18 @@ add(1, b=2)   # ->  add(a=1, b=2)
 The fixer is deliberately conservative: it never rewrites a call it would not
 report, and it leaves alone overloaded callees (so an overloaded builtin like
 `str` is reported but not rewritten), `*args` / `**kwargs` unpacking at the
-call site, and anything resolved only through the `ty` fallback.
-Positional-only parameters and arguments absorbed by `*args` stay positional.
-Run `strict-kwargs fix` before `ty check`.
+call site, and anything resolved only through the `ty` fallback (a wrong
+parameter name would corrupt source). Positional-only parameters and arguments
+absorbed by `*args` stay positional. Run `strict-kwargs fix` before
+`ty check`.
+
+When `fix` declines a violation it does not stay silent: it prints how many
+violations it detected but left untouched, so `fix` then `check` is
+predictable — that count is exactly what a following `strict-kwargs` run (with
+the same `--python`) still reports. `fix` accepts `--python` for the same
+reason `check` does: it steers the `ty` fallback so `fix` *detects* the same
+violations `check` would, making the reported count complete. The rewrite
+itself never edits a `ty`-resolved call regardless.
 
 `--python` accepts a Python interpreter, a virtualenv directory, or a
 `sys.prefix` directory (mirrors `ty check --python`). Use it when third-party

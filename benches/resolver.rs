@@ -232,15 +232,18 @@ fn reexport_closure() -> usize {
     check(reexport_hub_project())
 }
 
-/// The auto-fixer shares the index/parse/walk path with `check` but runs the
-/// positional → keyword rewrite instead of the ty deferral, so it is tracked
-/// separately.
+/// The auto-fixer shares the index/parse/walk path with `check` and now runs
+/// the same detection, but adds the positional → keyword rewrite; it is
+/// tracked separately. The fixture is fully resolvable by the built-in
+/// resolver, so the ty fallback never starts (lazy) and the numbers stay
+/// deterministic.
 #[divan::bench]
 fn fix_first_party_closure() -> usize {
     let root = first_party_project();
     let config = Config::load(root);
     let paths = [root.to_path_buf()];
-    fix_paths(root, &paths, &config)
+    fix_paths(root, &paths, &config, None)
         .expect("fix_paths over a benchmark fixture must succeed")
+        .files
         .len()
 }

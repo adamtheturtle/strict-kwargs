@@ -4,6 +4,21 @@ Changelog
 Next
 ----
 
+- ``strict-kwargs fix`` no longer silently disagrees with ``check``
+  (issue #42). It now runs the same detection — the built-in resolver
+  *and* the optional ``ty`` fallback — and accepts ``--python`` (mirroring
+  ``check``) to steer that fallback. The rewrite stays conservative and, by
+  design (issue #7), still never edits an overloaded, synthesized, or
+  ``ty``-only-resolved call (a wrong parameter name would corrupt source,
+  cf. issue #41); but ``fix`` now reports how many violations it detected
+  and declined to rewrite. That count is exactly what a following
+  ``strict-kwargs`` run (with the same ``--python``) still reports, so
+  ``fix`` then ``check`` is predictable instead of leaving violations with
+  no signal. The ``ty`` fallback still starts lazily, so the all-first-party
+  common case pays nothing. The library ``fix_paths`` now takes a
+  ``python_env`` argument and returns a ``FixOutcome`` (``files`` plus a
+  ``declined`` count) instead of a bare ``Vec<FileFix>``.
+
 - Fix ``strict-kwargs fix`` corrupting source on a redundantly
   parenthesized argument (issue #41). The Ruff parser drops redundant
   parentheses, so ``f((1), (2))`` used to rewrite to the unparsable

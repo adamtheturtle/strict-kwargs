@@ -17,7 +17,7 @@ use crate::ast_util::{line_column, positional_argument_count, signature_from_par
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
-use crate::fix::{apply_insertions, FileFix, Insertion};
+use crate::fix::{apply_insertions, FileFix, FixOutcome, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
@@ -837,9 +837,22 @@ fn call_fix_insertions(
 /// Rewrite positional call arguments to keyword arguments for every fixable
 /// violation reachable from `paths`.
 ///
-/// Mirrors [`check_paths`] but, by design (issue #7), does not consult the
-/// `ty` fallback: only calls the built-in resolver can resolve to a single
-/// in-project signature are rewritten. Files without changes are omitted.
+/// Mirrors [`check_paths`]: it runs the same detection — built-in resolver
+/// *and*, for the calls that misses, the optional `ty` fallback steered by
+/// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
+/// stays conservative: only a call the built-in resolver pins to a single
+/// in-project signature is rewritten; overloads, synthesized constructors and
+/// `ty`-only resolutions are left alone (a wrong parameter name would corrupt
+/// source, cf. issue #41).
+///
+/// Running the `ty` fallback here is detection-only: it lets the returned
+/// [`FixOutcome::declined`] account for *every* violation `check` would
+/// report, so `fix` then `check` (with the same `--python`) is predictable
+/// rather than silently inconsistent (issue #42). The fallback still starts
+/// lazily — only when the built-in resolver leaves a file with unresolved
+/// calls — so the all-first-party common case pays nothing.
+///
+/// Files without changes are omitted from [`FixOutcome::files`].
 ///
 /// # Errors
 ///
@@ -848,15 +861,23 @@ pub fn fix_paths(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
-) -> Result<Vec<FileFix>, CheckError> {
+    python_env: Option<&Path>,
+) -> Result<FixOutcome, CheckError> {
     let python_files = collect_python_files(paths);
     let index = build_index(project_root, &python_files)?;
+    let mut ty: Option<TyResolver> = None;
+    let mut ty_start_attempted = false;
+    let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
+    // Every violation the checker would report, across all files (built-in
+    // and ty-resolved). Only used for the declined count; the rewrite is
+    // driven solely by `checker.fixes`.
+    let mut diagnostics = Vec::new();
+    let mut fixed_total = 0usize;
     let mut results = Vec::new();
     for path in &python_files {
         let source = std::fs::read_to_string(path)?;
         let parsed = parse_module(&source)?;
         let module_name = module_name_for_path(project_root, path);
-        let mut diagnostics = Vec::new();
         let mut checker = CallChecker::new(
             path.clone(),
             module_name,
@@ -872,6 +893,21 @@ pub fn fix_paths(
         }
         let insertions = std::mem::take(&mut checker.fixes);
         let count = checker.fixed_calls;
+        let pending = std::mem::take(&mut checker.ty_pending);
+        // `checker`'s `&mut diagnostics` borrow ends at its last use above;
+        // the ty fallback can now extend the same vec (detection only — it
+        // never produces fixes, mirroring `check_paths`).
+        resolve_file_with_ty(
+            &mut ty,
+            &mut ty_start_attempted,
+            project_root,
+            python_env,
+            path,
+            &source,
+            &pending,
+            &mut ty_file_cache,
+            &mut diagnostics,
+        );
         if insertions.is_empty() {
             continue;
         }
@@ -885,6 +921,7 @@ pub fn fix_paths(
         if parse_module(&fixed).is_err() {
             return Err(CheckError::FixProducedInvalidSyntax { path: path.clone() });
         }
+        fixed_total += count;
         results.push(FileFix {
             path: path.clone(),
             original: source,
@@ -893,7 +930,15 @@ pub fn fix_paths(
         });
     }
     results.sort_by_key(|fix| fix.path.clone());
-    Ok(results)
+    // Each violation pushes exactly one diagnostic, then is rewritten or not;
+    // the ty fallback only ever adds diagnostics. So the un-rewritten count
+    // is the total detected minus the total rewritten. `saturating_sub` is
+    // defensive — `fixed_total` can never exceed the diagnostic count.
+    let declined = diagnostics.len().saturating_sub(fixed_total);
+    Ok(FixOutcome {
+        files: results,
+        declined,
+    })
 }
 
 /// `typing` / `typing_extensions` *special-form* constructors whose name is

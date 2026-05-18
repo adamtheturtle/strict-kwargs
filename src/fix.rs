@@ -30,6 +30,23 @@ pub struct FileFix {
     pub count: usize,
 }
 
+/// What a fix run produced: the files it would rewrite plus the number of
+/// violations it detected but deliberately left untouched.
+///
+/// `declined` is every violation the checker would report (built-in *and*
+/// `ty`-resolved) minus the ones rewritten: overloaded callees, synthesized
+/// constructors, and anything resolved only through the `ty` fallback (issue
+/// #7). Surfacing it makes `fix` then `check` predictable — a non-zero count
+/// is exactly what a subsequent `strict-kwargs` run (with the same
+/// `--python`) will still report (issue #42).
+#[derive(Debug, Clone)]
+pub struct FixOutcome {
+    /// Files the fixer would rewrite (empty when there is nothing to write).
+    pub files: Vec<FileFix>,
+    /// Violations detected but not rewritten.
+    pub declined: usize,
+}
+
 /// Apply `insertions` to `source`, returning the rewritten text.
 ///
 /// Edits are applied from the highest offset down so earlier offsets stay

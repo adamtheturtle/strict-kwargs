@@ -160,6 +160,84 @@ fn fix_multiple_calls_and_files_plural_messages() {
     assert!(project.read("b.py").contains("g(a=9)"));
 }
 
+const DATACLASS: &str =
+    "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\n";
+
+#[test]
+fn fix_reports_declined_when_no_fixes() {
+    // Only a synthesized-constructor violation: the fixer declines it
+    // (issue #29), so there is nothing to write, but it must still announce
+    // the violation it left for `check` (issue #42). Singular wording.
+    let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
+    let output = project.run(&["fix", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let err = stderr(&output);
+    assert!(err.contains("no fixes to apply"), "stderr: {err}");
+    assert!(
+        err.contains("1 violation detected but not rewritten") && err.contains("see it"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn fix_reports_declined_after_writing() {
+    // One rewritable plain call plus two declined dataclass constructors:
+    // `fix` writes the one and reports the two it left (issue #42). Plural
+    // wording, and the declined note follows the write summary.
+    let project = Project::new().write(
+        "main.py",
+        &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\nD(3, 4)\n"),
+    );
+    let output = project.run(&["fix", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let err = stderr(&output);
+    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
+    assert!(
+        err.contains("2 violations detected but not rewritten") && err.contains("see them"),
+        "stderr: {err}"
+    );
+    assert!(project.read("main.py").contains("f(a=1, b=2)"));
+}
+
+#[test]
+fn fix_diff_reports_declined() {
+    // `--diff` writes nothing but still reports the declined violation on
+    // stderr (the patch owns stdout).
+    let project = Project::new().write(
+        "main.py",
+        &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n"),
+    );
+    let output = project.run(&["fix", "--diff", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let patch = stdout(&output);
+    assert!(patch.contains("+f(a=1, b=2)"), "patch: {patch}");
+    let err = stderr(&output);
+    assert!(
+        err.contains("1 violation detected but not rewritten") && err.contains("see it"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn fix_accepts_python_flag() {
+    // `--python` is now accepted by `fix` (issue #42). This call is fully
+    // resolvable by the built-in resolver, so the ty fallback never starts
+    // and the flag value is irrelevant to the result — the point is that the
+    // argument parses and the rewrite still happens.
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let output = project.run(&["fix", "--python", ".", "main.py"]);
+    assert_eq!(code(&output), 0);
+    assert!(
+        stderr(&output).contains("fixed 1 call in"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        project.read("main.py"),
+        "def f(a: int) -> None: ...\nf(a=1)\n"
+    );
+}
+
 #[test]
 fn fix_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
