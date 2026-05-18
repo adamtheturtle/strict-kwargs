@@ -487,3 +487,12 @@ fn singledispatch_call_not_rewritten() {
         "from functools import singledispatch\n\n@singledispatch\ndef process(node):\n    ...\n\nprocess(42)\n",
     );
 }
+
+#[test]
+fn singledispatch_multi_arg_call_not_rewritten() {
+    // Multiple positional args to a @singledispatch function must not be
+    // rewritten: dispatch on the first positional arg would break (issue #81).
+    assert_unchanged(
+        "from functools import singledispatch\n\n@singledispatch\ndef fn(a, b):\n    return (a, b)\n\nfn(1, 2)\n",
+    );
+}

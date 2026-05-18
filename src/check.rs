@@ -824,6 +824,12 @@ impl<'a> CallChecker<'a> {
         let Some(signatures) = self.index.get(&callee_fullname) else {
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.
+            // Re-check is_excluded: `get` may have triggered lazy loading
+            // that discovered a @singledispatch decorator and added the
+            // function to `excluded` without adding it to `signatures`.
+            if self.index.is_excluded(&callee_fullname) {
+                return;
+            }
             self.record_ty_pending(call);
             return;
         };
