@@ -11,6 +11,16 @@ pub enum CheckError {
     Io(std::io::Error),
     /// The Python source could not be parsed.
     Parse(ParseError),
+    /// The source nests `()`/`[]`/`{}` deeper than the supported limit
+    /// (issue #54). Refused before the recursive parser is reached so a
+    /// pathological or hostile file fails cleanly (exit 2) instead of
+    /// overflowing the stack and aborting the whole run.
+    TooDeeplyNested {
+        /// The deepest bracket nesting found in the file.
+        depth: usize,
+        /// The maximum supported depth (`limits::MAX_NESTING_DEPTH`).
+        limit: usize,
+    },
     /// A fix would have written syntactically invalid Python; the file was
     /// left untouched rather than corrupted (issue #41).
     FixProducedInvalidSyntax {
@@ -45,6 +55,13 @@ impl std::fmt::Display for CheckError {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Parse(error) => write!(formatter, "{error}"),
+            Self::TooDeeplyNested { depth, limit } => write!(
+                formatter,
+                "expression nesting too deep ({depth} levels, limit {limit}); \
+                 refusing to parse to avoid a stack overflow — split the \
+                 expression (this is almost always machine-generated or \
+                 hostile input)"
+            ),
             Self::FixProducedInvalidSyntax { path } => write!(
                 formatter,
                 "refusing to write {}: the rewrite would not parse (file left unchanged)",
@@ -95,6 +112,19 @@ mod tests {
         let error = CheckError::from(parse_error());
         assert!(!error.to_string().is_empty());
         assert!(format!("{error:?}").starts_with("Parse("));
+    }
+
+    #[test]
+    fn too_deeply_nested_reports_depth_limit_and_reassures() {
+        let error = CheckError::TooDeeplyNested {
+            depth: 5000,
+            limit: 1000,
+        };
+        let message = error.to_string();
+        assert!(message.contains("5000"));
+        assert!(message.contains("1000"));
+        assert!(message.contains("stack overflow"));
+        assert!(format!("{error:?}").starts_with("TooDeeplyNested"));
     }
 
     #[test]

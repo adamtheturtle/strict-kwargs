@@ -21,6 +21,7 @@ use crate::fix::{apply_insertions, FileFix, FixOutcome, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
+use crate::limits::{parse_module_guarded, run_with_large_stack};
 use crate::signature::{ParameterKind, Signature};
 use crate::ty_resolver::{
     byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
@@ -34,7 +35,20 @@ use crate::ty_resolver::{
 /// Returns [`CheckError`] if a source file cannot be read or parsed, or if
 /// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
 /// server cannot start ([`CheckError::TyServerFailed`]).
+///
+/// The whole walk runs on a large dedicated stack so a deeply nested file
+/// cannot overflow it; one nested deeper than the supported limit is rejected
+/// up front ([`CheckError::TooDeeplyNested`]) instead of crashing (issue #54).
 pub fn check_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+    python_env: Option<&Path>,
+) -> Result<Vec<Diagnostic>, CheckError> {
+    run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
+}
+
+fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
@@ -64,7 +78,7 @@ pub fn check_paths(
     let mut diagnostics = Vec::new();
     for path in &python_files {
         let source = std::fs::read_to_string(path)?;
-        let parsed = parse_module(&source)?;
+        let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         let mut checker = CallChecker::new(
             path.clone(),
@@ -885,8 +899,20 @@ fn call_fix_insertions(
 ///
 /// Returns [`CheckError`] if a source file cannot be read or parsed, or if
 /// the required `ty` backend is missing ([`CheckError::TyNotFound`]) or its
-/// server cannot start ([`CheckError::TyServerFailed`]).
+/// server cannot start ([`CheckError::TyServerFailed`]). A file nested deeper
+/// than the supported limit is rejected ([`CheckError::TooDeeplyNested`])
+/// rather than overflowing the stack; the walk runs on a large dedicated
+/// stack (issue #54).
 pub fn fix_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+    python_env: Option<&Path>,
+) -> Result<FixOutcome, CheckError> {
+    run_with_large_stack(move || fix_paths_impl(project_root, paths, config, python_env))
+}
+
+fn fix_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
@@ -907,7 +933,7 @@ pub fn fix_paths(
     let mut results = Vec::new();
     for path in &python_files {
         let source = std::fs::read_to_string(path)?;
-        let parsed = parse_module(&source)?;
+        let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         let mut checker = CallChecker::new(
             path.clone(),
@@ -1480,7 +1506,9 @@ fn resolve_pending_with_ty(
                 .clone()
         };
         let Some(target) = target else { continue };
-        let Ok(parsed) = parse_module(&target) else {
+        // A too-deeply-nested resolution target is skipped like an unparsable
+        // one (best-effort signature lookup; never abort the run — issue #54).
+        let Ok(parsed) = parse_module_guarded(&target) else {
             continue;
         };
         let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {

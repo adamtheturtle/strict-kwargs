@@ -4,6 +4,18 @@ Changelog
 Next
 ----
 
+- A deeply nested file no longer crashes the process with a stack
+  overflow (issue #54). ``f(f(f(…f(1)…)))`` thousands of levels deep —
+  machine-generated code, a huge data literal, or hostile input — used to
+  abort the whole run with ``SIGABRT`` (exit 134), taking every other file
+  in a directory or pre-commit run down with it; the vendored Ruff parser
+  fork enforces no recursion limit. The analysis now runs on a large
+  dedicated stack so legitimate deep nesting is handled identically across
+  platforms and build profiles (rather than depending on the host's default
+  stack), and a file nested deeper than the supported limit is rejected up
+  front with a clear ``expression nesting too deep`` message and exit code
+  2 instead of crashing.
+
 - ``ty`` is now a hard requirement instead of an optional fallback. When
   ``ty`` cannot be located (next to the ``strict-kwargs`` binary or on
   ``PATH``) or its language server will not start, the run aborts with exit

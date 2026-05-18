@@ -6,11 +6,11 @@ use std::rc::Rc;
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
-use ruff_python_parser::parse_module;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
 use crate::error::CheckError;
+use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
 use crate::signature::{Parameter, ParameterKind, Signature};
 
@@ -168,7 +168,11 @@ impl DefinitionIndex {
         if *query_budget == 0 {
             return;
         }
-        let Ok(parsed) = parse_module(&m.source) else {
+        // A too-deeply-nested dependency module is skipped here exactly like
+        // an unparsable one: indexing it is best-effort, and failing the
+        // whole run because some imported library ships a pathological file
+        // would be wrong (issue #54).
+        let Ok(parsed) = parse_module_guarded(&m.source) else {
             return;
         };
         *query_budget -= 1;
@@ -371,7 +375,7 @@ pub fn build_index(
     // (numpy/torch/scipy) is never eagerly walked (issue #39).
     for path in python_files {
         let source = std::fs::read_to_string(path)?;
-        let parsed = parse_module(&source)?;
+        let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         index.inner.borrow_mut().indexed.insert(module_name);
