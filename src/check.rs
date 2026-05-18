@@ -678,7 +678,18 @@ impl<'a> CallChecker<'a> {
 impl<'a> Visitor<'a> for CallChecker<'a> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
-            Stmt::FunctionDef(StmtFunctionDef { name, body, .. }) => {
+            Stmt::FunctionDef(StmtFunctionDef {
+                name,
+                body,
+                decorator_list,
+                ..
+            }) => {
+                // Decorator expressions are evaluated in the enclosing
+                // scope, so visit them before defining/scoping the function
+                // (issue #51: decorator-factory calls were never checked).
+                for decorator in decorator_list {
+                    self.visit_expr(&decorator.expression);
+                }
                 self.define(name, format!("{}.{}", self.module_name, name));
                 self.push_scope();
                 for inner in body {
@@ -686,15 +697,28 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.pop_scope();
             }
-            Stmt::ClassDef(StmtClassDef { name, body, .. }) => {
+            Stmt::ClassDef(StmtClassDef {
+                name,
+                body,
+                decorator_list,
+                ..
+            }) => {
+                for decorator in decorator_list {
+                    self.visit_expr(&decorator.expression);
+                }
                 let class_fullname = format!("{}.{}", self.module_name, name);
                 self.define(name, class_fullname);
                 self.push_scope();
                 for inner in body {
                     match inner {
                         Stmt::FunctionDef(StmtFunctionDef {
-                            body: method_body, ..
+                            body: method_body,
+                            decorator_list: method_decorators,
+                            ..
                         }) => {
+                            for decorator in method_decorators {
+                                self.visit_expr(&decorator.expression);
+                            }
                             self.push_scope();
                             for method_stmt in method_body {
                                 walk_stmt(self, method_stmt);
