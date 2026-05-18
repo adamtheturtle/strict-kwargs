@@ -1026,6 +1026,20 @@ impl<'a> CallChecker<'a> {
             _ => None,
         }
     }
+
+    /// Walk a statement that appears in the body of a function, class, or
+    /// control-flow branch. `Stmt::If` is dispatched through `visit_stmt` so
+    /// our override fires and avoids the double-elif-test bug present in
+    /// `walk_stmt` for ruff 0.15.8. Every other statement type keeps using the
+    /// raw `walk_stmt` to preserve existing behaviour (e.g. function-local
+    /// imports are intentionally not registered).
+    fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
+        if matches!(stmt, Stmt::If(_)) {
+            self.visit_stmt(stmt);
+        } else {
+            walk_stmt(self, stmt);
+        }
+    }
 }
 
 impl<'a> Visitor<'a> for CallChecker<'a> {
@@ -1065,7 +1079,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.mark_param_opaque(kwarg.name.as_str());
                 }
                 for inner in body {
-                    walk_stmt(self, inner);
+                    self.visit_body_stmt(inner);
                 }
                 self.pop_scope();
             }
@@ -1108,11 +1122,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 self.mark_param_opaque(kwarg.name.as_str());
                             }
                             for method_stmt in method_body {
-                                walk_stmt(self, method_stmt);
+                                self.visit_body_stmt(method_stmt);
                             }
                             self.pop_scope();
                         }
-                        _ => walk_stmt(self, inner),
+                        _ => self.visit_body_stmt(inner),
                     }
                 }
                 self.pop_scope();
@@ -1142,7 +1156,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             // `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each
             // `elif` test expression twice: once via a direct `visit_expr` call
             // and again inside `walk_elif_else_clause`. Override `Stmt::If` to
-            // traverse each test and body exactly once.
+            // traverse each test and body exactly once. Body statements are
+            // dispatched through `visit_body_stmt` so that any nested
+            // `if`/`elif` chains are also protected against the double visit.
             Stmt::If(ast::StmtIf {
                 test,
                 body,
@@ -1151,14 +1167,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }) => {
                 self.visit_expr(test);
                 for inner in body {
-                    walk_stmt(self, inner);
+                    self.visit_body_stmt(inner);
                 }
                 for clause in elif_else_clauses {
                     if let Some(clause_test) = &clause.test {
                         self.visit_expr(clause_test);
                     }
                     for inner in &clause.body {
-                        walk_stmt(self, inner);
+                        self.visit_body_stmt(inner);
                     }
                 }
             }
