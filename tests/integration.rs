@@ -510,6 +510,11 @@ fn directory_walk_skips_venv_git_and_dunder_pycache() {
         "venv/lib/legacy.py",
         "src/__pycache__/cached.py",
         ".hidden/secret.py",
+        // A dot-prefixed *file* (not a directory) in real source: pruning
+        // only skips directories, so this still reaches — and must stay
+        // rejected by — `is_ignored_path`, keeping it the authoritative
+        // filter the optimization defers to.
+        "src/.generated.py",
     ] {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");

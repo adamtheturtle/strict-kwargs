@@ -1464,8 +1464,26 @@ fn resolve_pending_with_ty(
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use super::{is_typing_special_form_constructor, strip_unbound_receiver, without_leading_self};
+    use super::{
+        is_ignored_path, is_typing_special_form_constructor, strip_unbound_receiver,
+        without_leading_self,
+    };
     use crate::signature::{Parameter, ParameterKind, Signature};
+    use std::path::Path;
+
+    #[test]
+    fn ignored_path_rejects_dot_venv_and_pycache_components() {
+        // A path is ignored iff some component is dot-prefixed, `venv`, or
+        // `__pycache__` — each arm of the rule, in turn. Directory walks now
+        // prune these trees before their files are tested, so this is the
+        // direct contract that keeps the explicit-file-path case correct.
+        assert!(is_ignored_path(Path::new(".venv/lib/python3.12/x.py")));
+        assert!(is_ignored_path(Path::new("pkg/venv/mod.py")));
+        assert!(is_ignored_path(Path::new("pkg/__pycache__/mod.py")));
+        // No special component anywhere: kept. Also exercises a non-`Normal`
+        // (root) component falling through to the catch-all arm.
+        assert!(!is_ignored_path(Path::new("/srv/app/src/pkg/mod.py")));
+    }
 
     #[test]
     fn exempts_typing_special_forms_in_every_resolved_form() {
