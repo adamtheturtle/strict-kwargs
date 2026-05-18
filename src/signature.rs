@@ -78,6 +78,7 @@ impl Signature {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
@@ -141,6 +142,69 @@ mod tests {
         assert_eq!(
             s.max_positional_at_call_site("main.C.method", false),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn ignored_callable_has_no_limit() {
+        let s = sig(&[("a", ParameterKind::PositionalOrKeyword)]);
+        assert_eq!(s.max_positional_at_call_site("main.func", true), None);
+    }
+
+    #[test]
+    fn init_and_new_skip_self_only() {
+        let s = sig(&[
+            ("self", ParameterKind::PositionalOrKeyword),
+            ("a", ParameterKind::PositionalOnly),
+        ]);
+        assert_eq!(
+            s.max_positional_at_call_site("main.C.__init__", false),
+            Some(1)
+        );
+        assert_eq!(
+            s.max_positional_at_call_site("main.C.__new__", false),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn descriptor_set_skips_self_and_counts_instance() {
+        let s = sig(&[
+            ("self", ParameterKind::PositionalOrKeyword),
+            ("instance", ParameterKind::PositionalOrKeyword),
+            ("value", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(
+            s.max_positional_at_call_site("main.D.__set__", false),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn positional_or_keyword_after_var_positional_is_keyword_only() {
+        // ``def f(a, *args, b)``: ``b`` follows ``*args`` so it cannot be
+        // passed positionally (exercises the `index <= star_index` guard's
+        // false arm).
+        let s = sig(&[
+            ("a", ParameterKind::PositionalOrKeyword),
+            ("args", ParameterKind::VarPositional),
+            ("b", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(s.max_positional_at_call_site("main.f", false), Some(1));
+    }
+
+    #[test]
+    fn descriptor_get_skips_self_and_counts_instance() {
+        // ``__get__(self, instance, owner)``: ``self`` is skipped and the
+        // second parameter (``instance``) is always allowed positionally.
+        let s = sig(&[
+            ("self", ParameterKind::PositionalOrKeyword),
+            ("instance", ParameterKind::PositionalOrKeyword),
+            ("owner", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(
+            s.max_positional_at_call_site("main.D.__get__", false),
+            Some(1)
         );
     }
 }

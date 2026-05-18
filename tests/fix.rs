@@ -264,6 +264,87 @@ fn unchanged_file_not_reported() {
 }
 
 #[test]
+fn does_not_fix_violation_with_trailing_star_args() {
+    // Flagged (3 explicit positionals > 0 allowed) but the `*rest` makes a
+    // keyword rewrite unsound, so the fixer declines.
+    let source = "def f(a, b): ...\nrest = []\nf(1, 2, 3, *rest)\n";
+    assert_unchanged(source);
+    assert!(
+        project(source)
+            .check_main()
+            .iter()
+            .any(|m| m.contains("Too many positional")),
+        "starred-arg violation should still be flagged"
+    );
+}
+
+#[test]
+fn does_not_fix_when_surplus_maps_onto_var_keyword() {
+    // `def f(a, **kw)` called `f(1, 2)`: the surplus `2` maps onto `**kw`,
+    // which cannot take a keyword name, so the fixer declines.
+    let source = "def f(a, **kw): ...\nf(1, 2)\n";
+    assert_unchanged(source);
+    assert!(
+        project(source)
+            .check_main()
+            .iter()
+            .any(|m| m.contains("Too many positional")),
+        "**kwargs-surplus violation should still be flagged"
+    );
+}
+
+#[test]
+fn does_not_fix_generator_argument() {
+    // A bare generator argument cannot be safely prefixed with `name=`, so
+    // the fixer declines — but the checker still flags the call.
+    let source = "def func(items): ...\nfunc(x for x in range(3))\n";
+    assert_unchanged(source);
+    let proj = project(source);
+    assert!(
+        proj.check_main()
+            .iter()
+            .any(|m| m.contains("Too many positional")),
+        "generator call should still be flagged"
+    );
+}
+
+#[test]
+fn does_not_fix_walrus_argument() {
+    // `func(y := 1)` — a walrus argument likewise cannot be prefixed.
+    assert_unchanged("def func(a): ...\nfunc(y := 1)\n");
+}
+
+#[test]
+fn all_positional_only_call_is_legal_and_unchanged() {
+    let source = "def func(a, b, /): ...\nfunc(1, 2)\n";
+    assert_unchanged(source);
+    assert!(
+        project(source).check_main().is_empty(),
+        "wholly positional-only call must be accepted"
+    );
+}
+
+#[test]
+fn rewrites_surplus_into_keyword_only_parameter() {
+    // `def func(a, *, b)` called `func(1, 2)`: the surplus maps onto the
+    // keyword-only `b`, so both are rewritten.
+    assert_fixed(
+        "def func(a, *, b): ...\nfunc(1, 2)\n",
+        "def func(a, *, b): ...\nfunc(a=1, b=2)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_descriptor_set_call() {
+    // Descriptor-protocol calls (`d.__set__(obj, value, ...)`) are never
+    // rewritten even when flagged.
+    assert_unchanged(
+        "class Desc:\n    def __set__(self, obj, value, extra): ...\n\n\
+         d = Desc()\nd.__set__(obj, value, extra)\n",
+    );
+}
+
+#[test]
 fn synthesized_dataclass_constructor_not_rewritten() {
     // Issue #29: the synthesized `__init__` omits inherited base-class
     // fields, so the position->name mapping is not guaranteed sound. The

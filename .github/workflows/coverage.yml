@@ -1,0 +1,60 @@
+---
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    # Run at 1:00 every day
+    - cron: 0 1 * * *
+
+permissions: {}
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust nightly (branch coverage needs an unstable rustc)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install ty (type-inference fallback under test)
+        shell: bash
+        run: |
+          uv tool install ty
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        # Fail loudly if ty is missing so the ty-backed tests are actually
+        # exercised (rather than skipped) and counted towards coverage.
+        run: ty version
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Enforce 100% coverage (lines, regions, functions, branches)
+        run: ./scripts/coverage.sh
+
+  completion-coverage:
+    needs: coverage
+    runs-on: ubuntu-latest
+    if: always()  # Run even if the coverage job fails
+    steps:
+      - name: Check coverage job status
+        run: |-
+          if ! ${{ needs.coverage.result == 'success' }}; then
+            echo "Coverage gate failed"
+            exit 1
+          fi
