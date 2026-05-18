@@ -167,6 +167,45 @@ gamma(1)
     );
 }
 
+/// A module-level `if` / `elif` / `else` also preserves module scope. The
+/// custom `Stmt::If` visitor must still route body statements through
+/// `visit_stmt` so imports in every branch are recorded.
+#[test]
+fn control_flow_if_elif_else_preserve_module_scope() {
+    let project = TestProject::new()
+        .dep("impl.py", "def alpha(a: int) -> None: ...\n")
+        .dep("impl2.py", "def beta(a: int) -> None: ...\n")
+        .dep("impl3.py", "def gamma(a: int) -> None: ...\n")
+        .file(
+            "app.py",
+            r"
+if True:
+    from impl import alpha
+elif False:
+    from impl2 import beta
+else:
+    from impl3 import gamma
+
+alpha(1)
+beta(1)
+gamma(1)
+",
+        );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:9:", "Too many positional"),
+        "if-nested import alias; got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:10:", "Too many positional"),
+        "elif-nested import alias; got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:11:", "Too many positional"),
+        "else-nested import alias; got: {messages:?}"
+    );
+}
+
 /// A module-level `try` / `except` / `else` / `finally` likewise preserves
 /// module scope (typeshed gates re-exports on `sys.version_info` this way),
 /// so imports in every clause produce module-level re-export aliases.

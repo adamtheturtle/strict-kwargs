@@ -1106,12 +1106,11 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    /// Walk a statement that appears in the body of a function, class, or
-    /// control-flow branch. `Stmt::If` is dispatched through `visit_stmt` so
-    /// our override fires and avoids the double-elif-test bug present in
-    /// `walk_stmt` for ruff 0.15.8. Every other statement type keeps using the
-    /// raw `walk_stmt` to preserve existing behaviour (e.g. function-local
-    /// imports are intentionally not registered).
+    /// Walk a statement that appears in a function or method body. `Stmt::If`
+    /// is dispatched through `visit_stmt` so our override fires and avoids the
+    /// double-elif-test bug present in `walk_stmt` for ruff 0.15.8. Every other
+    /// statement type keeps using the raw `walk_stmt` to preserve existing
+    /// behaviour (e.g. function-local imports are intentionally not registered).
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
         if matches!(stmt, Stmt::If(_)) {
             self.visit_stmt(stmt);
@@ -1235,9 +1234,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             // `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each
             // `elif` test expression twice: once via a direct `visit_expr` call
             // and again inside `walk_elif_else_clause`. Override `Stmt::If` to
-            // traverse each test and body exactly once. Body statements are
-            // dispatched through `visit_body_stmt` so that any nested
-            // `if`/`elif` chains are also protected against the double visit.
+            // traverse each test and body exactly once. Body statements still
+            // route through `visit_stmt`, matching `walk_stmt`'s normal
+            // statement-body dispatch for imports, assignments, definitions,
+            // and nested `if`/`elif` chains.
             Stmt::If(ast::StmtIf {
                 test,
                 body,
@@ -1246,14 +1246,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }) => {
                 self.visit_expr(test);
                 for inner in body {
-                    self.visit_body_stmt(inner);
+                    self.visit_stmt(inner);
                 }
                 for clause in elif_else_clauses {
                     if let Some(clause_test) = &clause.test {
                         self.visit_expr(clause_test);
                     }
                     for inner in &clause.body {
-                        self.visit_body_stmt(inner);
+                        self.visit_stmt(inner);
                     }
                 }
             }
