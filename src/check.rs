@@ -51,6 +51,132 @@ pub fn check_paths(
     run_with_large_stack(move || check_paths_impl(project_root, paths, config, python_env))
 }
 
+/// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
+/// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty resolver
+/// ([`ScanOutcome::Scanned`]).
+///
+/// This is the gated business-logic counterpart to [`pipeline_phases`], which
+/// handles the non-deterministic threading orchestration that cannot be covered.
+#[allow(clippy::too_many_arguments)]
+fn process_scan_outcome_for_ty(
+    i: usize,
+    path: PathBuf,
+    outcome: ScanOutcome,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    project_root: &Path,
+    python_env: Option<&Path>,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    match outcome {
+        ScanOutcome::Skipped(reason) => {
+            // Collect skip warnings with their file index so they can be
+            // emitted in the original sorted-file order after both phases
+            // finish (issue #53 + #46).
+            skip_warnings.push((i, path, reason));
+        }
+        ScanOutcome::Scanned(scan) => {
+            diagnostics.extend(scan.diagnostics);
+            if !scan.pending.is_empty() {
+                resolve_file_with_ty(
+                    ty,
+                    ty_start_attempted,
+                    project_root,
+                    python_env,
+                    &path,
+                    &scan.source,
+                    &scan.pending,
+                    ty_file_cache,
+                    diagnostics,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
+/// Phase 1 workers to the serial Phase 2 ty consumer as each file's built-in
+/// pass finishes, overlapping the remaining Phase 1 work with early Phase 2
+/// ty round-trips. The final sort in [`check_paths_impl`] keeps output
+/// deterministic regardless of arrival order; the lazy ty-server start is
+/// preserved (only the first file with pending calls triggers it).
+///
+/// Excluded from the coverage gate for the same reason as
+/// [`stream_scan_files`]: what is excluded here is only the threading
+/// orchestration — the environment-only pool-construction failure, the
+/// scheduling-dependent drain path, a scan error arriving from a worker, and
+/// the unreachable thread-panic arm. The per-outcome business logic lives in
+/// the gated [`process_scan_outcome_for_ty`].
+#[cfg_attr(coverage, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+fn pipeline_phases(
+    python_files: &[PathBuf],
+    project_root: &Path,
+    config: &Config,
+    index: &DefinitionIndex,
+    python_env: Option<&Path>,
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+) -> Result<(), CheckError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut consumer_err: Option<CheckError> = None;
+
+    let scan_result = std::thread::scope(|scope| {
+        // Phase 1 (parallel, background): the built-in pass over every file.
+        // Each file is an independent, pure-CPU unit of work sharing only the
+        // `Sync` demand-driven index; results are sent to `rx` as each worker
+        // finishes rather than being collected all at once. `tx` is moved in
+        // and dropped when all workers finish, closing the channel.
+        let scan_handle =
+            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
+
+        for (i, path, result) in rx {
+            if consumer_err.is_some() {
+                // A ty or scan error has already been recorded; drain the
+                // remaining items so the background thread can finish.
+                continue;
+            }
+            let outcome = match result {
+                Ok(o) => o,
+                Err(e) => {
+                    consumer_err = Some(e);
+                    continue;
+                }
+            };
+            if let Err(e) = process_scan_outcome_for_ty(
+                i,
+                path,
+                outcome,
+                ty,
+                ty_start_attempted,
+                project_root,
+                python_env,
+                ty_file_cache,
+                diagnostics,
+                skip_warnings,
+            ) {
+                consumer_err = Some(e);
+            }
+        }
+
+        match scan_handle.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    });
+    scan_result?;
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -65,13 +191,6 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let index = build_index(project_root, &python_files)?;
-
-    // Phase 1 (parallel): the built-in pass over every file. Each file is an
-    // independent, pure-CPU unit of work sharing only the `Sync`
-    // demand-driven index; this is the bulk of whole-project runtime and the
-    // residual issue #46 targets. Order is preserved, so `scans` — and
-    // therefore the `ty` phase and final output — stay deterministic.
-    let scans = scan_files(&python_files, project_root, config, &index)?;
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -89,37 +208,32 @@ fn check_paths_impl(
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
     let mut diagnostics = Vec::new();
-    for (path, outcome) in scans {
-        // Emit the undecodable-file warning here, not in the parallel phase,
-        // so its order is deterministic (issue #53 + #46): `python_files` is
-        // sorted, so warnings appear in a stable order regardless of which
-        // worker decoded which file.
-        let scan = match outcome {
-            ScanOutcome::Skipped(reason) => {
-                eprintln!(
-                    "strict-kwargs: warning: skipping {} ({reason})",
-                    path.display()
-                );
-                continue;
-            }
-            ScanOutcome::Scanned(scan) => scan,
-        };
-        diagnostics.extend(scan.diagnostics);
-        if scan.pending.is_empty() {
-            continue;
-        }
-        resolve_file_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            python_env,
-            &path,
-            &scan.source,
-            &scan.pending,
-            &mut ty_file_cache,
-            &mut diagnostics,
-        )?;
+    // Collect skip warnings with their file index so they can be emitted in
+    // the original sorted-file order after both phases finish (issue #53).
+    let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
+
+    pipeline_phases(
+        &python_files,
+        project_root,
+        config,
+        &index,
+        python_env,
+        &mut ty,
+        &mut ty_start_attempted,
+        &mut ty_file_cache,
+        &mut diagnostics,
+        &mut skip_warnings,
+    )?;
+
+    // Emit skip warnings in the original sorted-file order (issue #53 + #46).
+    skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
+    for (_, path, reason) in skip_warnings {
+        eprintln!(
+            "strict-kwargs: warning: skipping {} ({reason})",
+            path.display()
+        );
     }
+
     diagnostics.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -235,37 +349,48 @@ fn plan_rewrite(path: &Path, outcome: &ScanOutcome) -> Result<Option<String>, Ch
     Ok(Some(fixed))
 }
 
-/// Run [`scan_file`] over every file in parallel on the deep-stack worker
-/// pool (issue #46 phase 1; the stack also satisfies issue #54 for the
-/// parallel pass). `par_iter`/`collect` preserve input order, so the result
-/// — and every later phase — stays deterministic.
+/// Like [`scan_file`] but sends each result to `tx` as the worker finishes
+/// rather than collecting all results first. This lets the ty phase in
+/// [`check_paths_impl`] start working on completed files while Phase 1
+/// workers are still running over the rest of the project (cross-file
+/// pipelining, issue #67).
+///
+/// `tx` is moved in and dropped when all workers finish, closing the channel
+/// and signalling the consumer that no more items are coming.
 ///
 /// Excluded from the coverage gate for the same reason as
-/// [`run_with_large_stack`]: the per-file
-/// logic ([`scan_file`]) is a separate, fully gated function exercised by
-/// every integration test; what is excluded here is only the parallel-pool
-/// orchestration — the environment-only pool-construction failure and the
-/// scheduling-dependent path that surfaces one worker's error across the
-/// `par_iter` boundary — neither of which is deterministically reachable.
+/// [`run_with_large_stack`]: the per-file logic ([`scan_file`]) is a
+/// separate, fully gated function exercised by every integration test; what
+/// is excluded here is only the parallel-pool orchestration — the
+/// environment-only pool-construction failure and the scheduling-dependent
+/// path that surfaces one worker's error — neither of which is
+/// deterministically reachable.
 #[cfg_attr(coverage, coverage(off))]
-fn scan_files(
+fn stream_scan_files(
     python_files: &[PathBuf],
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
-) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
-    with_large_stack_pool(|| {
+    tx: std::sync::mpsc::Sender<(usize, PathBuf, Result<ScanOutcome, CheckError>)>,
+) -> Result<(), CheckError> {
+    with_large_stack_pool(move || {
         python_files
             .par_iter()
-            .map(|path| Ok((path.clone(), scan_file(project_root, path, config, index)?)))
-            .collect()
+            .enumerate()
+            .for_each_with(tx, |tx, (i, path)| {
+                let result = scan_file(project_root, path, config, index);
+                // Ignore send errors: the consumer has exited early (e.g. a
+                // ty error was already recorded).
+                let _ = tx.send((i, path.clone(), result));
+            });
+        Ok(())
     })
 }
 
-/// Like [`scan_files`], but also computes each file's [`plan_rewrite`] in the
-/// same parallel pass (the fixer's per-file CPU work). Excluded from the
-/// coverage gate for the same reason as [`scan_files`]; the rewrite decision
-/// itself stays in the gated [`plan_rewrite`].
+/// Like [`stream_scan_files`], but also computes each file's [`plan_rewrite`]
+/// in the same parallel pass (the fixer's per-file CPU work). Excluded from
+/// the coverage gate for the same reason as [`stream_scan_files`]; the rewrite
+/// decision itself stays in the gated [`plan_rewrite`].
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
     python_files: &[PathBuf],
