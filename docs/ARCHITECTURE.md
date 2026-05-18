@@ -44,8 +44,10 @@ will not start — is a fatal error (`CheckError::TyNotFound` /
 `TyServerFailed`, exit 2), not a silent downgrade: a hard requirement is what
 makes results deterministic across machines, so the same source can never
 resolve fewer calls just because a machine lacks `ty`. `ty` is declared as a
-pinned dependency of the PyPI wheel (`pyproject.toml`), so a `pip`/`uv`
-install ships it; the binary is located **next to our own executable** first
+dependency of the PyPI wheel (`ty>=0.0.23` — a floor, not a pin: that is the
+version the integration was verified against; see `pyproject.toml`), so a
+`pip`/`uv` install ships it; the binary is located **next to our own
+executable** first
 (maturin + the dependency land in the same venv `bin`/`Scripts`, and `uv
 tool install` does *not* put a dependency's entry point on `PATH`), then via
 `PATH` (`cargo install`, activated venv). See `ty_command`. Presence is
@@ -121,7 +123,8 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
 - **Pipelined per file**: all requests for a file are sent, then collected —
   round-trip latency is hidden; out-of-order responses are buffered.
 - **Required, verified up front**: the `ty` executable is located next to
-  our own binary (the pinned wheel dependency) or on `PATH` (`ty_command`);
+  our own binary (the wheel dependency, `ty>=0.0.23`) or on `PATH`
+  (`ty_command`);
   a cheap `ty version` probe runs before any file is read, memoized per
   process; an unlocatable binary aborts the run with
   `CheckError::TyNotFound` (exit 2) regardless of file content, so the
@@ -197,7 +200,7 @@ diagnostics) just as when no environment is configured.
 
 **Stability.** `ty` is pre-1.0 and its LSP settings surface is undocumented
 for embedding; the schema above was verified against the `ty_server` source
-and the locally pinned `ty` (`0.0.23`) and is exercised by the
+and `ty` `0.0.23` (the dependency floor) and is exercised by the
 `ty_forwards_external_python_env` / `ty_invalid_python_env_fails_closed`
 integration tests. If a future `ty` changes or rejects this channel, the
 fail-closed behaviour means the fallback degrades to today's

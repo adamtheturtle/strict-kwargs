@@ -15,7 +15,7 @@ add(1, 2)  # strict-kwargs error: too many positional arguments
 
 ## Install
 
-From PyPI (recommended — [`ty`](https://docs.astral.sh/ty/) is pulled in automatically as a pinned dependency, so there is nothing else to install):
+From PyPI (recommended — [`ty`](https://docs.astral.sh/ty/) is pulled in automatically as a dependency, so there is nothing else to install):
 
 ```bash
 pip install strict-kwargs
@@ -144,7 +144,7 @@ For calls the built-in resolver cannot resolve without type inference — method
 A `ty server` (LSP) subprocess is driven to resolve the callee's definition, and the strict-kwargs rule is applied to it.
 This brings detection close to the mypy-strict-kwargs plugin for ordinary OO code.
 
-`ty` is a **hard requirement**, declared as a pinned dependency of the PyPI package so a `pip`/`uv` install brings it along.
+`ty` is a **hard requirement**, declared as a dependency of the PyPI package (`ty>=0.0.23`, the version the integration is verified against) so a `pip`/`uv` install brings it along.
 strict-kwargs looks for it next to its own binary first (where the wheel install places it — `uv tool install` does not put a dependency on `PATH`), then on `PATH` (for `cargo install` users, or an activated venv).
 If it cannot be found, or its language server cannot be started, strict-kwargs exits with an error (code 2) instead of silently degrading — that keeps results deterministic, so the same source can never resolve fewer calls just because the machine running it happens to lack `ty`.
 The server itself is still started **lazily** — only when a file has calls the built-in resolver could not resolve — so a fully-resolvable run does not pay ty's project-indexing startup cost.

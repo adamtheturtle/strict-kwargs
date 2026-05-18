@@ -4,9 +4,20 @@ Changelog
 Next
 ----
 
+- ``ty`` is now a hard requirement instead of an optional fallback. When
+  ``ty`` cannot be located (next to the ``strict-kwargs`` binary or on
+  ``PATH``) or its language server will not start, the run aborts with exit
+  code 2 instead of silently resolving fewer calls, so results are
+  deterministic across machines rather than depending on whether ``ty``
+  happens to be installed. ``ty`` is now declared as a PyPI dependency
+  (``ty>=0.0.23``, the version the integration is verified against), so a
+  ``pip``/``uv`` install brings it along automatically; ``cargo install``
+  users still install ``ty`` themselves. Per-call resolution still fails
+  closed (a miss, never a wrong diagnostic).
+
 - ``strict-kwargs fix`` no longer silently disagrees with ``check``
   (issue #42). It now runs the same detection — the built-in resolver
-  *and* the optional ``ty`` fallback — and accepts ``--python`` (mirroring
+  *and* the ``ty`` fallback — and accepts ``--python`` (mirroring
   ``check``) to steer that fallback. The rewrite stays conservative and, by
   design (issue #7), still never edits an overloaded, synthesized, or
   ``ty``-only-resolved call (a wrong parameter name would corrupt source,

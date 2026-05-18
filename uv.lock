@@ -199,7 +199,7 @@ release = [
 [package.metadata]
 requires-dist = [
     { name = "check-wheel-contents", marker = "extra == 'release'", specifier = "==0.6.3" },
-    { name = "ty", specifier = "==0.0.23" },
+    { name = "ty", specifier = ">=0.0.23" },
 ]
 provides-extras = ["release"]
 
