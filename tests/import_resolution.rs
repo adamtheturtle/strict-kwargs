@@ -742,6 +742,45 @@ Child(base=1, child=2)
 }
 
 #[test]
+fn dataclass_imported_base_checked_file_is_not_indexed_twice() {
+    let project = TestProject::new()
+        .file(
+            "app.py",
+            r"
+from dataclasses import dataclass
+from models import Base
+
+@dataclass
+class Child(Base):
+    child: int
+
+Child(1)
+Child(base=1, child=2)
+",
+        )
+        .file(
+            "models.py",
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    base: int
+",
+        );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:9:", "Too many positional"),
+        "checked imported dataclass base should be modeled once; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "duplicate indexing would make the constructor look overloaded; got: {messages:?}"
+    );
+}
+
+#[test]
 fn dataclass_constructor_inherits_fields_through_base_alias_assignment() {
     let project = TestProject::new()
         .dep(
