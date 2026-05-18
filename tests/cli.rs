@@ -76,12 +76,29 @@ impl Project {
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod strict-kwargs copy");
         }
+        // A freshly-copied executable can fail to exec with ETXTBSY ("Text
+        // file busy", raw OS error 26): in this multithreaded test binary
+        // another thread's `fork` may still hold a write fd to the copy when
+        // we `exec` it. It is transient — retry a few times before failing.
+        for _ in 0..19 {
+            let result = Command::new(&exe)
+                .args(args)
+                .current_dir(&self.root)
+                .env("PATH", path_dir)
+                .output();
+            match result {
+                Err(ref error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                other => return other.expect("spawn strict-kwargs"),
+            }
+        }
         Command::new(&exe)
             .args(args)
             .current_dir(&self.root)
             .env("PATH", path_dir)
             .output()
-            .expect("spawn strict-kwargs")
+            .expect("spawn strict-kwargs (after ETXTBSY retries)")
     }
 
     /// Run with no discoverable `ty` at all, so the required-backend probe
