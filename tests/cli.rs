@@ -259,6 +259,37 @@ fn non_utf8_file_is_skipped_with_warning_and_does_not_mask_others() {
     );
 }
 
+/// Issue #82: a non-UTF-8 file with no PEP 263 declaration must not abort a
+/// directory run or mask violations in sibling files even when the sibling's
+/// function has no type annotations (built-in-resolver-only path) and
+/// `--project-root` is passed explicitly.
+#[test]
+fn issue_82_undecodable_file_does_not_abort_directory_run() {
+    let project = Project::new();
+    std::fs::create_dir_all(project.root.join("dir")).expect("mkdir");
+    std::fs::write(
+        project.root.join("dir/ok.py"),
+        "def f(a, b): return a\nf(1, 2)\n",
+    )
+    .expect("write ok.py");
+    // Raw non-UTF-8 byte, no PEP 263 declaration — the exact case from #82.
+    std::fs::write(project.root.join("dir/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
+
+    let output = project.run(&["--project-root", ".", "dir"]);
+    let err = stderr(&output);
+    // Exit 1 (a real violation), not 2 (aborted).
+    assert_eq!(code(&output), 1, "stderr: {err}");
+    // ok.py:2's violation is still reported despite the stray sibling.
+    assert!(err.contains("ok.py"), "stderr: {err}");
+    // legacy.py is reported as a skipped-file warning, not a fatal error.
+    assert!(err.contains("warning: skipping"), "stderr: {err}");
+    assert!(err.contains("legacy.py"), "stderr: {err}");
+    assert!(
+        !err.contains("stream did not contain valid UTF-8"),
+        "stderr: {err}"
+    );
+}
+
 /// A run whose *only* input is undecodable is a warning, not a failure: the
 /// run proceeds, finds nothing, and exits 0 (issue #53).
 #[test]
@@ -332,6 +363,44 @@ fn check_nonexistent_path_is_fatal_exit_two() {
     assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
     assert!(err.contains("no such file or directory"), "stderr: {err}");
     assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
+}
+
+#[test]
+fn check_nonexistent_dir_is_fatal_exit_two() {
+    // A mistyped directory target must not report "clean" (exit 0); like a
+    // mistyped file it is a hard error (issue #84).
+    let project = Project::new();
+    let output = project.run(&["no_such_dir/"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("no_such_dir"), "stderr: {err}");
+}
+
+#[test]
+fn fix_nonexistent_path_is_fatal_exit_two() {
+    // A mistyped target passed to `fix` must not exit 0 silently (issue #84).
+    let project = Project::new();
+    let output = project.run(&["fix", "typo_does_not_exist.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
+}
+
+#[test]
+fn fix_nonexistent_dir_is_fatal_exit_two() {
+    // A mistyped directory target passed to `fix` must not exit 0 silently
+    // (issue #84).
+    let project = Project::new();
+    let output = project.run(&["fix", "no_such_dir/"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("no such file or directory"), "stderr: {err}");
+    assert!(err.contains("no_such_dir"), "stderr: {err}");
 }
 
 #[test]

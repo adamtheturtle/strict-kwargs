@@ -55,6 +55,13 @@ struct CheckArgs {
     /// system site-packages). Unset: ty's own auto-discovery is unchanged.
     #[arg(long, value_name = "PATH")]
     python: Option<PathBuf>,
+
+    /// Directory for the persistent on-disk diagnostic cache.  When set,
+    /// resolved results are stored here and reused on future runs where
+    /// the file and its environment are unchanged.  Omit to disable the
+    /// cache (every run is cold, the previous behaviour).
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -130,7 +137,13 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
     let python_env = resolve_python_env(args.python);
-    let diagnostics = check_paths(&project_root, &args.paths, &config, python_env.as_deref())?;
+    let diagnostics = check_paths(
+        &project_root,
+        &args.paths,
+        &config,
+        python_env.as_deref(),
+        args.cache_dir.as_deref(),
+    )?;
     let mut failed = false;
     for diagnostic in &diagnostics {
         eprintln!("{}", diagnostic.display_path());

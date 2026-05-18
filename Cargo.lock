@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "strict-kwargs"
-version = "2026.5.18-post.2"
+version = "2026.5.18-post.3"
 dependencies = [
  "clap",
  "codspeed-divan-compat",

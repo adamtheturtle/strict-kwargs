@@ -71,7 +71,7 @@ impl TestProject {
     /// diagnostics formatted as ``<filename>:<line>: <message>``.
     fn check(&self) -> Vec<String> {
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &self.paths, &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, &self.paths, &config, None, None).expect("check");
         diagnostics
             .iter()
             .map(|d| {

@@ -67,7 +67,7 @@ impl TestProject {
     fn check_main(&self) -> Vec<String> {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None).expect("check");
+        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
         diagnostics.iter().map(Diagnostic::message).collect()
     }
 }

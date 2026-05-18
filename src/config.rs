@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::error::CheckError;
 
 /// Resolved `[tool.strict_kwargs]` configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct Config {
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
