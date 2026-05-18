@@ -1770,6 +1770,32 @@ class Processor:
     );
 }
 
+/// Class method with *args and **kwargs: those parameters must be marked
+/// opaque so calls through them are never attributed to a same-named
+/// function (issue #71). Also exercises the vararg/kwarg branches in the
+/// class-method parameter registration code.
+#[test]
+fn callable_method_vararg_kwarg_parameters_not_flagged() {
+    assert_ok(
+        r"
+from typing import Any, Callable
+
+
+def process(*args: Any) -> None: ...
+
+
+class Handler:
+    def dispatch(
+        self,
+        process: Callable[..., None],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        process(*args, **kwargs)
+",
+    );
+}
+
 /// A real positional-argument violation through a local *function def* (not a
 /// parameter) must still be caught after the opaque-parameter fix (issue #71).
 #[test]
