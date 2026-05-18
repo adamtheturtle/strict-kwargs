@@ -16,6 +16,10 @@ Next
   front with a clear ``expression nesting too deep`` message and exit code
   2 instead of crashing.
 
+2026.5.18
+---------
+
+
 - Fix a false negative where a call in **decorator** position was never
   analyzed (issue #51). Decorator-factory calls with surplus positional
   arguments — ``@retry(3, 0.5)``, ``@functools.lru_cache(128)``,
