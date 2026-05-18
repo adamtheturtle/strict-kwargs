@@ -14,13 +14,11 @@
 //! 1. [`parse_module_guarded`] refuses to hand the recursive parser a file
 //!    nested deeper than [`MAX_NESTING_DEPTH`], returning
 //!    [`CheckError::TooDeeplyNested`] (exit 2) instead of crashing. It is
-//!    two-stage: a cheap byte count ([`open_bracket_bytes`]) is a sound upper
-//!    bound on real nesting, so all but pathological files are admitted
-//!    without tokenizing; only a file that count cannot clear pays the exact,
-//!    *non-recursive* lexer scan ([`max_nesting_depth`], safe at any depth).
-//!    Applied to the files the user asked to check; lazily-resolved
-//!    dependency stubs rely on guard 2 alone (re-scanning every stub purely
-//!    to depth-check it is pure overhead — they are not attacker-chosen).
+//!    two-stage: short files are admitted immediately, and otherwise a cheap
+//!    byte count ([`open_bracket_bytes`]) is a sound upper bound on real
+//!    nesting, so all but pathological files are admitted without tokenizing;
+//!    only a file that count cannot clear pays the exact, *non-recursive*
+//!    lexer scan ([`max_nesting_depth`], safe at any depth).
 //! 2. [`run_with_large_stack`] runs the whole analysis on a thread with a
 //!    large, explicit stack, so the depth that is *legitimately* handled is
 //!    high and identical across build profiles and platforms — in particular
@@ -106,14 +104,14 @@ fn max_nesting_depth(source: &str) -> usize {
 
 /// Parse a module, refusing input nested deeper than [`MAX_NESTING_DEPTH`].
 ///
-/// Two-stage so the common case stays cheap: [`open_bracket_bytes`] is a
-/// sound upper bound on real nesting, so a file within the limit by that
-/// cheap byte count provably cannot be too deep and skips the precise
-/// (full-tokenization) [`max_nesting_depth`] scan entirely. Only a file with
-/// more than [`MAX_NESTING_DEPTH`] bracket bytes — pathological, or a huge
-/// string of brackets — pays the exact scan, which alone decides rejection
-/// (so a shallow file with many bracket bytes inside string literals is *not*
-/// falsely rejected).
+/// Two-stage so the common case stays cheap: a source shorter than the limit
+/// cannot nest deeper than the limit, and [`open_bracket_bytes`] is a sound
+/// upper bound on real nesting for longer sources. Files cleared by either
+/// test skip the precise (full-tokenization) [`max_nesting_depth`] scan
+/// entirely. Only a file with more than [`MAX_NESTING_DEPTH`] bracket bytes —
+/// pathological, or a huge string of brackets — pays the exact scan, which
+/// alone decides rejection (so a shallow file with many bracket bytes inside
+/// string literals is *not* falsely rejected).
 ///
 /// # Errors
 ///
@@ -121,7 +119,7 @@ fn max_nesting_depth(source: &str) -> usize {
 /// the recursive parser is never reached), otherwise [`CheckError::Parse`] on
 /// a syntax error.
 pub fn parse_module_guarded(source: &str) -> Result<Parsed<ModModule>, CheckError> {
-    if open_bracket_bytes(source) > MAX_NESTING_DEPTH {
+    if source.len() > MAX_NESTING_DEPTH && open_bracket_bytes(source) > MAX_NESTING_DEPTH {
         let depth = max_nesting_depth(source);
         if depth > MAX_NESTING_DEPTH {
             return Err(CheckError::TooDeeplyNested {
