@@ -37,10 +37,10 @@ pub struct FileFix {
 ///
 /// `declined` is every violation the checker would report (built-in *and*
 /// `ty`-resolved) minus the ones rewritten: overloaded callees, synthesized
-/// constructors, and anything resolved only through the `ty` fallback (issue
-/// #7). Surfacing it makes `fix` then `check` predictable — a non-zero count
-/// is exactly what a subsequent `strict-kwargs` run (with the same
-/// `--python`) will still report (issue #42).
+/// constructors, ambiguous `ty` displays, and call-site unpacking that makes
+/// a rewrite unsafe. Surfacing it makes `fix` then `check` predictable — a
+/// non-zero count is exactly what a subsequent `strict-kwargs` run (with the
+/// same `--python`) will still report (issue #42).
 #[derive(Debug, Clone)]
 pub struct FixOutcome {
     /// Files the fixer would rewrite (empty when there is nothing to write).

@@ -5,7 +5,7 @@
 // integration-test crate (not `#[cfg(test)]`), so allow them here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use strict_kwargs::{check_paths, fix_paths, Config, Diagnostic};
 
@@ -98,6 +98,42 @@ fn assert_round_trips(source: &str) {
 /// The fixer must leave `source` untouched.
 fn assert_unchanged(source: &str) {
     assert_eq!(project(source).fixed_main(), source);
+}
+
+/// Locate the `site-packages` directory inside a freshly created venv
+/// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
+fn venv_site_packages(venv: &Path) -> Option<PathBuf> {
+    let win = venv.join("Lib").join("site-packages");
+    if win.is_dir() {
+        return Some(win);
+    }
+    for entry in std::fs::read_dir(venv.join("lib")).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("python") {
+            let sp = entry.path().join("site-packages");
+            if sp.is_dir() {
+                return Some(sp);
+            }
+        }
+    }
+    None
+}
+
+/// Create a real (pip-less, fast, offline) venv at `dir`. Returns `None` if
+/// no `python` is available so the test can skip rather than fail.
+fn make_venv(dir: &Path) -> Option<PathBuf> {
+    for py in ["python3", "python"] {
+        let ok = std::process::Command::new(py)
+            .args(["-m", "venv", "--without-pip"])
+            .arg(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
 }
 
 #[test]
@@ -222,10 +258,83 @@ fn fixes_builtins() {
 }
 
 #[test]
+fn fixes_ty_resolved_stdlib_single_signature() {
+    // Issue #94: stdlib calls that only ty resolves can be rewritten when
+    // ty's hover gives one concrete, fully named signature.
+    assert_fixed(
+        "import math\n\nmath.isclose(1.0, 2.0, 0.1)\n",
+        "import math\n\nmath.isclose(a=1.0, b=2.0, rel_tol=0.1)\n",
+    );
+}
+
+#[test]
+fn fixes_ty_resolved_inferred_receiver() {
+    // `p` is inferred from `Path.cwd()`, not from a direct constructor call
+    // the built-in resolver tracks. ty's bound-method hover maps the call-site
+    // argument directly to `suffix`.
+    assert_fixed(
+        "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n",
+        "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(suffix=\".txt\")\n",
+    );
+}
+
+#[test]
+fn fixes_ty_resolved_third_party_env_package() {
+    // A package that exists only in an external venv is resolved by ty via the
+    // forwarded `--python` environment, then safely rewritten from its single
+    // named hover signature.
+    let env_temp = tempfile::tempdir().expect("tempdir");
+    let Some(venv) = make_venv(&env_temp.path().join("ext-env")) else {
+        eprintln!("skipping: `python -m venv` unavailable");
+        return;
+    };
+    let Some(site) = venv_site_packages(&venv) else {
+        eprintln!("skipping: venv has no site-packages");
+        return;
+    };
+    let pkg = site.join("extdep");
+    std::fs::create_dir_all(&pkg).expect("mkdir pkg");
+    std::fs::write(pkg.join("py.typed"), "").expect("py.typed");
+    std::fs::write(
+        pkg.join("__init__.py"),
+        "def configure(host: str, port: int) -> tuple[str, int]:\n    return (host, port)\n",
+    )
+    .expect("pkg init");
+
+    let proj = project("import extdep\n\nextdep.configure(\"localhost\", 8080)\n");
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(
+        &proj.root,
+        std::slice::from_ref(&main),
+        &config,
+        Some(venv.as_path()),
+    )
+    .expect("fix");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(
+        outcome.files[0].fixed,
+        "import extdep\n\nextdep.configure(host=\"localhost\", port=8080)\n"
+    );
+}
+
+#[test]
 fn does_not_fix_overloaded_builtin() {
     // `str` is overloaded in typeshed: still flagged by the checker, but the
     // overload safety rule (not a builtins carve-out) keeps the fixer away.
     assert_unchanged("str(123)\n");
+}
+
+#[test]
+fn does_not_fix_ty_resolved_ambiguous_stdlib_hover() {
+    // `os.getenv` is still detected through ty, but its hover is not a single
+    // concrete signature that the fixer can safely map, so it remains
+    // declined and a following check will still report it.
+    let proj = project("import os\n\nos.getenv(\"PATH\", \"fallback\")\n");
+    let outcome = proj.fix_main_result().expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
 }
 
 #[test]

@@ -160,10 +160,13 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   (see *Forwarding an explicit environment* below) so the fallback can
   resolve third-party imports in environments ty would not auto-discover.
   Accepted by both `check` and `fix`.
-- **`fix` uses it for detection only**: `fix_paths` runs the same built-in +
-  ty detection as `check_paths` (same lazy start), but the *rewrite* stays
-  conservative — overloaded, synthesized, and ty-only-resolved calls are
-  never edited (issue #7; a wrong parameter name would corrupt source, cf.
+- **`fix` keeps the same conservative boundary**: `fix_paths` runs the same
+  built-in + ty detection as `check_paths` (same lazy start). Rewrites are
+  allowed only when the positional-to-keyword mapping is unambiguous: a
+  single built-in signature, or a `ty` hover with one concrete callable
+  signature and complete parameter names. Overloaded, synthesized,
+  ambiguous callable displays, goto-definition-only, and unpacked call sites
+  are declined (issue #7; a wrong parameter name would corrupt source, cf.
   issue #41). Running detection in full lets `fix` report a `declined`
   count equal to what a following `check` (same `--python`) still reports,
   so the two no longer silently disagree (issue #42).
