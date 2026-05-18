@@ -26,6 +26,7 @@ strict-kwargs --python .venv .  # point the ty fallback at an environment
 ```
 
 `fix` is conservative: it never rewrites a call it would not report, and leaves overloaded callees, `*args`/`**kwargs` unpacking, and `ty`-only-resolved calls untouched (reporting how many it declined).
+It only rewrites calls whose positional arguments can be mapped to keyword names unambiguously.
 `--python` accepts an interpreter, venv, or `sys.prefix` (mirrors `ty check --python`) for third-party packages outside an activated venv or `<project>/.venv`.
 A path that does not exist is a hard error (exit 2), like `ruff`, rather than a silent "clean" result; a nonexistent `--python` is reported on stderr and the run falls back to `ty`'s own environment discovery.
 
