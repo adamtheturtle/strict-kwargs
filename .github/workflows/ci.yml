@@ -16,6 +16,13 @@ on:
 
 permissions: {}
 
+# A new push to a PR cancels superseded in-progress runs instead of
+# queueing behind them. `main` pushes use the unique run id so post-merge
+# runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -31,6 +38,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.platform }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -80,6 +92,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codspeed
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6

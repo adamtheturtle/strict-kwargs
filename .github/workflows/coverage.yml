@@ -13,6 +13,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -26,6 +30,13 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: llvm-tools-preview
+
+      - name: Cache Rust build artifacts
+        # Instrumented nightly build — kept on its own key so it never
+        # thrashes the (uninstrumented, stable) `test`/`lint` caches.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
