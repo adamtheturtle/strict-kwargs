@@ -110,8 +110,19 @@ fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
         if path.is_file() && is_python_file(path) {
             files.push(path.clone());
         } else if path.is_dir() {
-            for entry in walkdir::WalkDir::new(path)
+            // Prune `.venv`/`.git`/`__pycache__`/dot-directories instead of
+            // descending into them and discarding their files one by one: a
+            // real project's virtualenv alone is tens of thousands of
+            // entries, so the unpruned walk dominated whole-project runtime
+            // and was the main run-to-run variance source (cold vs warm FS
+            // cache over ~50k entries). `is_ignored_path` below stays the
+            // authoritative filter, so the result set is unchanged — only
+            // directories every one of whose files it would reject are
+            // skipped, and never the walk root (depth 0).
+            let walk = walkdir::WalkDir::new(path)
                 .into_iter()
+                .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e));
+            for entry in walk
                 .filter_map(Result::ok)
                 .filter(|e| e.file_type().is_file())
             {
@@ -130,6 +141,18 @@ fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
 fn is_python_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext == "py" || ext == "pyi")
+}
+
+/// Whether `entry` is a directory that [`is_ignored_path`] would reject for
+/// every file beneath it (`.git`, `.venv` and other dot-directories,
+/// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
+/// lock-step with the component rule in [`is_ignored_path`].
+fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    name.starts_with('.') || name == "venv" || name == "__pycache__"
 }
 
 fn is_ignored_path(path: &Path) -> bool {
@@ -1480,8 +1503,26 @@ fn resolve_pending_with_ty(
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use super::{is_typing_special_form_constructor, strip_unbound_receiver, without_leading_self};
+    use super::{
+        is_ignored_path, is_typing_special_form_constructor, strip_unbound_receiver,
+        without_leading_self,
+    };
     use crate::signature::{Parameter, ParameterKind, Signature};
+    use std::path::Path;
+
+    #[test]
+    fn ignored_path_rejects_dot_venv_and_pycache_components() {
+        // A path is ignored iff some component is dot-prefixed, `venv`, or
+        // `__pycache__` — each arm of the rule, in turn. Directory walks now
+        // prune these trees before their files are tested, so this is the
+        // direct contract that keeps the explicit-file-path case correct.
+        assert!(is_ignored_path(Path::new(".venv/lib/python3.12/x.py")));
+        assert!(is_ignored_path(Path::new("pkg/venv/mod.py")));
+        assert!(is_ignored_path(Path::new("pkg/__pycache__/mod.py")));
+        // No special component anywhere: kept. Also exercises a non-`Normal`
+        // (root) component falling through to the catch-all arm.
+        assert!(!is_ignored_path(Path::new("/srv/app/src/pkg/mod.py")));
+    }
 
     #[test]
     fn exempts_typing_special_forms_in_every_resolved_form() {
