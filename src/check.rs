@@ -319,10 +319,10 @@ fn stream_scan_files(
     })
 }
 
-/// Like [`scan_files`], but also computes each file's [`plan_rewrite`] in the
-/// same parallel pass (the fixer's per-file CPU work). Excluded from the
-/// coverage gate for the same reason as [`scan_files`]; the rewrite decision
-/// itself stays in the gated [`plan_rewrite`].
+/// Like [`stream_scan_files`], but also computes each file's [`plan_rewrite`]
+/// in the same parallel pass (the fixer's per-file CPU work). Excluded from
+/// the coverage gate for the same reason as [`stream_scan_files`]; the rewrite
+/// decision itself stays in the gated [`plan_rewrite`].
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
     python_files: &[PathBuf],
