@@ -241,7 +241,7 @@ fn plan_rewrite(path: &Path, outcome: &ScanOutcome) -> Result<Option<String>, Ch
 /// — and every later phase — stays deterministic.
 ///
 /// Excluded from the coverage gate for the same reason as
-/// [`run_with_large_stack`](crate::limits::run_with_large_stack): the per-file
+/// [`run_with_large_stack`]: the per-file
 /// logic ([`scan_file`]) is a separate, fully gated function exercised by
 /// every integration test; what is excluded here is only the parallel-pool
 /// orchestration — the environment-only pool-construction failure and the
