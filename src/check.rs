@@ -1555,9 +1555,13 @@ fn resolve_pending_with_ty(
                 .clone()
         };
         let Some(target) = target else { continue };
-        // A too-deeply-nested resolution target is skipped like an unparsable
-        // one (best-effort signature lookup; never abort the run — issue #54).
-        let Ok(parsed) = parse_module_guarded(&target) else {
+        // A `ty` goto-definition target is a dependency/stub, not user input:
+        // the explicit nesting *rejection* (issue #54) is reserved for the
+        // files the user asked to check (re-tokenizing every resolved stub
+        // just to depth-check it is the #54 perf regression). Overflow safety
+        // here comes from the large analysis stack `run_with_large_stack`
+        // provides; a parse failure is a silent skip, as before.
+        let Ok(parsed) = parse_module(&target) else {
             continue;
         };
         let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {

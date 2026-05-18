@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
+use ruff_python_parser::parse_module;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
@@ -169,11 +170,15 @@ impl DefinitionIndex {
         if *query_budget == 0 {
             return;
         }
-        // A too-deeply-nested dependency module is skipped here exactly like
-        // an unparsable one: indexing it is best-effort, and failing the
-        // whole run because some imported library ships a pathological file
-        // would be wrong (issue #54).
-        let Ok(parsed) = parse_module_guarded(&m.source) else {
+        // Lazily-resolved dependency modules (stdlib stubs, builtins,
+        // third-party) are *not* depth-guarded: the explicit nesting
+        // rejection (issue #54) is scoped to the files the user asked to
+        // check, and re-tokenizing every resolved stub here purely to
+        // measure its depth is a large hot-path regression (#54 follow-up).
+        // Overflow safety for these still holds — the whole analysis runs on
+        // the large stack `run_with_large_stack` provides — and a parse
+        // failure is already a silent, fail-closed skip.
+        let Ok(parsed) = parse_module(&m.source) else {
             return;
         };
         *query_budget -= 1;

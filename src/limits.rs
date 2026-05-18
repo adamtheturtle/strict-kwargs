@@ -11,10 +11,16 @@
 //!
 //! Two independent guards make that a bounded, graceful failure instead:
 //!
-//! 1. [`parse_module_guarded`] measures the maximum bracket-nesting depth with
-//!    a *non-recursive* lexer pass (safe at any depth) and refuses to hand the
-//!    recursive parser anything deeper than [`MAX_NESTING_DEPTH`], returning
-//!    [`CheckError::TooDeeplyNested`] (exit 2) instead of crashing.
+//! 1. [`parse_module_guarded`] refuses to hand the recursive parser a file
+//!    nested deeper than [`MAX_NESTING_DEPTH`], returning
+//!    [`CheckError::TooDeeplyNested`] (exit 2) instead of crashing. It is
+//!    two-stage: a cheap byte count ([`open_bracket_bytes`]) is a sound upper
+//!    bound on real nesting, so all but pathological files are admitted
+//!    without tokenizing; only a file that count cannot clear pays the exact,
+//!    *non-recursive* lexer scan ([`max_nesting_depth`], safe at any depth).
+//!    Applied to the files the user asked to check; lazily-resolved
+//!    dependency stubs rely on guard 2 alone (re-scanning every stub purely
+//!    to depth-check it is pure overhead — they are not attacker-chosen).
 //! 2. [`run_with_large_stack`] runs the whole analysis on a thread with a
 //!    large, explicit stack, so the depth that is *legitimately* handled is
 //!    high and identical across build profiles and platforms — in particular
@@ -50,6 +56,24 @@ pub const MAX_NESTING_DEPTH: usize = 1000;
 /// thread/main stack.
 pub const STACK_SIZE: usize = 256 * 1024 * 1024;
 
+/// Number of `(`, `[` and `{` *bytes* in `source`.
+///
+/// A sound, cheap upper bound on the real maximum expression nesting depth:
+/// every nesting level opens one of these brackets, so the real depth can
+/// never exceed how many such bytes the file contains. Brackets inside string
+/// or comment content only *inflate* this count — they never reduce real
+/// nesting — so using it to *skip* the precise (lexer-based) scan is always
+/// safe. A plain byte scan (these are ASCII, so multi-byte UTF-8 sequences
+/// cannot collide) is far cheaper than tokenizing, which matters because this
+/// runs on every checked file (issue #54 performance follow-up).
+fn open_bracket_bytes(source: &str) -> usize {
+    source
+        .as_bytes()
+        .iter()
+        .filter(|&&byte| matches!(byte, b'(' | b'[' | b'{'))
+        .count()
+}
+
 /// Maximum depth of nested `()`, `[]` and `{}` in `source`.
 ///
 /// Driven by the lexer's `next_token`, which is an iterative state machine —
@@ -81,18 +105,29 @@ fn max_nesting_depth(source: &str) -> usize {
 
 /// Parse a module, refusing input nested deeper than [`MAX_NESTING_DEPTH`].
 ///
+/// Two-stage so the common case stays cheap: [`open_bracket_bytes`] is a
+/// sound upper bound on real nesting, so a file within the limit by that
+/// cheap byte count provably cannot be too deep and skips the precise
+/// (full-tokenization) [`max_nesting_depth`] scan entirely. Only a file with
+/// more than [`MAX_NESTING_DEPTH`] bracket bytes — pathological, or a huge
+/// string of brackets — pays the exact scan, which alone decides rejection
+/// (so a shallow file with many bracket bytes inside string literals is *not*
+/// falsely rejected).
+///
 /// # Errors
 ///
 /// [`CheckError::TooDeeplyNested`] if the source exceeds the nesting bound (so
 /// the recursive parser is never reached), otherwise [`CheckError::Parse`] on
 /// a syntax error.
 pub fn parse_module_guarded(source: &str) -> Result<Parsed<ModModule>, CheckError> {
-    let depth = max_nesting_depth(source);
-    if depth > MAX_NESTING_DEPTH {
-        return Err(CheckError::TooDeeplyNested {
-            depth,
-            limit: MAX_NESTING_DEPTH,
-        });
+    if open_bracket_bytes(source) > MAX_NESTING_DEPTH {
+        let depth = max_nesting_depth(source);
+        if depth > MAX_NESTING_DEPTH {
+            return Err(CheckError::TooDeeplyNested {
+                depth,
+                limit: MAX_NESTING_DEPTH,
+            });
+        }
     }
     Ok(parse_module(source)?)
 }
@@ -187,7 +222,21 @@ mod tests {
 
     #[test]
     fn shallow_source_parses_through_the_guard() {
+        // Few bracket bytes: the cheap pre-filter rules it in and the precise
+        // scan is skipped entirely.
         assert!(parse_module_guarded("def f(a):\n    return a\n").is_ok());
+    }
+
+    #[test]
+    fn many_bracket_bytes_in_a_string_are_not_falsely_rejected() {
+        // > `MAX_NESTING_DEPTH` `(` *bytes* so the cheap pre-filter cannot
+        // rule the file out, but they are all inside a string literal: real
+        // nesting is 0, so the precise scan must accept it (the byte count is
+        // only ever used to *skip* the scan, never to reject).
+        let src = format!("s = \"{}\"\n", "(".repeat(MAX_NESTING_DEPTH + 50));
+        assert!(open_bracket_bytes(&src) > MAX_NESTING_DEPTH);
+        assert_eq!(max_nesting_depth(&src), 0);
+        assert!(parse_module_guarded(&src).is_ok());
     }
 
     #[test]
