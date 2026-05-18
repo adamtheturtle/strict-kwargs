@@ -217,9 +217,9 @@ impl DefinitionIndex {
         let mut collected = Collected::default();
         collect(stmts, module_name, is_package, &mut collected);
         let mut query_budget = MAX_QUERY_MODULES;
-        for base in data_constructor_bases(stmts, module_name, &collected.bindings) {
-            if !same_module_or_nested(module_name, &base) {
-                self.ensure_for_data_constructor_base(&base, &mut query_budget);
+        for base in &collected.data_constructor_bases {
+            if !same_module_or_nested(module_name, base) {
+                self.ensure_for_data_constructor_base(base, &mut query_budget);
             }
         }
         let mut inner = self.lock();
@@ -533,6 +533,7 @@ const MODULE_BUDGET: usize = 4000;
 struct Collected {
     reexports: Vec<(String, String)>,
     bindings: FxHashMap<String, String>,
+    data_constructor_bases: Vec<String>,
 }
 
 pub fn build_index(
@@ -576,7 +577,15 @@ pub fn build_index(
 /// resolving relative imports against ``module_name``/``is_package``.
 fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collected) {
     let mut bindings: FxHashMap<String, String> = FxHashMap::default();
-    collect_scoped(stmts, module_name, is_package, true, &mut bindings, out);
+    collect_scoped(
+        stmts,
+        module_name,
+        module_name,
+        is_package,
+        true,
+        &mut bindings,
+        out,
+    );
     out.bindings = bindings;
 }
 
@@ -655,76 +664,22 @@ fn resolve_base_name(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn data_constructor_bases(
-    stmts: &[Stmt],
-    scope_name: &str,
-    bindings: &FxHashMap<String, String>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_data_constructor_bases(stmts, scope_name, bindings, &mut out);
-    out
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn collect_data_constructor_bases(
-    stmts: &[Stmt],
+fn collect_class_data_constructor_bases(
+    class_def: &ast::StmtClassDef,
     scope_name: &str,
     bindings: &FxHashMap<String, String>,
     out: &mut Vec<String>,
 ) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::ClassDef(class_def) => {
-                if dataclass_decorator(class_def).is_some() || is_namedtuple_class(class_def) {
-                    if let Some(arguments) = &class_def.arguments {
-                        out.extend(
-                            arguments
-                                .args
-                                .iter()
-                                .filter_map(|base| resolve_base_name(base, scope_name, bindings)),
-                        );
-                    }
-                }
-                let class_name = format!("{scope_name}.{}", class_def.name);
-                collect_data_constructor_bases(&class_def.body, &class_name, bindings, out);
-            }
-            Stmt::If(ast::StmtIf {
-                body,
-                elif_else_clauses,
-                ..
-            }) => {
-                collect_data_constructor_bases(body, scope_name, bindings, out);
-                for clause in elif_else_clauses {
-                    collect_data_constructor_bases(&clause.body, scope_name, bindings, out);
-                }
-            }
-            Stmt::While(ast::StmtWhile { body, .. })
-            | Stmt::For(ast::StmtFor { body, .. })
-            | Stmt::With(ast::StmtWith { body, .. }) => {
-                collect_data_constructor_bases(body, scope_name, bindings, out);
-            }
-            Stmt::Try(ast::StmtTry {
-                body,
-                handlers,
-                orelse,
-                finalbody,
-                ..
-            }) => {
-                collect_data_constructor_bases(body, scope_name, bindings, out);
-                for handler in handlers {
-                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    collect_data_constructor_bases(&handler.body, scope_name, bindings, out);
-                }
-                collect_data_constructor_bases(orelse, scope_name, bindings, out);
-                collect_data_constructor_bases(finalbody, scope_name, bindings, out);
-            }
-            Stmt::Match(ast::StmtMatch { cases, .. }) => {
-                for case in cases {
-                    collect_data_constructor_bases(&case.body, scope_name, bindings, out);
-                }
-            }
-            _ => {}
-        }
+    if dataclass_decorator(class_def).is_none() && !is_namedtuple_class(class_def) {
+        return;
+    }
+    if let Some(arguments) = &class_def.arguments {
+        out.extend(
+            arguments
+                .args
+                .iter()
+                .filter_map(|base| resolve_base_name(base, scope_name, bindings)),
+        );
     }
 }
 
@@ -737,6 +692,7 @@ fn collect_data_constructor_bases(
 fn collect_scoped(
     stmts: &[Stmt],
     module_name: &str,
+    scope_name: &str,
     is_package: bool,
     module_scope: bool,
     bindings: &mut FxHashMap<String, String>,
@@ -833,9 +789,34 @@ fn collect_scoped(
             }
             // Imports here bind in the function/class namespace, never the
             // module's, so descend with ``module_scope = false``.
-            Stmt::FunctionDef(ast::StmtFunctionDef { body, .. })
-            | Stmt::ClassDef(ast::StmtClassDef { body, .. }) => {
-                collect_scoped(body, module_name, is_package, false, bindings, out);
+            Stmt::FunctionDef(ast::StmtFunctionDef { body, .. }) => {
+                collect_scoped(
+                    body,
+                    module_name,
+                    scope_name,
+                    is_package,
+                    false,
+                    bindings,
+                    out,
+                );
+            }
+            Stmt::ClassDef(class_def) => {
+                collect_class_data_constructor_bases(
+                    class_def,
+                    scope_name,
+                    bindings,
+                    &mut out.data_constructor_bases,
+                );
+                let class_scope = format!("{scope_name}.{}", class_def.name);
+                collect_scoped(
+                    &class_def.body,
+                    module_name,
+                    &class_scope,
+                    is_package,
+                    false,
+                    bindings,
+                    out,
+                );
             }
             // Control flow does not introduce a scope: a module-level
             // ``if``/``try`` still re-exports (typeshed gates re-exports on
@@ -843,18 +824,35 @@ fn collect_scoped(
             Stmt::While(ast::StmtWhile { body, .. })
             | Stmt::For(ast::StmtFor { body, .. })
             | Stmt::With(ast::StmtWith { body, .. }) => {
-                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
+                collect_scoped(
+                    body,
+                    module_name,
+                    scope_name,
+                    is_package,
+                    module_scope,
+                    bindings,
+                    out,
+                );
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
+                collect_scoped(
+                    body,
+                    module_name,
+                    scope_name,
+                    is_package,
+                    module_scope,
+                    bindings,
+                    out,
+                );
                 for clause in elif_else_clauses {
                     collect_scoped(
                         &clause.body,
                         module_name,
+                        scope_name,
                         is_package,
                         module_scope,
                         bindings,
@@ -869,27 +867,58 @@ fn collect_scoped(
                 finalbody,
                 ..
             }) => {
-                collect_scoped(body, module_name, is_package, module_scope, bindings, out);
+                collect_scoped(
+                    body,
+                    module_name,
+                    scope_name,
+                    is_package,
+                    module_scope,
+                    bindings,
+                    out,
+                );
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
                     collect_scoped(
                         &handler.body,
                         module_name,
+                        scope_name,
                         is_package,
                         module_scope,
                         bindings,
                         out,
                     );
                 }
-                collect_scoped(orelse, module_name, is_package, module_scope, bindings, out);
                 collect_scoped(
-                    finalbody,
+                    orelse,
                     module_name,
+                    scope_name,
                     is_package,
                     module_scope,
                     bindings,
                     out,
                 );
+                collect_scoped(
+                    finalbody,
+                    module_name,
+                    scope_name,
+                    is_package,
+                    module_scope,
+                    bindings,
+                    out,
+                );
+            }
+            Stmt::Match(ast::StmtMatch { cases, .. }) => {
+                for case in cases {
+                    collect_scoped(
+                        &case.body,
+                        module_name,
+                        scope_name,
+                        is_package,
+                        module_scope,
+                        bindings,
+                        out,
+                    );
+                }
             }
             _ => {}
         }
