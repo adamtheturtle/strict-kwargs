@@ -1087,9 +1087,9 @@ impl<'a> CallChecker<'a> {
                     return None;
                 }
                 if let Some(resolved) = self.resolve_local(local) {
-                    let dunder_call = format!("{resolved}.__call__");
-                    if self.index.get(&dunder_call).is_some() {
-                        return Some(dunder_call);
+                    if self.binding_is_instance(local) {
+                        let dunder_call = format!("{resolved}.__call__");
+                        return self.index.get(&dunder_call).map(|_| dunder_call);
                     }
                     // Class name -> its constructor, if indexed.
                     return Some(self.callable_fullname(&resolved).unwrap_or(resolved));

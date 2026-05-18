@@ -169,6 +169,24 @@ fn rewrites_constructor_excluding_self() {
 }
 
 #[test]
+fn class_construction_prefers_init_over_instance_call() {
+    assert_fixed(
+        "class C:\n    def __init__(self, x: int) -> None: ...\n    def __call__(self, document: object) -> None: ...\nC(1)\n",
+        "class C:\n    def __init__(self, x: int) -> None: ...\n    def __call__(self, document: object) -> None: ...\nC(x=1)\n",
+    );
+}
+
+#[test]
+fn list_subclass_construction_does_not_use_instance_call_signature() {
+    assert_unchanged("class C(list):\n    def __call__(self, document):\n        pass\n\nC([])\n");
+}
+
+#[test]
+fn instance_call_without_dunder_call_does_not_use_constructor_signature() {
+    assert_unchanged("class C:\n    def __init__(self, x: int) -> None: ...\n\nc = C(x=1)\nc(2)\n");
+}
+
+#[test]
 fn rewrites_method_excluding_self() {
     assert_fixed(
         "class C:\n    def m(self, a: int, b: int) -> None: ...\nc = C()\nc.m(1, 2)\n",
