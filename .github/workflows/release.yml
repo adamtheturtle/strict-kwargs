@@ -294,3 +294,32 @@ jobs:
           verbose: true
           packages-dir: dist/
           skip-existing: true
+
+  trigger-mirror:
+    name: Trigger strict-kwargs-pre-commit mirror
+    needs: [release, publish-pypi-release, publish-pypi]
+    if: >-
+      always() &&
+      (needs.publish-pypi-release.result == 'success' ||
+       needs.publish-pypi.result == 'success')
+    runs-on: ubuntu-latest
+
+    permissions: {}
+
+    steps:
+      - name: Dispatch to strict-kwargs-pre-commit
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
+          NORMAL_PATH: ${{ needs.publish-pypi-release.result == 'success' }}
+        run: |
+          if [ "$NORMAL_PATH" = "true" ]; then
+            version="$RELEASE_TAG"
+          else
+            version="$INPUT_TAG"
+          fi
+          gh api repos/adamtheturtle/strict-kwargs-pre-commit/dispatches \
+            --method POST \
+            -f event_type=strict-kwargs-released \
+            -F "client_payload={\"version\":\"${version}\"}"
