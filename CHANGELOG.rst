@@ -4,6 +4,26 @@ Changelog
 Next
 ----
 
+- Whole-project and directory runs are faster (issue #46). The per-file
+  built-in pass (read, parse, AST walk) now runs in parallel across files
+  instead of sequentially — on a multicore machine it is the bulk of
+  whole-project runtime once ignored directories are pruned. The ``ty``
+  fallback still runs serially against a single shared server, and output
+  is byte-identical and deterministic regardless of how the work is
+  scheduled.
+
+- A deeply nested file no longer crashes the process with a stack
+  overflow (issue #54). ``f(f(f(…f(1)…)))`` thousands of levels deep —
+  machine-generated code, a huge data literal, or hostile input — used to
+  abort the whole run with ``SIGABRT`` (exit 134), taking every other file
+  in a directory or pre-commit run down with it; the vendored Ruff parser
+  fork enforces no recursion limit. The analysis now runs on a large
+  dedicated stack so legitimate deep nesting is handled identically across
+  platforms and build profiles (rather than depending on the host's default
+  stack), and a file nested deeper than the supported limit is rejected up
+  front with a clear ``expression nesting too deep`` message and exit code
+  2 instead of crashing.
+
 - Operational errors are no longer silently swallowed (issue #55).
   Previously a mistyped path made the run report "clean" (exit 0), a
   malformed or wrong-typed ``[tool.strict_kwargs]`` was ignored and the run
