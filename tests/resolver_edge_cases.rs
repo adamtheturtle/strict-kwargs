@@ -300,6 +300,92 @@ o.factory()(1, 2)
     assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
 }
 
+/// An instance assignment inside an `if` in a function body must still run the
+/// custom assignment visitor. Otherwise the later method call cannot resolve
+/// through the local instance binding.
+#[test]
+fn instance_assigned_inside_function_if_body_is_tracked() {
+    let messages = check_source(
+        r"
+class Widget:
+    def method(self, a, b): ...
+
+
+def caller() -> None:
+    if True:
+        widget = Widget()
+        widget.method(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "Too many positional"),
+        "method call through if-local instance must be flagged, got: {messages:?}"
+    );
+}
+
+/// Annotated instance assignments take the same custom visitor path as plain
+/// assignments; this must also happen inside function-local `if` bodies.
+#[test]
+fn annotated_instance_assigned_inside_function_if_body_is_tracked() {
+    let messages = check_source(
+        r"
+class Widget:
+    def method(self, a, b): ...
+
+
+def caller() -> None:
+    if True:
+        widget: Widget = Widget()
+        widget.method(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "Too many positional"),
+        "method call through annotated if-local instance must be flagged, got: {messages:?}"
+    );
+}
+
+/// A function definition inside an `if` in a function body must still be
+/// registered in the local scope before calls in the same branch are checked.
+#[test]
+fn function_defined_inside_function_if_body_is_registered() {
+    let messages = check_source(
+        r"
+def caller() -> None:
+    if True:
+        def inner(a, b):
+            ...
+
+        inner(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "Too many positional"),
+        "call to if-local nested function must be flagged, got: {messages:?}"
+    );
+}
+
+/// A class definition inside an `if` in a function body is also a local
+/// definition that later calls in the branch should resolve.
+#[test]
+fn class_defined_inside_function_if_body_is_registered() {
+    let messages = check_source(
+        r"
+def caller() -> None:
+    if True:
+        class Local:
+            def __init__(self, a, b):
+                ...
+
+        Local(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "Too many positional"),
+        "call to if-local nested class must be flagged, got: {messages:?}"
+    );
+}
+
 /// A call to a `*args` function with more positionals than the named
 /// parameters is legal — `*args` absorbs the surplus, so it is not flagged
 /// (exercises the var-positional short-circuit in the limit check).
