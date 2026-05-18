@@ -690,6 +690,12 @@ impl<'a> CallChecker<'a> {
             self.record_ty_pending(call);
             return;
         };
+        // Functions whose first argument must stay positional at runtime
+        // (e.g. @singledispatch dispatches on args[0].__class__): skip
+        // without deferring to ty.
+        if self.index.is_excluded(&callee_fullname) {
+            return;
+        }
         let Some(signatures) = self.index.get(&callee_fullname) else {
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.

@@ -132,6 +132,20 @@ const REEXPORT_LEAVES: usize = 40;
 /// Functions defined per leaf module (each a positional call target).
 const REEXPORT_FUNCS_PER_LEAF: usize = 8;
 
+/// Number of packages in the whole-project fixture (issue #69). Each package
+/// contributes `WHOLE_PROJECT_MODS_PER_PKG` independent modules; the flat fan-
+/// out means every file in a package can be processed without waiting for any
+/// sibling, maximising rayon utilisation in Phase 1.
+const WHOLE_PROJECT_PKGS: usize = 4;
+/// Independent modules per package. Total file count is
+/// `WHOLE_PROJECT_PKGS × WHOLE_PROJECT_MODS_PER_PKG + 1` (the `app.py` entry
+/// point). Chosen so the whole-project wall-clock is large enough to expose
+/// variance without making CI noticeably slower.
+const WHOLE_PROJECT_MODS_PER_PKG: usize = 25;
+/// Call-site variants per module (plain, keyword-only, default-bearing). More
+/// patterns means the checker's visitor code is exercised more thoroughly.
+const WHOLE_PROJECT_FUNCS_PER_MOD: usize = 5;
+
 /// A deterministic first-party project whose package root re-exports a wide,
 /// chained `import *` web — `pkg/__init__` ← `pkg.api` ← `pkg.agg` ←
 /// `pkg.leaf_000 … leaf_039`, with `app.py` calling every leaf function
@@ -204,6 +218,106 @@ fn reexport_hub_project() -> &'static Path {
         .path()
 }
 
+/// A deterministic whole-project directory (issue #69): `WHOLE_PROJECT_PKGS`
+/// packages of `WHOLE_PROJECT_MODS_PER_PKG` independent modules each, plus a
+/// top-level `app.py` entry point that imports and calls every function.
+///
+/// The modules within each package share no imports — every file in a package
+/// is an independent unit of work — so rayon can process the entire package in
+/// parallel during Phase 1 (the built-in pass). The `app.py` calls span all
+/// packages, so the index walk exercises cross-package resolution too.
+///
+/// Every call is resolvable by the built-in resolver (project code only, no
+/// third-party deps), so the `ty server` subprocess is never started and the
+/// measured numbers are the deterministic Phase-1 (parallel built-in pass)
+/// hot path — exactly what issue #46 / #70 targeted and what issue #69 asks to
+/// track over time. Generated once and reused (read-only).
+fn whole_project_dir() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create whole-project fixture tempdir");
+            let root = temp.path();
+            std::fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"whole-project-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write pyproject.toml");
+
+            // Generate WHOLE_PROJECT_PKGS independent packages.
+            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
+                let pkg_name = format!("pkg_{pkg_idx}");
+                let pkg_dir = root.join(&pkg_name);
+                std::fs::create_dir_all(&pkg_dir).expect("create package dir");
+                std::fs::write(pkg_dir.join("__init__.py"), "")
+                    .expect("write package __init__.py");
+
+                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
+                    let mut src =
+                        format!("\"\"\"Generated module p{pkg_idx}m{mod_idx}.\"\"\"\n\n");
+                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
+                        // Vary the signature shape so the checker visits
+                        // different ParameterKind combinations.
+                        match func_idx % 3 {
+                            0 => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(alpha: int, beta: int, gamma: int = 0) -> int:\n    return alpha + beta + gamma\n"
+                            ),
+                            1 => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(x: str, y: str) -> str:\n    return x + y\n"
+                            ),
+                            _ => writeln!(
+                                src,
+                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(n: int) -> int:\n    return n\n"
+                            ),
+                        }
+                        .expect("format function def");
+                    }
+                    std::fs::write(
+                        pkg_dir.join(format!("mod_{mod_idx:03}.py")),
+                        src,
+                    )
+                    .expect("write generated module");
+                }
+            }
+
+            // app.py: import every function and call it positionally (so every
+            // call site is a potential violation the checker must evaluate).
+            let mut app =
+                String::from("\"\"\"Entry point that exercises every package.\"\"\"\n\n");
+            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
+                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
+                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
+                        let pkg = format!("pkg_{pkg_idx}");
+                        let mod_ = format!("mod_{mod_idx:03}");
+                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                        writeln!(app, "from {pkg}.{mod_} import {func}")
+                            .expect("format import");
+                    }
+                }
+            }
+            app.push('\n');
+            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
+                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
+                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
+                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                        match func_idx % 3 {
+                            0 => writeln!(app, "{func}(1, 2, 3)"),
+                            1 => writeln!(app, "{func}(\"a\", \"b\")"),
+                            _ => writeln!(app, "{func}(42)"),
+                        }
+                        .expect("format call");
+                    }
+                }
+            }
+            std::fs::write(root.join("app.py"), app).expect("write app.py");
+
+            temp
+        })
+        .path()
+}
+
 #[divan::bench]
 fn leaf() -> usize {
     check(&fixture_dir("leaf"))
@@ -231,6 +345,15 @@ fn first_party_closure() -> usize {
 #[divan::bench]
 fn reexport_closure() -> usize {
     check(reexport_hub_project())
+}
+
+/// Whole-project directory run (issue #69): tracks the post-parallelisation
+/// Phase-1 baseline across the full parse / index / walk / resolve pipeline
+/// over a multi-package project. A regression in directory-run time (or a
+/// return of high variance) shows up here rather than being noticed manually.
+#[divan::bench]
+fn whole_project() -> usize {
+    check(whole_project_dir())
 }
 
 /// The auto-fixer shares the index/parse/walk path with `check` and now runs

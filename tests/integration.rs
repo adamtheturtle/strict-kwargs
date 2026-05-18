@@ -1640,6 +1640,60 @@ def d(): ...
     );
 }
 
+// --- @singledispatch / @singledispatchmethod ---
+
+#[test]
+fn singledispatch_positional_not_flagged() {
+    // Calls to @singledispatch functions must not be flagged: the dispatch
+    // mechanism reads args[0].__class__, so the first argument must stay
+    // positional. Bare-name import form.
+    assert_ok(
+        r"
+from functools import singledispatch
+
+@singledispatch
+def process(node):
+    ...
+
+process(42)
+",
+    );
+}
+
+#[test]
+fn singledispatch_qualified_not_flagged() {
+    // Qualified attribute form: `functools.singledispatch`.
+    assert_ok(
+        r"
+import functools
+
+@functools.singledispatch
+def process(node):
+    ...
+
+process(42)
+",
+    );
+}
+
+#[test]
+fn singledispatchmethod_not_flagged() {
+    // @singledispatchmethod on a class method must not be flagged.
+    assert_ok(
+        r"
+from functools import singledispatchmethod
+
+class C:
+    @singledispatchmethod
+    def process(self, node):
+        ...
+
+c = C()
+c.process(42)
+",
+    );
+}
+
 // --- issue #71: false positives from Callable parameters / unbound locals ---
 
 /// A call through a `Callable`-typed parameter must not be attributed to a

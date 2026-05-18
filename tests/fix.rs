@@ -478,3 +478,12 @@ fn rewrites_method_decorator_factory_call() {
         "def tag(a: int, b: int):\n    def w(fn): return fn\n    return w\n\nclass C:\n    @tag(a=1, b=2)\n    def m(self): ...\n",
     );
 }
+
+#[test]
+fn singledispatch_call_not_rewritten() {
+    // @singledispatch dispatches on args[0].__class__; converting the first
+    // positional arg to keyword form breaks runtime dispatch.
+    assert_unchanged(
+        "from functools import singledispatch\n\n@singledispatch\ndef process(node):\n    ...\n\nprocess(42)\n",
+    );
+}
