@@ -367,7 +367,7 @@ D(1, 2)
 /// Assigning / annotating a constructor result onto an *attribute* target
 /// (`h.attr = C()`, `h.attr2: C = C()`) is not a name binding, so no
 /// instance is recorded — the non-`Name` target branches are taken and the
-/// run does not panic or mis-resolve.
+/// run neither panics nor resolves to the wrong target.
 #[test]
 fn constructor_assigned_to_attribute_target_records_no_instance() {
     let messages = check_source(
