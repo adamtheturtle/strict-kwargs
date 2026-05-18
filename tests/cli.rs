@@ -512,7 +512,10 @@ fn fix_accepts_python_flag() {
 fn fix_elif_test_call_is_rewritten_exactly_once() {
     // Regression: the ruff visitor walked `elif` test expressions twice,
     // causing the fixer to insert `name=` twice and produce `name=name=value`
-    // which fails to parse. Verify the rewrite is applied exactly once.
+    // which fails to parse. Verify the rewrite is applied exactly once, and
+    // that calls in `elif` bodies and `else` bodies are also rewritten (the
+    // `else` clause has no test, exercising the `None` arm of the
+    // `if let Some(clause_test)` branch in the `Stmt::If` handler).
     let source = "\
 def f(a: int) -> None: ...
 
@@ -520,7 +523,9 @@ x = True
 if x:
     pass
 elif f(1):
-    pass
+    f(2)
+else:
+    f(3)
 ";
     let project = Project::new().write("main.py", source);
     let output = project.run(&["fix", "main.py"]);
@@ -534,7 +539,9 @@ x = True
 if x:
     pass
 elif f(a=1):
-    pass
+    f(a=2)
+else:
+    f(a=3)
 "
     );
 }
