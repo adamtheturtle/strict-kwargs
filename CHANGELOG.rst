@@ -4,6 +4,15 @@ Changelog
 Next
 ----
 
+- Fix ``strict-kwargs fix`` corrupting source on a redundantly
+  parenthesized argument (issue #41). The Ruff parser drops redundant
+  parentheses, so ``f((1), (2))`` used to rewrite to the unparsable
+  ``f((a=1), (b=2))``; the ``name=`` prefix now lands *before* the
+  parentheses (``f(a=(1), b=(2))``), so the result parses and the fix is
+  idempotent. As an independent fail-safe, the rewritten module is parsed
+  before anything is written: if it would not parse, the run aborts with a
+  clear message and every file is left untouched rather than corrupted.
+
 - Performance: a file importing a heavy third-party package
   (``numpy``/``torch``/``scipy``/``PIL``) is now checked in milliseconds
   instead of timing out (issue #39, follow-up to #31/#36). The eager
