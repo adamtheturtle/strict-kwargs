@@ -7,6 +7,8 @@
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
+use owo_colors::OwoColorize as _;
+
 /// A single source insertion: `text` is spliced in at byte offset `at`.
 ///
 /// The fixer only ever *inserts* (`name=` before an argument), so it never
@@ -66,8 +68,12 @@ pub fn apply_insertions(source: &str, insertions: &[Insertion]) -> String {
 /// The fixer never adds or removes newlines, so the two share a line count and
 /// every change is an in-place line modification — that lets us pair lines by
 /// index instead of running a full diff algorithm.
+///
+/// When `color` is `true`, removal lines are red, addition lines are green, and
+/// hunk headers are bold — suitable for a terminal that supports ANSI codes.
+/// Pass `false` when stdout is not a TTY or when `NO_COLOR` is set.
 #[must_use]
-pub fn unified_diff(path: &Path, original: &str, fixed: &str) -> String {
+pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> String {
     const CONTEXT: usize = 3;
 
     let before: Vec<&str> = original.split('\n').collect();
@@ -89,18 +95,40 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str) -> String {
     }
 
     let display = path.display();
-    let mut lines: Vec<String> = vec![format!("--- a/{display}"), format!("+++ b/{display}")];
+    let mut lines: Vec<String> = if color {
+        vec![
+            format!("{}", format!("--- a/{display}").bold()),
+            format!("{}", format!("+++ b/{display}").bold()),
+        ]
+    } else {
+        vec![format!("--- a/{display}"), format!("+++ b/{display}")]
+    };
     for (first, last) in groups {
         let start = first.saturating_sub(CONTEXT);
         let end = (last + CONTEXT).min(line_count - 1);
         let len = end - start + 1;
-        lines.push(format!("@@ -{0},{len} +{0},{len} @@", start + 1));
+        let hunk = format!("@@ -{0},{len} +{0},{len} @@", start + 1);
+        lines.push(if color {
+            format!("{}", hunk.bold())
+        } else {
+            hunk
+        });
         for i in start..=end {
             if before[i] == after[i] {
                 lines.push(format!(" {}", before[i]));
             } else {
-                lines.push(format!("-{}", before[i]));
-                lines.push(format!("+{}", after[i]));
+                let removal = format!("-{}", before[i]);
+                let addition = format!("+{}", after[i]);
+                lines.push(if color {
+                    format!("{}", removal.red())
+                } else {
+                    removal
+                });
+                lines.push(if color {
+                    format!("{}", addition.green())
+                } else {
+                    addition
+                });
             }
         }
     }
@@ -135,14 +163,14 @@ mod tests {
     #[test]
     fn unified_diff_empty_when_unchanged() {
         let path = Path::new("m.py");
-        assert!(unified_diff(path, "a\nb\n", "a\nb\n").is_empty());
+        assert!(unified_diff(path, "a\nb\n", "a\nb\n", false).is_empty());
     }
 
     #[test]
     fn unified_diff_single_hunk_with_context_clamped() {
         let original = "l1\nl2\nf(a)\nl4\nl5\n";
         let fixed = "l1\nl2\nf(x=a)\nl4\nl5\n";
-        let diff = unified_diff(Path::new("pkg/m.py"), original, fixed);
+        let diff = unified_diff(Path::new("pkg/m.py"), original, fixed, false);
         assert_eq!(
             diff,
             "--- a/pkg/m.py\n\
@@ -166,7 +194,7 @@ mod tests {
         // Two changed lines 4 apart: within `2*CONTEXT+1`, so one hunk.
         let original = "c0\nc1\nA\nc3\nc4\nB\nc6\nc7\n";
         let fixed = "c0\nc1\nA1\nc3\nc4\nB1\nc6\nc7\n";
-        let diff = unified_diff(Path::new("m.py"), original, fixed);
+        let diff = unified_diff(Path::new("m.py"), original, fixed, false);
         assert_eq!(diff.matches("@@").count(), 2); // one hunk header (`@@ ... @@`)
         assert!(diff.contains("-A\n+A1\n"));
         assert!(diff.contains("-B\n+B1\n"));
@@ -180,7 +208,7 @@ mod tests {
         }
         before.push_str("Y\n");
         let after = before.replace("X\n", "X1\n").replace("Y\n", "Y1\n");
-        let diff = unified_diff(Path::new("m.py"), &before, &after);
+        let diff = unified_diff(Path::new("m.py"), &before, &after, false);
         // Two separate hunks => two `@@ ... @@` headers.
         assert_eq!(diff.matches("@@ -").count(), 2);
         assert!(diff.contains("-X\n+X1\n"));

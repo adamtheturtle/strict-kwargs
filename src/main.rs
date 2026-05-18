@@ -12,6 +12,7 @@
 // (nightly) identical. See `lib.rs` for the library-crate rationale.
 #![cfg_attr(all(coverage, test), feature(coverage_attribute))]
 
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -173,8 +174,12 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     }
 
     if args.diff {
+        let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
         for fix in fixes {
-            print!("{}", unified_diff(&fix.path, &fix.original, &fix.fixed));
+            print!(
+                "{}",
+                unified_diff(&fix.path, &fix.original, &fix.fixed, color)
+            );
         }
         report_declined(outcome.declined);
         return Ok(ExitCode::from(0));
