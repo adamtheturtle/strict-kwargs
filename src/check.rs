@@ -2284,8 +2284,8 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, strip_unbound_receiver,
-        without_leading_self,
+        is_ignored_path, is_typing_special_form_constructor, record_ty_fix, strip_unbound_receiver,
+        without_leading_self, PendingTy, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2420,6 +2420,51 @@ mod tests {
         assert!(s.parameters.is_empty());
         assert_eq!(count, 0);
         assert!(stripped);
+    }
+
+    #[test]
+    fn ty_fix_recording_decline_branches_are_explicit() {
+        let pending = PendingTy {
+            callee_offset: 0,
+            call_start: 0,
+            positional_count: 1,
+        };
+        let named = sig(&["a"]);
+
+        // `check_paths` passes no fix context. The ty path still considers
+        // the violation, but rewrite recording must be a no-op.
+        let mut no_fix_context = None;
+        record_ty_fix(
+            &mut no_fix_context,
+            "f(1)\n",
+            &pending,
+            "ty.f",
+            &named,
+            0,
+            1,
+            false,
+        );
+
+        // A fix run may also have a context but an unsafe signature mapping
+        // (for example an unnamed parameter). It remains declined without
+        // recording a call or insertion.
+        let unnamed = Signature {
+            parameters: vec![Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        };
+        let mut insertions = Vec::new();
+        let mut fixed_calls = 0usize;
+        let mut fixes = Some(TyFixes {
+            insertions: &mut insertions,
+            fixed_calls: &mut fixed_calls,
+        });
+        record_ty_fix(
+            &mut fixes, "f(1)\n", &pending, "ty.f", &unnamed, 0, 1, false,
+        );
+        assert!(insertions.is_empty());
+        assert_eq!(fixed_calls, 0);
     }
 
     // ----- ty goto-definition resolution internals --------------------
