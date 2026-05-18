@@ -4,6 +4,14 @@ Changelog
 Next
 ----
 
+- Whole-project and directory runs are faster (issue #46). The per-file
+  built-in pass (read, parse, AST walk) now runs in parallel across files
+  instead of sequentially — on a multicore machine it is the bulk of
+  whole-project runtime once ignored directories are pruned. The ``ty``
+  fallback still runs serially against a single shared server, and output
+  is byte-identical and deterministic regardless of how the work is
+  scheduled.
+
 - A deeply nested file no longer crashes the process with a stack
   overflow (issue #54). ``f(f(f(…f(1)…)))`` thousands of levels deep —
   machine-generated code, a huge data literal, or hostile input — used to

@@ -1,8 +1,7 @@
 //! Index of callable definitions discovered in the project.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
@@ -58,7 +57,8 @@ impl Store {
 }
 
 /// Mutable state shared between the eager construction pass and the lazy
-/// per-query resolution (the latter only has `&self`, hence the `RefCell`).
+/// per-query resolution (the latter only has `&self`, hence the interior
+/// `Mutex` — see [`DefinitionIndex::lock`]).
 #[derive(Debug, Default)]
 struct Inner {
     store: Store,
@@ -85,25 +85,38 @@ struct Inner {
     /// Memoizes [`DefinitionIndex::get`] (including resolved-to-`None`), so a
     /// name queried repeatedly across the file walk is chased through the
     /// edge graph at most once.
-    cache: FxHashMap<String, Option<Rc<[Signature]>>>,
+    cache: FxHashMap<String, Option<Arc<[Signature]>>>,
 }
 
 pub struct DefinitionIndex {
     /// Resolves a dotted module name to source. `None` in unit tests that
     /// drive the edge/signature logic directly (no module resolution).
     resolver: Option<ModuleResolver>,
-    inner: RefCell<Inner>,
+    inner: Mutex<Inner>,
 }
 
 impl DefinitionIndex {
     fn new(resolver: ModuleResolver) -> Self {
         Self {
             resolver: Some(resolver),
-            inner: RefCell::new(Inner {
+            inner: Mutex::new(Inner {
                 budget: MODULE_BUDGET,
                 ..Inner::default()
             }),
         }
+    }
+
+    /// Lock the shared inner state. The whole-project run scans files in
+    /// parallel (issue #46) and they share this one demand-driven index, so
+    /// access is serialized here. A poisoned lock (a worker panicked while
+    /// holding it) still yields the data: `Inner` is a pure memoization cache
+    /// over deterministic resolution, so a half-updated entry is at worst a
+    /// redundant re-resolve, never unsoundness — strictly better than turning
+    /// every other worker's access into a panic. Every hold is short (a map
+    /// lookup/insert); the one longer hold, `ensure_module`'s parse, is
+    /// memoized so it happens at most once per module across the whole run.
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Record re-export edges into the by-destination index, dropping no-ops
@@ -123,9 +136,13 @@ impl DefinitionIndex {
     fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
         let mut collected = Collected::default();
         collect(stmts, module_name, is_package, &mut collected);
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.lock();
         index_module(&mut inner.store, module_name, stmts);
         Self::push_edges(&mut inner, collected.reexports);
+        // Release before returning so a parallel worker's next query does not
+        // wait on a guard the borrow checker would otherwise hold to scope
+        // end (clippy::significant_drop_tightening).
+        drop(inner);
     }
 
     /// Resolve, parse and index `dotted` if not already done. Memoized
@@ -150,7 +167,7 @@ impl DefinitionIndex {
     #[cfg_attr(coverage, coverage(off))]
     fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
         {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.lock();
             if !inner.indexed.insert(dotted.to_string()) {
                 return;
             }
@@ -182,7 +199,7 @@ impl DefinitionIndex {
             return;
         };
         *query_budget -= 1;
-        self.inner.borrow_mut().budget -= 1;
+        self.lock().budget -= 1;
         self.index_source(dotted, m.is_package, parsed.suite());
     }
 
@@ -203,16 +220,21 @@ impl DefinitionIndex {
     /// Resolve `fullname` to its signatures, following re-export edges
     /// backwards on demand. A real definition always wins; aliases are only
     /// consulted when no definition is bound under the queried name. Memoized.
-    pub fn get(&self, fullname: &str) -> Option<Rc<[Signature]>> {
-        if let Some(hit) = self.inner.borrow().cache.get(fullname) {
-            return hit.clone();
+    pub fn get(&self, fullname: &str) -> Option<Arc<[Signature]>> {
+        // Scope the guard so it is released before `resolve_alias` (which
+        // re-locks): holding it across that call would self-deadlock the
+        // `Mutex`, where the old `RefCell` merely panicked.
+        {
+            let inner = self.lock();
+            if let Some(hit) = inner.cache.get(fullname) {
+                return hit.clone();
+            }
         }
         let mut visited = FxHashSet::default();
         let mut query_budget = MAX_QUERY_MODULES;
         let mut steps = MAX_QUERY_STEPS;
         let resolved = self.resolve_alias(fullname, &mut visited, 0, &mut query_budget, &mut steps);
-        self.inner
-            .borrow_mut()
+        self.lock()
             .cache
             .insert(fullname.to_string(), resolved.clone());
         resolved
@@ -249,20 +271,22 @@ impl DefinitionIndex {
         depth: usize,
         query_budget: &mut usize,
         steps: &mut usize,
-    ) -> Option<Rc<[Signature]>> {
+    ) -> Option<Arc<[Signature]>> {
         if Self::resolution_exhausted(*steps, depth) {
             return None;
         }
         *steps -= 1;
         self.ensure_for(name, query_budget);
-        if let Some(sigs) = self
-            .inner
-            .borrow()
+        // Materialize the lookup into an owned value so the guard is dropped
+        // (end of this statement) before the recursive `resolve_alias` calls
+        // below, which re-lock.
+        let direct = self
+            .lock()
             .store
             .signatures
             .get(name)
-            .map(|v| Rc::<[Signature]>::from(v.as_slice()))
-        {
+            .map(|v| Arc::<[Signature]>::from(v.as_slice()));
+        if let Some(sigs) = direct {
             return Some(sigs);
         }
         // Cycle guard: a name already on this resolution's stack dead-ends
@@ -287,7 +311,7 @@ impl DefinitionIndex {
         // ""`) and non-self-referential subtree aliases (e.g. `np = numpy`,
         // `src = numpy` not under `dst = np`) terminate, so stay unrestricted.
         let candidates: Vec<String> = {
-            let inner = self.inner.borrow();
+            let inner = self.lock();
             let mut out = Vec::new();
             let mut end = name.len();
             loop {
@@ -310,6 +334,10 @@ impl DefinitionIndex {
                     None => break,
                 }
             }
+            // Drop the guard before the recursive `resolve_alias` loop below
+            // (which re-locks) rather than holding it to block scope end
+            // (clippy::significant_drop_tightening).
+            drop(inner);
             out
         };
         for candidate in candidates {
@@ -325,7 +353,7 @@ impl DefinitionIndex {
     /// Whether `fullname` is a constructor we synthesized from class fields
     /// (see [`Store::synthesized`]).
     pub fn is_synthesized(&self, fullname: &str) -> bool {
-        self.inner.borrow().store.synthesized.contains(fullname)
+        self.lock().store.synthesized.contains(fullname)
     }
 }
 
@@ -390,7 +418,7 @@ pub fn build_index(
         let parsed = parse_module_guarded(&source)?;
         let module_name = module_name_for_path(project_root, path);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
-        index.inner.borrow_mut().indexed.insert(module_name);
+        index.lock().indexed.insert(module_name);
     }
 
     Ok(index)
@@ -898,28 +926,32 @@ impl DefinitionIndex {
     pub(crate) fn for_test() -> Self {
         Self {
             resolver: None,
-            inner: RefCell::new(Inner::default()),
+            inner: Mutex::new(Inner::default()),
         }
     }
 
     /// Replace the re-export edges (test convenience), applying the same
     /// no-op/empty filtering as the construction path.
     fn set_edges(&mut self, edges: Vec<(String, String)>) {
-        let inner = self.inner.get_mut();
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
         inner.by_dst.clear();
         Self::push_edges(inner, edges);
     }
 
     fn insert(&mut self, fullname: String, signature: Signature) {
-        self.inner.get_mut().store.insert(fullname, signature);
+        self.inner
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .store
+            .insert(fullname, signature);
     }
 
     fn signature_count(&self) -> usize {
-        self.inner.borrow().store.signatures.len()
+        self.lock().store.signatures.len()
     }
 
     fn edges_is_empty(&self) -> bool {
-        self.inner.borrow().by_dst.is_empty()
+        self.lock().by_dst.is_empty()
     }
 }
 

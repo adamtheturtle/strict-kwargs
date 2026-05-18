@@ -28,6 +28,7 @@
 //!    magnitude smaller than glibc's), which would otherwise make the bound
 //!    non-deterministic.
 
+use rayon::ThreadPoolBuilder;
 use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::ModModule;
 use ruff_python_parser::{lexer::lex, parse_module, Mode, Parsed};
@@ -169,6 +170,39 @@ where
             Err(payload) => std::panic::resume_unwind(payload),
         }
     })
+}
+
+/// Run `f` inside a `rayon` pool whose every worker has a [`STACK_SIZE`]
+/// stack, and return its result.
+///
+/// The whole-project built-in pass runs in parallel (issue #46), so the deep
+/// stack issue #54 needs must cover the *worker* threads too, not only the
+/// main analysis thread [`run_with_large_stack`] provides — rayon's default
+/// worker stack is far smaller and a legitimately-accepted ~[`MAX_NESTING_DEPTH`]
+/// file would overflow it. The pool is scoped to this call (mirroring
+/// `run_with_large_stack`'s per-call thread); `f` typically drives a
+/// `par_iter` whose closures then execute on these deep-stacked workers.
+///
+/// Excluded from the coverage gate for the same reason as
+/// [`run_with_large_stack`]: every integration test that runs a check/fix
+/// exercises the happy path, but the pool-construction-failure arm is
+/// environment-only (thread creation) and not deterministically reachable.
+///
+/// # Errors
+///
+/// Whatever `f` returns, or [`CheckError::Io`] if the worker pool cannot be
+/// built.
+#[cfg_attr(coverage, coverage(off))]
+pub fn with_large_stack_pool<T, F>(f: F) -> Result<T, CheckError>
+where
+    F: FnOnce() -> Result<T, CheckError> + Send,
+    T: Send,
+{
+    let pool = ThreadPoolBuilder::new()
+        .stack_size(STACK_SIZE)
+        .build()
+        .map_err(|e| CheckError::Io(std::io::Error::other(e.to_string())))?;
+    pool.install(f)
 }
 
 #[cfg(test)]

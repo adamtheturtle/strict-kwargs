@@ -58,6 +58,19 @@ built-in resolver could not resolve — so a run the built-in path fully
 handles never pays ty's project-indexing startup cost; a server that fails
 to start at that point is the fatal `TyServerFailed`.
 
+### Whole-project execution (`src/check.rs`)
+
+A directory/whole-project run is **two phases** (issue #46). Phase 1 — read,
+decode, parse and the built-in AST walk — is per-file, pure CPU, and shares
+only the (immutable-from-the-caller's-view) `DefinitionIndex`, so it runs in
+**parallel** across files; it is the bulk of whole-project runtime once
+ignored directories are pruned (issue #56). Phase 2 — the `ty` fallback —
+drives a **single shared `ty server`** and so stays **serial**. Files are
+processed in sorted order and all diagnostics are sorted before return, so
+output is byte-identical and deterministic regardless of scheduling; the
+non-UTF-8 skip warning (issue #53) is emitted in phase 2 to keep its order
+deterministic too.
+
 ### The DefinitionIndex (`src/index.rs`)
 
 A map from fully-qualified name → **list** of signatures (a list, so
@@ -77,7 +90,10 @@ honoring **PEP 561** (`*-stubs`, `py.typed`, bundled `.pyi`). The earlier
 eager worklist walked the *entire transitive import closure* up front; on a
 heavy third-party package (numpy/torch/scipy) that did not complete in any
 practical time (issue #39). Now only the modules on a queried name's actual
-re-export path are parsed.
+re-export path are parsed. The demand-driven state (resolved modules, the
+memo cache) is behind an internal lock so the parallel phase-1 workers share
+one index — and therefore one cross-file memo — rather than each rebuilding
+it (issue #46).
 
 **Imports and re-exports** are followed: `import a.b [as m]`,
 `from a.b import c [as d]`, relative imports (correctly anchored for
