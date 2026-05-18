@@ -675,10 +675,7 @@ fn collect_data_constructor_bases(
     for stmt in stmts {
         match stmt {
             Stmt::ClassDef(class_def) => {
-                if dataclass_decorator(class_def).is_some()
-                    || is_namedtuple_class(class_def)
-                    || class_def.arguments.is_some()
-                {
+                if dataclass_decorator(class_def).is_some() || is_namedtuple_class(class_def) {
                     if let Some(arguments) = &class_def.arguments {
                         out.extend(
                             arguments
