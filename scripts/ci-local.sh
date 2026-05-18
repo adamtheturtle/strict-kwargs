@@ -5,7 +5,7 @@
 #
 #   - lint.yml `build`  : cargo fmt --check, clippy, docs
 #   - ci.yml   `build`  : cargo test --all-features
-#   - coverage.yml      : scripts/coverage.sh (100% line+branch+function)
+#   - coverage.yml      : cargo llvm-cov (100% line + branch coverage)
 #
 # Run this before any push. Windows-only behaviour can't be reproduced
 # here, but the logic is identical.
@@ -28,6 +28,26 @@ step "tests (ci.yml)"
 cargo test --all-features
 
 step "coverage gate (coverage.yml)"
-./scripts/coverage.sh
+# CI runs this on nightly; locally `RUSTC_BOOTSTRAP=1` lets a stable
+# toolchain compile the unstable `#[coverage(off)]` attribute, so local
+# and CI results are identical. `cargo-llvm-cov` needs llvm-tools: use
+# rustup's `llvm-tools-preview` when present, else fall back to a
+# Homebrew LLVM install.
+if [ -z "${LLVM_COV:-}" ]; then
+  for prefix in /opt/homebrew/opt/llvm /usr/local/opt/llvm; do
+    if [ -x "$prefix/bin/llvm-cov" ] && [ -x "$prefix/bin/llvm-profdata" ]; then
+      export LLVM_COV="$prefix/bin/llvm-cov"
+      export LLVM_PROFDATA="$prefix/bin/llvm-profdata"
+      break
+    fi
+  done
+fi
+export RUSTC_BOOTSTRAP=1
+cargo llvm-cov --no-report --branch --workspace
+cargo llvm-cov report --branch --fail-under-lines 100
+summary="$(cargo llvm-cov report --branch --json --summary-only)"
+echo "Branch coverage: $(jq -r '.data[0].totals.branches.percent' <<<"$summary")%"
+jq -e '.data[0].totals.branches.percent >= 100' >/dev/null <<<"$summary" \
+  || { echo "error: branch coverage is below the required 100%" >&2; exit 1; }
 
 printf '\nAll local CI checks passed.\n'
