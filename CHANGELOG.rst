@@ -12,6 +12,9 @@ Next
   as constructor parameters. The auto-fixer still declines synthesized
   constructors.
 
+2026.5.18-post.4
+----------------
+
 2026.5.18-post.3
 ----------------
 

@@ -1936,7 +1936,7 @@ fn signature_is_fully_named(signature: &Signature) -> bool {
 
 #[cfg_attr(coverage, coverage(off))]
 fn ty_call_fix_insertions(
-    source: &str,
+    fix_ast: TyFixAst<'_>,
     pending: &PendingTy,
     callee_fullname: &str,
     signature: &Signature,
@@ -1947,15 +1947,14 @@ fn ty_call_fix_insertions(
     if !signature_is_fully_named(signature) {
         return None;
     }
-    let parsed = parse_module(source).ok()?;
-    let call = call_at_start(parsed.suite(), pending.call_start)?;
+    let call = call_at_start(fix_ast.suite, pending.call_start)?;
     // Ty hovers are already call-site oriented for bound methods, so avoid
     // the built-in resolver's attribute-name receiver heuristic here. The one
     // exception is an unbound `def` hover with leading `self`/`cls`, where
     // `strip_unbound_receiver` proved the first positional is explicit.
     call_fix_insertions(
         call,
-        parsed.tokens(),
+        fix_ast.tokens,
         callee_fullname,
         signature,
         max_positional,
@@ -1973,7 +1972,7 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
-    source: &str,
+    fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
     signature: &Signature,
@@ -1984,8 +1983,11 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
+    let Some(fix_ast) = fix_ast else {
+        return;
+    };
     let Some(insertions) = ty_call_fix_insertions(
-        source,
+        fix_ast,
         pending,
         callee_fullname,
         signature,
@@ -2096,6 +2098,12 @@ struct TyFixes<'a> {
     fixed_calls: &'a mut usize,
 }
 
+#[derive(Clone, Copy)]
+struct TyFixAst<'a> {
+    suite: &'a [Stmt],
+    tokens: &'a Tokens,
+}
+
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver
 /// missed: hover (precise, overload- and inheritance-resolved, stdlib too),
 /// then goto-definition for the rest (constructors). Fails closed.
@@ -2124,6 +2132,11 @@ fn resolve_pending_with_ty(
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
     }
+    let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
+        suite: parsed.suite(),
+        tokens: parsed.tokens(),
+    });
 
     // Phase A: pipeline all hover requests, then collect.
     let hover_ids: Vec<Option<i64>> = pending
@@ -2181,7 +2194,7 @@ fn resolve_pending_with_ty(
                 };
                 record_ty_fix(
                     &mut fixes,
-                    source,
+                    fix_ast,
                     p,
                     &fullname,
                     fix_signature,
@@ -2220,7 +2233,7 @@ fn resolve_pending_with_ty(
             if let [signature] = overloads.as_slice() {
                 record_ty_fix(
                     &mut fixes,
-                    source,
+                    fix_ast,
                     p,
                     &fullname,
                     signature,
@@ -2289,7 +2302,8 @@ fn resolve_pending_with_ty(
 mod tests {
     use super::{
         is_ignored_path, is_typing_special_form_constructor, record_ty_fix,
-        signature_is_fully_named, strip_unbound_receiver, without_leading_self, PendingTy, TyFixes,
+        signature_is_fully_named, strip_unbound_receiver, without_leading_self, PendingTy,
+        TyFixAst, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2460,7 +2474,7 @@ mod tests {
         let mut no_fix_context = None;
         record_ty_fix(
             &mut no_fix_context,
-            "f(1)\n",
+            None,
             &pending,
             "ty.f",
             &named,
@@ -2484,8 +2498,20 @@ mod tests {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
         });
+        let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
+        let fix_ast = TyFixAst {
+            suite: parsed.suite(),
+            tokens: parsed.tokens(),
+        };
         record_ty_fix(
-            &mut fixes, "f(1)\n", &pending, "ty.f", &unnamed, 0, 1, false,
+            &mut fixes,
+            Some(fix_ast),
+            &pending,
+            "ty.f",
+            &unnamed,
+            0,
+            1,
+            false,
         );
         assert!(insertions.is_empty());
         assert_eq!(fixed_calls, 0);
