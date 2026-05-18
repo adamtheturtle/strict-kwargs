@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
 
+use crate::source::read_python_source_lossy;
+
 /// Vendored typeshed `stdlib/` stubs, embedded at the pinned commit recorded
 /// in `vendored/typeshed/COMMIT`.
 static TYPESHED_STDLIB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/vendored/typeshed/stdlib");
@@ -99,10 +101,12 @@ impl ResolvedModule {
 /// (a package).
 fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> {
     for ext in exts {
-        if let Ok(text) = std::fs::read_to_string(root.join(format!("{rel}.{ext}"))) {
+        if let Some(text) = read_python_source_lossy(&root.join(format!("{rel}.{ext}"))) {
             return Some(ResolvedModule::module(text));
         }
-        if let Ok(text) = std::fs::read_to_string(root.join(rel).join(format!("__init__.{ext}"))) {
+        if let Some(text) =
+            read_python_source_lossy(&root.join(rel).join(format!("__init__.{ext}")))
+        {
             return Some(ResolvedModule::package(text));
         }
     }
