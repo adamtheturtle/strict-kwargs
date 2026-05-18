@@ -292,7 +292,7 @@ impl DiagnosticCache {
     /// [`Diagnostic`] (all `String`/`usize`/`PathBuf` fields, writing to a
     /// `Vec<u8>`) is infallible in practice, so the `Err` arm of the `if let`
     /// is a structurally dead branch that cannot be reached in tests; and the
-    /// write itself is delegated to [`write_entry_atomic`], which is already
+    /// write itself is delegated to `write_entry_atomic`, which is already
     /// excluded for I/O-failure reasons.
     #[cfg_attr(coverage, coverage(off))]
     pub fn put(&self, key: u64, diagnostics: &[Diagnostic]) {
