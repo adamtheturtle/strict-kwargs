@@ -1,0 +1,241 @@
+---
+name: Full Checkout Dry Runs
+
+# Expensive real-world coverage for issue #132. This intentionally does not
+# run on every PR; it runs weekly and can be started manually when changing
+# parsing, resolution, or rewrite logic.
+on:
+  schedule:
+    # Run at 03:17 UTC every Sunday.
+    - cron: 17 3 * * 0
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CPYTHON_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
+  SPHINX_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+
+jobs:
+  full-dry-runs:
+    name: Sphinx and CPython dry runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: full-dry-runs
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin strict-kwargs
+
+      - name: Install ty
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv tool install ty
+          uv tool dir --bin >> "$GITHUB_PATH"
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+
+      - name: Clone pinned external repositories
+        shell: bash
+        env:
+          EXTERNAL_DIR: ${{ runner.temp }}/external
+        run: |
+          set -euo pipefail
+
+          clone_pinned() {
+            local name="$1"
+            local url="$2"
+            local ref="$3"
+            local dest="$EXTERNAL_DIR/$name"
+
+            mkdir -p "$dest"
+            git -C "$dest" init --quiet
+            git -C "$dest" remote add origin "$url"
+            git -C "$dest" fetch --depth=1 origin "$ref"
+            git -C "$dest" checkout --detach --quiet FETCH_HEAD
+            git -C "$dest" rev-parse HEAD
+          }
+
+          clone_pinned sphinx https://github.com/sphinx-doc/sphinx.git "$SPHINX_REF"
+          clone_pinned cpython https://github.com/python/cpython.git "$CPYTHON_REF"
+
+      - name: Prepare Sphinx Python environment
+        shell: bash
+        env:
+          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
+          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+        run: |
+          set -euo pipefail
+          uv venv --python "$pythonLocation/bin/python" "$SPHINX_VENV"
+          uv pip install --python "$SPHINX_VENV/bin/python" -e "$SPHINX_CHECKOUT"
+
+      - name: Run full-tree dry runs
+        shell: bash
+        env:
+          CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+          LOG_DIR: ${{ github.workspace }}/full-dry-run-logs
+          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
+          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$LOG_DIR"
+          summary_file="$LOG_DIR/summary.md"
+          printf '# Full checkout dry runs\n\n' > "$summary_file"
+
+          append_metric_summary() {
+            local name="$1"
+            local status="$2"
+            local elapsed="$3"
+            local peak_rss="$4"
+            local stdout_bytes="$5"
+            local stdout_lines="$6"
+            local stderr_lines="$7"
+            local diff_files="$8"
+            local diff_hunks="$9"
+            local skips="${10}"
+            local would_fix="${11}"
+            local declined_summary="${12}"
+
+            {
+              printf '## %s\n\n' "$name"
+              printf '| Metric | Value |\n'
+              printf '| --- | ---: |\n'
+              printf '| Exit status | %s |\n' "$status"
+              printf '| Elapsed seconds | %s |\n' "$elapsed"
+              printf '| Peak RSS | %s |\n' "$peak_rss"
+              printf '| Diff bytes | %s |\n' "$stdout_bytes"
+              printf '| Diff lines | %s |\n' "$stdout_lines"
+              printf '| Stderr lines | %s |\n' "$stderr_lines"
+              printf '| Files with proposed fixes | %s |\n' "$diff_files"
+              printf '| Diff hunks | %s |\n' "$diff_hunks"
+              printf '| Skipped files | %s |\n\n' "$skips"
+              printf 'Fixed summary:\n\n~~~text\n%s\n~~~\n\n' "$would_fix"
+              printf 'Declined summary:\n\n~~~text\n%s\n~~~\n\n' "$declined_summary"
+            } >> "$summary_file"
+
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              tail -n 26 "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          run_dry_run() {
+            local name="$1"
+            local checkout="$2"
+            local python_env="${3:-}"
+            local stdout="$LOG_DIR/$name.stdout.diff"
+            local stderr="$LOG_DIR/$name.stderr.log"
+            local command_file="$LOG_DIR/$name.command.txt"
+            local -a cmd=(strict-kwargs fix --diff)
+
+            if [ -n "$python_env" ]; then
+              cmd+=(--python "$python_env")
+            fi
+            cmd+=("$checkout")
+            printf '%q ' "${cmd[@]}" > "$command_file"
+            printf '\n' >> "$command_file"
+
+            local start
+            local end
+            local elapsed
+            local status
+            start="$(date +%s)"
+            set +e
+            /usr/bin/time -v "${cmd[@]}" > "$stdout" 2> "$stderr"
+            status=$?
+            set -e
+            end="$(date +%s)"
+            elapsed=$((end - start))
+
+            local peak_rss
+            peak_rss="$(grep -E 'Maximum resident set size' "$stderr" \
+              | sed -E 's/.*: *([0-9]+).*/\1 KB/' \
+              || true)"
+            if [ -z "$peak_rss" ]; then
+              peak_rss="unavailable"
+            fi
+
+            local stdout_bytes
+            local stdout_lines
+            local stderr_lines
+            local diff_files
+            local diff_hunks
+            local skips
+            stdout_bytes="$(wc -c < "$stdout" | tr -d ' ')"
+            stdout_lines="$(wc -l < "$stdout" | tr -d ' ')"
+            stderr_lines="$(wc -l < "$stderr" | tr -d ' ')"
+            diff_files="$(grep -c '^--- a/' "$stdout" || true)"
+            diff_hunks="$(grep -c '^@@ ' "$stdout" || true)"
+            skips="$(grep -c '^strict-kwargs: warning: skipping ' "$stderr" || true)"
+
+            local would_fix
+            local declined_summary
+            would_fix="$(grep -E '^strict-kwargs: would fix ' "$stderr" || true)"
+            if [ -z "$would_fix" ]; then
+              would_fix="strict-kwargs: would fix 0 calls in 0 files"
+            fi
+            declined_summary="$(grep -E '^strict-kwargs: declined ' "$stderr" || true)"
+            if [ -z "$declined_summary" ]; then
+              declined_summary="none"
+            fi
+
+            append_metric_summary \
+              "$name" "$status" "$elapsed" "$peak_rss" "$stdout_bytes" \
+              "$stdout_lines" "$stderr_lines" "$diff_files" "$diff_hunks" \
+              "$skips" "$would_fix" "$declined_summary"
+
+            echo "::group::$name metrics"
+            tail -n 26 "$summary_file"
+            echo "::endgroup::"
+
+            local failure_matches
+            failure_matches="$(grep -En \
+              "refusing to write|would not parse|panicked at|thread '.*' panicked" \
+              "$stderr" || true)"
+            if [ "$status" -ne 0 ] || [ -n "$failure_matches" ]; then
+              echo "::error title=$name dry run failed::strict-kwargs exited $status"
+              if [ -n "$failure_matches" ]; then
+                printf 'Failure-pattern matches:\n%s\n' "$failure_matches"
+              fi
+              printf '\nLast 80 stderr lines:\n'
+              tail -n 80 "$stderr" || true
+              return 1
+            fi
+          }
+
+          overall=0
+          run_dry_run sphinx "$SPHINX_CHECKOUT" "$SPHINX_VENV" || overall=1
+          run_dry_run cpython "$CPYTHON_CHECKOUT" || overall=1
+          exit "$overall"
+
+      - name: Upload dry-run logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-dry-run-logs
+          path: full-dry-run-logs/
+          if-no-files-found: warn
+          retention-days: 14

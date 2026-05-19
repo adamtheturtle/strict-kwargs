@@ -539,6 +539,11 @@ fn fix_diff_prints_patch_without_writing() {
     assert!(patch.contains("--- a/"), "patch: {patch}");
     assert!(patch.contains("-f(1)"));
     assert!(patch.contains("+f(a=1)"));
+    assert!(
+        stderr(&output).contains("would fix 1 call in 1 file"),
+        "stderr: {}",
+        stderr(&output)
+    );
     // `--diff` must not modify the file.
     assert_eq!(project.read("main.py"), source);
 }
