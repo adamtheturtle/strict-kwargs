@@ -20,6 +20,8 @@ use strict_kwargs::{
     DeclinedFixReasonCount, Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
 
+const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "strict-kwargs",
@@ -62,8 +64,8 @@ struct CheckArgs {
 
     /// Directory for the persistent on-disk diagnostic cache.  When set,
     /// resolved results are stored here and reused on future runs where
-    /// the file and its environment are unchanged.  Omit to disable the
-    /// cache (every run is cold, the previous behaviour).
+    /// the file and its environment are unchanged.  Takes precedence over
+    /// ``[tool.strict_kwargs].cache_dir`` and ``STRICT_KWARGS_CACHE_DIR``.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
 
@@ -142,6 +144,29 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> PathBuf {
     })
 }
 
+fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
+    if cache_dir.is_absolute() {
+        cache_dir.clone()
+    } else {
+        project_root.join(cache_dir)
+    }
+}
+
+fn effective_cache_dir(
+    cli_cache_dir: Option<PathBuf>,
+    config: &Config,
+    project_root: &std::path::Path,
+) -> Option<PathBuf> {
+    cli_cache_dir
+        .or_else(|| {
+            config
+                .cache_dir
+                .as_ref()
+                .map(|dir| resolve_configured_cache_dir(project_root, dir))
+        })
+        .or_else(|| std::env::var_os(CACHE_DIR_ENV_VAR).map(PathBuf::from))
+}
+
 fn run() -> Result<ExitCode, CheckError> {
     let cli = Cli::parse();
     match cli.command {
@@ -155,12 +180,13 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let config = Config::load(&project_root)?;
     let output_format = args.output_format.unwrap_or(config.output_format);
     let python_env = resolve_python_env(args.python);
+    let cache_dir = effective_cache_dir(args.cache_dir, &config, &project_root);
     let diagnostics = check_paths(
         &project_root,
         &args.paths,
         &config,
         python_env.as_deref(),
-        args.cache_dir.as_deref(),
+        cache_dir.as_deref(),
     )?;
     report_check_diagnostics(&diagnostics, output_format);
     if diagnostics.is_empty() {

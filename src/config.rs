@@ -40,6 +40,12 @@ pub struct Config {
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
     pub ignore_names: Vec<String>,
+    /// Directory for the persistent on-disk diagnostic cache.
+    ///
+    /// This affects where diagnostics are stored, not the diagnostics
+    /// themselves, so it is omitted from cache fingerprints.
+    #[serde(default, skip_serializing)]
+    pub cache_dir: Option<PathBuf>,
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
     pub debug: bool,
@@ -140,7 +146,7 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
     let current = parse_version(current_version, "current strict-kwargs version")?;
     if let Some(minimum) = required_version.strip_prefix(">=") {
         let minimum = parse_version(minimum.trim(), "`required_version` minimum")?;
-        if current >= minimum {
+        if minimum_required_version_is_satisfied(&current, &minimum) {
             return Ok(());
         }
         return Err(format!(
@@ -162,6 +168,22 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
         "`required_version = \"{required_version}\"` is not satisfied by strict-kwargs \
          {current_version}; install strict-kwargs {required_version} or update the setting"
     ))
+}
+
+fn minimum_required_version_is_satisfied(current: &Version, minimum: &Version) -> bool {
+    if current >= minimum {
+        return true;
+    }
+    minimum.pre.is_empty()
+        && current.major == minimum.major
+        && current.minor == minimum.minor
+        && current.patch == minimum.patch
+        && current
+            .pre
+            .as_str()
+            .split('.')
+            .next()
+            .is_some_and(|identifier| identifier == "post")
 }
 
 fn parse_version(version: &str, label: &str) -> Result<Version, String> {
@@ -200,6 +222,7 @@ mod tests {
       [tool.strict_kwargs]
       required_version = "2026.5.19-post.3"
       ignore_names = ["main.func", "builtins.str"]
+      cache_dir = ".strict-kwargs-cache"
       debug = true
       fix_synthesized_constructors = true
       output_format = "json"
@@ -213,6 +236,10 @@ mod tests {
         assert_eq!(
             config.required_version,
             Some("2026.5.19-post.3".to_string())
+        );
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
@@ -236,6 +263,7 @@ mod tests {
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
         assert!(config.required_version.is_none());
+        assert_eq!(config.cache_dir, None);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
         assert_eq!(config.output_format, OutputFormat::Full);
@@ -293,6 +321,16 @@ mod tests {
     }
 
     #[test]
+    fn wrong_cache_dir_type_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\ncache_dir = [\"dir\"]\n")
+            .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
     fn explicit_full_output_format_is_valid() {
         let config = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"full\"\n")
             .expect("full output format is valid");
@@ -329,6 +367,30 @@ mod tests {
     fn minimum_required_version_can_be_older_than_current_version() {
         validate_required_version(">=2026.5.19-post.2", "2026.5.19-post.3")
             .expect("older minimum is satisfied");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_accepts_matching_post_release() {
+        validate_required_version(">=2026.5.19", "2026.5.19-post.3")
+            .expect("post release satisfies its calendar-version minimum");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_non_post_prerelease() {
+        let message = validate_required_version(">=2026.5.19", "2026.5.19-alpha.1")
+            .expect_err("non-post prerelease must stay below the bare release");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_post_release_before_required_base() {
+        for required_version in [">=2027.5.19", ">=2026.6.19", ">=2026.5.20"] {
+            let message = validate_required_version(required_version, "2026.5.19-post.3")
+                .expect_err("post release must not satisfy a newer base version");
+            assert!(message.contains("required_version"), "message: {message}");
+            assert!(message.contains("not satisfied"), "message: {message}");
+        }
     }
 
     #[test]
@@ -443,6 +505,21 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
+    }
+
+    #[test]
+    fn load_reads_cache_dir_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\ncache_dir = \".strict-kwargs-cache\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
+        );
     }
 
     #[test]
