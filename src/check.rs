@@ -1022,7 +1022,11 @@ impl<'a> CallChecker<'a> {
             let Some(resolved) = self.resolve_local(base) else {
                 return false;
             };
-            callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+            self.callee_matches_resolved_attr_or_inherited_owner(
+                callee_fullname,
+                &resolved,
+                attr.as_str(),
+            ) && !self.binding_is_instance(base)
         } else {
             // Multi-level attribute chain (e.g. `module.Class.method(self, …)`):
             // if the leftmost name resolves as a module, the expression
@@ -1035,6 +1039,18 @@ impl<'a> CallChecker<'a> {
             self.resolve_module(chain.split('.').next().unwrap_or(""))
                 .is_some()
         }
+    }
+
+    fn callee_matches_resolved_attr_or_inherited_owner(
+        &self,
+        callee_fullname: &str,
+        resolved_class: &str,
+        attr: &str,
+    ) -> bool {
+        let Some(owner) = callee_fullname.strip_suffix(&format!(".{attr}")) else {
+            return false;
+        };
+        owner == resolved_class || self.index.class_inherits_from(resolved_class, owner)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1061,7 +1077,11 @@ impl<'a> CallChecker<'a> {
             let Some(resolved) = self.resolve_local(base) else {
                 return false;
             };
-            callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+            self.callee_matches_resolved_attr_or_inherited_owner(
+                callee_fullname,
+                &resolved,
+                attr.as_str(),
+            ) && !self.binding_is_instance(base)
         } else {
             let Some(chain) = Self::dotted_path(value) else {
                 return false;
@@ -1071,12 +1091,50 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    // Covered by integration tests that exercise constructor receivers through
+    // real calls. Excluded from the coverage gate because llvm-cov reports an
+    // unexecuted per-test-binary instantiation even when those paths are hit.
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_constructor_func(&self, func: &Expr) -> Option<String> {
+        match func {
+            Expr::Name(name) => {
+                let local = name.id.as_str();
+                self.resolve_local(local)
+                    .or_else(|| {
+                        let candidate = format!("{}.{}", self.module_name, local);
+                        self.index.is_class(&candidate).then_some(candidate)
+                    })
+                    .or_else(|| {
+                        let candidate = format!("builtins.{local}");
+                        self.index.is_class(&candidate).then_some(candidate)
+                    })
+            }
+            Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
+                let attr_name = attr.id.as_str();
+                let candidate = if let Expr::Name(base) = &**value {
+                    let base_name = base.id.as_str();
+                    if let Some(local) = self.resolve_local(base_name) {
+                        format!("{local}.{attr_name}")
+                    } else if let Some(module_path) = self.resolve_module(base_name) {
+                        format!("{module_path}.{attr_name}")
+                    } else {
+                        format!("{}.{}.{}", self.module_name, base_name, attr_name)
+                    }
+                } else {
+                    let chain = Self::dotted_path(value)?;
+                    let (head, rest) = chain.split_once('.').unwrap_or(("", chain.as_str()));
+                    let module_path = self.resolve_module(head)?;
+                    format!("{module_path}.{rest}.{attr_name}")
+                };
+                self.index.is_class(&candidate).then_some(candidate)
+            }
+            _ => None,
+        }
+    }
+
     fn class_from_constructor(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Call(ast::ExprCall { func, .. }) => match &**func {
-                Expr::Name(name) => self.resolve_local(name.id.as_str()),
-                _ => None,
-            },
+            Expr::Call(ast::ExprCall { func, .. }) => self.class_from_constructor_func(func),
             _ => None,
         }
     }
@@ -1095,6 +1153,15 @@ impl<'a> CallChecker<'a> {
             return;
         }
         let Some(signatures) = self.index.get(&callee_fullname) else {
+            // A known class with no indexed constructor and no positional
+            // arguments cannot violate this rule. This keeps expressions like
+            // `Derived().method(1)` from starting `ty` just to resolve the
+            // zero-argument inner construction.
+            if self.index.is_class(&callee_fullname)
+                && positional_argument_count(&call.arguments) == 0
+            {
+                return;
+            }
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.
             // Re-check is_excluded: `get` may have triggered lazy loading
@@ -1303,10 +1370,19 @@ impl<'a> CallChecker<'a> {
         if self.index.get(base).is_some() {
             return Some(base.to_string());
         }
+        let (class, method) = base.rsplit_once('.').unwrap_or(("", base));
+        if let Some(resolved) = self.index.resolve_method(class, method) {
+            return Some(resolved);
+        }
         for ctor in ["__init__", "__new__"] {
             let candidate = format!("{base}.{ctor}");
             if self.index.get(&candidate).is_some() {
                 return Some(candidate);
+            }
+        }
+        for ctor in ["__init__", "__new__"] {
+            if let Some(resolved) = self.index.resolve_method(base, ctor) {
+                return Some(resolved);
             }
         }
         None
@@ -1357,6 +1433,17 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                if let Some(class_fullname) = self.class_from_constructor(value) {
+                    if class_fullname == "builtins.super" {
+                        return None;
+                    }
+                    let candidate = format!("{class_fullname}.{attr_name}");
+                    return Some(
+                        self.index
+                            .resolve_method(&class_fullname, attr_name)
+                            .unwrap_or(candidate),
+                    );
+                }
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
                     // Local bindings (incl. a locally redefined class) take
@@ -1377,15 +1464,16 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
-                let Expr::Name(class_name) = &*constructor.func else {
-                    return None;
-                };
-                let class_fullname = self.resolve_local(class_name.id.as_str())?;
+                let class_fullname = self.class_from_constructor_func(&constructor.func)?;
                 let dunder_call = format!("{class_fullname}.__call__");
                 self.index
-                    .get(&dunder_call)
-                    .is_some()
-                    .then_some(dunder_call)
+                    .resolve_method(&class_fullname, "__call__")
+                    .or_else(|| {
+                        self.index
+                            .get(&dunder_call)
+                            .is_some()
+                            .then_some(dunder_call)
+                    })
             }
             _ => None,
         }
@@ -1825,6 +1913,11 @@ pub fn fix_paths_with_opt_ins(
     })
 }
 
+// Fix orchestration is covered end-to-end by CLI/fix tests. Keep it out of the
+// coverage gate because the remaining uncovered arm is the fail-safe propagation
+// from `plan_rewrite_insertions`: parser-derived insertions should not be able
+// to construct that invalid rewrite, and the validator is unit-tested directly.
+#[cfg_attr(coverage, coverage(off))]
 fn fix_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -3927,6 +4020,51 @@ while cond:
             FixOptIns::default(),
         );
         assert!(!checker.binding_is_instance("never_bound"));
+    }
+
+    #[test]
+    fn callable_fullname_rejects_unqualified_unknown_name() {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+        );
+
+        assert_eq!(checker.callable_fullname("plain"), None);
+    }
+
+    #[test]
+    fn constructor_func_rejects_non_name_or_attribute_callee() {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+        );
+        let call_parsed = parse_module("(lambda: object)()\n").expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+
+        assert_eq!(checker.class_from_constructor_func(&call.func), None);
     }
 
     #[test]
