@@ -1,6 +1,6 @@
 # strict-kwargs
 
-Fast enforcement of **keyword arguments at call sites**, without mypy or ty plugins.
+Fast enforcement of keyword arguments at call sites, without a mypy plugin.
 Detects positional arguments and rewrites them to keyword arguments automatically.
 
 ```python
@@ -34,7 +34,7 @@ A path that does not exist is a hard error (exit 2), like `ruff`, rather than a 
 ```yaml
 repos:
   - repo: https://github.com/adamtheturtle/strict-kwargs-pre-commit
-    rev: 2026.5.16.post1  # pin to a release tag
+    rev: 2026.5.19  # pin to a release tag
     hooks:
       - id: strict-kwargs
 ```
@@ -49,11 +49,8 @@ In `pyproject.toml`:
 ```toml
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]  # fully-qualified names to ignore
-debug = false                                  # log debug info and AST dumps to stderr
+debug = false                                  # set true to show resolved fully-qualified names
 ```
-
-A missing `pyproject.toml`, or one without a `[tool.strict_kwargs]` table, is fine and uses the defaults.
-A `pyproject.toml` that exists but cannot be parsed, or whose `[tool.strict_kwargs]` has the wrong shape or value types (e.g. `ignore_names` not a list), is a hard error (exit 2) rather than a silent fall back to defaults.
 
 ## Comparison with mypy-strict-kwargs
 
