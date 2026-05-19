@@ -2,13 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
+use semver::Version;
 use serde::Deserialize;
 
 use crate::error::CheckError;
 
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Resolved `[tool.strict_kwargs]` configuration.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct Config {
+    /// Required `strict-kwargs` version specifier for this project.
+    #[serde(default)]
+    pub required_version: Option<String>,
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
     pub ignore_names: Vec<String>,
@@ -82,10 +88,14 @@ impl Config {
                 strict.type_str()
             ));
         }
-        strict
+        let config: Self = strict
             .clone()
             .try_into()
-            .map_err(|error| format!("has an invalid `[tool.strict_kwargs]` table: {error}"))
+            .map_err(|error| format!("has an invalid `[tool.strict_kwargs]` table: {error}"))?;
+        if let Some(required_version) = &config.required_version {
+            validate_required_version(required_version, CURRENT_VERSION)?;
+        }
+        Ok(config)
     }
 
     /// Whether `fullname` is in the configured ignore list.
@@ -93,6 +103,46 @@ impl Config {
     pub fn is_ignored(&self, fullname: &str) -> bool {
         self.ignore_names.iter().any(|name| name == fullname)
     }
+}
+
+fn validate_required_version(required_version: &str, current_version: &str) -> Result<(), String> {
+    let required_version = required_version.trim();
+    if required_version.is_empty() {
+        return Err(
+            "`required_version` must be an exact version or a `>=` version specifier".to_owned(),
+        );
+    }
+    let current = parse_version(current_version, "current strict-kwargs version")?;
+    if let Some(minimum) = required_version.strip_prefix(">=") {
+        let minimum = parse_version(minimum.trim(), "`required_version` minimum")?;
+        if current >= minimum {
+            return Ok(());
+        }
+        return Err(format!(
+            "`required_version = \"{required_version}\"` is not satisfied by strict-kwargs \
+             {current_version}; install a compatible strict-kwargs version or update the setting"
+        ));
+    }
+    if required_version.starts_with(['<', '>', '=', '~', '^']) {
+        return Err(format!(
+            "`required_version = \"{required_version}\"` uses unsupported syntax; supported \
+             forms are exact versions and `>=`"
+        ));
+    }
+    let exact = parse_version(required_version, "`required_version`")?;
+    if current == exact {
+        return Ok(());
+    }
+    Err(format!(
+        "`required_version = \"{required_version}\"` is not satisfied by strict-kwargs \
+         {current_version}; install strict-kwargs {required_version} or update the setting"
+    ))
+}
+
+fn parse_version(version: &str, label: &str) -> Result<Version, String> {
+    Version::parse(version).map_err(|error| {
+        format!("{label} must be a valid version like `2026.5.19-post.3`: {error}")
+    })
 }
 
 /// Discover project root by walking up from ``start`` looking for ``pyproject.toml``.
@@ -123,6 +173,7 @@ mod tests {
         let config = Config::from_pyproject_str(
             r#"
       [tool.strict_kwargs]
+      required_version = "2026.5.19-post.3"
       ignore_names = ["main.func", "builtins.str"]
       debug = true
       fix_synthesized_constructors = true
@@ -132,6 +183,10 @@ mod tests {
         assert_eq!(
             config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
+        );
+        assert_eq!(
+            config.required_version,
+            Some("2026.5.19-post.3".to_string())
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
@@ -153,6 +208,7 @@ mod tests {
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
+        assert!(config.required_version.is_none());
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
     }
@@ -192,6 +248,105 @@ mod tests {
             "[tool.strict_kwargs]\nfix_synthesized_constructors = \"yes\"\n",
         )
         .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn exact_required_version_can_match_current_version() {
+        let config = Config::from_pyproject_str(&format!(
+            "[tool.strict_kwargs]\nrequired_version = \"{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .expect("current exact version is valid");
+        assert_eq!(
+            config.required_version,
+            Some(env!("CARGO_PKG_VERSION").to_string())
+        );
+    }
+
+    #[test]
+    fn minimum_required_version_can_match_current_version() {
+        let config = Config::from_pyproject_str(&format!(
+            "[tool.strict_kwargs]\nrequired_version = \">={}\"\n",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .expect("current minimum version is valid");
+        assert_eq!(
+            config.required_version,
+            Some(format!(">={}", env!("CARGO_PKG_VERSION")))
+        );
+    }
+
+    #[test]
+    fn minimum_required_version_can_be_older_than_current_version() {
+        validate_required_version(">=2026.5.19-post.2", "2026.5.19-post.3")
+            .expect("older minimum is satisfied");
+    }
+
+    #[test]
+    fn required_version_rejects_too_old_binary() {
+        let message = validate_required_version(">=2026.5.19-post.4", "2026.5.19-post.3")
+            .expect_err("too-old binary must be rejected");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+        assert!(message.contains("2026.5.19-post.3"), "message: {message}");
+    }
+
+    #[test]
+    fn required_version_rejects_empty_specifier() {
+        let message = validate_required_version("   ", "2026.5.19-post.3")
+            .expect_err("empty specifier must be rejected");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("exact version"), "message: {message}");
+        assert!(message.contains(">="), "message: {message}");
+    }
+
+    #[test]
+    fn required_version_rejects_wrong_exact_version() {
+        let message = validate_required_version("2026.5.19-post.4", "2026.5.19-post.3")
+            .expect_err("wrong exact version must be rejected");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+        assert!(message.contains("2026.5.19-post.4"), "message: {message}");
+    }
+
+    #[test]
+    fn required_version_rejects_unsupported_syntax() {
+        let message = validate_required_version("~=2026.5.19", "2026.5.19-post.3")
+            .expect_err("unsupported syntax must be rejected");
+        assert!(message.contains("unsupported syntax"), "message: {message}");
+        assert!(message.contains("exact versions"), "message: {message}");
+        assert!(message.contains(">="), "message: {message}");
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_version() {
+        let message = validate_required_version(">=definitely-not-a-version", "2026.5.19-post.3")
+            .expect_err("invalid version must be rejected");
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_current_version() {
+        let message = validate_required_version(">=2026.5.19-post.3", "not-a-version")
+            .expect_err("invalid current version must be reported");
+        assert!(message.contains("current strict-kwargs version"));
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn wrong_required_version_type_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\nrequired_version = 7\n")
+            .expect_err("wrong value type must be reported");
         assert!(
             message.contains("invalid `[tool.strict_kwargs]` table"),
             "message: {message}"
