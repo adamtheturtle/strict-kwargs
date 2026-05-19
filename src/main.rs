@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use strict_kwargs::{
     check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    DeclinedFixReasonCount, FixOptIns,
+    DeclinedFixReasonCount, FileFix, FixOptIns,
 };
 
 #[derive(Debug, Parser)]
@@ -217,6 +217,16 @@ fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
     }
 }
 
+fn report_diff_summary(fixes: &[FileFix]) {
+    let total = fixes.iter().map(|fix| fix.count).sum::<usize>();
+    eprintln!(
+        "strict-kwargs: would fix {total} call{} in {} file{}",
+        if total == 1 { "" } else { "s" },
+        fixes.len(),
+        if fixes.len() == 1 { "" } else { "s" }
+    );
+}
+
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths);
@@ -249,6 +259,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
                 unified_diff(&fix.path, &fix.original, &fix.fixed, color)
             );
         }
+        report_diff_summary(fixes);
         report_declined(&outcome.declined_reasons);
         return Ok(ExitCode::from(0));
     }
