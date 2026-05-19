@@ -821,6 +821,20 @@ fn ty_hover_flags_too_many_positional_on_stdlib() {
     );
 }
 
+#[test]
+fn ty_hover_honors_ignore_names_for_bound_builtin_method() {
+    let project = TestProject::new()
+        .pyproject(
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nignore_names = [\"builtins.str.split\"]\n",
+        )
+        .main("text = \"a:b\"\ntext.split(\":\", maxsplit=1)\n");
+    let messages = project.check();
+    assert!(
+        messages.is_empty(),
+        "ignored ty-resolved builtin method must not flag: {messages:?}"
+    );
+}
+
 /// A class object returned from a cross-file factory and then called is
 /// resolved via ty goto-definition to its `__init__`; the over-long
 /// constructor call is flagged at the call site.
