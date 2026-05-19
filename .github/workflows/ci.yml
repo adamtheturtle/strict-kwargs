@@ -45,7 +45,7 @@ jobs:
           shared-key: test-${{ matrix.platform }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
 
       - name: Install ty (type-inference fallback under test)
         shell: bash
@@ -99,7 +99,7 @@ jobs:
           shared-key: codspeed
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
 
       - name: Install ty (required backend; probed once per process)
         shell: bash
