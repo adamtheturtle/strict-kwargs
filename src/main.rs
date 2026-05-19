@@ -218,9 +218,13 @@ fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
 }
 
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
-    let fix_opt_ins = fix_opt_ins_from_args(&args);
+    let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
+    let fix_opt_ins = FixOptIns {
+        synthesized_constructors: config.fix_synthesized_constructors
+            || args_fix_opt_ins.synthesized_constructors,
+    };
     let python_env = resolve_python_env(args.python);
     report_enabled_fix_opt_ins(fix_opt_ins);
     let outcome = fix_paths_with_opt_ins(

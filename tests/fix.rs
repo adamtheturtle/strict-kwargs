@@ -755,6 +755,25 @@ fn fix_synthesized_constructors_rewrites_dataclass_constructor() {
 }
 
 #[test]
+fn config_fix_synthesized_constructors_rewrites_dataclass_constructor() {
+    let proj = project(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    )
+    .pyproject(
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nfix_synthesized_constructors = true\n",
+    );
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(
+        outcome.files[0].fixed,
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\n"
+    );
+}
+
+#[test]
 fn inherited_synthesized_dataclass_constructor_not_rewritten() {
     let source = "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n";
     let proj = project(source);

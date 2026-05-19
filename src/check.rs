@@ -1679,6 +1679,10 @@ pub fn fix_paths_with_opt_ins(
     python_env: Option<&Path>,
     fix_opt_ins: FixOptIns,
 ) -> Result<FixOutcome, CheckError> {
+    let fix_opt_ins = FixOptIns {
+        synthesized_constructors: config.fix_synthesized_constructors
+            || fix_opt_ins.synthesized_constructors,
+    };
     run_with_large_stack(move || {
         fix_paths_impl(project_root, paths, config, python_env, fix_opt_ins)
     })

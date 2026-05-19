@@ -104,10 +104,12 @@ Configuration lives in `pyproject.toml`:
 ```toml
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]
+fix_synthesized_constructors = true
 ```
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
 
 To find the name of a function to ignore, set the following configuration:
 
