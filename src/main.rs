@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use strict_kwargs::{
     check_paths, find_project_root, fix_paths_with_safety, unified_diff, CheckError, Config,
-    FixSafety,
+    DeclinedFixReasonCount, FixSafety,
 };
 
 #[derive(Debug, Parser)]
@@ -166,17 +166,27 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
 /// Report violations `fix` detected but deliberately did not rewrite, so a
 /// following `strict-kwargs` run is no surprise (issue #42). Always to stderr
 /// — stdout is reserved for the `--diff` patch.
-fn report_declined(declined: usize) {
+fn report_declined(declined_reasons: &[DeclinedFixReasonCount]) {
+    let declined = declined_reasons
+        .iter()
+        .map(|item| item.count)
+        .sum::<usize>();
     if declined == 0 {
         return;
     }
     eprintln!(
-        "strict-kwargs: {declined} violation{} detected but not rewritten \
-         (ambiguous or unsupported fix category); run `strict-kwargs` to \
-         see {}",
+        "strict-kwargs: {declined} violation{} detected but not rewritten; \
+         run `strict-kwargs` to see {}",
         if declined == 1 { "" } else { "s" },
         if declined == 1 { "it" } else { "them" }
     );
+    for item in declined_reasons {
+        eprintln!(
+            "strict-kwargs: declined {}: {}",
+            item.reason.label(),
+            item.count
+        );
+    }
 }
 
 /// Return `true` when diff output should be colorized.
@@ -210,7 +220,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let fixes = &outcome.files;
     if fixes.is_empty() {
         eprintln!("strict-kwargs: no fixes to apply");
-        report_declined(outcome.declined);
+        report_declined(&outcome.declined_reasons);
         return Ok(ExitCode::from(0));
     }
 
@@ -222,7 +232,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
                 unified_diff(&fix.path, &fix.original, &fix.fixed, color)
             );
         }
-        report_declined(outcome.declined);
+        report_declined(&outcome.declined_reasons);
         return Ok(ExitCode::from(0));
     }
 
@@ -243,7 +253,7 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
         fixes.len(),
         if fixes.len() == 1 { "" } else { "s" }
     );
-    report_declined(outcome.declined);
+    report_declined(&outcome.declined_reasons);
     Ok(ExitCode::from(0))
 }
 

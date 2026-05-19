@@ -19,7 +19,10 @@ use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
-use crate::fix::{apply_insertions, FileFix, FixOutcome, FixSafety, Insertion};
+use crate::fix::{
+    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixOutcome,
+    FixSafety, Insertion,
+};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
@@ -376,7 +379,7 @@ fn scan_file(
     let module_name = module_name_for_path(project_root, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
-    let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls) = {
+    let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls, declined_fix_reasons) = {
         let mut checker = CallChecker::new(
             path.to_path_buf(),
             module_name,
@@ -396,6 +399,7 @@ fn scan_file(
             std::mem::take(&mut checker.ty_overload_fix_pending),
             std::mem::take(&mut checker.fixes),
             checker.fixed_calls,
+            std::mem::take(&mut checker.declined_fix_reasons),
         )
     };
     Ok(ScanOutcome::Scanned(FileScan {
@@ -405,6 +409,7 @@ fn scan_file(
         overload_fix_pending,
         fixes,
         fixed_calls,
+        declined_fix_reasons,
     }))
 }
 
@@ -427,6 +432,7 @@ struct FileScan {
     overload_fix_pending: Vec<PendingTyOverloadFix>,
     fixes: Vec<Insertion>,
     fixed_calls: usize,
+    declined_fix_reasons: Vec<DeclinedFixReason>,
 }
 
 /// Apply `insertions` to `source` and validate that the result remains valid
@@ -623,6 +629,8 @@ struct CallChecker<'a> {
     fixes: Vec<Insertion>,
     /// Number of call sites the fixer rewrote in this file.
     fixed_calls: usize,
+    /// Reasons for diagnostics emitted by the built-in pass but not rewritten.
+    declined_fix_reasons: Vec<DeclinedFixReason>,
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
@@ -693,6 +701,7 @@ impl<'a> CallChecker<'a> {
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
             fixed_calls: 0,
+            declined_fix_reasons: Vec::new(),
         }
     }
 
@@ -1037,13 +1046,15 @@ impl<'a> CallChecker<'a> {
         // `--unsafe-fixes` opts into those synthesized data-constructor
         // mappings, while overloads still need a deterministic selected arm.
         if self.index.is_synthesized(&callee_fullname) && !self.fix_safety.allows_unsafe() {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
         if let [signature] = signatures.as_ref() {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
-            if let Some(insertions) = call_fix_insertions(
+            match call_fix_insertions(
                 call,
                 self.tokens,
                 &callee_fullname,
@@ -1053,8 +1064,11 @@ impl<'a> CallChecker<'a> {
                 is_attribute_call,
                 receiver_is_explicit,
             ) {
-                self.fixes.extend(insertions);
-                self.fixed_calls += 1;
+                Ok(insertions) => {
+                    self.fixes.extend(insertions);
+                    self.fixed_calls += 1;
+                }
+                Err(reason) => self.declined_fix_reasons.push(reason),
             }
         } else {
             // Multi-arm overloads remain unsafe by default: different arms
@@ -1064,13 +1078,16 @@ impl<'a> CallChecker<'a> {
             // the only parameter-name mapping we may rewrite with. A hover
             // that still shows multiple arms, or no callable arm, is declined.
             let rewrite_start = max_positional + usize::from(receiver_is_explicit);
-            self.record_ty_overload_fix_pending(
+            if !self.record_ty_overload_fix_pending(
                 call,
                 &callee_fullname,
                 signatures.as_ref(),
                 rewrite_start,
                 positional_count,
-            );
+            ) {
+                self.declined_fix_reasons
+                    .push(DeclinedFixReason::UnresolvedOverload);
+            }
         }
     }
 
@@ -1106,7 +1123,7 @@ impl<'a> CallChecker<'a> {
         candidate_signatures: &[Signature],
         rewrite_start: usize,
         positional_count: usize,
-    ) {
+    ) -> bool {
         if let Some(pending) = Self::pending_ty_for_call(call) {
             let rewrite_args_are_statically_precise = (rewrite_start..positional_count).all(|i| {
                 call.arguments
@@ -1120,6 +1137,9 @@ impl<'a> CallChecker<'a> {
                 candidate_signatures: candidate_signatures.to_vec(),
                 rewrite_args_are_statically_precise,
             });
+            true
+        } else {
+            false
         }
     }
 
@@ -1496,19 +1516,19 @@ fn call_fix_insertions(
     positional_count: usize,
     is_attribute_call: bool,
     receiver_is_explicit: bool,
-) -> Option<Vec<Insertion>> {
+) -> Result<Vec<Insertion>, DeclinedFixReason> {
     // Star-unpacking at the call site (`f(*xs)` / `f(**kw)`): the positional
     // count is unknown, so a positional->keyword mapping is unsound.
     if call.arguments.args.iter().any(Expr::is_starred_expr) {
-        return None;
+        return Err(DeclinedFixReason::UnsafeCallSiteUnpacking);
     }
     if call.arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
-        return None;
+        return Err(DeclinedFixReason::UnsafeCallSiteUnpacking);
     }
     // Descriptor protocol calls are rare and their receiver/value mapping is
     // subtle; skip rather than risk a wrong rewrite.
     if callee_fullname.ends_with(".__get__") || callee_fullname.ends_with(".__set__") {
-        return None;
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
     }
 
     // `(skip, start)`: how the call's positional arguments map onto the
@@ -1547,16 +1567,22 @@ fn call_fix_insertions(
 
     let mut insertions = Vec::new();
     for arg_index in start..positional_count {
-        let arg = call.arguments.args.get(arg_index)?;
+        let Some(arg) = call.arguments.args.get(arg_index) else {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        };
         // A bare generator (`f(x for x in y)`) or walrus (`f(x := 1)`) would
         // need extra parentheses once prefixed; decline rather than wrap.
         if arg.is_generator_expr() || arg.is_named_expr() {
-            return None;
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
         }
-        let param = signature.parameters.get(arg_index + skip)?;
-        let name = param.name.as_deref()?;
+        let Some(param) = signature.parameters.get(arg_index + skip) else {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        };
+        let Some(name) = param.name.as_deref() else {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        };
         if !parameter_name_is_safe_keyword_target(name) {
-            return None;
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
         }
         // Only these kinds accept a keyword argument; a positional-only
         // parameter or `*args`/`**kwargs` slot cannot be rewritten.
@@ -1564,7 +1590,7 @@ fn call_fix_insertions(
             param.kind,
             ParameterKind::PositionalOrKeyword | ParameterKind::KeywordOnly
         ) {
-            return None;
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
         }
         // A redundantly parenthesized argument (`f((1))`) has an AST span
         // that starts *inside* the parentheses, since the Ruff parser drops
@@ -1585,7 +1611,11 @@ fn call_fix_insertions(
             text: format!("{name}="),
         });
     }
-    (!insertions.is_empty()).then_some(insertions)
+    if insertions.is_empty() {
+        Err(DeclinedFixReason::UnsupportedSignatureShape)
+    } else {
+        Ok(insertions)
+    }
 }
 
 /// Rewrite positional call arguments to keyword arguments for every fixable
@@ -1675,6 +1705,7 @@ fn fix_paths_impl(
     // and ty-resolved). Used for the declined count; ty may also append safe
     // hover-derived insertions to the built-in rewrite plan.
     let mut diagnostics = Vec::new();
+    let mut declined_fix_reasons = Vec::new();
     let mut fixed_total = 0usize;
     let mut results = Vec::new();
     for (path, outcome) in scans {
@@ -1691,6 +1722,7 @@ fn fix_paths_impl(
             ScanOutcome::Scanned(scan) => scan,
         };
         diagnostics.extend(scan.diagnostics);
+        declined_fix_reasons.extend(scan.declined_fix_reasons);
         let mut insertions = scan.fixes;
         let mut fixed_calls = scan.fixed_calls;
         // The ty fallback adds diagnostics, and for a single concrete named
@@ -1711,6 +1743,7 @@ fn fix_paths_impl(
             Some(TyFixes {
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
+                declined_fix_reasons: &mut declined_fix_reasons,
             }),
         )?;
         resolve_overload_fixes_with_ty(
@@ -1724,6 +1757,7 @@ fn fix_paths_impl(
             Some(TyFixes {
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
+                declined_fix_reasons: &mut declined_fix_reasons,
             }),
         );
         if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
@@ -1741,10 +1775,13 @@ fn fix_paths_impl(
     // the ty fallback only ever adds diagnostics. So the un-rewritten count
     // is the total detected minus the total rewritten. `saturating_sub` is
     // defensive — `fixed_total` can never exceed the diagnostic count.
-    let declined = diagnostics.len().saturating_sub(fixed_total);
+    let declined = declined_fix_reasons.len();
+    debug_assert_eq!(declined, diagnostics.len().saturating_sub(fixed_total));
+    let declined_reasons = declined_fix_reason_counts(&declined_fix_reasons);
     Ok(FixOutcome {
         files: results,
         declined,
+        declined_reasons,
     })
 }
 
@@ -2184,11 +2221,13 @@ fn ty_call_fix_insertions(
     max_positional: usize,
     positional_count: usize,
     receiver_is_explicit: bool,
-) -> Option<Vec<Insertion>> {
+) -> Result<Vec<Insertion>, DeclinedFixReason> {
     if !signature_is_fully_named(signature) {
-        return None;
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
     }
-    let call = call_at_start(fix_ast.suite, pending.call_start)?;
+    let Some(call) = call_at_start(fix_ast.suite, pending.call_start) else {
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
+    };
     // Ty hovers are already call-site oriented for bound methods, so avoid
     // the built-in resolver's attribute-name receiver heuristic here. The one
     // exception is an unbound `def` hover with leading `self`/`cls`, where
@@ -2225,9 +2264,12 @@ fn record_ty_fix(
         return;
     };
     let Some(fix_ast) = fix_ast else {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnsupportedSignatureShape);
         return;
     };
-    let Some(insertions) = ty_call_fix_insertions(
+    let insertions = match ty_call_fix_insertions(
         fix_ast,
         pending,
         callee_fullname,
@@ -2235,8 +2277,12 @@ fn record_ty_fix(
         max_positional,
         positional_count,
         receiver_is_explicit,
-    ) else {
-        return;
+    ) {
+        Ok(insertions) => insertions,
+        Err(reason) => {
+            fixes.declined_fix_reasons.push(reason);
+            return;
+        }
     };
     fixes.insertions.extend(insertions);
     *fixes.fixed_calls += 1;
@@ -2347,6 +2393,7 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
 struct TyFixes<'a> {
     insertions: &'a mut Vec<Insertion>,
     fixed_calls: &'a mut usize,
+    declined_fix_reasons: &'a mut Vec<DeclinedFixReason>,
 }
 
 #[derive(Clone, Copy)]
@@ -2376,14 +2423,29 @@ fn resolve_overload_fixes_with_ty(
     if !*ty_start_attempted {
         *ty_start_attempted = true;
         let Ok(started) = start_ty(project_root, python_env) else {
+            record_declined_fixes(
+                &mut fixes,
+                DeclinedFixReason::UnresolvedOverload,
+                pending.len(),
+            );
             return;
         };
         *ty = Some(started);
     }
     let Some(ty) = ty.as_mut() else {
+        record_declined_fixes(
+            &mut fixes,
+            DeclinedFixReason::UnresolvedOverload,
+            pending.len(),
+        );
         return;
     };
     if ty.ensure_open(path, source).is_none() {
+        record_declined_fixes(
+            &mut fixes,
+            DeclinedFixReason::UnresolvedOverload,
+            pending.len(),
+        );
         return;
     }
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
@@ -2406,9 +2468,26 @@ fn resolve_overload_fixes_with_ty(
             .as_ref()
             .and_then(hover_text);
         let Some(raw) = raw else {
+            record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
             continue;
         };
         record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn record_declined_fix(fixes: &mut Option<TyFixes<'_>>, reason: DeclinedFixReason) {
+    if let Some(fixes) = fixes.as_mut() {
+        fixes.declined_fix_reasons.push(reason);
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn record_declined_fixes(fixes: &mut Option<TyFixes<'_>>, reason: DeclinedFixReason, count: usize) {
+    if let Some(fixes) = fixes.as_mut() {
+        fixes
+            .declined_fix_reasons
+            .extend((0..count).map(|_| reason));
     }
 }
 
@@ -2423,11 +2502,13 @@ fn record_selected_overload_fix(
 
     if let Some(sig) = parse_hover_signature(raw_hover) {
         let Some(signature) = signature_from_param_text(&sig.params) else {
+            record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         };
         let (effective_signature, positional_count, receiver_is_explicit) =
             strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
         if !selected_overload_arm_is_unambiguous(&effective_signature, &item.candidate_signatures) {
+            record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
         let Some(max_positional) = violation_max_positional(
@@ -2436,6 +2517,7 @@ fn record_selected_overload_fix(
             positional_count,
             false,
         ) else {
+            record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         };
         let fix_signature = if receiver_is_explicit {
@@ -2449,6 +2531,7 @@ fn record_selected_overload_fix(
             positional_count
         };
         if !item.rewrite_args_are_statically_precise {
+            record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
         record_ty_fix(
@@ -2471,9 +2554,11 @@ fn record_selected_overload_fix(
     let [signature] = overloads.as_slice() else {
         // A hover that still reports multiple overload arms has not selected
         // a unique callable. Leave the existing diagnostic declined.
+        record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
         return;
     };
     if !selected_overload_arm_is_unambiguous(signature, &item.candidate_signatures) {
+        record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
         return;
     }
     let Some(max_positional) = violation_max_positional(
@@ -2482,11 +2567,13 @@ fn record_selected_overload_fix(
         p.positional_count,
         false,
     ) else {
+        record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
         return;
     };
     // The selected callable-type arm is already call-site oriented (as in the
     // normal ty fallback). It is safe only if it has complete parameter names.
     if !item.rewrite_args_are_statically_precise {
+        record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
         return;
     }
     record_ty_fix(
@@ -2701,6 +2788,8 @@ fn resolve_pending_with_ty(
                     p.positional_count,
                     false,
                 );
+            } else if fixes.is_some() {
+                record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
             }
         }
     }
@@ -2755,18 +2844,25 @@ fn resolve_pending_with_ty(
                 path,
                 diagnostics,
             );
-            if fullname.ends_with(".__call__") {
-                if let (Some(max_positional), [signature]) = (max_positional, sigs.as_slice()) {
-                    record_ty_fix(
-                        &mut fixes,
-                        fix_ast,
-                        &pending[i],
-                        &fullname,
-                        signature,
-                        max_positional,
-                        pending[i].positional_count,
-                        false,
-                    );
+            if let Some(max_positional) = max_positional {
+                let mut attempted_fix = false;
+                if fullname.ends_with(".__call__") {
+                    if let [signature] = sigs.as_slice() {
+                        attempted_fix = true;
+                        record_ty_fix(
+                            &mut fixes,
+                            fix_ast,
+                            &pending[i],
+                            &fullname,
+                            signature,
+                            max_positional,
+                            pending[i].positional_count,
+                            false,
+                        );
+                    }
+                }
+                if !attempted_fix {
+                    record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
                 }
             }
         }
@@ -2779,7 +2875,7 @@ mod tests {
     use super::{
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver, without_leading_self,
-        FixSafety, PendingTy, TyFixAst, TyFixes,
+        DeclinedFixReason, FixSafety, PendingTy, TyFixAst, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2973,9 +3069,11 @@ mod tests {
         };
         let mut insertions = Vec::new();
         let mut fixed_calls = 0usize;
+        let mut declined_fix_reasons = Vec::new();
         let mut fixes = Some(TyFixes {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
+            declined_fix_reasons: &mut declined_fix_reasons,
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let fix_ast = TyFixAst {
@@ -3011,6 +3109,13 @@ mod tests {
         );
         assert!(insertions.is_empty());
         assert_eq!(fixed_calls, 0);
+        assert_eq!(
+            declined_fix_reasons,
+            vec![
+                DeclinedFixReason::UnsupportedSignatureShape,
+                DeclinedFixReason::UnsupportedSignatureShape
+            ]
+        );
     }
 
     // ----- ty goto-definition resolution internals --------------------
