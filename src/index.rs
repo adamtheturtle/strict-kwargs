@@ -214,12 +214,24 @@ impl DefinitionIndex {
     /// definitions and its re-export edges. Shared by the eager pass
     /// (builtins / checked files) and lazy [`Self::ensure_module`].
     fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
+        let mut active_modules = FxHashSet::default();
+        active_modules.insert(module_name.to_string());
+        self.index_source_with_active(module_name, is_package, stmts, &mut active_modules);
+    }
+
+    fn index_source_with_active(
+        &self,
+        module_name: &str,
+        is_package: bool,
+        stmts: &[Stmt],
+        active_modules: &mut FxHashSet<String>,
+    ) {
         let mut collected = Collected::default();
         collect(stmts, module_name, is_package, &mut collected);
         let mut query_budget = MAX_QUERY_MODULES;
         for base in &collected.data_constructor_bases {
             if !same_module_or_nested(module_name, base) {
-                self.ensure_for_data_constructor_base(base, &mut query_budget);
+                self.ensure_for_data_constructor_base(base, &mut query_budget, active_modules);
             }
         }
         let mut inner = self.lock();
@@ -258,27 +270,13 @@ impl DefinitionIndex {
     // callees, `synthesize_data_constructor`).
     #[cfg_attr(coverage, coverage(off))]
     fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
-        self.ensure_module_impl(dotted, query_budget, true);
-    }
-
-    #[cfg_attr(coverage, coverage(off))]
-    fn ensure_module_impl(
-        &self,
-        dotted: &str,
-        query_budget: &mut usize,
-        wait_for_in_progress: bool,
-    ) {
         let claim = {
             let mut inner = self.lock();
             loop {
                 match inner.modules.get(dotted).copied() {
                     Some(ModuleState::Indexed) => return,
                     Some(ModuleState::Indexing) => {
-                        if wait_for_in_progress {
-                            inner = self.wait_for_module(inner);
-                        } else {
-                            return;
-                        }
+                        inner = self.wait_for_module(inner);
                     }
                     None => {
                         inner
@@ -332,8 +330,65 @@ impl DefinitionIndex {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn ensure_module_data_constructor_base(&self, dotted: &str, query_budget: &mut usize) {
-        self.ensure_module_impl(dotted, query_budget, false);
+    fn ensure_module_data_constructor_base(
+        &self,
+        dotted: &str,
+        query_budget: &mut usize,
+        active_modules: &mut FxHashSet<String>,
+    ) {
+        if active_modules.contains(dotted) {
+            return;
+        }
+        let claim = {
+            let mut inner = self.lock();
+            loop {
+                match inner.modules.get(dotted).copied() {
+                    Some(ModuleState::Indexed) => return,
+                    Some(ModuleState::Indexing) => {
+                        inner = self.wait_for_module(inner);
+                    }
+                    None => {
+                        inner
+                            .modules
+                            .insert(dotted.to_string(), ModuleState::Indexing);
+                        drop(inner);
+                        break ModuleIndexClaim {
+                            index: self,
+                            dotted: dotted.to_string(),
+                        };
+                    }
+                }
+            }
+        };
+        let Some(resolver) = self.resolver.as_ref() else {
+            return;
+        };
+        let Some(m) = resolver.resolve(dotted) else {
+            return;
+        };
+        if *query_budget == 0 {
+            return;
+        }
+        {
+            let mut inner = self.lock();
+            if inner.budget == 0 {
+                return;
+            }
+            inner.budget -= 1;
+        }
+        *query_budget -= 1;
+        let parsed = if m.guard_nesting {
+            parse_module_guarded(&m.source)
+        } else {
+            parse_module(&m.source).map_err(CheckError::from)
+        };
+        let Ok(parsed) = parsed else {
+            return;
+        };
+        active_modules.insert(dotted.to_string());
+        self.index_source_with_active(dotted, m.is_package, parsed.suite(), active_modules);
+        active_modules.remove(dotted);
+        drop(claim);
     }
 
     /// Ensure every dotted prefix of `name` (parents first) and `name` itself
@@ -351,14 +406,19 @@ impl DefinitionIndex {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn ensure_for_data_constructor_base(&self, name: &str, query_budget: &mut usize) {
+    fn ensure_for_data_constructor_base(
+        &self,
+        name: &str,
+        query_budget: &mut usize,
+        active_modules: &mut FxHashSet<String>,
+    ) {
         let mut idx = 0;
         while let Some(rel) = name[idx..].find('.') {
             let end = idx + rel;
-            self.ensure_module_data_constructor_base(&name[..end], query_budget);
+            self.ensure_module_data_constructor_base(&name[..end], query_budget, active_modules);
             idx = end + 1;
         }
-        self.ensure_module_data_constructor_base(name, query_budget);
+        self.ensure_module_data_constructor_base(name, query_budget, active_modules);
     }
 
     /// Resolve `fullname` to its signatures, following re-export edges
@@ -1615,7 +1675,7 @@ mod tests {
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use ruff_python_parser::parse_module;
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     /// A signature with `n` positional-or-keyword parameters, so a test can
     /// tell which definition won an alias collision by its arity.
@@ -2025,5 +2085,48 @@ class Child(Base):
             Some(2)
         );
         assert_eq!(arity(&index, "pkg.f"), Some(2));
+    }
+
+    #[test]
+    fn constructor_base_preload_waits_for_in_progress_module() {
+        let index = Arc::new(DefinitionIndex::for_test());
+        {
+            let mut inner = index.lock();
+            inner
+                .modules
+                .insert("pkg".to_string(), ModuleState::Indexing);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_index = Arc::clone(&index);
+        std::thread::spawn(move || {
+            let mut query_budget = 1;
+            let mut active_modules = FxHashSet::default();
+            worker_index.ensure_for_data_constructor_base(
+                "pkg.Base",
+                &mut query_budget,
+                &mut active_modules,
+            );
+            tx.send(query_budget).expect("send result");
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "base preload returned while the base module was still being indexed"
+        );
+
+        {
+            let mut inner = index.lock();
+            inner
+                .modules
+                .insert("pkg".to_string(), ModuleState::Indexed);
+        }
+        index.module_ready.notify_all();
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("worker result"),
+            1
+        );
     }
 }
