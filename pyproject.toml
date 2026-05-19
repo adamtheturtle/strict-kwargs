@@ -12,7 +12,7 @@ authors = [
     { name = "Adam Dangoor", email = "adamdangoor@gmail.com" },
 ]
 requires-python = ">=3.11"
-# `ty` is the required type-inference backend (see docs/ARCHITECTURE.md).
+# `ty` is the required type-inference backend.
 # Floor, not a pin: `0.0.23` is the version the LSP/hover integration was
 # verified against, so it is the minimum; newer `ty` is allowed. ty is
 # pre-1.0, so a future release could change the hover/LSP surface — hover

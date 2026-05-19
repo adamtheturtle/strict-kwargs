@@ -172,8 +172,7 @@ Next
   benchmark suite (``benches/resolver.rs``) covering a leaf file, a large
   stdlib import closure, an overload/special-form heavy file, and a
   generated first-party closure, plus the auto-fixer. A non-gating CI job
-  reports an instruction-count delta against ``main`` on every PR. See
-  ``docs/ARCHITECTURE.md``.
+  reports an instruction-count delta against ``main`` on every PR.
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
   keyword arguments (``--diff`` to preview). Conservative — only calls that
   resolve to a single known signature are rewritten (project code and the
@@ -208,9 +207,6 @@ Next
   robust to ty being absent/slow/changing.
 - Cross-platform ``file://`` URI handling; CI runs the ty-backed suite on
   Linux and Windows.
-- See ``docs/ARCHITECTURE.md`` for the current state, capability matrix,
-  parity status, and limitations.
-
 2026.5.16-post.1
 ----------------
 
