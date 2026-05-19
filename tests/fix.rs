@@ -435,6 +435,13 @@ fn does_not_fix_overloaded_callee_when_ty_selection_is_not_unique() {
 }
 
 #[test]
+fn scans_annotated_method_vararg_and_kwarg_parameters() {
+    assert_unchanged(
+        "class C:\n    def m(self, *rest: int, **kw: int) -> None: ...\n\nc = C()\nc.m()\n",
+    );
+}
+
+#[test]
 fn round_trips_keyword_only_and_methods() {
     assert_round_trips(
         "def add(a: int, b: int) -> int: ...\n\
