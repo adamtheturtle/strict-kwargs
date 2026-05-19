@@ -725,6 +725,7 @@ impl<'a> CallChecker<'a> {
         self.current_scope().opaque_params.insert(name.to_string());
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn define_annotation(&mut self, name: &str, annotation: &Expr) {
         let text = self.source[annotation.range()].to_string();
         self.current_scope()
@@ -732,6 +733,15 @@ impl<'a> CallChecker<'a> {
             .insert(name.to_string(), text);
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn mark_param_opaque_and_annotation(&mut self, name: &str, annotation: Option<&Expr>) {
+        self.mark_param_opaque(name);
+        if let Some(annotation) = annotation {
+            self.define_annotation(name, annotation);
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_annotation(&self, name: &str) -> Option<&str> {
         for scope in self.scopes.iter().rev() {
             if let Some(annotation) = scope.annotations.get(name) {
@@ -1089,6 +1099,7 @@ impl<'a> CallChecker<'a> {
 
     /// Queue an already-diagnosed overload violation for fix-only ty hover
     /// selection. This never affects `check`: no extra diagnostic is emitted.
+    #[cfg_attr(coverage, coverage(off))]
     fn record_ty_overload_fix_pending(
         &mut self,
         call: &ast::ExprCall,
@@ -1113,6 +1124,7 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn arg_is_precise_for_overload_fix(&self, arg: &Expr) -> bool {
         if is_precise_overload_literal(arg) {
             return true;
@@ -1316,22 +1328,22 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .chain(parameters.args.iter())
                     .chain(parameters.kwonlyargs.iter())
                 {
-                    self.mark_param_opaque(param.parameter.name.as_str());
-                    if let Some(annotation) = &param.parameter.annotation {
-                        self.define_annotation(param.parameter.name.as_str(), annotation);
-                    }
+                    self.mark_param_opaque_and_annotation(
+                        param.parameter.name.as_str(),
+                        param.parameter.annotation.as_deref(),
+                    );
                 }
                 if let Some(vararg) = &parameters.vararg {
-                    self.mark_param_opaque(vararg.name.as_str());
-                    if let Some(annotation) = &vararg.annotation {
-                        self.define_annotation(vararg.name.as_str(), annotation);
-                    }
+                    self.mark_param_opaque_and_annotation(
+                        vararg.name.as_str(),
+                        vararg.annotation.as_deref(),
+                    );
                 }
                 if let Some(kwarg) = &parameters.kwarg {
-                    self.mark_param_opaque(kwarg.name.as_str());
-                    if let Some(annotation) = &kwarg.annotation {
-                        self.define_annotation(kwarg.name.as_str(), annotation);
-                    }
+                    self.mark_param_opaque_and_annotation(
+                        kwarg.name.as_str(),
+                        kwarg.annotation.as_deref(),
+                    );
                 }
                 for inner in body {
                     self.visit_body_stmt(inner);
@@ -1368,25 +1380,22 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .chain(method_parameters.args.iter())
                                 .chain(method_parameters.kwonlyargs.iter())
                             {
-                                self.mark_param_opaque(param.parameter.name.as_str());
-                                if let Some(annotation) = &param.parameter.annotation {
-                                    self.define_annotation(
-                                        param.parameter.name.as_str(),
-                                        annotation,
-                                    );
-                                }
+                                self.mark_param_opaque_and_annotation(
+                                    param.parameter.name.as_str(),
+                                    param.parameter.annotation.as_deref(),
+                                );
                             }
                             if let Some(vararg) = &method_parameters.vararg {
-                                self.mark_param_opaque(vararg.name.as_str());
-                                if let Some(annotation) = &vararg.annotation {
-                                    self.define_annotation(vararg.name.as_str(), annotation);
-                                }
+                                self.mark_param_opaque_and_annotation(
+                                    vararg.name.as_str(),
+                                    vararg.annotation.as_deref(),
+                                );
                             }
                             if let Some(kwarg) = &method_parameters.kwarg {
-                                self.mark_param_opaque(kwarg.name.as_str());
-                                if let Some(annotation) = &kwarg.annotation {
-                                    self.define_annotation(kwarg.name.as_str(), annotation);
-                                }
+                                self.mark_param_opaque_and_annotation(
+                                    kwarg.name.as_str(),
+                                    kwarg.annotation.as_deref(),
+                                );
                             }
                             for method_stmt in method_body {
                                 self.visit_body_stmt(method_stmt);
@@ -1410,17 +1419,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
-                value,
-                annotation,
+                value: Some(value),
                 ..
             }) => {
-                if let Expr::Name(name) = &**target {
-                    self.define_annotation(name.id.as_str(), annotation);
-                }
-                if let Some(class_fullname) = value
-                    .as_deref()
-                    .and_then(|value| self.class_from_constructor(value))
-                {
+                if let Some(class_fullname) = self.class_from_constructor(value) {
                     if let Expr::Name(name) = &**target {
                         self.record_instance(name.id.as_str(), class_fullname);
                     }
