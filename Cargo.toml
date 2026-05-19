@@ -27,7 +27,7 @@ rayon = "1.12"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.1"
 walkdir = "2.5"
 
 # Vendored Ruff Python parser/AST (same API as astral-sh/ruff).
