@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use strict_kwargs::{check_paths, fix_paths, Config, Diagnostic};
+use strict_kwargs::{check_paths, fix_paths, fix_paths_with_safety, Config, Diagnostic, FixSafety};
 
 struct TestProject {
     _temp: tempfile::TempDir,
@@ -41,10 +41,20 @@ impl TestProject {
     /// Run the fixer over `main.py` and return the rewritten source (or the
     /// original when nothing was fixed).
     fn fixed_main(&self) -> String {
+        self.fixed_main_with_safety(FixSafety::Safe)
+    }
+
+    fn fixed_main_with_safety(&self, fix_safety: FixSafety) -> String {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let outcome =
-            fix_paths(&self.root, std::slice::from_ref(&main), &config, None).expect("fix");
+        let outcome = fix_paths_with_safety(
+            &self.root,
+            std::slice::from_ref(&main),
+            &config,
+            None,
+            fix_safety,
+        )
+        .expect("fix");
         outcome
             .files
             .into_iter()
@@ -98,6 +108,11 @@ fn assert_round_trips(source: &str) {
 /// The fixer must leave `source` untouched.
 fn assert_unchanged(source: &str) {
     assert_eq!(project(source).fixed_main(), source);
+}
+
+fn assert_unsafe_fixed(source: &str, expected: &str) {
+    let proj = project(source);
+    assert_eq!(proj.fixed_main_with_safety(FixSafety::Unsafe), expected);
 }
 
 /// Locate the `site-packages` directory inside a freshly created venv
@@ -673,6 +688,14 @@ fn synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
+fn unsafe_fixes_synthesized_dataclass_constructor() {
+    assert_unsafe_fixed(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\n",
+    );
+}
+
+#[test]
 fn inherited_synthesized_dataclass_constructor_not_rewritten() {
     let source = "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n";
     let proj = project(source);
@@ -687,9 +710,25 @@ fn inherited_synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
+fn unsafe_fixes_inherited_synthesized_dataclass_constructor() {
+    assert_unsafe_fixed(
+        "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n",
+        "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(base=1, child=2)\n",
+    );
+}
+
+#[test]
 fn synthesized_namedtuple_constructor_not_rewritten() {
     assert_unchanged(
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
+    );
+}
+
+#[test]
+fn unsafe_fixes_synthesized_namedtuple_constructor() {
+    assert_unsafe_fixed(
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
+        "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(a=1, b=2)\n",
     );
 }
 

@@ -78,6 +78,7 @@ This is tested on Python 3.11+.
 strict-kwargs .                 # check a directory
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
+strict-kwargs fix --unsafe-fixes .  # include rewrites that may change runtime behavior
 strict-kwargs --python .venv .  # point type resolution at an environment
 ```
 
@@ -89,6 +90,9 @@ Exit codes are:
 
 `fix` only rewrites calls it can name unambiguously. Ambiguous calls are
 counted as declined.
+
+`--unsafe-fixes` includes broader rewrites that may change runtime behavior.
+Today that means synthesized dataclass and `NamedTuple` constructors.
 
 Use `--python` to point third-party resolution at an interpreter, virtual
 environment, or `sys.prefix`. Missing paths are errors. A missing `--python`

@@ -9,6 +9,23 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
 
+/// Which fixes may be emitted by the auto-fixer.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FixSafety {
+    /// Only fixes that preserve the default conservative mutation contract.
+    Safe,
+    /// Include broader rewrites that may change runtime behaviour.
+    Unsafe,
+}
+
+impl FixSafety {
+    /// Whether this mode permits unsafe fixes.
+    #[must_use]
+    pub const fn allows_unsafe(self) -> bool {
+        matches!(self, Self::Unsafe)
+    }
+}
+
 /// A single source insertion: `text` is spliced in at byte offset `at`.
 ///
 /// The fixer only ever *inserts* (`name=` before an argument), so it never
