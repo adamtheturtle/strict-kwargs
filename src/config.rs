@@ -121,7 +121,7 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
     let current = parse_version(current_version, "current strict-kwargs version")?;
     if let Some(minimum) = required_version.strip_prefix(">=") {
         let minimum = parse_version(minimum.trim(), "`required_version` minimum")?;
-        if current >= minimum {
+        if minimum_required_version_is_satisfied(&current, &minimum) {
             return Ok(());
         }
         return Err(format!(
@@ -143,6 +143,22 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
         "`required_version = \"{required_version}\"` is not satisfied by strict-kwargs \
          {current_version}; install strict-kwargs {required_version} or update the setting"
     ))
+}
+
+fn minimum_required_version_is_satisfied(current: &Version, minimum: &Version) -> bool {
+    if current >= minimum {
+        return true;
+    }
+    minimum.pre.is_empty()
+        && current.major == minimum.major
+        && current.minor == minimum.minor
+        && current.patch == minimum.patch
+        && current
+            .pre
+            .as_str()
+            .split('.')
+            .next()
+            .is_some_and(|identifier| identifier == "post")
 }
 
 fn parse_version(version: &str, label: &str) -> Result<Version, String> {
@@ -306,6 +322,30 @@ mod tests {
     fn minimum_required_version_can_be_older_than_current_version() {
         validate_required_version(">=2026.5.19-post.2", "2026.5.19-post.3")
             .expect("older minimum is satisfied");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_accepts_matching_post_release() {
+        validate_required_version(">=2026.5.19", "2026.5.19-post.3")
+            .expect("post release satisfies its calendar-version minimum");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_non_post_prerelease() {
+        let message = validate_required_version(">=2026.5.19", "2026.5.19-alpha.1")
+            .expect_err("non-post prerelease must stay below the bare release");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_post_release_before_required_base() {
+        for required_version in [">=2027.5.19", ">=2026.6.19", ">=2026.5.20"] {
+            let message = validate_required_version(required_version, "2026.5.19-post.3")
+                .expect_err("post release must not satisfy a newer base version");
+            assert!(message.contains("required_version"), "message: {message}");
+            assert!(message.contains("not satisfied"), "message: {message}");
+        }
     }
 
     #[test]

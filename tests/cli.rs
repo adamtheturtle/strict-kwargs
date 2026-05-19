@@ -204,6 +204,19 @@ fn check_required_version_mismatch_is_fatal_exit_two() {
 }
 
 #[test]
+fn check_bare_required_version_minimum_accepts_post_build() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nrequired_version = \">=2026.5.19\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+}
+
+#[test]
 fn check_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
     let output = project.run(&["broken.py"]);
