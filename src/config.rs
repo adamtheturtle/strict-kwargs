@@ -6,6 +6,21 @@ use serde::Deserialize;
 
 use crate::error::CheckError;
 
+/// Diagnostic output format for `strict-kwargs check`.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    /// Human-oriented `path:line:column: error: ...` lines on stderr.
+    #[default]
+    Full,
+    /// A JSON array of structured diagnostics on stdout.
+    Json,
+    /// GitHub Actions workflow command annotations on stdout.
+    Github,
+}
+
 /// Resolved `[tool.strict_kwargs]` configuration.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct Config {
@@ -19,6 +34,9 @@ pub struct Config {
     /// were synthesized from class fields.
     #[serde(default)]
     pub fix_synthesized_constructors: bool,
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[serde(default)]
+    pub output_format: OutputFormat,
 }
 
 impl Config {
@@ -126,6 +144,7 @@ mod tests {
       ignore_names = ["main.func", "builtins.str"]
       debug = true
       fix_synthesized_constructors = true
+      output_format = "json"
       "#,
         )
         .expect("valid config");
@@ -135,6 +154,7 @@ mod tests {
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Json);
     }
 
     #[test]
@@ -155,6 +175,7 @@ mod tests {
         assert!(config.ignore_names.is_empty());
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Full);
     }
 
     #[test]
@@ -192,6 +213,16 @@ mod tests {
             "[tool.strict_kwargs]\nfix_synthesized_constructors = \"yes\"\n",
         )
         .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn wrong_output_format_value_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"xml\"\n")
+            .expect_err("wrong value must be reported");
         assert!(
             message.contains("invalid `[tool.strict_kwargs]` table"),
             "message: {message}"
@@ -237,6 +268,18 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert!(config.fix_synthesized_constructors);
+    }
+
+    #[test]
+    fn load_reads_output_format_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\noutput_format = \"github\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(config.output_format, OutputFormat::Github);
     }
 
     #[test]

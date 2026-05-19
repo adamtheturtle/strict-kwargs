@@ -62,6 +62,8 @@ This is tested on Python 3.11+.
 
 ```shell
 strict-kwargs .                 # check a directory
+strict-kwargs --output-format json .    # emit check diagnostics as JSON
+strict-kwargs --output-format github .  # emit GitHub Actions annotations
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
 strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
@@ -74,11 +76,17 @@ Exit codes are:
 - `1`: violations found
 - `2`: operational error
 
+For `check`, the default `full` output format preserves the traditional
+human-readable diagnostics on stderr. `json` and `github` write diagnostics to
+stdout so machine consumers can read them without mixing in operational
+messages. Warnings and operational errors are always written to stderr.
+
 `fix` only rewrites calls it can name unambiguously. Ambiguous calls are
 counted as declined.
 Single-signature calls are rewritten by default, including calls that require deeper type inference.
 Overloaded calls are rewritten by default only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
 Synthesized constructors are the only opt-in category, because generated constructor models can differ from runtime behaviour when class construction is customized.
+`fix --diff` writes the unified diff to stdout and its summary to stderr.
 
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
   These can differ from runtime behaviour when class construction is customized.
@@ -105,6 +113,7 @@ Configuration lives in `pyproject.toml`:
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]
 fix_synthesized_constructors = true
+output_format = "full"  # or "json", "github"
 ```
 
 This is useful especially for builtins which can look strange with keyword arguments.

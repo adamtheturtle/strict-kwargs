@@ -11,13 +11,14 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 use std::io::IsTerminal as _;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use strict_kwargs::{
     check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    DeclinedFixReasonCount, FileFix, FixOptIns,
+    DeclinedFixReasonCount, Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
 
 #[derive(Debug, Parser)]
@@ -65,6 +66,10 @@ struct CheckArgs {
     /// cache (every run is cold, the previous behaviour).
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+
+    /// Diagnostic output format for check results.
+    #[arg(long, value_enum)]
+    output_format: Option<OutputFormat>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -148,6 +153,7 @@ fn run() -> Result<ExitCode, CheckError> {
 fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
+    let output_format = args.output_format.unwrap_or(config.output_format);
     let python_env = resolve_python_env(args.python);
     let diagnostics = check_paths(
         &project_root,
@@ -156,16 +162,67 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
         python_env.as_deref(),
         args.cache_dir.as_deref(),
     )?;
-    let mut failed = false;
-    for diagnostic in &diagnostics {
-        eprintln!("{}", diagnostic.display_path());
-        failed = true;
-    }
-    if failed {
-        Ok(ExitCode::from(1))
-    } else {
+    report_check_diagnostics(&diagnostics, output_format)?;
+    if diagnostics.is_empty() {
         Ok(ExitCode::from(0))
+    } else {
+        Ok(ExitCode::from(1))
     }
+}
+
+#[derive(serde::Serialize)]
+struct JsonDiagnostic<'a> {
+    path: String,
+    line: usize,
+    column: usize,
+    callee: &'a str,
+    positional_count: usize,
+    max_positional_count: usize,
+}
+
+impl<'a> From<&'a Diagnostic> for JsonDiagnostic<'a> {
+    fn from(diagnostic: &'a Diagnostic) -> Self {
+        Self {
+            path: diagnostic.path.display().to_string(),
+            line: diagnostic.line,
+            column: diagnostic.column,
+            callee: &diagnostic.callee,
+            positional_count: diagnostic.positional_count,
+            max_positional_count: diagnostic.max_positional,
+        }
+    }
+}
+
+fn report_check_diagnostics(
+    diagnostics: &[Diagnostic],
+    output_format: OutputFormat,
+) -> Result<(), CheckError> {
+    match output_format {
+        OutputFormat::Full => {
+            for diagnostic in diagnostics {
+                eprintln!("{}", diagnostic.display_path());
+            }
+        }
+        OutputFormat::Json => {
+            let diagnostics = diagnostics
+                .iter()
+                .map(JsonDiagnostic::from)
+                .collect::<Vec<_>>();
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            serde_json::to_writer_pretty(&mut stdout, &diagnostics)
+                .map_err(|error| CheckError::Io(std::io::Error::other(error)))?;
+            writeln!(stdout)?;
+        }
+        OutputFormat::Github => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            for diagnostic in diagnostics {
+                writeln!(stdout, "{}", diagnostic.github_annotation())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Report violations `fix` detected but deliberately did not rewrite, so a
