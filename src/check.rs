@@ -1046,9 +1046,9 @@ impl<'a> CallChecker<'a> {
             positional_count: effective_count,
             max_positional,
         });
-        // Auto-fix is applied by default only when a single, unambiguous
-        // built-in signature is known and it is not synthesized from class
-        // fields. Higher-risk categories are explicit opt-ins.
+        // Auto-fix is applied by default when the parameter-name mapping is
+        // proven unambiguous and it is not synthesized from class fields.
+        // Synthesized constructors remain an explicit opt-in.
         if self.index.is_synthesized(&callee_fullname) && !self.fix_opt_ins.synthesized_constructors
         {
             self.declined_fix_reasons
@@ -1076,8 +1076,8 @@ impl<'a> CallChecker<'a> {
                 Err(reason) => self.declined_fix_reasons.push(reason),
             }
         } else {
-            // Multi-arm overloads remain unsafe by default: different arms
-            // can bind the same positional slot to different parameter names.
+            // Multi-arm overloads need extra proof: different arms can bind
+            // the same positional slot to different parameter names.
             // During `fix` only, ask ty for the hover at this exact call site;
             // if ty has selected one concrete arm, that selected arm provides
             // the only parameter-name mapping we may rewrite with. A hover

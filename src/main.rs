@@ -90,9 +90,15 @@ struct FixArgs {
     #[arg(long)]
     fix_synthesized_constructors: bool,
 
-    /// Rewrite overloaded calls when analysis selects one precise overload arm.
-    #[arg(long)]
+    /// Rewrite overloaded calls when analysis selects one precise overload arm
+    /// (default; accepted for compatibility).
+    #[arg(long, hide = true, conflicts_with = "no_fix_unambiguous_overloads")]
     fix_unambiguous_overloads: bool,
+
+    /// Do not rewrite overloaded calls, even when analysis selects one precise
+    /// overload arm.
+    #[arg(long)]
+    no_fix_unambiguous_overloads: bool,
 
     /// Python environment for the `ty` inference fallback (see
     /// ``strict-kwargs --help``). The rewrite stays conservative and never
@@ -210,7 +216,7 @@ fn diff_color() -> bool {
 const fn fix_opt_ins_from_args(args: &FixArgs) -> FixOptIns {
     FixOptIns {
         synthesized_constructors: args.fix_synthesized_constructors,
-        unambiguous_overloads: args.fix_unambiguous_overloads,
+        unambiguous_overloads: args.fix_unambiguous_overloads || !args.no_fix_unambiguous_overloads,
     }
 }
 
@@ -218,11 +224,6 @@ fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
     if opt_ins.synthesized_constructors {
         eprintln!(
             "strict-kwargs: fix opt-in enabled: synthesized constructors may change runtime behavior"
-        );
-    }
-    if opt_ins.unambiguous_overloads {
-        eprintln!(
-            "strict-kwargs: fix opt-in enabled: unambiguous overloads use the selected overload arm"
         );
     }
 }

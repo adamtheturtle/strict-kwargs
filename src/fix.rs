@@ -9,14 +9,23 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
 
-/// Non-default fix categories a caller may opt into explicitly.
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+/// Fix categories a caller may enable or disable explicitly.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct FixOptIns {
     /// Rewrite dataclass and `NamedTuple` constructors whose signatures were
     /// synthesized from class fields.
     pub synthesized_constructors: bool,
-    /// Rewrite overloaded calls when `ty` selects one precise overload arm.
+    /// Rewrite overloaded calls when analysis selects one precise overload arm.
     pub unambiguous_overloads: bool,
+}
+
+impl Default for FixOptIns {
+    fn default() -> Self {
+        Self {
+            synthesized_constructors: false,
+            unambiguous_overloads: true,
+        }
+    }
 }
 
 /// Why a detected violation was deliberately left untouched by the fixer.
@@ -33,8 +42,8 @@ pub enum DeclinedFixReason {
     /// `ty` could only resolve the call via goto-definition, not a concrete
     /// call-site hover signature suitable for rewriting.
     TyDefinitionOnly,
-    /// An overloaded call was narrowed to one rewriteable arm; default `fix`
-    /// keeps overload-derived parameter mappings opt-in.
+    /// An overloaded call was narrowed to one rewriteable arm, but overload
+    /// rewrites were disabled.
     UnambiguousOverload,
     /// The call uses `*args` or `**kwargs`, so local argument positions are not
     /// enough to build a sound keyword rewrite.

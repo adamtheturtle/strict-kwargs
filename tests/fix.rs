@@ -444,13 +444,9 @@ fn fixes_overloaded_stdlib_when_ty_selection_is_unambiguous() {
     // `os.getenv` has overload arms, but this arity and argument shape select
     // one fully named arm. The overload fix path may rewrite it with that
     // selected parameter mapping.
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "import os\n\nos.getenv(\"PATH\", \"fallback\")\n",
         "import os\n\nos.getenv(key=\"PATH\", default=\"fallback\")\n",
-        FixOptIns {
-            unambiguous_overloads: true,
-            ..FixOptIns::default()
-        },
     );
 }
 
@@ -480,7 +476,7 @@ fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
     // Issue #95: overload arms can map the same positional slot to different
     // parameter names. Rewrite only when ty's call-site hover selects exactly
     // one indexed arm, so the chosen keyword name is not guessed.
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "from typing import overload\n\
          @overload\n\
          def f(count: int) -> int: ...\n\
@@ -495,16 +491,12 @@ fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
          def f(text: str) -> str: ...\n\
          def f(value):\n    return value\n\
          f(count=1)\n",
-        FixOptIns {
-            unambiguous_overloads: true,
-            ..FixOptIns::default()
-        },
     );
 }
 
 #[test]
 fn fixes_overloaded_callee_for_precisely_annotated_argument() {
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "from typing import overload\n\
          @overload\n\
          def f(count: int) -> int: ...\n\
@@ -519,11 +511,38 @@ fn fixes_overloaded_callee_for_precisely_annotated_argument() {
          def f(text: str) -> str: ...\n\
          def f(value):\n    return value\n\
          def g(x: int):\n    f(count=x)\n",
+    );
+}
+
+#[test]
+fn no_fix_unambiguous_overloads_keeps_selected_overload_declined() {
+    let source = "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         f(1)\n";
+    let proj = project(source);
+    let outcome = fix_paths_with_opt_ins(
+        &proj.root,
+        &[proj.root.join("main.py")],
+        &Config::load(&proj.root).expect("valid config"),
+        None,
         FixOptIns {
-            unambiguous_overloads: true,
+            unambiguous_overloads: false,
             ..FixOptIns::default()
         },
+    )
+    .expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::UnambiguousOverload
     );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]

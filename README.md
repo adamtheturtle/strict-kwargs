@@ -79,6 +79,7 @@ strict-kwargs .                 # check a directory
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
 strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
+strict-kwargs fix --no-fix-unambiguous-overloads .  # disable overload rewrites
 strict-kwargs --python .venv .  # point type resolution at an environment
 ```
 
@@ -94,12 +95,13 @@ counted as declined.
 `fix` has no blanket unsafe mode.
 Different declined rewrite categories carry different risks, so broad opt-ins are harder to reason about in review and CI.
 Ordinary single-signature fixes default to yes, including calls that require deeper type inference.
-The remaining opt-ins default to no because they depend on generated constructor models or a selected overload arm rather than one concrete declared signature.
-Use the narrow flag for the category you accept:
+Overloaded calls also default to yes when analysis selects one precise overload arm and the rewritten argument types are precise enough.
+Use `--no-fix-unambiguous-overloads` to leave selected overloaded calls unchanged.
+Synthesized constructors default to no because generated constructor models can differ from runtime behaviour when class construction is customized.
+Use the narrow flag when you accept that category:
 
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
   These can differ from runtime behaviour when class construction is customized.
-- `--fix-unambiguous-overloads`: rewrite overloaded calls only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
 
 Use `--python` to point third-party resolution at an interpreter, virtual
 environment, or `sys.prefix`. Missing paths are errors. A missing `--python`

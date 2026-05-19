@@ -8,13 +8,13 @@ Next
 ----------------
 
 
-- Add category-specific ``strict-kwargs fix`` opt-ins instead of a blanket
+- Add category-specific ``strict-kwargs fix`` controls instead of a blanket
   unsafe mode. ``--fix-synthesized-constructors`` rewrites dataclass and
-  ``NamedTuple`` calls from synthesized field models, and
-  ``--fix-unambiguous-overloads`` rewrites overloads when analysis selects one
-  precise arm. Each can be used with or without ``--diff``; ordinary
-  single-signature fixes remain default-on regardless of which resolver found
-  the signature.
+  ``NamedTuple`` calls from synthesized field models. Overload rewrites are
+  default-on when analysis selects one precise arm, and
+  ``--no-fix-unambiguous-overloads`` disables them. Each can be used with or
+  without ``--diff``; ordinary single-signature fixes remain default-on
+  regardless of which resolver found the signature.
 
 - ``strict-kwargs fix`` now reports declined rewrite reasons by category on
   stderr, including synthesized constructors, unresolved overloads,
