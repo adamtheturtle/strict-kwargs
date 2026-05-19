@@ -345,14 +345,14 @@ fn does_not_fix_overloaded_builtin() {
 }
 
 #[test]
-fn does_not_fix_ty_resolved_ambiguous_stdlib_hover() {
-    // `os.getenv` is still detected through ty, but its hover is not a single
-    // concrete signature that the fixer can safely map, so it remains
-    // declined and a following check will still report it.
-    let proj = project("import os\n\nos.getenv(\"PATH\", \"fallback\")\n");
-    let outcome = proj.fix_main_result().expect("fix");
-    assert!(outcome.files.is_empty());
-    assert_eq!(outcome.declined, 1);
+fn fixes_overloaded_stdlib_when_ty_selection_is_unambiguous() {
+    // `os.getenv` has overload arms, but this arity and argument shape select
+    // one fully named arm. The overload fix path may rewrite it with that
+    // selected parameter mapping.
+    assert_fixed(
+        "import os\n\nos.getenv(\"PATH\", \"fallback\")\n",
+        "import os\n\nos.getenv(key=\"PATH\", default=\"fallback\")\n",
+    );
 }
 
 #[test]
@@ -363,7 +363,9 @@ fn does_not_fix_before_var_positional() {
 
 #[test]
 fn does_not_fix_overloaded_callee() {
-    // Two signatures: a keyword rewrite could bind the wrong name.
+    // Two signatures with the same parameter-name mapping still remain a
+    // multi-arm overload for the fixer: without a uniquely identifiable arm,
+    // the conservative rule declines the rewrite.
     let source = "from typing import overload\n\
          @overload\n\
          def f(a: int) -> int: ...\n\
@@ -371,6 +373,64 @@ fn does_not_fix_overloaded_callee() {
          def f(a: str) -> str: ...\n\
          def f(a):\n    return a\n\
          f(1)\n";
+    assert_unchanged(source);
+}
+
+#[test]
+fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
+    // Issue #95: overload arms can map the same positional slot to different
+    // parameter names. Rewrite only when ty's call-site hover selects exactly
+    // one indexed arm, so the chosen keyword name is not guessed.
+    assert_fixed(
+        "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         f(1)\n",
+        "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         f(count=1)\n",
+    );
+}
+
+#[test]
+fn fixes_overloaded_callee_for_precisely_annotated_argument() {
+    assert_fixed(
+        "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         def g(x: int):\n    f(x)\n",
+        "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         def g(x: int):\n    f(count=x)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_overloaded_callee_when_ty_selection_is_not_unique() {
+    // `x` could match either overload arm, whose first parameter names differ.
+    // The union annotation is not precise enough for the fixer to trust any
+    // single hover arm, so it keeps the diagnostic declined.
+    let source = "from typing import overload\n\
+         @overload\n\
+         def f(count: int) -> int: ...\n\
+         @overload\n\
+         def f(text: str) -> str: ...\n\
+         def f(value):\n    return value\n\
+         def g(x: int | str):\n    f(x)\n";
     assert_unchanged(source);
 }
 

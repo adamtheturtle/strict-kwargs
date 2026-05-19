@@ -372,7 +372,7 @@ fn scan_file(
     let module_name = module_name_for_path(project_root, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
-    let (diagnostics, pending, fixes, fixed_calls) = {
+    let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls) = {
         let mut checker = CallChecker::new(
             path.to_path_buf(),
             module_name,
@@ -388,6 +388,7 @@ fn scan_file(
         (
             std::mem::take(&mut checker.diagnostics),
             std::mem::take(&mut checker.ty_pending),
+            std::mem::take(&mut checker.ty_overload_fix_pending),
             std::mem::take(&mut checker.fixes),
             checker.fixed_calls,
         )
@@ -396,6 +397,7 @@ fn scan_file(
         source,
         diagnostics,
         pending,
+        overload_fix_pending,
         fixes,
         fixed_calls,
     }))
@@ -417,6 +419,7 @@ struct FileScan {
     source: String,
     diagnostics: Vec<Diagnostic>,
     pending: Vec<PendingTy>,
+    overload_fix_pending: Vec<PendingTyOverloadFix>,
     fixes: Vec<Insertion>,
     fixed_calls: usize,
 }
@@ -606,6 +609,9 @@ struct CallChecker<'a> {
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
     ty_pending: Vec<PendingTy>,
+    /// Built-in-resolved overload violations that are diagnostics already,
+    /// but may be safe to rewrite if ty's hover selects one concrete arm.
+    ty_overload_fix_pending: Vec<PendingTyOverloadFix>,
     /// Source insertions for the auto-fixer (`check_paths` ignores these).
     fixes: Vec<Insertion>,
     /// Number of call sites the fixer rewrote in this file.
@@ -619,6 +625,13 @@ struct PendingTy {
     /// Start of the whole call expression (for the diagnostic position).
     call_start: usize,
     positional_count: usize,
+}
+
+struct PendingTyOverloadFix {
+    pending: PendingTy,
+    callee_fullname: String,
+    candidate_signatures: Vec<Signature>,
+    rewrite_args_are_statically_precise: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -636,6 +649,10 @@ struct Scope {
     /// concrete indexed signature, so they are skipped rather than matched
     /// against a homonymous module-level or nested function (issue #71).
     opaque_params: rustc_hash::FxHashSet<String>,
+    /// Simple local/parameter annotations, used only as a conservative
+    /// overload-fix precondition. A union/`Any`/`object` annotation is not
+    /// precise enough to prove one overload arm was selected.
+    annotations: FxHashMap<String, String>,
 }
 
 impl<'a> CallChecker<'a> {
@@ -664,6 +681,7 @@ impl<'a> CallChecker<'a> {
             diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
             ty_pending: Vec::new(),
+            ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
             fixed_calls: 0,
         }
@@ -705,6 +723,22 @@ impl<'a> CallChecker<'a> {
 
     fn mark_param_opaque(&mut self, name: &str) {
         self.current_scope().opaque_params.insert(name.to_string());
+    }
+
+    fn define_annotation(&mut self, name: &str, annotation: &Expr) {
+        let text = self.source[annotation.range()].to_string();
+        self.current_scope()
+            .annotations
+            .insert(name.to_string(), text);
+    }
+
+    fn resolve_annotation(&self, name: &str) -> Option<&str> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(annotation) = scope.annotations.get(name) {
+                return Some(annotation);
+            }
+        }
+        None
     }
 
     /// Whether `name` is a function parameter in the innermost scope that
@@ -991,10 +1025,8 @@ impl<'a> CallChecker<'a> {
         // synthesized ``@dataclass`` / ``NamedTuple`` constructor is likewise
         // declined until its position->name mapping is guaranteed sound
         // across every modeled constructor shape.
-        if let ([signature], false) = (
-            signatures.as_ref(),
-            self.index.is_synthesized(&callee_fullname),
-        ) {
+        let synthesized = self.index.is_synthesized(&callee_fullname);
+        if let ([signature], false) = (signatures.as_ref(), synthesized) {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
@@ -1011,23 +1043,85 @@ impl<'a> CallChecker<'a> {
                 self.fixes.extend(insertions);
                 self.fixed_calls += 1;
             }
+        } else if signatures.len() > 1 && !synthesized {
+            // Multi-arm overloads remain unsafe by default: different arms
+            // can bind the same positional slot to different parameter names.
+            // During `fix` only, ask ty for the hover at this exact call site;
+            // if ty has selected one concrete arm, that selected arm provides
+            // the only parameter-name mapping we may rewrite with. A hover
+            // that still shows multiple arms, or no callable arm, is declined.
+            let rewrite_start = if receiver_is_explicit {
+                max_positional + 1
+            } else {
+                max_positional
+            };
+            self.record_ty_overload_fix_pending(
+                call,
+                &callee_fullname,
+                signatures.as_ref(),
+                rewrite_start,
+                positional_count,
+            );
         }
     }
 
-    /// Defer a call the built-in resolver missed to a pipelined ty query.
-    fn record_ty_pending(&mut self, call: &ast::ExprCall) {
+    fn pending_ty_for_call(call: &ast::ExprCall) -> Option<PendingTy> {
         // Position at the callee identifier: the attribute for ``x.m()``,
         // otherwise the name itself.
         let callee_offset = match &*call.func {
             Expr::Attribute(attr) => attr.attr.range().start(),
             Expr::Name(name) => name.range().start(),
-            _ => return,
+            _ => return None,
         };
-        self.ty_pending.push(PendingTy {
+        Some(PendingTy {
             callee_offset: callee_offset.to_usize(),
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
-        });
+        })
+    }
+
+    /// Defer a call the built-in resolver missed to a pipelined ty query.
+    fn record_ty_pending(&mut self, call: &ast::ExprCall) {
+        if let Some(pending) = Self::pending_ty_for_call(call) {
+            self.ty_pending.push(pending);
+        }
+    }
+
+    /// Queue an already-diagnosed overload violation for fix-only ty hover
+    /// selection. This never affects `check`: no extra diagnostic is emitted.
+    fn record_ty_overload_fix_pending(
+        &mut self,
+        call: &ast::ExprCall,
+        callee_fullname: &str,
+        candidate_signatures: &[Signature],
+        rewrite_start: usize,
+        positional_count: usize,
+    ) {
+        if let Some(pending) = Self::pending_ty_for_call(call) {
+            let rewrite_args_are_statically_precise = (rewrite_start..positional_count).all(|i| {
+                call.arguments
+                    .args
+                    .get(i)
+                    .is_some_and(|arg| self.arg_is_precise_for_overload_fix(arg))
+            });
+            self.ty_overload_fix_pending.push(PendingTyOverloadFix {
+                pending,
+                callee_fullname: callee_fullname.to_string(),
+                candidate_signatures: candidate_signatures.to_vec(),
+                rewrite_args_are_statically_precise,
+            });
+        }
+    }
+
+    fn arg_is_precise_for_overload_fix(&self, arg: &Expr) -> bool {
+        if is_precise_overload_literal(arg) {
+            return true;
+        }
+        let Expr::Name(name) = arg else {
+            return false;
+        };
+        self.resolve_annotation(name.id.as_str())
+            .is_some_and(annotation_is_precise_overload_type)
     }
 
     /// Record a ty fallback unless a lazy signature lookup just discovered
@@ -1223,12 +1317,21 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .chain(parameters.kwonlyargs.iter())
                 {
                     self.mark_param_opaque(param.parameter.name.as_str());
+                    if let Some(annotation) = &param.parameter.annotation {
+                        self.define_annotation(param.parameter.name.as_str(), annotation);
+                    }
                 }
                 if let Some(vararg) = &parameters.vararg {
                     self.mark_param_opaque(vararg.name.as_str());
+                    if let Some(annotation) = &vararg.annotation {
+                        self.define_annotation(vararg.name.as_str(), annotation);
+                    }
                 }
                 if let Some(kwarg) = &parameters.kwarg {
                     self.mark_param_opaque(kwarg.name.as_str());
+                    if let Some(annotation) = &kwarg.annotation {
+                        self.define_annotation(kwarg.name.as_str(), annotation);
+                    }
                 }
                 for inner in body {
                     self.visit_body_stmt(inner);
@@ -1266,12 +1369,24 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .chain(method_parameters.kwonlyargs.iter())
                             {
                                 self.mark_param_opaque(param.parameter.name.as_str());
+                                if let Some(annotation) = &param.parameter.annotation {
+                                    self.define_annotation(
+                                        param.parameter.name.as_str(),
+                                        annotation,
+                                    );
+                                }
                             }
                             if let Some(vararg) = &method_parameters.vararg {
                                 self.mark_param_opaque(vararg.name.as_str());
+                                if let Some(annotation) = &vararg.annotation {
+                                    self.define_annotation(vararg.name.as_str(), annotation);
+                                }
                             }
                             if let Some(kwarg) = &method_parameters.kwarg {
                                 self.mark_param_opaque(kwarg.name.as_str());
+                                if let Some(annotation) = &kwarg.annotation {
+                                    self.define_annotation(kwarg.name.as_str(), annotation);
+                                }
                             }
                             for method_stmt in method_body {
                                 self.visit_body_stmt(method_stmt);
@@ -1295,10 +1410,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
-                value: Some(value),
+                value,
+                annotation,
                 ..
             }) => {
-                if let Some(class_fullname) = self.class_from_constructor(value) {
+                if let Expr::Name(name) = &**target {
+                    self.define_annotation(name.id.as_str(), annotation);
+                }
+                if let Some(class_fullname) = value
+                    .as_deref()
+                    .and_then(|value| self.class_from_constructor(value))
+                {
                     if let Expr::Name(name) = &**target {
                         self.record_instance(name.id.as_str(), class_fullname);
                     }
@@ -1470,10 +1592,13 @@ fn call_fix_insertions(
 /// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
 /// stays conservative: a call is rewritten only when the parameter mapping is
 /// unambiguous. For `ty`-resolved calls that means a single concrete hover
-/// signature with complete parameter names; overloads, synthesized
-/// constructors, ambiguous callable displays, and goto-definition-only
-/// resolutions are left alone (a wrong parameter name would corrupt source,
-/// cf. issue #41).
+/// signature with complete parameter names. Built-in-detected overloads get a
+/// fix-only ty hover pass: they are rewritten only when that exact call site
+/// selects one indexed overload arm and the rewritten arguments have precise
+/// literal or annotation types; multi-arm and unmatched overload displays stay
+/// declined. Synthesized constructors, ambiguous callable displays, and
+/// goto-definition-only resolutions are also left alone (a wrong parameter
+/// name would corrupt source, cf. issue #41).
 ///
 /// Running the `ty` fallback here also lets the returned
 /// [`FixOutcome::declined`] account for *every* violation `check` would
@@ -1557,6 +1682,19 @@ fn fix_paths_impl(
             &scan.pending,
             &mut ty_file_cache,
             &mut diagnostics,
+            Some(TyFixes {
+                insertions: &mut insertions,
+                fixed_calls: &mut fixed_calls,
+            }),
+        )?;
+        resolve_overload_fixes_with_ty(
+            &mut ty,
+            &mut ty_start_attempted,
+            project_root,
+            python_env,
+            &path,
+            &scan.source,
+            &scan.overload_fix_pending,
             Some(TyFixes {
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
@@ -2102,6 +2240,187 @@ struct TyFixes<'a> {
 struct TyFixAst<'a> {
     suite: &'a [Stmt],
     tokens: &'a Tokens,
+}
+
+/// Try to rewrite built-in-diagnosed overload violations by asking ty for the
+/// hover at the exact call site. The diagnostic is already recorded, so this
+/// path is fix-only: it must never emit another diagnostic.
+#[cfg_attr(coverage, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_overload_fixes_with_ty(
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    project_root: &Path,
+    python_env: Option<&Path>,
+    path: &Path,
+    source: &str,
+    pending: &[PendingTyOverloadFix],
+    mut fixes: Option<TyFixes<'_>>,
+) -> Result<(), CheckError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    if !*ty_start_attempted {
+        *ty_start_attempted = true;
+        *ty = Some(start_ty(project_root, python_env)?);
+    }
+    let Some(ty) = ty.as_mut() else {
+        return Ok(());
+    };
+    if ty.ensure_open(path, source).is_none() {
+        return Ok(());
+    }
+    let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
+        suite: parsed.suite(),
+        tokens: parsed.tokens(),
+    });
+
+    let hover_ids: Vec<Option<i64>> = pending
+        .iter()
+        .map(|p| {
+            let (line, ch) = byte_offset_to_lsp(source, p.pending.callee_offset);
+            ty.ask("textDocument/hover", path, line, ch)
+        })
+        .collect();
+
+    for (item, hover_id) in pending.iter().zip(hover_ids) {
+        let raw = hover_id
+            .and_then(|id| ty.take(id))
+            .as_ref()
+            .and_then(hover_text);
+        let Some(raw) = raw else {
+            continue;
+        };
+        record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+    }
+    Ok(())
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn record_selected_overload_fix(
+    fixes: &mut Option<TyFixes<'_>>,
+    fix_ast: Option<TyFixAst<'_>>,
+    item: &PendingTyOverloadFix,
+    raw_hover: &str,
+) {
+    let p = &item.pending;
+
+    if let Some(sig) = parse_hover_signature(raw_hover) {
+        let Some(signature) = signature_from_param_text(&sig.params) else {
+            return;
+        };
+        let (effective_signature, positional_count, receiver_is_explicit) =
+            strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
+        if !selected_overload_arm_is_unambiguous(&effective_signature, &item.candidate_signatures) {
+            return;
+        }
+        let Some(max_positional) = violation_max_positional(
+            &item.callee_fullname,
+            std::slice::from_ref(&effective_signature),
+            positional_count,
+        ) else {
+            return;
+        };
+        let fix_signature = if receiver_is_explicit {
+            &signature
+        } else {
+            &effective_signature
+        };
+        let fix_positional_count = if receiver_is_explicit {
+            p.positional_count
+        } else {
+            positional_count
+        };
+        if !item.rewrite_args_are_statically_precise {
+            return;
+        }
+        record_ty_fix(
+            fixes,
+            fix_ast,
+            p,
+            &item.callee_fullname,
+            fix_signature,
+            max_positional,
+            fix_positional_count,
+            receiver_is_explicit,
+        );
+        return;
+    }
+
+    let overloads: Vec<Signature> = parse_callable_type_overloads(raw_hover)
+        .iter()
+        .filter_map(|params| signature_from_param_text(params))
+        .collect();
+    let [signature] = overloads.as_slice() else {
+        // A hover that still reports multiple overload arms has not selected
+        // a unique callable. Leave the existing diagnostic declined.
+        return;
+    };
+    if !selected_overload_arm_is_unambiguous(signature, &item.candidate_signatures) {
+        return;
+    }
+    let Some(max_positional) = violation_max_positional(
+        &item.callee_fullname,
+        std::slice::from_ref(signature),
+        p.positional_count,
+    ) else {
+        return;
+    };
+    // The selected callable-type arm is already call-site oriented (as in the
+    // normal ty fallback). It is safe only if it has complete parameter names.
+    if !item.rewrite_args_are_statically_precise {
+        return;
+    }
+    record_ty_fix(
+        fixes,
+        fix_ast,
+        p,
+        &item.callee_fullname,
+        signature,
+        max_positional,
+        p.positional_count,
+        false,
+    );
+}
+
+#[cfg_attr(coverage, coverage(off))]
+const fn is_precise_overload_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::StringLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+    )
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn annotation_is_precise_overload_type(annotation: &str) -> bool {
+    let annotation = annotation.trim();
+    !annotation.is_empty()
+        && !annotation.contains('|')
+        && !matches!(annotation, "Any" | "typing.Any" | "object" | "Unknown")
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn selected_overload_arm_is_unambiguous(selected: &Signature, candidates: &[Signature]) -> bool {
+    candidates
+        .iter()
+        .filter(|candidate| same_parameter_mapping(selected, candidate))
+        .take(2)
+        .count()
+        == 1
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
+    left.parameters.len() == right.parameters.len()
+        && left
+            .parameters
+            .iter()
+            .zip(&right.parameters)
+            .all(|(left, right)| left.kind == right.kind && left.name == right.name)
 }
 
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver
