@@ -180,6 +180,57 @@ fn check_default_path_dot_reports_violation() {
 }
 
 #[test]
+fn check_json_output_writes_structured_diagnostics_to_stdout() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let output = project.run(&["--output-format", "json", "main.py"]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).is_empty());
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json output");
+    let diagnostic = json.as_array().expect("diagnostic array")[0].clone();
+    assert_eq!(diagnostic["path"], "main.py");
+    assert_eq!(diagnostic["line"], 2);
+    assert_eq!(diagnostic["column"], 1);
+    assert_eq!(diagnostic["callee"], "\"f\"");
+    assert_eq!(diagnostic["positional_count"], 1);
+    assert_eq!(diagnostic["max_positional_count"], 0);
+}
+
+#[test]
+fn check_github_output_writes_annotations_to_stdout() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let output = project.run(&["--output-format", "github", "main.py"]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).is_empty());
+    assert_eq!(
+        stdout(&output),
+        "::error file=main.py,line=2,col=1::\
+         Too many positional arguments for \"f\" (got 1, maximum 0)\n"
+    );
+}
+
+#[test]
+fn check_output_format_config_is_overridden_by_cli() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\nversion = \"0\"\n\
+             [tool.strict_kwargs]\noutput_format = \"json\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+
+    let configured = project.run(&["main.py"]);
+    assert_eq!(code(&configured), 1);
+    assert!(stderr(&configured).is_empty());
+    assert!(stdout(&configured).starts_with("[\n  {"));
+
+    let overridden = project.run(&["--output-format", "full", "main.py"]);
+    assert_eq!(code(&overridden), 1);
+    assert!(stdout(&overridden).is_empty());
+    assert!(stderr(&overridden).contains("main.py:2:1: error:"));
+}
+
+#[test]
 fn check_explicit_project_root_flag() {
     let project = Project::new().write("pkg/m.py", "def f(a: int) -> None: ...\nf(1)\n");
     let root = project.root.to_string_lossy().into_owned();
