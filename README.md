@@ -5,14 +5,11 @@
 
 Enforce using keyword arguments where possible.
 
-`strict-kwargs` is a standalone CLI implemented in Rust. It parses Python with
-Ruff's Python parser and AST crates, then uses its own resolver plus
-[ty](https://docs.astral.sh/ty/) for type-aware call resolution where static
-names alone are not enough.
+`strict-kwargs` is a standalone CLI implemented in Rust.
+It parses Python with Ruff's Python parser and AST crates, then uses its own resolver plus [ty](https://docs.astral.sh/ty/) for type-aware call resolution where static names alone are not enough.
 
-For example, if we have a function which takes two regular arguments, there
-are three ways to call it. With this tool, only the form where keyword
-arguments are used is accepted.
+For example, if we have a function which takes two regular arguments, there are three ways to call it.
+With this tool, only the form where keyword arguments are used is accepted.
 
 ```python
 """Showcase errors when calling a function without naming the arguments."""
@@ -30,33 +27,22 @@ add(1, b=2)  # strict-kwargs reports this
 
 ## Why?
 
-- In the same spirit as a formatter - think `black` or `ruff format` - this
-  lets you stop spending time discussing whether a particular function call
-  should use keyword arguments.
-- Sometimes positional arguments are best at first, and then more and more are
-  added and code becomes unclear, without anyone stopping to refactor to
-  keyword arguments.
-- Type checkers give better errors when keyword arguments are used. For
-  example, with positional arguments, you may see,
-  `Argument 5 to "add" has incompatible type "str"; expected "int"`. This
-  requires that you count the arguments to see which one is wrong. With named
-  arguments, you get
-  `Argument "e" to "add" has incompatible type "str"; expected "int"`.
+- In the same spirit as a formatter - think `black` or `ruff format` - this lets you stop spending time discussing whether a particular function call should use keyword arguments.
+- Sometimes positional arguments are best at first, and then more and more are added and code becomes unclear, without anyone stopping to refactor to keyword arguments.
+- Type checkers give better errors when keyword arguments are used.
+  For example, with positional arguments, you may see, `Argument 5 to "add" has incompatible type "str"; expected "int"`.
+  This requires that you count the arguments to see which one is wrong.
+  With named arguments, you get `Argument "e" to "add" has incompatible type "str"; expected "int"`.
 
 ## How it works
 
 `strict-kwargs` has two resolution layers:
 
-- A built-in resolver parses checked files, first-party modules, vendored
-  typeshed stubs, and discovered site-packages using Ruff's Python parser and
-  AST crates.
-- For calls that need richer inference, `strict-kwargs` asks ty's language
-  server for hover and definition information. `ty` is a required dependency of
-  the Python package so results do not depend on whether it happens to be
-  installed separately.
+- A built-in resolver parses checked files, first-party modules, vendored typeshed stubs, and discovered site-packages using Ruff's Python parser and AST crates.
+- For calls that need richer inference, `strict-kwargs` asks ty's language server for hover and definition information.
+  `ty` is a required dependency of the Python package so results do not depend on whether it happens to be installed separately.
 
-The fixer uses the same detection path, but only rewrites calls when the target
-parameter names are known unambiguously.
+The fixer uses the same detection path, but only rewrites calls when the target parameter names are known unambiguously.
 
 ## Installation
 
@@ -97,16 +83,16 @@ Synthesized constructors are the only opt-in category, because generated constru
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
   These can differ from runtime behaviour when class construction is customized.
 
-Use `--python` to point third-party resolution at an interpreter, virtual
-environment, or `sys.prefix`. Missing paths are errors. A missing `--python`
-path is warned about and ignored.
+Use `--python` to point third-party resolution at an interpreter, virtual environment, or `sys.prefix`.
+Missing paths are errors.
+A missing `--python` path is warned about and ignored.
 
 ## pre-commit
 
 ```yaml
 repos:
   - repo: https://github.com/adamtheturtle/strict-kwargs-pre-commit
-    rev: 2026.5.19.post1  # pin to a release tag
+    rev: 2026.5.19.post2  # pin to a release tag
     hooks:
       - id: strict-kwargs
 ```
@@ -120,8 +106,8 @@ Configuration lives in `pyproject.toml`:
 ignore_names = ["main.func", "builtins.str"]
 ```
 
-This is useful especially for builtins which can look strange with keyword
-arguments. For example, `str(object=1)` is not idiomatic.
+This is useful especially for builtins which can look strange with keyword arguments.
+For example, `str(object=1)` is not idiomatic.
 
 To find the name of a function to ignore, set the following configuration:
 
@@ -134,9 +120,6 @@ Then run `strict-kwargs` and look for the debug output.
 
 ## Comparison with mypy-strict-kwargs
 
-[mypy-strict-kwargs](https://github.com/adamtheturtle/mypy-strict-kwargs) is a
-`mypy` plugin that enforces the same rule during type checking.
+[mypy-strict-kwargs](https://github.com/adamtheturtle/mypy-strict-kwargs) is a `mypy` plugin that enforces the same rule during type checking.
 
-Use `strict-kwargs` if you type-check with [ty](https://docs.astral.sh/ty/), if
-you prefer a standalone linter without plugins, or if you want automatic
-rewrites with `strict-kwargs fix`.
+Use `strict-kwargs` if you type-check with [ty](https://docs.astral.sh/ty/), if you prefer a standalone linter without plugins, or if you want automatic rewrites with `strict-kwargs fix`.
