@@ -54,7 +54,10 @@ pub struct Config {
     #[serde(default)]
     pub fix_synthesized_constructors: bool,
     /// Diagnostic output format for `strict-kwargs check`.
-    #[serde(default)]
+    ///
+    /// This affects how diagnostics are reported, not which diagnostics are
+    /// found, so it is omitted from cache fingerprints.
+    #[serde(default, skip_serializing)]
     pub output_format: OutputFormat,
 }
 
@@ -335,6 +338,23 @@ mod tests {
         let config = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"full\"\n")
             .expect("full output format is valid");
         assert_eq!(config.output_format, OutputFormat::Full);
+    }
+
+    #[test]
+    fn output_format_is_not_serialized_for_cache_fingerprints() {
+        let full = Config {
+            output_format: OutputFormat::Full,
+            ..Config::default()
+        };
+        let json = Config {
+            output_format: OutputFormat::Json,
+            ..Config::default()
+        };
+
+        assert_eq!(
+            serde_json::to_string(&full).expect("serialize config"),
+            serde_json::to_string(&json).expect("serialize config")
+        );
     }
 
     #[test]
