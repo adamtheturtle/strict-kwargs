@@ -296,6 +296,24 @@ mod tests {
     }
 
     #[test]
+    fn required_version_rejects_empty_specifier() {
+        let message = validate_required_version("   ", "2026.5.19-post.3")
+            .expect_err("empty specifier must be rejected");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("exact version"), "message: {message}");
+        assert!(message.contains(">="), "message: {message}");
+    }
+
+    #[test]
+    fn required_version_rejects_wrong_exact_version() {
+        let message = validate_required_version("2026.5.19-post.4", "2026.5.19-post.3")
+            .expect_err("wrong exact version must be rejected");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+        assert!(message.contains("2026.5.19-post.4"), "message: {message}");
+    }
+
+    #[test]
     fn required_version_rejects_unsupported_syntax() {
         let message = validate_required_version("~=2026.5.19", "2026.5.19-post.3")
             .expect_err("unsupported syntax must be rejected");
@@ -308,6 +326,17 @@ mod tests {
     fn required_version_rejects_invalid_version() {
         let message = validate_required_version(">=definitely-not-a-version", "2026.5.19-post.3")
             .expect_err("invalid version must be rejected");
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_current_version() {
+        let message = validate_required_version(">=2026.5.19-post.3", "not-a-version")
+            .expect_err("invalid current version must be reported");
+        assert!(message.contains("current strict-kwargs version"));
         assert!(
             message.contains("must be a valid version"),
             "message: {message}"
