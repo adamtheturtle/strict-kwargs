@@ -7,6 +7,28 @@ use serde::Deserialize;
 
 use crate::error::CheckError;
 
+#[cfg_attr(coverage, coverage(off))]
+mod output_format {
+    use serde::Deserialize;
+
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[derive(
+        Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, clap::ValueEnum,
+    )]
+    #[serde(rename_all = "kebab-case")]
+    pub enum OutputFormat {
+        /// Human-oriented `path:line:column: error: ...` lines on stderr.
+        #[default]
+        Full,
+        /// A JSON array of structured diagnostics on stdout.
+        Json,
+        /// GitHub Actions workflow command annotations on stdout.
+        Github,
+    }
+}
+
+pub use output_format::OutputFormat;
+
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Resolved `[tool.strict_kwargs]` configuration.
@@ -31,6 +53,9 @@ pub struct Config {
     /// were synthesized from class fields.
     #[serde(default)]
     pub fix_synthesized_constructors: bool,
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[serde(default)]
+    pub output_format: OutputFormat,
 }
 
 impl Config {
@@ -200,6 +225,7 @@ mod tests {
       cache_dir = ".strict-kwargs-cache"
       debug = true
       fix_synthesized_constructors = true
+      output_format = "json"
       "#,
         )
         .expect("valid config");
@@ -217,6 +243,7 @@ mod tests {
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Json);
     }
 
     #[test]
@@ -239,6 +266,7 @@ mod tests {
         assert_eq!(config.cache_dir, None);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Full);
     }
 
     #[test]
@@ -283,6 +311,16 @@ mod tests {
     }
 
     #[test]
+    fn wrong_output_format_value_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"xml\"\n")
+            .expect_err("wrong value must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
     fn wrong_cache_dir_type_is_an_error() {
         let message = Config::from_pyproject_str("[tool.strict_kwargs]\ncache_dir = [\"dir\"]\n")
             .expect_err("wrong value type must be reported");
@@ -290,6 +328,13 @@ mod tests {
             message.contains("invalid `[tool.strict_kwargs]` table"),
             "message: {message}"
         );
+    }
+
+    #[test]
+    fn explicit_full_output_format_is_valid() {
+        let config = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"full\"\n")
+            .expect("full output format is valid");
+        assert_eq!(config.output_format, OutputFormat::Full);
     }
 
     #[test]
@@ -377,17 +422,35 @@ mod tests {
 
     #[test]
     fn required_version_rejects_unsupported_syntax() {
-        let message = validate_required_version("~=2026.5.19", "2026.5.19-post.3")
-            .expect_err("unsupported syntax must be rejected");
-        assert!(message.contains("unsupported syntax"), "message: {message}");
-        assert!(message.contains("exact versions"), "message: {message}");
-        assert!(message.contains(">="), "message: {message}");
+        for specifier in [
+            "<2026.5.19",
+            ">2026.5.19",
+            "=2026.5.19",
+            "~=2026.5.19",
+            "^2026.5.19",
+        ] {
+            let message = validate_required_version(specifier, "2026.5.19-post.3")
+                .expect_err("unsupported syntax must be rejected");
+            assert!(message.contains("unsupported syntax"), "message: {message}");
+            assert!(message.contains("exact versions"), "message: {message}");
+            assert!(message.contains(">="), "message: {message}");
+        }
     }
 
     #[test]
     fn required_version_rejects_invalid_version() {
         let message = validate_required_version(">=definitely-not-a-version", "2026.5.19-post.3")
             .expect_err("invalid version must be rejected");
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_exact_version() {
+        let message = validate_required_version("definitely-not-a-version", "2026.5.19-post.3")
+            .expect_err("invalid exact version must be rejected");
         assert!(
             message.contains("must be a valid version"),
             "message: {message}"
@@ -469,6 +532,18 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert!(config.fix_synthesized_constructors);
+    }
+
+    #[test]
+    fn load_reads_output_format_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\noutput_format = \"github\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(config.output_format, OutputFormat::Github);
     }
 
     #[test]
