@@ -353,18 +353,23 @@ fn fixes_ty_resolved_third_party_env_package() {
 }
 
 #[test]
-fn does_not_fix_callable_value_returned_by_factory() {
-    // Issue #115: ty may hover a variable assigned from a factory call as the
-    // factory definition itself. Rewriting the later call with the factory's
-    // parameter name would produce `formatter(quote_char=value)`, but the
-    // returned callable accepts `value`.
-    assert_unchanged(
+fn fixes_protocol_callable_value_returned_by_factory() {
+    // Follow-up to issue #115: when ty can resolve the callable value to a
+    // Protocol `__call__`, use that call signature, not the factory's
+    // parameter names.
+    assert_fixed(
         "from typing import Protocol\n\n\
          class Formatter(Protocol):\n    def __call__(self, value: str) -> str: ...\n\n\
          def build_formatter(quote_char: str) -> Formatter: ...\n\n\
          formatter = build_formatter(quote_char='\"')\n\
          value = 'hello'\n\
          formatter(value)\n",
+        "from typing import Protocol\n\n\
+         class Formatter(Protocol):\n    def __call__(self, value: str) -> str: ...\n\n\
+         def build_formatter(quote_char: str) -> Formatter: ...\n\n\
+         formatter = build_formatter(quote_char='\"')\n\
+         value = 'hello'\n\
+         formatter(value=value)\n",
     );
 }
 
@@ -379,6 +384,22 @@ fn does_not_fix_annotated_callable_value_returned_by_factory() {
          finite: Callable[[float], str] = build_wrapper(prefix='')\n\
          value = 1.0\n\
          finite(value)\n",
+    );
+}
+
+#[test]
+fn fixes_callable_instance_value_returned_by_factory() {
+    assert_fixed(
+        "class Formatter:\n    def __call__(self, value: str) -> str: ...\n\n\
+         def build_formatter(quote_char: str) -> Formatter: ...\n\n\
+         formatter = build_formatter(quote_char='\"')\n\
+         value = 'hello'\n\
+         formatter(value)\n",
+        "class Formatter:\n    def __call__(self, value: str) -> str: ...\n\n\
+         def build_formatter(quote_char: str) -> Formatter: ...\n\n\
+         formatter = build_formatter(quote_char='\"')\n\
+         value = 'hello'\n\
+         formatter(value=value)\n",
     );
 }
 
