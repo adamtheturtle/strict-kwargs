@@ -245,7 +245,6 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let explicit_files = explicit_python_files(paths);
-    let index = build_index(project_root, &python_files);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
     let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
@@ -287,6 +286,27 @@ fn check_paths_impl(
         }
     }
 
+    let mut diagnostics = Vec::new();
+
+    // Cache hits bypass the pipeline; their diagnostics are added directly.
+    for entry in &entries {
+        if let Some(cached) = &entry.cache_hit {
+            diagnostics.extend_from_slice(cached);
+        }
+    }
+
+    if files_to_scan.is_empty() {
+        diagnostics.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.column.cmp(&right.column))
+        });
+        return Ok(diagnostics);
+    }
+
+    let index = build_index(project_root, &python_files);
+
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
     // `python_env` (the `--python` value) only steers ty's third-party
@@ -302,17 +322,9 @@ fn check_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut diagnostics = Vec::new();
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
-
-    // Cache hits bypass the pipeline; their diagnostics are added directly.
-    for entry in &entries {
-        if let Some(cached) = &entry.cache_hit {
-            diagnostics.extend_from_slice(cached);
-        }
-    }
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
     pipeline_phases(
@@ -331,7 +343,6 @@ fn check_paths_impl(
 
     // Emit skip warnings in the original sorted-file order (issue #53 + #46).
     skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
-    let skipped_paths: Vec<&PathBuf> = skip_warnings.iter().map(|(_, p, _)| p).collect();
     for (_, path, reason) in &skip_warnings {
         eprintln!(
             "strict-kwargs: warning: skipping {} ({reason})",
@@ -343,17 +354,24 @@ fn check_paths_impl(
     // file's diagnostics by path (Diagnostic::path is always the source file).
     // Skipped files are excluded — the skip reason may be transient.
     if let Some((ref cache, _)) = cache_and_fp {
-        for (key, path) in &cache_miss_keys {
-            if skipped_paths.contains(&path) {
-                continue;
-            }
-            let file_diags: Vec<Diagnostic> = diagnostics
-                .iter()
-                .filter(|d| &d.path == path)
-                .cloned()
-                .collect();
-            cache.put(*key, &file_diags);
+        let skipped_paths: FxHashSet<PathBuf> = skip_warnings
+            .iter()
+            .map(|(_, path, _)| path.clone())
+            .collect();
+        let mut diagnostics_by_path: FxHashMap<PathBuf, Vec<Diagnostic>> = FxHashMap::default();
+        for diagnostic in &diagnostics {
+            diagnostics_by_path
+                .entry(diagnostic.path.clone())
+                .or_default()
+                .push(diagnostic.clone());
         }
+        cache_miss_keys
+            .par_iter()
+            .filter(|(_, path)| !skipped_paths.contains(path))
+            .for_each(|(key, path)| {
+                let file_diags = diagnostics_by_path.get(path).map_or(&[][..], Vec::as_slice);
+                cache.put(*key, file_diags);
+            });
     }
 
     diagnostics.sort_by(|left, right| {
