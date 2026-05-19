@@ -1035,8 +1035,10 @@ impl<'a> CallChecker<'a> {
         // synthesized ``@dataclass`` / ``NamedTuple`` constructor is likewise
         // declined until its position->name mapping is guaranteed sound
         // across every modeled constructor shape.
-        let synthesized = self.index.is_synthesized(&callee_fullname);
-        if let ([signature], false) = (signatures.as_ref(), synthesized) {
+        if self.index.is_synthesized(&callee_fullname) {
+            return;
+        }
+        if let [signature] = signatures.as_ref() {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
             let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
@@ -1053,18 +1055,14 @@ impl<'a> CallChecker<'a> {
                 self.fixes.extend(insertions);
                 self.fixed_calls += 1;
             }
-        } else if signatures.len() > 1 && !synthesized {
+        } else {
             // Multi-arm overloads remain unsafe by default: different arms
             // can bind the same positional slot to different parameter names.
             // During `fix` only, ask ty for the hover at this exact call site;
             // if ty has selected one concrete arm, that selected arm provides
             // the only parameter-name mapping we may rewrite with. A hover
             // that still shows multiple arms, or no callable arm, is declined.
-            let rewrite_start = if receiver_is_explicit {
-                max_positional + 1
-            } else {
-                max_positional
-            };
+            let rewrite_start = max_positional + usize::from(receiver_is_explicit);
             self.record_ty_overload_fix_pending(
                 call,
                 &callee_fullname,
@@ -1701,7 +1699,7 @@ fn fix_paths_impl(
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
             }),
-        )?;
+        );
         if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
             fixed_total += fixed_calls;
             results.push(FileFix {
@@ -2258,19 +2256,22 @@ fn resolve_overload_fixes_with_ty(
     source: &str,
     pending: &[PendingTyOverloadFix],
     mut fixes: Option<TyFixes<'_>>,
-) -> Result<(), CheckError> {
+) {
     if pending.is_empty() {
-        return Ok(());
+        return;
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        *ty = Some(start_ty(project_root, python_env)?);
+        let Ok(started) = start_ty(project_root, python_env) else {
+            return;
+        };
+        *ty = Some(started);
     }
     let Some(ty) = ty.as_mut() else {
-        return Ok(());
+        return;
     };
     if ty.ensure_open(path, source).is_none() {
-        return Ok(());
+        return;
     }
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
@@ -2296,7 +2297,6 @@ fn resolve_overload_fixes_with_ty(
         };
         record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
     }
-    Ok(())
 }
 
 #[cfg_attr(coverage, coverage(off))]
