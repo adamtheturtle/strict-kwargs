@@ -44,7 +44,7 @@ impl TestProject {
     /// Run the fixer over `main.py` and return the rewritten source (or the
     /// original when nothing was fixed).
     fn fixed_main(&self) -> String {
-        self.fixed_main_with_opt_ins(FixOptIns::conservative())
+        self.fixed_main_with_opt_ins(FixOptIns::default())
     }
 
     fn fixed_main_with_opt_ins(&self, fix_opt_ins: FixOptIns) -> String {
@@ -124,7 +124,7 @@ fn assert_synthesized_constructor_fixed(source: &str, expected: &str) {
         expected,
         FixOptIns {
             synthesized_constructors: true,
-            ..FixOptIns::conservative()
+            ..FixOptIns::default()
         },
     );
 }
@@ -449,7 +449,7 @@ fn fixes_overloaded_stdlib_when_ty_selection_is_unambiguous() {
         "import os\n\nos.getenv(key=\"PATH\", default=\"fallback\")\n",
         FixOptIns {
             unambiguous_overloads: true,
-            ..FixOptIns::conservative()
+            ..FixOptIns::default()
         },
     );
 }
@@ -497,7 +497,7 @@ fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
          f(count=1)\n",
         FixOptIns {
             unambiguous_overloads: true,
-            ..FixOptIns::conservative()
+            ..FixOptIns::default()
         },
     );
 }
@@ -521,7 +521,7 @@ fn fixes_overloaded_callee_for_precisely_annotated_argument() {
          def g(x: int):\n    f(count=x)\n",
         FixOptIns {
             unambiguous_overloads: true,
-            ..FixOptIns::conservative()
+            ..FixOptIns::default()
         },
     );
 }

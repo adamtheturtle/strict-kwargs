@@ -493,8 +493,7 @@ fn stream_scan_files(
             .par_iter()
             .enumerate()
             .for_each_with(tx, |tx, (i, path)| {
-                let result =
-                    scan_file(project_root, path, config, index, FixOptIns::conservative());
+                let result = scan_file(project_root, path, config, index, FixOptIns::default());
                 // Ignore send errors: the consumer has exited early (e.g. a
                 // ty error was already recorded).
                 let _ = tx.send((i, path.clone(), result));
@@ -1669,7 +1668,7 @@ pub fn fix_paths(
         paths,
         config,
         python_env,
-        FixOptIns::conservative(),
+        FixOptIns::default(),
     )
 }
 
@@ -3101,7 +3100,7 @@ mod tests {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
             declined_fix_reasons: &mut declined_fix_reasons,
-            opt_ins: FixOptIns::conservative(),
+            opt_ins: FixOptIns::default(),
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let fix_ast = TyFixAst {
@@ -3452,7 +3451,7 @@ while cond:
             checker_parsed.tokens(),
             &index,
             &config,
-            FixOptIns::conservative(),
+            FixOptIns::default(),
         );
         setup(&mut checker);
 
@@ -3606,7 +3605,7 @@ while cond:
             parsed.tokens(),
             &index,
             &config,
-            FixOptIns::conservative(),
+            FixOptIns::default(),
         );
         assert!(!checker.binding_is_instance("never_bound"));
     }

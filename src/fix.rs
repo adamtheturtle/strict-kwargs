@@ -19,17 +19,6 @@ pub struct FixOptIns {
     pub unambiguous_overloads: bool,
 }
 
-impl FixOptIns {
-    /// The default conservative fixer policy.
-    #[must_use]
-    pub const fn conservative() -> Self {
-        Self {
-            synthesized_constructors: false,
-            unambiguous_overloads: false,
-        }
-    }
-}
-
 /// Why a detected violation was deliberately left untouched by the fixer.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum DeclinedFixReason {
