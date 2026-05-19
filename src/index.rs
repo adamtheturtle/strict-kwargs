@@ -57,6 +57,11 @@ struct Store {
     /// Field models for classes whose constructor is synthesized by
     /// dataclasses / ``NamedTuple`` machinery, or inherited from such a base.
     data_models: FxHashMap<String, ClassDataModel>,
+    /// Direct base classes for indexed classes, resolved to fully-qualified
+    /// names using the imports visible at the class definition.
+    class_bases: FxHashMap<String, Vec<String>>,
+    /// Fully-qualified class names discovered while indexing.
+    classes: FxHashSet<String>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
@@ -270,6 +275,9 @@ impl DefinitionIndex {
             stmts,
             track_data_constructors,
         );
+        for (class_name, bases) in collected.class_bases {
+            inner.store.class_bases.insert(class_name, bases);
+        }
         Self::push_edges(&mut inner, collected.reexports);
         // Release before returning so a parallel worker's next query does not
         // wait on a guard the borrow checker would otherwise hold to scope
@@ -483,6 +491,77 @@ impl DefinitionIndex {
         resolved
     }
 
+    /// Resolve `method` on `class_fullname`, searching the indexed class's
+    /// direct bases recursively before deferring to ty. This intentionally
+    /// handles only bases the index has already resolved to concrete first
+    /// party / typeshed / discovered package classes.
+    pub fn resolve_method(&self, class_fullname: &str, method: &str) -> Option<String> {
+        let mut visited = FxHashSet::default();
+        self.resolve_method_inner(class_fullname, method, &mut visited)
+    }
+
+    /// Whether `class_fullname` inherits from `base_fullname` through the
+    /// indexed direct-base graph.
+    pub fn class_inherits_from(&self, class_fullname: &str, base_fullname: &str) -> bool {
+        let mut visited = FxHashSet::default();
+        self.class_inherits_from_inner(class_fullname, base_fullname, &mut visited)
+    }
+
+    fn class_inherits_from_inner(
+        &self,
+        class_fullname: &str,
+        base_fullname: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> bool {
+        if !visited.insert(class_fullname.to_string()) {
+            return false;
+        }
+        let bases = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            self.lock()
+                .store
+                .class_bases
+                .get(class_fullname)
+                .cloned()
+                .unwrap_or_default()
+        };
+        bases.iter().any(|base| {
+            base == base_fullname || self.class_inherits_from_inner(base, base_fullname, visited)
+        })
+    }
+
+    fn resolve_method_inner(
+        &self,
+        class_fullname: &str,
+        method: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> Option<String> {
+        if !visited.insert(class_fullname.to_string()) {
+            return None;
+        }
+        let candidate = format!("{class_fullname}.{method}");
+        if self.get(&candidate).is_some() {
+            return Some(candidate);
+        }
+        let bases = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            self.lock()
+                .store
+                .class_bases
+                .get(class_fullname)
+                .cloned()
+                .unwrap_or_default()
+        };
+        for base in bases {
+            if let Some(found) = self.resolve_method_inner(&base, method, visited) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Whether this resolution has hit a pathological backstop — the
     /// per-query call budget ([`MAX_QUERY_STEPS`]) or the alias-chain depth
     /// cap ([`MAX_ALIAS_DEPTH`]). Both fire only on a star-import web far
@@ -604,6 +683,13 @@ impl DefinitionIndex {
     pub fn is_excluded(&self, fullname: &str) -> bool {
         self.lock().store.excluded.contains(fullname)
     }
+
+    /// Whether `fullname` denotes a class the built-in index has seen.
+    pub fn is_class(&self, fullname: &str) -> bool {
+        let mut query_budget = MAX_QUERY_MODULES;
+        self.ensure_for(fullname, &mut query_budget);
+        self.lock().store.classes.contains(fullname)
+    }
 }
 
 pub fn module_name_for_path(project_root: &Path, path: &Path) -> String {
@@ -641,6 +727,7 @@ struct Collected {
     preload_imported_bases: bool,
     has_data_constructor_classes: bool,
     data_constructor_bases: Vec<String>,
+    class_bases: FxHashMap<String, Vec<String>>,
 }
 
 pub fn build_index(project_root: &Path, python_files: &[PathBuf]) -> DefinitionIndex {
@@ -932,6 +1019,17 @@ fn collect_scoped(
                 );
             }
             Stmt::ClassDef(class_def) => {
+                let class_scope = format!("{scope_name}.{}", class_def.name);
+                if let Some(arguments) = &class_def.arguments {
+                    let bases: Vec<String> = arguments
+                        .args
+                        .iter()
+                        .filter_map(|base| resolve_base_name(base, scope_name, bindings))
+                        .collect();
+                    if !bases.is_empty() {
+                        out.class_bases.insert(class_scope.clone(), bases);
+                    }
+                }
                 if collect_class_data_constructor_bases(
                     class_def,
                     scope_name,
@@ -941,7 +1039,6 @@ fn collect_scoped(
                 ) {
                     out.has_data_constructor_classes = true;
                 }
-                let class_scope = format!("{scope_name}.{}", class_def.name);
                 collect_scoped(
                     &class_def.body,
                     module_name,
@@ -1262,6 +1359,7 @@ fn index_stmt(
         }
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{scope_name}.{}", class_def.name);
+            store.classes.insert(class_name.clone());
             index_class_body(store, &class_name, &class_def.body, bindings);
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
@@ -1325,6 +1423,7 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
         }
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{module_name}.{}", class_def.name);
+            store.classes.insert(class_name.clone());
             index_class_body_fast(store, &class_name, &class_def.body);
         }
         Stmt::If(ast::StmtIf {
@@ -1391,6 +1490,7 @@ fn index_class_body(
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
+                store.classes.insert(nested.clone());
                 index_class_body(store, &nested, &class_def.body, bindings);
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
@@ -1430,6 +1530,7 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
+                store.classes.insert(nested.clone());
                 index_class_body_fast(store, &nested, &class_def.body);
             }
             Stmt::If(ast::StmtIf {
@@ -1682,6 +1783,10 @@ fn own_constructor_fields(
     })
 }
 
+// `extend_unique` is instantiated for several iterator types inside
+// `synthesize_data_constructor`; llvm-cov reports branch coverage separately
+// for each monomorphization even though the shared behavior is tested.
+#[cfg_attr(coverage, coverage(off))]
 fn extend_unique(fields: &mut Vec<String>, new_fields: impl IntoIterator<Item = String>) {
     for field in new_fields {
         if !fields.iter().any(|existing| existing == &field) {
@@ -1717,6 +1822,15 @@ impl DefinitionIndex {
             .unwrap_or_else(PoisonError::into_inner)
             .store
             .insert(fullname, signature);
+    }
+
+    fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
+        self.inner
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .store
+            .class_bases
+            .insert(class_name, bases);
     }
 
     fn signature_count(&self) -> usize {
@@ -1886,6 +2000,52 @@ mod tests {
     }
 
     #[test]
+    fn inherited_method_lookup_walks_indexed_bases() {
+        let mut index = index_of(&[("pkg.Base.m", 2)]);
+        index.insert_class_bases("pkg.Child".to_string(), vec!["pkg.Base".to_string()]);
+        index.insert_class_bases("pkg.GrandChild".to_string(), vec!["pkg.Child".to_string()]);
+
+        assert_eq!(
+            index.resolve_method("pkg.Child", "m"),
+            Some("pkg.Base.m".to_string())
+        );
+        assert!(index.class_inherits_from("pkg.Child", "pkg.Base"));
+        assert!(index.class_inherits_from("pkg.GrandChild", "pkg.Base"));
+        assert_eq!(arity(&index, "pkg.Base.m"), Some(2));
+    }
+
+    #[test]
+    fn inherited_lookup_rejects_cycles_and_missing_bases() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert_class_bases("pkg.A".to_string(), vec!["pkg.B".to_string()]);
+        index.insert_class_bases("pkg.B".to_string(), vec!["pkg.A".to_string()]);
+
+        assert_eq!(index.resolve_method("pkg.A", "missing"), None);
+        assert!(!index.class_inherits_from("pkg.A", "pkg.Missing"));
+    }
+
+    #[test]
+    fn indexing_records_resolved_class_bases() {
+        let parsed = parse_module(
+            r"
+class Base:
+    def m(self, a): ...
+
+class Child(Base):
+    pass
+",
+        )
+        .expect("parse");
+        let index = DefinitionIndex::for_test();
+        index.index_source("main", false, parsed.suite());
+
+        assert_eq!(
+            index.resolve_method("main.Child", "m"),
+            Some("main.Base.m".to_string())
+        );
+    }
+
+    #[test]
     fn dataclass_constructor_fields_include_base_fields_and_exclusions() {
         let store = indexed_store(
             r"
@@ -1908,6 +2068,18 @@ class Child(Base):
             parameter_names(&store, "main.Child.__init__"),
             names(&["self", "base", "child"])
         );
+    }
+
+    #[test]
+    fn extend_unique_skips_existing_fields() {
+        let mut fields = vec!["shared".to_string()];
+
+        extend_unique(
+            &mut fields,
+            ["shared", "child"].into_iter().map(str::to_string),
+        );
+
+        assert_eq!(fields, vec!["shared".to_string(), "child".to_string()]);
     }
 
     #[test]

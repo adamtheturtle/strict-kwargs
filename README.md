@@ -111,10 +111,15 @@ Configuration lives in `pyproject.toml`:
 
 ```toml
 [tool.strict_kwargs]
+required_version = ">=2026.5.19-post.3"
 ignore_names = ["main.func", "builtins.str"]
 fix_synthesized_constructors = true
 output_format = "full"  # or "json", "github"
 ```
+
+Set `required_version` to make older or incompatible `strict-kwargs` binaries fail fast when they read this project configuration.
+Supported specifiers are exact versions, such as `2026.5.19-post.3`, and minimum versions, such as `>=2026.5.19-post.3`.
+Use the version reported by `strict-kwargs --version`.
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
