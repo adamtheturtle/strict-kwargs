@@ -13,6 +13,12 @@ on:
   # Lets CodSpeed trigger backtest runs to seed an initial benchmark
   # baseline (issue #30).
   workflow_dispatch:
+    inputs:
+      include-cpython-benchmark:
+        description: Include the opt-in CPython CodSpeed benchmark
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -122,8 +128,26 @@ jobs:
       - name: Build the benchmark target
         run: cargo codspeed build
 
+      - name: Clone pinned CPython benchmark checkout
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include-cpython-benchmark }}
+        shell: bash
+        env:
+          CPYTHON_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
+          EXTERNAL_DIR: ${{ runner.temp }}/external
+        run: |
+          set -euo pipefail
+          dest="$EXTERNAL_DIR/cpython"
+          mkdir -p "$dest"
+          git -C "$dest" init --quiet
+          git -C "$dest" remote add origin https://github.com/python/cpython.git
+          git -C "$dest" fetch --depth=1 origin "$CPYTHON_REF"
+          git -C "$dest" checkout --detach --quiet FETCH_HEAD
+          git -C "$dest" rev-parse HEAD
+
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
+        env:
+          STRICT_KWARGS_BENCH_CPYTHON_CHECKOUT: ${{ github.event_name == 'workflow_dispatch' && inputs.include-cpython-benchmark && format('{0}/external/cpython', runner.temp) || '' }}
         with:
           mode: simulation
           run: cargo codspeed run
