@@ -12,6 +12,14 @@ pub struct Config {
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
     pub ignore_names: Vec<String>,
+    /// Additional path patterns to exclude from project walks, relative to
+    /// the project root.
+    #[serde(default)]
+    pub extend_exclude: Vec<String>,
+    /// Apply configured and built-in path exclusions even to explicitly
+    /// passed file paths.
+    #[serde(default)]
+    pub force_exclude: bool,
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
     pub debug: bool,
@@ -124,6 +132,8 @@ mod tests {
             r#"
       [tool.strict_kwargs]
       ignore_names = ["main.func", "builtins.str"]
+      extend_exclude = ["generated", "vendor"]
+      force_exclude = true
       debug = true
       fix_synthesized_constructors = true
       "#,
@@ -133,6 +143,11 @@ mod tests {
             config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
         );
+        assert_eq!(
+            config.extend_exclude,
+            vec!["generated".to_string(), "vendor".to_string()]
+        );
+        assert!(config.force_exclude);
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
     }
@@ -153,6 +168,8 @@ mod tests {
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
+        assert!(config.extend_exclude.is_empty());
+        assert!(!config.force_exclude);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
     }
@@ -196,6 +213,21 @@ mod tests {
             message.contains("invalid `[tool.strict_kwargs]` table"),
             "message: {message}"
         );
+    }
+
+    #[test]
+    fn wrong_file_selection_types_are_errors() {
+        for contents in [
+            "[tool.strict_kwargs]\nextend_exclude = \"generated\"\n",
+            "[tool.strict_kwargs]\nforce_exclude = \"yes\"\n",
+        ] {
+            let message =
+                Config::from_pyproject_str(contents).expect_err("wrong value type must error");
+            assert!(
+                message.contains("invalid `[tool.strict_kwargs]` table"),
+                "message: {message}"
+            );
+        }
     }
 
     #[test]

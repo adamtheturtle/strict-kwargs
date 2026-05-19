@@ -4,6 +4,11 @@ Changelog
 Next
 ----
 
+- Add configurable project-level file exclusions. ``[tool.strict_kwargs]`` now
+  accepts ``extend_exclude`` patterns for directory runs and
+  ``force_exclude = true`` to apply those exclusions to explicitly passed
+  files, matching pre-commit workflows (issue #141).
+
 2026.5.19-post.3
 ----------------
 

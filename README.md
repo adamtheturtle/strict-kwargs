@@ -104,11 +104,18 @@ Configuration lives in `pyproject.toml`:
 ```toml
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]
+extend_exclude = ["generated", "vendor"]
+force_exclude = true
 fix_synthesized_constructors = true
 ```
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Use `extend_exclude` to skip generated or vendored Python files during directory runs.
+Patterns use `.gitignore`-style matching relative to the project root.
+By default, exclusions apply to directory traversal only: an explicitly passed file such as `strict-kwargs generated/api.py` is still checked.
+Set `force_exclude = true` to apply exclusions to explicitly passed files too, which is useful when pre-commit passes changed files directly.
+The built-in skips for dot-directories, `venv`, and `__pycache__` remain enabled.
 Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
 
 To find the name of a function to ignore, set the following configuration:

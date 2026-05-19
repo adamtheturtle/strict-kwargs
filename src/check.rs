@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
@@ -247,7 +248,7 @@ fn check_paths_impl(
     // errors if `ty` is missing, so the same source can never resolve fewer
     // calls on a machine that merely lacks `ty`.
     require_ty_present()?;
-    let python_files = collect_python_files(paths)?;
+    let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
@@ -603,32 +604,87 @@ fn scan_files_for_fix(
 ///
 /// Returns [`CheckError::PathNotFound`] for the first path that does not
 /// exist.
-fn collect_python_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, CheckError> {
+struct FileSelection {
+    project_root: PathBuf,
+    extend_exclude: Gitignore,
+    force_exclude: bool,
+}
+
+impl FileSelection {
+    fn new(project_root: &Path, config: &Config) -> Result<Self, CheckError> {
+        let mut builder = GitignoreBuilder::new(project_root);
+        for pattern in &config.extend_exclude {
+            builder
+                .add_line(None, pattern)
+                .map_err(|error| CheckError::ConfigInvalid {
+                    path: project_root.join("pyproject.toml"),
+                    message: format!(
+                        "has an invalid `extend_exclude` pattern `{pattern}`: {error}"
+                    ),
+                })?;
+        }
+        let extend_exclude = builder.build().map_err(|error| CheckError::ConfigInvalid {
+            path: project_root.join("pyproject.toml"),
+            message: format!("has invalid `extend_exclude` patterns: {error}"),
+        })?;
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            extend_exclude,
+            force_exclude: config.force_exclude,
+        })
+    }
+
+    fn is_excluded(&self, path: &Path, is_dir: bool, explicit: bool) -> bool {
+        if explicit && !self.force_exclude {
+            return false;
+        }
+        if is_ignored_path(path) {
+            return true;
+        }
+        if self.project_root.is_absolute()
+            && path.is_absolute()
+            && !path.starts_with(&self.project_root)
+        {
+            return false;
+        }
+        self.extend_exclude
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
+    }
+}
+
+fn collect_python_files(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<PathBuf>, CheckError> {
+    let selection = FileSelection::new(project_root, config)?;
     let mut files = Vec::new();
     for path in paths {
         if path.is_file() {
-            if is_python_file(path) {
+            if is_python_file(path) && !selection.is_excluded(path, false, true) {
                 files.push(path.clone());
             }
         } else if path.is_dir() {
-            // Prune `.venv`/`.git`/`__pycache__`/dot-directories instead of
-            // descending into them and discarding their files one by one: a
-            // real project's virtualenv alone is tens of thousands of
-            // entries, so the unpruned walk dominated whole-project runtime
-            // and was the main run-to-run variance source (cold vs warm FS
-            // cache over ~50k entries). `is_ignored_path` below stays the
-            // authoritative filter, so the result set is unchanged — only
-            // directories every one of whose files it would reject are
-            // skipped, and never the walk root (depth 0).
+            // Prune excluded directories instead of descending into them and
+            // discarding their files one by one: a real project's virtualenv
+            // alone is tens of thousands of entries, so the unpruned walk
+            // dominated whole-project runtime and run-to-run variance. The
+            // walk root is never pruned so `strict-kwargs .` keeps working
+            // even when `.` contains ignored path components.
             let walk = walkdir::WalkDir::new(path)
                 .into_iter()
-                .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e));
+                .filter_entry(|entry| {
+                    entry.depth() == 0
+                        || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
+                });
             for entry in walk
                 .filter_map(Result::ok)
                 .filter(|e| e.file_type().is_file())
             {
                 let entry_path = entry.path().to_path_buf();
-                if is_python_file(&entry_path) && !is_ignored_path(&entry_path) {
+                if is_python_file(&entry_path) && !selection.is_excluded(&entry_path, false, false)
+                {
                     files.push(entry_path);
                 }
             }
@@ -656,10 +712,9 @@ fn is_python_file(path: &Path) -> bool {
         .is_some_and(|ext| ext == "py" || ext == "pyi")
 }
 
-/// Whether `entry` is a directory that [`is_ignored_path`] would reject for
-/// every file beneath it (`.git`, `.venv` and other dot-directories,
-/// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
-/// lock-step with the component rule in [`is_ignored_path`].
+/// Whether `entry` is a built-in ignored directory (`.git`, `.venv` and other
+/// dot-directories, `venv`, `__pycache__`), so cache fingerprinting can avoid
+/// descending into default-skipped trees.
 #[cfg_attr(coverage, coverage(off))]
 pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
@@ -1834,7 +1889,7 @@ fn fix_paths_impl(
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
-    let python_files = collect_python_files(paths)?;
+    let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
     let index = build_index(project_root, &python_files);
 

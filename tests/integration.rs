@@ -542,6 +542,82 @@ fn directory_walk_skips_venv_git_and_dunder_pycache() {
     );
 }
 
+#[test]
+fn directory_walk_applies_extend_exclude() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        r#"
+[project]
+name = "t"
+version = "0"
+
+[tool.strict_kwargs]
+extend_exclude = ["generated", "vendor"]
+"#,
+    )
+    .expect("write pyproject");
+    let violation = "\ndef func(a: int) -> None: ...\nfunc(1)\n";
+    for path in ["src/real.py", "generated/api.py", "pkg/vendor/dep.py"] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
+        std::fs::write(&file, violation).expect("write");
+    }
+
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, std::slice::from_ref(&root), &config, None, None).expect("check");
+    let files: Vec<String> = diagnostics
+        .iter()
+        .map(|d| {
+            d.path
+                .strip_prefix(&root)
+                .unwrap_or(&d.path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+
+    assert_eq!(files, vec!["src/real.py".to_string()]);
+}
+
+#[test]
+fn explicit_paths_ignore_extend_exclude_unless_forced() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let pyproject = root.join("pyproject.toml");
+    let file = root.join("generated").join("api.py");
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
+    std::fs::write(&file, "\ndef func(a: int) -> None: ...\nfunc(1)\n").expect("write source");
+
+    std::fs::write(
+        &pyproject,
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nextend_exclude = [\"generated\"]\n",
+    )
+    .expect("write pyproject");
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, std::slice::from_ref(&file), &config, None, None).expect("check");
+    assert_eq!(diagnostics.len(), 1);
+
+    std::fs::write(
+        &pyproject,
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nextend_exclude = [\"generated\"]\nforce_exclude = true\n",
+    )
+    .expect("write pyproject");
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, std::slice::from_ref(&file), &config, None, None).expect("check");
+    assert!(diagnostics.is_empty());
+}
+
 /// Build a non-dotted project dir, write the given files, and check them all
 /// (passing explicit file paths so directory-ignore rules don't interfere).
 fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
