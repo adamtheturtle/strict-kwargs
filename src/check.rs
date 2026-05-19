@@ -1554,6 +1554,9 @@ fn call_fix_insertions(
         }
         let param = signature.parameters.get(arg_index + skip)?;
         let name = param.name.as_deref()?;
+        if !parameter_name_is_safe_keyword_target(name) {
+            return None;
+        }
         // Only these kinds accept a keyword argument; a positional-only
         // parameter or `*args`/`**kwargs` slot cannot be rewritten.
         if !matches!(
@@ -2070,6 +2073,10 @@ fn signature_is_fully_named(signature: &Signature) -> bool {
         .parameters
         .iter()
         .all(|param| param.name.as_deref().is_some_and(|name| !name.is_empty()))
+}
+
+fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
+    !name.starts_with("__") || name.ends_with("__")
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -2622,9 +2629,9 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, record_ty_fix,
-        signature_is_fully_named, strip_unbound_receiver, without_leading_self, PendingTy,
-        TyFixAst, TyFixes,
+        is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
+        record_ty_fix, signature_is_fully_named, strip_unbound_receiver, without_leading_self,
+        PendingTy, TyFixAst, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -2764,6 +2771,9 @@ mod tests {
     #[test]
     fn signature_full_name_check_covers_decline_shapes() {
         assert!(signature_is_fully_named(&sig(&["a", "b"])));
+        assert!(parameter_name_is_safe_keyword_target("a"));
+        assert!(parameter_name_is_safe_keyword_target("__dunder__"));
+        assert!(!parameter_name_is_safe_keyword_target("__fp"));
         assert!(signature_is_fully_named(&Signature {
             parameters: Vec::new(),
         }));
@@ -2830,6 +2840,23 @@ mod tests {
             &pending,
             "ty.f",
             &unnamed,
+            0,
+            1,
+            false,
+        );
+
+        let private = Signature {
+            parameters: vec![Parameter {
+                name: Some("__fp".to_string()),
+                kind: ParameterKind::PositionalOrKeyword,
+            }],
+        };
+        record_ty_fix(
+            &mut fixes,
+            Some(fix_ast),
+            &pending,
+            "ty.f",
+            &private,
             0,
             1,
             false,
