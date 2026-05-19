@@ -2669,7 +2669,14 @@ fn resolve_pending_with_ty(
         }
         let name = identifier_at(source, p.callee_offset).unwrap_or_default();
         let fullname = format!("ty.{name}");
-        let ignored = ty_fallback_callee_is_ignored(config, &fullname);
+        let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
+        if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
+            if let Some((def_fullname, _)) =
+                resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
+            {
+                ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
+            }
+        }
         if let Some(max_positional) = emit_if_violation(
             &fullname,
             &overloads,

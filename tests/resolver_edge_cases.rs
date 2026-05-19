@@ -973,6 +973,20 @@ fn ty_hover_callable_type_overloads_accept_varargs() {
     );
 }
 
+#[test]
+fn ty_hover_callable_type_honors_definition_based_ignore_names() {
+    let project = TestProject::new()
+        .pyproject(
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nignore_names = [\"builtins.IO.write\"]\n",
+        )
+        .main("import sys\n\nsys.stdout.write(\"hello\", \"extra\")\n");
+    let messages = project.check();
+    assert!(
+        messages.is_empty(),
+        "callable-type hover ignore must use goto-definition context: {messages:?}"
+    );
+}
+
 /// `Diagnostic::message` renders the expected human-readable text for a
 /// plain function violation.
 #[test]
