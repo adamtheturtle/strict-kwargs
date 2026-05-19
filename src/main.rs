@@ -11,7 +11,6 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 use std::io::IsTerminal as _;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -163,7 +162,7 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
         python_env.as_deref(),
         args.cache_dir.as_deref(),
     )?;
-    report_check_diagnostics(&diagnostics, output_format)?;
+    report_check_diagnostics(&diagnostics, output_format);
     if diagnostics.is_empty() {
         Ok(ExitCode::from(0))
     } else {
@@ -194,10 +193,7 @@ impl<'a> From<&'a Diagnostic> for JsonDiagnostic<'a> {
     }
 }
 
-fn report_check_diagnostics(
-    diagnostics: &[Diagnostic],
-    output_format: OutputFormat,
-) -> Result<(), CheckError> {
+fn report_check_diagnostics(diagnostics: &[Diagnostic], output_format: OutputFormat) {
     match output_format {
         OutputFormat::Full => {
             for diagnostic in diagnostics {
@@ -209,21 +205,25 @@ fn report_check_diagnostics(
                 .iter()
                 .map(JsonDiagnostic::from)
                 .collect::<Vec<_>>();
-            let stdout = std::io::stdout();
-            let mut stdout = stdout.lock();
-            serde_json::to_writer_pretty(&mut stdout, &diagnostics)
-                .map_err(|error| CheckError::Io(std::io::Error::other(error)))?;
-            writeln!(stdout)?;
+            let json = json_diagnostics(&diagnostics);
+            println!("{json}");
         }
         OutputFormat::Github => {
-            let stdout = std::io::stdout();
-            let mut stdout = stdout.lock();
             for diagnostic in diagnostics {
-                writeln!(stdout, "{}", diagnostic.github_annotation())?;
+                println!("{}", diagnostic.github_annotation());
             }
         }
     }
-    Ok(())
+}
+
+#[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::expect_used,
+    reason = "serializing this fixed struct shape to a JSON string cannot fail"
+)]
+fn json_diagnostics(diagnostics: &[JsonDiagnostic<'_>]) -> String {
+    serde_json::to_string_pretty(diagnostics)
+        .expect("serializing strict-kwargs diagnostics to JSON should be infallible")
 }
 
 /// Report violations `fix` detected but deliberately did not rewrite, so a

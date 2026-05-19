@@ -7,20 +7,27 @@ use serde::Deserialize;
 
 use crate::error::CheckError;
 
-/// Diagnostic output format for `strict-kwargs check`.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, clap::ValueEnum,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum OutputFormat {
-    /// Human-oriented `path:line:column: error: ...` lines on stderr.
-    #[default]
-    Full,
-    /// A JSON array of structured diagnostics on stdout.
-    Json,
-    /// GitHub Actions workflow command annotations on stdout.
-    Github,
+#[cfg_attr(coverage, coverage(off))]
+mod output_format {
+    use serde::Deserialize;
+
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[derive(
+        Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, clap::ValueEnum,
+    )]
+    #[serde(rename_all = "kebab-case")]
+    pub enum OutputFormat {
+        /// Human-oriented `path:line:column: error: ...` lines on stderr.
+        #[default]
+        Full,
+        /// A JSON array of structured diagnostics on stdout.
+        Json,
+        /// GitHub Actions workflow command annotations on stdout.
+        Github,
+    }
 }
+
+pub use output_format::OutputFormat;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -286,6 +293,13 @@ mod tests {
     }
 
     #[test]
+    fn explicit_full_output_format_is_valid() {
+        let config = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"full\"\n")
+            .expect("full output format is valid");
+        assert_eq!(config.output_format, OutputFormat::Full);
+    }
+
+    #[test]
     fn exact_required_version_can_match_current_version() {
         let config = Config::from_pyproject_str(&format!(
             "[tool.strict_kwargs]\nrequired_version = \"{}\"\n",
@@ -346,17 +360,35 @@ mod tests {
 
     #[test]
     fn required_version_rejects_unsupported_syntax() {
-        let message = validate_required_version("~=2026.5.19", "2026.5.19-post.3")
-            .expect_err("unsupported syntax must be rejected");
-        assert!(message.contains("unsupported syntax"), "message: {message}");
-        assert!(message.contains("exact versions"), "message: {message}");
-        assert!(message.contains(">="), "message: {message}");
+        for specifier in [
+            "<2026.5.19",
+            ">2026.5.19",
+            "=2026.5.19",
+            "~=2026.5.19",
+            "^2026.5.19",
+        ] {
+            let message = validate_required_version(specifier, "2026.5.19-post.3")
+                .expect_err("unsupported syntax must be rejected");
+            assert!(message.contains("unsupported syntax"), "message: {message}");
+            assert!(message.contains("exact versions"), "message: {message}");
+            assert!(message.contains(">="), "message: {message}");
+        }
     }
 
     #[test]
     fn required_version_rejects_invalid_version() {
         let message = validate_required_version(">=definitely-not-a-version", "2026.5.19-post.3")
             .expect_err("invalid version must be rejected");
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_exact_version() {
+        let message = validate_required_version("definitely-not-a-version", "2026.5.19-post.3")
+            .expect_err("invalid exact version must be rejected");
         assert!(
             message.contains("must be a valid version"),
             "message: {message}"
