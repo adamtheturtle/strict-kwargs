@@ -364,19 +364,15 @@ const WHOLE_PROJECT_TY_PKGS: usize = 3;
 const WHOLE_PROJECT_TY_MODS_PER_PKG: usize = 20;
 /// Functions defined per first-party module.
 const WHOLE_PROJECT_TY_FUNCS_PER_MOD: usize = 5;
-/// Base/derived class pairs in the ty-deferred module. Each pair produces
-/// one inherited-method call the built-in resolver cannot resolve, deferring
-/// it to `ty` (same pattern as `TY_DEFERRED` in `tests/cli.rs`).
+/// Base/derived class pairs in the inherited-method module. These used to
+/// defer to `ty`; issue #135 keeps them in the built-in resolver.
 const WHOLE_PROJECT_TY_INHERITED: usize = 10;
 
 /// A deterministic whole-project directory that mixes first-party Phase 1
-/// work with `ty`-deferred inherited-method calls (issue #67). The first-party
+/// work with inherited-method calls (issue #67 / #135). The first-party
 /// packages are identical in shape to [`whole_project_dir`]; the extra
 /// `ty_pkg` package adds a `base.py` / `derived.py` / `caller.py` triple
-/// whose inherited calls the built-in resolver cannot resolve, so the `ty`
-/// server is started and exercised. The pipelining introduced in issue #67
-/// lets these `ty` round-trips overlap with the remaining Phase 1 work on
-/// the first-party packages.
+/// whose inherited calls are now resolved by the built-in inheritance lookup.
 fn whole_project_ty_dir() -> &'static Path {
     static PROJECT: OnceLock<TempDir> = OnceLock::new();
     PROJECT
@@ -428,8 +424,7 @@ fn whole_project_ty_dir() -> &'static Path {
 
             // `ty_pkg`: base classes, derived classes (inheriting without
             // overriding), and a caller that invokes inherited methods
-            // positionally. The built-in resolver cannot trace inheritance,
-            // so each call is deferred to the `ty` server.
+            // positionally.
             let ty_pkg = root.join("ty_pkg");
             std::fs::create_dir_all(&ty_pkg).expect("create ty_pkg/");
             std::fs::write(ty_pkg.join("__init__.py"), "")
@@ -448,7 +443,7 @@ fn whole_project_ty_dir() -> &'static Path {
             }
             derived_src.push('\n');
             let mut caller_src = String::from(
-                "\"\"\"Calls inherited methods positionally — deferred to ty.\"\"\"\n\nfrom ty_pkg.derived import ",
+                "\"\"\"Calls inherited methods positionally.\"\"\"\n\nfrom ty_pkg.derived import ",
             );
             for i in 0..WHOLE_PROJECT_TY_INHERITED {
                 if i > 0 {
@@ -466,9 +461,6 @@ fn whole_project_ty_dir() -> &'static Path {
                 .expect("format base class");
                 writeln!(derived_src, "\nclass Derived{i}(Base{i}):\n    pass\n")
                     .expect("format derived class");
-                // Positional call on an instance of a derived class: the
-                // built-in resolver can't resolve the inherited method, so
-                // this defers to `ty`.
                 writeln!(caller_src, "Derived{i}().method{i}(1, 2)")
                     .expect("format caller call");
             }
@@ -514,12 +506,8 @@ fn whole_project_ty_dir() -> &'static Path {
         .path()
 }
 
-/// Whole-project run with a mix of built-in-resolvable first-party files and
-/// `ty`-deferred inherited-method calls (issue #67). Tracks whether the
-/// cross-file pipelining introduced in issue #67 improves wall-clock time
-/// relative to the sequential-phase baseline: the `ty` server startup and
-/// early-file round-trips should overlap with the remaining Phase 1 work on
-/// the first-party packages.
+/// Whole-project run with a mix of first-party files and inherited-method
+/// calls (issue #67 / #135).
 #[divan::bench]
 fn whole_project_ty() -> usize {
     check(whole_project_ty_dir())

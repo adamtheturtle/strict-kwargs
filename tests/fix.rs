@@ -309,6 +309,18 @@ fn explicit_dunder_constructor_via_module_keeps_receiver_positional() {
 }
 
 #[test]
+fn inherited_explicit_dunder_constructor_keeps_receiver_positional() {
+    assert_fixed(
+        "class Base:\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None): ...\n\n\
+         class Child(Base):\n    pass\n\n\
+         Child.__init__(Child(), outfp, mangle_from_, maxheaderlen, policy=policy)\n",
+        "class Base:\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None): ...\n\n\
+         class Child(Base):\n    pass\n\n\
+         Child.__init__(Child(), outfp=outfp, mangle_from_=mangle_from_, maxheaderlen=maxheaderlen, policy=policy)\n",
+    );
+}
+
+#[test]
 fn keeps_positional_only_positional() {
     // `a` is positional-only and stays; only `b` is rewritten.
     assert_fixed(

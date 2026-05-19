@@ -23,6 +23,7 @@ use strict_kwargs::{
 #[derive(Debug, Parser)]
 #[command(
     name = "strict-kwargs",
+    version,
     about = "Enforce using keyword arguments where possible (fast, independent of mypy/ty)",
     args_conflicts_with_subcommands = true
 )]

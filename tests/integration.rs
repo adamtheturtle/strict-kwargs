@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use strict_kwargs::CheckError;
 use strict_kwargs::{check_paths, Config};
 
 struct TestProject {
@@ -79,6 +81,31 @@ fn assert_error_at(project: &TestProject, line: usize, contains: &str) {
             .any(|m| m.starts_with(&format!("main:{line}:")) && m.contains(contains)),
         "expected error on line {line} containing {contains:?}, got: {messages:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_python_file_reports_io_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .main("def f():\n    pass\n");
+    let main = project.root.join("main.py");
+    std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let config = Config::load(&project.root).expect("valid config");
+
+    let error = check_paths(
+        &project.root,
+        std::slice::from_ref(&main),
+        &config,
+        None,
+        None,
+    )
+    .expect_err("unreadable source should fail");
+    std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o600)).expect("restore chmod");
+
+    assert!(matches!(error, CheckError::Io(_)));
 }
 
 #[test]
@@ -1189,13 +1216,13 @@ fn assignment_from_call_is_not_an_alias() {
 }
 
 // `ty` is a hard requirement (it is verified up front by
-// `check_paths`/`fix_paths`), so the whole suite — not just these
-// `ty_`-prefixed tests — needs `ty` on `PATH`. There is therefore no
+// `check_paths`/`fix_paths`), so the whole suite - not just these
+// `ty_`-prefixed tests - needs `ty` on `PATH`. There is therefore no
 // per-test availability guard: without `ty` every test fails, which is the
 // intended, deterministic behaviour. CI installs `ty` (see the workflows).
 
 #[test]
-fn ty_resolves_inherited_method() {
+fn builtin_resolves_inherited_method() {
     assert_error(
         r"
 class A:
@@ -1208,6 +1235,205 @@ B().method(1)
 ",
         8,
         "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_unbound_inherited_method() {
+    assert_error(
+        r"
+class Base:
+    def method(self, a: int) -> None: ...
+
+class Child(Base):
+    pass
+
+Child.method(Child(), 1)
+",
+        8,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_imported_inherited_method() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "base.py",
+            "class A:\n    def method(self, a: int) -> None: ...\n",
+        )
+        .main(
+            r"
+from base import A
+
+class B(A):
+    pass
+
+B().method(1)
+",
+        );
+    assert_error_at(&project, 7, "Too many positional");
+}
+
+#[test]
+fn builtin_resolves_inherited_constructor() {
+    assert_error(
+        r"
+class Base:
+    def __init__(self, a: int) -> None: ...
+
+class Child(Base):
+    pass
+
+Child(1)
+",
+        8,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_inherited_dunder_call() {
+    assert_error(
+        r"
+class Base:
+    def __call__(self, a: int) -> None: ...
+
+class Child(Base):
+    pass
+
+Child()(1)
+",
+        8,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_forward_constructor_receiver() {
+    assert_error(
+        r"
+def run() -> None:
+    Child().method(1)
+
+class Base:
+    def method(self, a: int) -> None: ...
+
+class Child(Base):
+    pass
+",
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_module_attribute_constructor_receiver() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "pkg/models.py",
+            "class Base:\n    def method(self, a: int) -> None: ...\n\nclass Child(Base):\n    pass\n",
+        )
+        .file("pkg/__init__.py", "")
+        .main(
+            r"
+import pkg.models
+
+pkg.models.Child().method(1)
+",
+        );
+    assert_error_at(&project, 4, "Too many positional");
+}
+
+#[test]
+fn builtin_resolves_imported_module_constructor_receiver() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "models.py",
+            "class Base:\n    def method(self, a: int) -> None: ...\n\nclass Child(Base):\n    pass\n",
+        )
+        .main(
+            r"
+import models
+
+models.Child().method(1)
+",
+        );
+    assert_error_at(&project, 4, "Too many positional");
+}
+
+#[test]
+fn builtin_resolves_local_attribute_constructor_receiver() {
+    assert_error(
+        r"
+class Outer:
+    class Base:
+        def method(self, a: int) -> None: ...
+
+    class Child(Base):
+        pass
+
+Outer.Child().method(1)
+",
+        9,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_forward_attribute_constructor_receiver() {
+    assert_error(
+        r"
+def run() -> None:
+    Outer.Child().method(1)
+
+class Outer:
+    class Base:
+        def method(self, a: int) -> None: ...
+
+    class Child(Base):
+        pass
+",
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn builtin_resolves_builtin_constructor_receiver() {
+    assert_ok("list().append(1)\n");
+}
+
+#[test]
+fn builtin_ignores_unresolved_deep_constructor_receiver() {
+    assert_ok("missing.ns.Child().method(1)\n");
+}
+
+#[test]
+fn builtin_ignores_dynamic_deep_constructor_receiver() {
+    assert_ok(
+        r"
+def factory():
+    return object
+
+factory().Child.Leaf().method(1)
+",
+    );
+}
+
+#[test]
+fn dynamic_class_base_is_ignored() {
+    assert_ok(
+        r"
+def factory():
+    return object
+
+class Child(factory()):
+    pass
+",
     );
 }
 
