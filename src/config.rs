@@ -15,6 +15,10 @@ pub struct Config {
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
     pub debug: bool,
+    /// Rewrite dataclass and `NamedTuple` constructor calls whose signatures
+    /// were synthesized from class fields.
+    #[serde(default)]
+    pub fix_synthesized_constructors: bool,
 }
 
 impl Config {
@@ -121,6 +125,7 @@ mod tests {
       [tool.strict_kwargs]
       ignore_names = ["main.func", "builtins.str"]
       debug = true
+      fix_synthesized_constructors = true
       "#,
         )
         .expect("valid config");
@@ -129,6 +134,7 @@ mod tests {
             vec!["main.func".to_string(), "builtins.str".to_string()]
         );
         assert!(config.debug);
+        assert!(config.fix_synthesized_constructors);
     }
 
     #[test]
@@ -148,6 +154,7 @@ mod tests {
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
         assert!(!config.debug);
+        assert!(!config.fix_synthesized_constructors);
     }
 
     #[test]
@@ -180,6 +187,18 @@ mod tests {
     }
 
     #[test]
+    fn wrong_fix_synthesized_constructors_type_is_an_error() {
+        let message = Config::from_pyproject_str(
+            "[tool.strict_kwargs]\nfix_synthesized_constructors = \"yes\"\n",
+        )
+        .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
     fn is_ignored_matches_exact_names() {
         let config = Config::from_pyproject_str("[tool.strict_kwargs]\nignore_names = [\"a.b\"]\n")
             .expect("valid config");
@@ -193,6 +212,7 @@ mod tests {
         let config = Config::load(dir.path()).expect("missing file is not an error");
         assert!(config.ignore_names.is_empty());
         assert!(!config.debug);
+        assert!(!config.fix_synthesized_constructors);
     }
 
     #[test]
@@ -205,6 +225,18 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
+    }
+
+    #[test]
+    fn load_reads_fix_synthesized_constructors_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\nfix_synthesized_constructors = true\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert!(config.fix_synthesized_constructors);
     }
 
     #[test]

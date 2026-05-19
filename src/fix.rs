@@ -9,21 +9,12 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
 
-/// Which fixes may be emitted by the auto-fixer.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FixSafety {
-    /// Only fixes that preserve the default conservative mutation contract.
-    Safe,
-    /// Include broader rewrites that may change runtime behaviour.
-    Unsafe,
-}
-
-impl FixSafety {
-    /// Whether this mode permits unsafe fixes.
-    #[must_use]
-    pub const fn allows_unsafe(self) -> bool {
-        matches!(self, Self::Unsafe)
-    }
+/// Fix categories a caller may opt into explicitly.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct FixOptIns {
+    /// Rewrite dataclass and `NamedTuple` constructors whose signatures were
+    /// synthesized from class fields.
+    pub synthesized_constructors: bool,
 }
 
 /// Why a detected violation was deliberately left untouched by the fixer.

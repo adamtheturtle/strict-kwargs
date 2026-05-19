@@ -64,7 +64,7 @@ This is tested on Python 3.11+.
 strict-kwargs .                 # check a directory
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
-strict-kwargs fix --unsafe-fixes .  # include rewrites that may change runtime behavior
+strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
 strict-kwargs --python .venv .  # point type resolution at an environment
 ```
 
@@ -74,11 +74,14 @@ Exit codes are:
 - `1`: violations found
 - `2`: operational error
 
-`fix` only rewrites calls it can name unambiguously.
-Ambiguous calls are counted as declined.
+`fix` only rewrites calls it can name unambiguously. Ambiguous calls are
+counted as declined.
+Single-signature calls are rewritten by default, including calls that require deeper type inference.
+Overloaded calls are rewritten by default only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
+Synthesized constructors are the only opt-in category, because generated constructor models can differ from runtime behaviour when class construction is customized.
 
-`--unsafe-fixes` includes broader rewrites that may change runtime behavior.
-Today that means synthesized dataclass and `NamedTuple` constructors.
+- `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
+  These can differ from runtime behaviour when class construction is customized.
 
 Use `--python` to point third-party resolution at an interpreter, virtual environment, or `sys.prefix`.
 Missing paths are errors.
@@ -101,10 +104,12 @@ Configuration lives in `pyproject.toml`:
 ```toml
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]
+fix_synthesized_constructors = true
 ```
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
 
 To find the name of a function to ignore, set the following configuration:
 

@@ -602,20 +602,42 @@ fn fix_diff_reports_declined() {
 }
 
 #[test]
-fn fix_unsafe_fixes_writes_synthesized_constructor() {
+fn fix_synthesized_constructors_writes_synthesized_constructor() {
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "--unsafe-fixes", "main.py"]);
+    let output = project.run(&["fix", "--fix-synthesized-constructors", "main.py"]);
     assert_eq!(code(&output), 0);
     let err = stderr(&output);
-    assert!(err.contains("unsafe fixes enabled"), "stderr: {err}");
+    assert!(
+        err.contains("fix opt-in enabled: synthesized constructors"),
+        "stderr: {err}"
+    );
     assert!(err.contains("fixed 1 call in"), "stderr: {err}");
     assert!(project.read("main.py").contains("D(x=1, y=2)"));
 }
 
 #[test]
-fn fix_diff_unsafe_fixes_previews_synthesized_constructor() {
+fn fix_synthesized_constructors_can_be_enabled_by_config() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nfix_synthesized_constructors = true\n",
+        )
+        .write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
+    let output = project.run(&["fix", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let err = stderr(&output);
+    assert!(
+        err.contains("fix opt-in enabled: synthesized constructors"),
+        "stderr: {err}"
+    );
+    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
+    assert!(project.read("main.py").contains("D(x=1, y=2)"));
+}
+
+#[test]
+fn fix_diff_synthesized_constructors_previews_synthesized_constructor() {
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "--diff", "--unsafe-fixes", "main.py"]);
+    let output = project.run(&["fix", "--diff", "--fix-synthesized-constructors", "main.py"]);
     assert_eq!(code(&output), 0);
     let patch = stdout(&output);
     assert!(patch.contains("+D(x=1, y=2)"), "patch: {patch}");

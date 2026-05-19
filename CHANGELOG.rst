@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+- ``--fix-synthesized-constructors`` can now also be enabled in
+  ``pyproject.toml`` with
+  ``[tool.strict_kwargs].fix_synthesized_constructors = true``.
+
 2026.5.19-post.2
 ----------------
 
@@ -12,17 +16,19 @@ Next
 ----------------
 
 
-- Add ``strict-kwargs fix --unsafe-fixes``. The flag is a long-term opt-in
-  for rewrites that may change runtime behavior and can be used with or
-  without ``--diff``. The first unsafe category is synthesized data
-  constructors: dataclass and ``NamedTuple`` calls can now be rewritten from
-  the field model when users explicitly opt in.
+- Add category-specific ``strict-kwargs fix`` controls instead of a blanket
+  unsafe mode. ``--fix-synthesized-constructors`` rewrites dataclass and
+  ``NamedTuple`` calls from synthesized field models. Overload rewrites are
+  default-on when analysis selects one precise arm. The synthesized
+  constructor control can be used with or without ``--diff``; ordinary
+  single-signature fixes remain default-on regardless of which resolver found
+  the signature.
 
 - ``strict-kwargs fix`` now reports declined rewrite reasons by category on
   stderr, including synthesized constructors, unresolved overloads,
-  ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions, unsafe
-  call-site unpacking, and unsupported signature shapes. ``--diff`` stdout
-  remains patch-only.
+  ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions,
+  unsafe call-site unpacking, and unsupported signature shapes. ``--diff``
+  stdout remains patch-only.
 
 2026.5.19
 ---------

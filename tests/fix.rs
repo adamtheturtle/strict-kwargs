@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use strict_kwargs::{
-    check_paths, fix_paths, fix_paths_with_safety, Config, DeclinedFixReason, Diagnostic, FixSafety,
+    check_paths, fix_paths, fix_paths_with_opt_ins, Config, DeclinedFixReason, Diagnostic,
+    FixOptIns,
 };
 
 struct TestProject {
@@ -43,18 +44,18 @@ impl TestProject {
     /// Run the fixer over `main.py` and return the rewritten source (or the
     /// original when nothing was fixed).
     fn fixed_main(&self) -> String {
-        self.fixed_main_with_safety(FixSafety::Safe)
+        self.fixed_main_with_opt_ins(FixOptIns::default())
     }
 
-    fn fixed_main_with_safety(&self, fix_safety: FixSafety) -> String {
+    fn fixed_main_with_opt_ins(&self, fix_opt_ins: FixOptIns) -> String {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let outcome = fix_paths_with_safety(
+        let outcome = fix_paths_with_opt_ins(
             &self.root,
             std::slice::from_ref(&main),
             &config,
             None,
-            fix_safety,
+            fix_opt_ins,
         )
         .expect("fix");
         outcome
@@ -95,6 +96,11 @@ fn assert_fixed(source: &str, expected: &str) {
     assert_eq!(proj.fixed_main(), expected);
 }
 
+fn assert_fixed_with_opt_ins(source: &str, expected: &str, fix_opt_ins: FixOptIns) {
+    let proj = project(source);
+    assert_eq!(proj.fixed_main_with_opt_ins(fix_opt_ins), expected);
+}
+
 /// The fixer's output must itself be clean (round-trip).
 fn assert_round_trips(source: &str) {
     let proj = project(source);
@@ -112,9 +118,14 @@ fn assert_unchanged(source: &str) {
     assert_eq!(project(source).fixed_main(), source);
 }
 
-fn assert_unsafe_fixed(source: &str, expected: &str) {
-    let proj = project(source);
-    assert_eq!(proj.fixed_main_with_safety(FixSafety::Unsafe), expected);
+fn assert_synthesized_constructor_fixed(source: &str, expected: &str) {
+    assert_fixed_with_opt_ins(
+        source,
+        expected,
+        FixOptIns {
+            synthesized_constructors: true,
+        },
+    );
 }
 
 /// Locate the `site-packages` directory inside a freshly created venv
@@ -736,10 +747,29 @@ fn synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_synthesized_dataclass_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_dataclass_constructor() {
+    assert_synthesized_constructor_fixed(
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\n",
+    );
+}
+
+#[test]
+fn config_fix_synthesized_constructors_rewrites_dataclass_constructor() {
+    let proj = project(
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
+    )
+    .pyproject(
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nfix_synthesized_constructors = true\n",
+    );
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(
+        outcome.files[0].fixed,
+        "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\n"
     );
 }
 
@@ -758,8 +788,8 @@ fn inherited_synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_inherited_synthesized_dataclass_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_inherited_dataclass_constructor() {
+    assert_synthesized_constructor_fixed(
         "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n",
         "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(base=1, child=2)\n",
     );
@@ -773,8 +803,8 @@ fn synthesized_namedtuple_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_synthesized_namedtuple_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_namedtuple_constructor() {
+    assert_synthesized_constructor_fixed(
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(a=1, b=2)\n",
     );
