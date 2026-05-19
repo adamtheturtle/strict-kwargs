@@ -165,10 +165,14 @@ A minimal JSON-RPC/LSP client that drives a `ty server` subprocess.
   built-in + ty detection as `check_paths` (same lazy start). Rewrites are
   allowed only when the positional-to-keyword mapping is unambiguous: a
   single built-in signature, or a `ty` hover with one concrete callable
-  signature and complete parameter names. Overloaded, synthesized,
-  ambiguous callable displays, goto-definition-only, and unpacked call sites
-  are declined (issue #7; a wrong parameter name would corrupt source, cf.
-  issue #41). Running detection in full lets `fix` report a `declined`
+  signature and complete parameter names. Built-in-detected overloads get a
+  fix-only ty hover pass and are rewritten only when the exact call site
+  selects one indexed overload arm and the rewritten arguments have precise
+  literal or annotation types; multi-arm or unmatched overloads stay
+  declined. Synthesized constructors, ambiguous callable displays,
+  goto-definition-only, and unpacked call sites are also declined (issue #7;
+  a wrong parameter name would corrupt source, cf. issue #41). Running
+  detection in full lets `fix` report a `declined`
   count equal to what a following `check` (same `--python`) still reports,
   so the two no longer silently disagree (issue #42).
 
