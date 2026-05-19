@@ -90,13 +90,9 @@ Exit codes are:
 
 `fix` only rewrites calls it can name unambiguously. Ambiguous calls are
 counted as declined.
-
-`fix` has no blanket unsafe mode.
-Different declined rewrite categories carry different risks, so broad opt-ins are harder to reason about in review and CI.
-Ordinary single-signature fixes default to yes, including calls that require deeper type inference.
-Overloaded calls also default to yes when analysis selects one precise overload arm and the rewritten argument types are precise enough.
-Synthesized constructors default to no because generated constructor models can differ from runtime behaviour when class construction is customized.
-Use the narrow flag when you accept that category:
+Single-signature calls are rewritten by default, including calls that require deeper type inference.
+Overloaded calls are rewritten by default only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
+Synthesized constructors are the only opt-in category, because generated constructor models can differ from runtime behaviour when class construction is customized.
 
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
   These can differ from runtime behaviour when class construction is customized.
