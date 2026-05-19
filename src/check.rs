@@ -80,6 +80,7 @@ fn process_scan_outcome_for_ty(
     i: usize,
     path: PathBuf,
     outcome: ScanOutcome,
+    config: &Config,
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
@@ -106,6 +107,7 @@ fn process_scan_outcome_for_ty(
                     &path,
                     &scan.source,
                     &scan.pending,
+                    config,
                     ty_file_cache,
                     diagnostics,
                     None,
@@ -184,6 +186,7 @@ fn pipeline_phases(
                 i,
                 path,
                 outcome,
+                config,
                 ty,
                 ty_start_attempted,
                 project_root,
@@ -981,13 +984,7 @@ impl<'a> CallChecker<'a> {
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
-        // A constructor call resolves to ``Class.__init__``/``__new__``; also
-        // honor an ``ignore_names`` entry for the class itself (``builtins.str``).
-        let ignored = self.config.is_ignored(&callee_fullname)
-            || callee_fullname
-                .strip_suffix(".__init__")
-                .or_else(|| callee_fullname.strip_suffix(".__new__"))
-                .is_some_and(|class| self.config.is_ignored(class));
+        let ignored = callee_is_ignored(self.config, &callee_fullname);
         let positional_count = positional_argument_count(&call.arguments);
         // Issue #27: an unbound instance-method call through the class object
         // (`K.m(K(), 1)`) passes the receiver explicitly. It binds to `self`
@@ -1706,6 +1703,7 @@ fn fix_paths_impl(
             &path,
             &scan.source,
             &scan.pending,
+            config,
             &mut ty_file_cache,
             &mut diagnostics,
             Some(TyFixes {
@@ -2045,6 +2043,7 @@ fn violation_max_positional(
     fullname: &str,
     signatures: &[Signature],
     positional_count: usize,
+    ignored: bool,
 ) -> Option<usize> {
     if is_typing_special_form_constructor(fullname) {
         return None;
@@ -2052,14 +2051,14 @@ fn violation_max_positional(
     if signatures.is_empty()
         || signatures
             .iter()
-            .any(|s| !call_exceeds_positional_limit(s, fullname, false, positional_count))
+            .any(|s| !call_exceeds_positional_limit(s, fullname, ignored, positional_count))
     {
         return None;
     }
     Some(
         signatures
             .iter()
-            .filter_map(|s| s.max_positional_at_call_site(fullname, false))
+            .filter_map(|s| s.max_positional_at_call_site(fullname, ignored))
             .max()
             .unwrap_or(0),
     )
@@ -2067,16 +2066,88 @@ fn violation_max_positional(
 
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
+fn callee_is_ignored(config: &Config, fullname: &str) -> bool {
+    // A constructor call resolves to `Class.__init__`/`__new__`; also honor an
+    // `ignore_names` entry for the class itself (`builtins.str`).
+    config.is_ignored(fullname)
+        || fullname
+            .strip_suffix(".__init__")
+            .or_else(|| fullname.strip_suffix(".__new__"))
+            .is_some_and(|class| config.is_ignored(class))
+}
+
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
+fn ty_fallback_callee_is_ignored(config: &Config, fullname: &str) -> bool {
+    if callee_is_ignored(config, fullname) {
+        return true;
+    }
+    let Some(rest) = fullname.strip_prefix("ty.") else {
+        return false;
+    };
+    // The ty fallback deliberately synthesizes display-oriented names such as
+    // `ty.str.split` for bound builtins. Map that shape back to the documented
+    // ignore spelling (`builtins.str.split`) before deciding.
+    callee_is_ignored(config, &format!("builtins.{rest}"))
+}
+
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
+fn ty_fallback_ignore_may_need_definition(config: &Config, fullname: &str) -> bool {
+    let Some(rest) = fullname.strip_prefix("ty.") else {
+        return false;
+    };
+    if rest.contains('.') {
+        return false;
+    }
+    config
+        .ignore_names
+        .iter()
+        .any(|name| name.rsplit('.').next() == Some(rest))
+}
+
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
+fn resolve_ty_definition_for_pending(
+    ty: &mut TyResolver,
+    path: &Path,
+    source: &str,
+    pending: &PendingTy,
+    file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+) -> Option<(String, Vec<Signature>)> {
+    let (line, ch) = byte_offset_to_lsp(source, pending.callee_offset);
+    let id = ty.ask("textDocument/definition", path, line, ch)?;
+    let loc = ty.take(id).as_ref().and_then(location_from_value)?;
+    let target = if same_path(&loc.path, path) {
+        Some(source.to_string())
+    } else {
+        file_cache
+            .entry(loc.path.clone())
+            .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
+            .clone()
+    }?;
+    let parsed = parse_module_guarded(&target).ok()?;
+    let off = lsp_to_byte_offset(&target, loc.line, loc.character)?;
+    resolve_def_at(parsed.suite(), off)
+}
+
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "threads one more resolved call fact into the ty diagnostic helper"
+)]
 fn emit_if_violation(
     fullname: &str,
     signatures: &[Signature],
     positional_count: usize,
+    ignored: bool,
     source: &str,
     call_start: usize,
     path: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
-    let max_positional = violation_max_positional(fullname, signatures, positional_count)?;
+    let max_positional = violation_max_positional(fullname, signatures, positional_count, ignored)?;
     let offset = u32::try_from(call_start).unwrap_or(u32::MAX);
     let (line, column) = line_column(source, TextSize::new(offset));
     diagnostics.push(Diagnostic {
@@ -2227,6 +2298,7 @@ fn resolve_file_with_ty(
     path: &Path,
     source: &str,
     pending: &[PendingTy],
+    config: &Config,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
     fixes: Option<TyFixes<'_>>,
@@ -2242,7 +2314,16 @@ fn resolve_file_with_ty(
         *ty = Some(start_ty(project_root, python_env)?);
     }
     if let Some(ty) = ty.as_mut() {
-        resolve_pending_with_ty(ty, path, source, pending, ty_file_cache, diagnostics, fixes);
+        resolve_pending_with_ty(
+            ty,
+            path,
+            source,
+            pending,
+            config,
+            ty_file_cache,
+            diagnostics,
+            fixes,
+        );
     }
     Ok(())
 }
@@ -2351,6 +2432,7 @@ fn record_selected_overload_fix(
             &item.callee_fullname,
             std::slice::from_ref(&effective_signature),
             positional_count,
+            false,
         ) else {
             return;
         };
@@ -2396,6 +2478,7 @@ fn record_selected_overload_fix(
         &item.callee_fullname,
         std::slice::from_ref(signature),
         p.positional_count,
+        false,
     ) else {
         return;
     };
@@ -2471,11 +2554,16 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// [`identifier_at`], [`byte_offset_to_lsp`], [`lsp_to_byte_offset`],
 /// [`location_from_value`], [`resolve_def_at`] and [`emit_if_violation`].
 #[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ty fallback orchestration shares per-file resolver state explicitly"
+)]
 fn resolve_pending_with_ty(
     ty: &mut TyResolver,
     path: &Path,
     source: &str,
     pending: &[PendingTy],
+    config: &Config,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
     mut fixes: Option<TyFixes<'_>>,
@@ -2524,10 +2612,19 @@ fn resolve_pending_with_ty(
                 }
                 None => format!("ty.{}", sig.name),
             };
+            let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
+            if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
+                if let Some((def_fullname, _)) =
+                    resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
+                {
+                    ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
+                }
+            }
             if let Some(max_positional) = emit_if_violation(
                 &fullname,
                 std::slice::from_ref(&effective_signature),
                 positional_count,
+                ignored,
                 source,
                 p.call_start,
                 path,
@@ -2572,10 +2669,12 @@ fn resolve_pending_with_ty(
         }
         let name = identifier_at(source, p.callee_offset).unwrap_or_default();
         let fullname = format!("ty.{name}");
+        let ignored = ty_fallback_callee_is_ignored(config, &fullname);
         if let Some(max_positional) = emit_if_violation(
             &fullname,
             &overloads,
             p.positional_count,
+            ignored,
             source,
             p.call_start,
             path,
@@ -2635,10 +2734,12 @@ fn resolve_pending_with_ty(
             continue;
         };
         if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
+            let ignored = ty_fallback_callee_is_ignored(config, &fullname);
             emit_if_violation(
                 &fullname,
                 &sigs,
                 pending[i].positional_count,
+                ignored,
                 source,
                 pending[i].call_start,
                 path,
@@ -3083,6 +3184,7 @@ while cond:
             "ty.TypeVar",
             std::slice::from_ref(&one),
             2,
+            false,
             "x",
             0,
             path,
@@ -3092,7 +3194,7 @@ while cond:
 
         // No signatures: nothing to check.
         let mut d = Vec::new();
-        emit_if_violation("ty.f", &[], 2, "x", 0, path, &mut d);
+        emit_if_violation("ty.f", &[], 2, false, "x", 0, path, &mut d);
         assert!(d.is_empty());
 
         // Within the limit (some overload permits it): no diagnostic.
@@ -3101,6 +3203,7 @@ while cond:
             "ty.f",
             std::slice::from_ref(&one),
             0,
+            false,
             "f()\n",
             0,
             path,
@@ -3110,13 +3213,28 @@ while cond:
 
         // Exceeds the limit: one diagnostic with the rendered fields.
         let mut d = Vec::new();
-        emit_if_violation("ty.f", &[one], 2, "f(1, 2)\n", 0, path, &mut d);
+        emit_if_violation("ty.f", &[one], 2, false, "f(1, 2)\n", 0, path, &mut d);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].line, 1);
         assert_eq!(d[0].column, 1);
         assert_eq!(d[0].callee, "\"f\"");
         assert_eq!(d[0].positional_count, 2);
         assert_eq!(d[0].max_positional, 0);
+
+        // Ignored callables are suppressed even when the positional count
+        // would otherwise exceed the limit.
+        let mut d = Vec::new();
+        emit_if_violation(
+            "ty.f",
+            &[sig(&["a"])],
+            2,
+            true,
+            "f(1, 2)\n",
+            0,
+            path,
+            &mut d,
+        );
+        assert!(d.is_empty());
     }
 
     #[test]
