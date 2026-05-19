@@ -245,6 +245,61 @@ mod tests {
     }
 
     #[test]
+    fn declined_fix_reason_counts_are_ordered_and_labeled() {
+        let reasons = [
+            DeclinedFixReason::UnsupportedSignatureShape,
+            DeclinedFixReason::UnresolvedOverload,
+            DeclinedFixReason::UnsafeCallSiteUnpacking,
+            DeclinedFixReason::UnresolvedOverload,
+            DeclinedFixReason::TyDefinitionOnly,
+            DeclinedFixReason::AmbiguousTyHover,
+            DeclinedFixReason::SynthesizedConstructor,
+        ];
+
+        assert_eq!(
+            declined_fix_reason_counts(&reasons),
+            vec![
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::SynthesizedConstructor,
+                    count: 1,
+                },
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::UnresolvedOverload,
+                    count: 2,
+                },
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::AmbiguousTyHover,
+                    count: 1,
+                },
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::TyDefinitionOnly,
+                    count: 1,
+                },
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::UnsafeCallSiteUnpacking,
+                    count: 1,
+                },
+                DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::UnsupportedSignatureShape,
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            reasons.map(DeclinedFixReason::label),
+            [
+                "unsupported signature shape",
+                "unresolved overload",
+                "unsafe call-site unpacking",
+                "unresolved overload",
+                "ty/goto-definition-only resolution",
+                "ambiguous ty hover",
+                "synthesized constructor",
+            ]
+        );
+    }
+
+    #[test]
     fn unified_diff_empty_when_unchanged() {
         let path = Path::new("m.py");
         assert!(unified_diff(path, "a\nb\n", "a\nb\n", false).is_empty());

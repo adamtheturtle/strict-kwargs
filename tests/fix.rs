@@ -506,6 +506,22 @@ fn does_not_fix_overloaded_callee_when_ty_selection_is_not_unique() {
 }
 
 #[test]
+fn callable_expression_overload_is_declined_when_it_cannot_be_hovered() {
+    let proj = project(
+        "from typing import overload\n\nclass C:\n    @overload\n    def __call__(self, count: int) -> int: ...\n    @overload\n    def __call__(self, text: str) -> str: ...\n    def __call__(self, value):\n        return value\n\nC()(1)\n",
+    );
+    let outcome = proj.fix_main_result().expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::UnresolvedOverload
+    );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
+}
+
+#[test]
 fn scans_annotated_method_vararg_and_kwarg_parameters() {
     assert_unchanged(
         "class C:\n    def m(self, *rest: int, **kw: int) -> None: ...\n\nc = C()\nc.m()\n",
