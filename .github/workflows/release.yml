@@ -101,7 +101,7 @@ jobs:
           pre_commit_rev="${NEW_TAG/-post./.post}"
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" Cargo.toml
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
-          sed -i.bak -E "s/^(    rev: ).*(  # pin to a release tag)$/\1${pre_commit_rev}\2/" README.md
+          sed -i.bak -E "s/^([[:space:]]*rev:[[:space:]]*).*(# pin to a release tag)$/\1${pre_commit_rev}  \2/" README.md
           if ! grep -Fq "    rev: ${pre_commit_rev}  # pin to a release tag" README.md; then
             echo "Error: README pre-commit hook revision was not updated"
             exit 1

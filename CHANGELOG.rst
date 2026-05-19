@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+2026.5.19-post.1
+----------------
+
+
 - Add ``strict-kwargs fix --unsafe-fixes``. The flag is a long-term opt-in
   for rewrites that may change runtime behavior and can be used with or
   without ``--diff``. The first unsafe category is synthesized data

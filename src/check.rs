@@ -1632,8 +1632,10 @@ fn call_fix_insertions(
 /// literal or annotation types; multi-arm and unmatched overload displays stay
 /// declined. Synthesized constructors are left alone by [`fix_paths`] but may
 /// be rewritten by [`fix_paths_with_safety`] with [`FixSafety::Unsafe`].
-/// Ambiguous callable displays and goto-definition-only resolutions are also
-/// left alone (a wrong parameter name would corrupt source, cf. issue #41).
+/// Ambiguous callable displays and most goto-definition-only resolutions are
+/// left alone (a wrong parameter name would corrupt source, cf. issue #41);
+/// a single resolved `__call__` signature may still be fixed because it maps
+/// directly to the callable value being invoked.
 ///
 /// Running the `ty` fallback here also lets the returned
 /// [`FixOutcome::declined`] account for *every* violation `check` would
@@ -2627,7 +2629,8 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 
 /// Resolve, in one pipelined batch per file, the calls the built-in resolver
 /// missed: hover (precise, overload- and inheritance-resolved, stdlib too),
-/// then goto-definition for the rest (constructors). Fails closed.
+/// then goto-definition for the rest (constructors and callable `__call__`
+/// definitions). Fails closed.
 ///
 /// This is pure orchestration of the `ty` LSP subprocess: it pipelines
 /// hover/goto-definition requests and dispatches each reply to the parsing
@@ -2756,7 +2759,14 @@ fn resolve_pending_with_ty(
         }
         let name = identifier_at(source, p.callee_offset).unwrap_or_default();
         let fullname = format!("ty.{name}");
-        let ignored = ty_fallback_callee_is_ignored(config, &fullname);
+        let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
+        if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
+            if let Some((def_fullname, _)) =
+                resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
+            {
+                ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
+            }
+        }
         if let Some(max_positional) = emit_if_violation(
             &fullname,
             &overloads,
@@ -2824,7 +2834,7 @@ fn resolve_pending_with_ty(
         };
         if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
             let ignored = ty_fallback_callee_is_ignored(config, &fullname);
-            if emit_if_violation(
+            let max_positional = emit_if_violation(
                 &fullname,
                 &sigs,
                 pending[i].positional_count,
@@ -2833,10 +2843,27 @@ fn resolve_pending_with_ty(
                 pending[i].call_start,
                 path,
                 diagnostics,
-            )
-            .is_some()
-            {
-                record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+            );
+            if let Some(max_positional) = max_positional {
+                let mut attempted_fix = false;
+                if fullname.ends_with(".__call__") {
+                    if let [signature] = sigs.as_slice() {
+                        attempted_fix = true;
+                        record_ty_fix(
+                            &mut fixes,
+                            fix_ast,
+                            &pending[i],
+                            &fullname,
+                            signature,
+                            max_positional,
+                            pending[i].positional_count,
+                            false,
+                        );
+                    }
+                }
+                if !attempted_fix {
+                    record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+                }
             }
         }
     }
