@@ -6,6 +6,13 @@
 #
 #     prek install      # or: pre-commit install
 #
+# Run all hooks locally, matching CI's pre-commit job:
+#
+#     uvx prek run --all-files
+#
+# CI sets `SKIP=cargo-fmt,cargo-clippy` for this command because
+# `.github/workflows/lint.yml` runs those exact Cargo checks separately.
+#
 fail_fast: false
 
 repos:

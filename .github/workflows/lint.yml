@@ -66,19 +66,14 @@ jobs:
         run: cargo audit --deny warnings
 
   pre-commit:
-    # Runs the same prek hooks contributors run locally
-    # (see `.pre-commit-config.yaml`) so there is no drift between local
-    # and CI — *except* the `cargo-fmt`/`cargo-clippy`/`cargo-test` local
-    # hooks, which are skipped here because the `build` matrix job above
-    # and `ci.yml` already run the byte-for-byte identical `cargo`
-    # commands. Re-running them here meant a third cold clippy compile and
-    # a second cold full test build per CI run; skipping keeps coverage
-    # of those checks (via the dedicated jobs) with no drift while
-    # dropping the Rust/ty toolchain setup this job no longer needs.
+    # Runs the all-hooks prek workflow documented in
+    # `.pre-commit-config.yaml`. The cargo hooks are skipped here because
+    # this workflow's `build` matrix runs the same `cargo fmt` and
+    # `cargo clippy` commands, while `ci.yml` covers `cargo test`.
     runs-on: ubuntu-latest
 
     env:
-      SKIP: cargo-fmt,cargo-clippy,cargo-test
+      SKIP: cargo-fmt,cargo-clippy
 
     steps:
       - uses: actions/checkout@v6
@@ -88,12 +83,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Run prek hooks (commit stage)
-        run: uvx prek run --all-files --hook-stage pre-commit
-          --show-diff-on-failure --color=always --verbose
-
-      - name: Run prek hooks (push stage)
-        run: uvx prek run --all-files --hook-stage pre-push
+      - name: Run prek hooks
+        run: uvx prek run --all-files
           --show-diff-on-failure --color=always --verbose
 
   completion-lint:
