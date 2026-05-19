@@ -9,20 +9,52 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
 
-/// Which fixes may be emitted by the auto-fixer.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FixSafety {
-    /// Only fixes that preserve the default conservative mutation contract.
-    Safe,
-    /// Include broader rewrites that may change runtime behaviour.
-    Unsafe,
+/// Non-default fix categories a caller may opt into explicitly.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct FixOptIns {
+    /// Rewrite dataclass and `NamedTuple` constructors whose signatures were
+    /// synthesized from class fields.
+    pub synthesized_constructors: bool,
+    /// Rewrite calls whose parameter mapping comes from `ty`.
+    pub ty_resolved: bool,
+    /// Rewrite overloaded calls when `ty` selects one precise overload arm.
+    pub unambiguous_overloads: bool,
 }
 
-impl FixSafety {
-    /// Whether this mode permits unsafe fixes.
+impl FixOptIns {
+    /// The default conservative fixer policy.
     #[must_use]
-    pub const fn allows_unsafe(self) -> bool {
-        matches!(self, Self::Unsafe)
+    pub const fn conservative() -> Self {
+        Self {
+            synthesized_constructors: false,
+            ty_resolved: false,
+            unambiguous_overloads: false,
+        }
+    }
+
+    pub(crate) const fn allows(self, category: FixCategory) -> bool {
+        match category {
+            FixCategory::SynthesizedConstructor => self.synthesized_constructors,
+            FixCategory::TyResolved => self.ty_resolved,
+            FixCategory::UnambiguousOverload => self.unambiguous_overloads,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FixCategory {
+    SynthesizedConstructor,
+    TyResolved,
+    UnambiguousOverload,
+}
+
+impl FixCategory {
+    pub const fn declined_reason(self) -> DeclinedFixReason {
+        match self {
+            Self::SynthesizedConstructor => DeclinedFixReason::SynthesizedConstructor,
+            Self::TyResolved => DeclinedFixReason::TyResolved,
+            Self::UnambiguousOverload => DeclinedFixReason::UnambiguousOverload,
+        }
     }
 }
 
@@ -40,6 +72,12 @@ pub enum DeclinedFixReason {
     /// `ty` could only resolve the call via goto-definition, not a concrete
     /// call-site hover signature suitable for rewriting.
     TyDefinitionOnly,
+    /// The call was resolved by `ty`; default `fix` keeps those
+    /// environment-dependent rewrites opt-in.
+    TyResolved,
+    /// An overloaded call was narrowed to one rewriteable arm; default `fix`
+    /// keeps overload-derived parameter mappings opt-in.
+    UnambiguousOverload,
     /// The call uses `*args` or `**kwargs`, so local argument positions are not
     /// enough to build a sound keyword rewrite.
     UnsafeCallSiteUnpacking,
@@ -49,11 +87,13 @@ pub enum DeclinedFixReason {
 }
 
 impl DeclinedFixReason {
-    pub(crate) const ORDERED: [Self; 6] = [
+    pub(crate) const ORDERED: [Self; 8] = [
         Self::SynthesizedConstructor,
         Self::UnresolvedOverload,
         Self::AmbiguousTyHover,
         Self::TyDefinitionOnly,
+        Self::TyResolved,
+        Self::UnambiguousOverload,
         Self::UnsafeCallSiteUnpacking,
         Self::UnsupportedSignatureShape,
     ];
@@ -66,6 +106,8 @@ impl DeclinedFixReason {
             Self::UnresolvedOverload => "unresolved overload",
             Self::AmbiguousTyHover => "ambiguous ty hover",
             Self::TyDefinitionOnly => "ty/goto-definition-only resolution",
+            Self::TyResolved => "ty-resolved call",
+            Self::UnambiguousOverload => "unambiguous overload",
             Self::UnsafeCallSiteUnpacking => "unsafe call-site unpacking",
             Self::UnsupportedSignatureShape => "unsupported signature shape",
         }

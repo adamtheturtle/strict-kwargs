@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use strict_kwargs::{
-    check_paths, fix_paths, fix_paths_with_safety, Config, DeclinedFixReason, Diagnostic, FixSafety,
+    check_paths, fix_paths, fix_paths_with_opt_ins, Config, DeclinedFixReason, Diagnostic,
+    FixOptIns,
 };
 
 struct TestProject {
@@ -43,18 +44,18 @@ impl TestProject {
     /// Run the fixer over `main.py` and return the rewritten source (or the
     /// original when nothing was fixed).
     fn fixed_main(&self) -> String {
-        self.fixed_main_with_safety(FixSafety::Safe)
+        self.fixed_main_with_opt_ins(FixOptIns::conservative())
     }
 
-    fn fixed_main_with_safety(&self, fix_safety: FixSafety) -> String {
+    fn fixed_main_with_opt_ins(&self, fix_opt_ins: FixOptIns) -> String {
         let main = self.root.join("main.py");
         let config = Config::load(&self.root).expect("valid config");
-        let outcome = fix_paths_with_safety(
+        let outcome = fix_paths_with_opt_ins(
             &self.root,
             std::slice::from_ref(&main),
             &config,
             None,
-            fix_safety,
+            fix_opt_ins,
         )
         .expect("fix");
         outcome
@@ -95,6 +96,11 @@ fn assert_fixed(source: &str, expected: &str) {
     assert_eq!(proj.fixed_main(), expected);
 }
 
+fn assert_fixed_with_opt_ins(source: &str, expected: &str, fix_opt_ins: FixOptIns) {
+    let proj = project(source);
+    assert_eq!(proj.fixed_main_with_opt_ins(fix_opt_ins), expected);
+}
+
 /// The fixer's output must itself be clean (round-trip).
 fn assert_round_trips(source: &str) {
     let proj = project(source);
@@ -112,9 +118,15 @@ fn assert_unchanged(source: &str) {
     assert_eq!(project(source).fixed_main(), source);
 }
 
-fn assert_unsafe_fixed(source: &str, expected: &str) {
-    let proj = project(source);
-    assert_eq!(proj.fixed_main_with_safety(FixSafety::Unsafe), expected);
+fn assert_synthesized_constructor_fixed(source: &str, expected: &str) {
+    assert_fixed_with_opt_ins(
+        source,
+        expected,
+        FixOptIns {
+            synthesized_constructors: true,
+            ..FixOptIns::conservative()
+        },
+    );
 }
 
 /// Locate the `site-packages` directory inside a freshly created venv
@@ -296,10 +308,28 @@ fn fixes_builtins() {
 fn fixes_ty_resolved_stdlib_single_signature() {
     // Issue #94: stdlib calls that only ty resolves can be rewritten when
     // ty's hover gives one concrete, fully named signature.
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "import math\n\nmath.isclose(1.0, 2.0, 0.1)\n",
         "import math\n\nmath.isclose(a=1.0, b=2.0, rel_tol=0.1)\n",
+        FixOptIns {
+            ty_resolved: true,
+            ..FixOptIns::conservative()
+        },
     );
+}
+
+#[test]
+fn default_fix_declines_ty_resolved_stdlib_single_signature() {
+    let proj = project("from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n");
+    let outcome = proj.fix_main_result().expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::TyResolved
+    );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]
@@ -307,9 +337,13 @@ fn fixes_ty_resolved_inferred_receiver() {
     // `p` is inferred from `Path.cwd()`, not from a direct constructor call
     // the built-in resolver tracks. ty's bound-method hover maps the call-site
     // argument directly to `suffix`.
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n",
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(suffix=\".txt\")\n",
+        FixOptIns {
+            ty_resolved: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
@@ -339,11 +373,15 @@ fn fixes_ty_resolved_third_party_env_package() {
     let proj = project("import extdep\n\nextdep.configure(\"localhost\", 8080)\n");
     let main = proj.root.join("main.py");
     let config = Config::load(&proj.root).expect("valid config");
-    let outcome = fix_paths(
+    let outcome = fix_paths_with_opt_ins(
         &proj.root,
         std::slice::from_ref(&main),
         &config,
         Some(venv.as_path()),
+        FixOptIns {
+            ty_resolved: true,
+            ..FixOptIns::conservative()
+        },
     )
     .expect("fix");
     assert_eq!(outcome.declined, 0);
@@ -359,7 +397,7 @@ fn fixes_protocol_callable_value_returned_by_factory() {
     // Follow-up to issue #115: when ty can resolve the callable value to a
     // Protocol `__call__`, use that call signature, not the factory's
     // parameter names.
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "from typing import Protocol\n\n\
          class Formatter(Protocol):\n    def __call__(self, value: str) -> str: ...\n\n\
          def build_formatter(quote_char: str) -> Formatter: ...\n\n\
@@ -372,6 +410,10 @@ fn fixes_protocol_callable_value_returned_by_factory() {
          formatter = build_formatter(quote_char='\"')\n\
          value = 'hello'\n\
          formatter(value=value)\n",
+        FixOptIns {
+            ty_resolved: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
@@ -391,7 +433,7 @@ fn does_not_fix_annotated_callable_value_returned_by_factory() {
 
 #[test]
 fn fixes_callable_instance_value_returned_by_factory() {
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "class Formatter:\n    def __call__(self, value: str) -> str: ...\n\n\
          def build_formatter(quote_char: str) -> Formatter: ...\n\n\
          formatter = build_formatter(quote_char='\"')\n\
@@ -402,6 +444,10 @@ fn fixes_callable_instance_value_returned_by_factory() {
          formatter = build_formatter(quote_char='\"')\n\
          value = 'hello'\n\
          formatter(value=value)\n",
+        FixOptIns {
+            ty_resolved: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
@@ -432,9 +478,13 @@ fn fixes_overloaded_stdlib_when_ty_selection_is_unambiguous() {
     // `os.getenv` has overload arms, but this arity and argument shape select
     // one fully named arm. The overload fix path may rewrite it with that
     // selected parameter mapping.
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "import os\n\nos.getenv(\"PATH\", \"fallback\")\n",
         "import os\n\nos.getenv(key=\"PATH\", default=\"fallback\")\n",
+        FixOptIns {
+            unambiguous_overloads: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
@@ -464,7 +514,7 @@ fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
     // Issue #95: overload arms can map the same positional slot to different
     // parameter names. Rewrite only when ty's call-site hover selects exactly
     // one indexed arm, so the chosen keyword name is not guessed.
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "from typing import overload\n\
          @overload\n\
          def f(count: int) -> int: ...\n\
@@ -479,12 +529,16 @@ fn fixes_overloaded_callee_when_ty_selects_one_differently_named_arm() {
          def f(text: str) -> str: ...\n\
          def f(value):\n    return value\n\
          f(count=1)\n",
+        FixOptIns {
+            unambiguous_overloads: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
 #[test]
 fn fixes_overloaded_callee_for_precisely_annotated_argument() {
-    assert_fixed(
+    assert_fixed_with_opt_ins(
         "from typing import overload\n\
          @overload\n\
          def f(count: int) -> int: ...\n\
@@ -499,6 +553,10 @@ fn fixes_overloaded_callee_for_precisely_annotated_argument() {
          def f(text: str) -> str: ...\n\
          def f(value):\n    return value\n\
          def g(x: int):\n    f(count=x)\n",
+        FixOptIns {
+            unambiguous_overloads: true,
+            ..FixOptIns::conservative()
+        },
     );
 }
 
@@ -736,8 +794,8 @@ fn synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_synthesized_dataclass_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_dataclass_constructor() {
+    assert_synthesized_constructor_fixed(
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(1, 2)\n",
         "from dataclasses import dataclass\n\n@dataclass\nclass D:\n    x: int\n    y: int\n\nD(x=1, y=2)\n",
     );
@@ -758,8 +816,8 @@ fn inherited_synthesized_dataclass_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_inherited_synthesized_dataclass_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_inherited_dataclass_constructor() {
+    assert_synthesized_constructor_fixed(
         "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(1, 2)\n",
         "from dataclasses import dataclass\n\n@dataclass\nclass Base:\n    base: int\n\n@dataclass\nclass Child(Base):\n    child: int\n\nChild(base=1, child=2)\n",
     );
@@ -773,8 +831,8 @@ fn synthesized_namedtuple_constructor_not_rewritten() {
 }
 
 #[test]
-fn unsafe_fixes_synthesized_namedtuple_constructor() {
-    assert_unsafe_fixed(
+fn fix_synthesized_constructors_rewrites_namedtuple_constructor() {
+    assert_synthesized_constructor_fixed(
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(1, 2)\n",
         "from typing import NamedTuple\n\nclass NT(NamedTuple):\n    a: int\n    b: int\n\nNT(a=1, b=2)\n",
     );

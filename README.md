@@ -78,7 +78,7 @@ This is tested on Python 3.11+.
 strict-kwargs .                 # check a directory
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
-strict-kwargs fix --unsafe-fixes .  # include rewrites that may change runtime behavior
+strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
 strict-kwargs --python .venv .  # point type resolution at an environment
 ```
 
@@ -91,8 +91,17 @@ Exit codes are:
 `fix` only rewrites calls it can name unambiguously. Ambiguous calls are
 counted as declined.
 
-`--unsafe-fixes` includes broader rewrites that may change runtime behavior.
-Today that means synthesized dataclass and `NamedTuple` constructors.
+`fix` has no blanket unsafe mode. Different declined rewrite categories carry
+different risks, so broad opt-ins are harder to reason about in review and CI.
+Use the narrow flag for the category you accept:
+
+- `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple`
+  constructors whose signatures were synthesized from fields. These can differ
+  from runtime behaviour when class construction is customized.
+- `--fix-ty-resolved`: rewrite calls whose parameter names come from ty's
+  inference for the selected Python environment.
+- `--fix-unambiguous-overloads`: rewrite overloaded calls only when ty selects
+  one precise overload arm and the rewritten argument types are precise enough.
 
 Use `--python` to point third-party resolution at an interpreter, virtual
 environment, or `sys.prefix`. Missing paths are errors. A missing `--python`

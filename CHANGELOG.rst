@@ -8,17 +8,18 @@ Next
 ----------------
 
 
-- Add ``strict-kwargs fix --unsafe-fixes``. The flag is a long-term opt-in
-  for rewrites that may change runtime behavior and can be used with or
-  without ``--diff``. The first unsafe category is synthesized data
-  constructors: dataclass and ``NamedTuple`` calls can now be rewritten from
-  the field model when users explicitly opt in.
+- Add category-specific ``strict-kwargs fix`` opt-ins instead of a blanket
+  unsafe mode. ``--fix-synthesized-constructors`` rewrites dataclass and
+  ``NamedTuple`` calls from synthesized field models, ``--fix-ty-resolved``
+  rewrites ty-derived parameter mappings, and
+  ``--fix-unambiguous-overloads`` rewrites overloads when ty selects one
+  precise arm. Each can be used with or without ``--diff``.
 
 - ``strict-kwargs fix`` now reports declined rewrite reasons by category on
   stderr, including synthesized constructors, unresolved overloads,
-  ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions, unsafe
-  call-site unpacking, and unsupported signature shapes. ``--diff`` stdout
-  remains patch-only.
+  ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions,
+  ty-resolved calls, unambiguous overloads, unsafe call-site unpacking, and
+  unsupported signature shapes. ``--diff`` stdout remains patch-only.
 
 2026.5.19
 ---------

@@ -16,8 +16,8 @@ use std::process::ExitCode;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use strict_kwargs::{
-    check_paths, find_project_root, fix_paths_with_safety, unified_diff, CheckError, Config,
-    DeclinedFixReasonCount, FixSafety,
+    check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
+    DeclinedFixReasonCount, FixOptIns,
 };
 
 #[derive(Debug, Parser)]
@@ -68,6 +68,10 @@ struct CheckArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "clap stores independent boolean flags directly"
+)]
 struct FixArgs {
     /// Paths to Python files or directories to fix.
     #[arg(default_value = ".")]
@@ -81,9 +85,18 @@ struct FixArgs {
     #[arg(long)]
     diff: bool,
 
-    /// Include fixes that may change runtime behaviour.
+    /// Rewrite dataclass and `NamedTuple` constructor calls whose signatures
+    /// were synthesized from class fields.
     #[arg(long)]
-    unsafe_fixes: bool,
+    fix_synthesized_constructors: bool,
+
+    /// Rewrite calls resolved only by ty's environment-dependent inference.
+    #[arg(long)]
+    fix_ty_resolved: bool,
+
+    /// Rewrite overloaded calls when ty selects one precise overload arm.
+    #[arg(long)]
+    fix_unambiguous_overloads: bool,
 
     /// Python environment for the `ty` inference fallback (see
     /// ``strict-kwargs --help``). The rewrite stays conservative and never
@@ -198,24 +211,44 @@ fn diff_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
+const fn fix_opt_ins_from_args(args: &FixArgs) -> FixOptIns {
+    FixOptIns {
+        synthesized_constructors: args.fix_synthesized_constructors,
+        ty_resolved: args.fix_ty_resolved,
+        unambiguous_overloads: args.fix_unambiguous_overloads,
+    }
+}
+
+fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
+    if opt_ins.synthesized_constructors {
+        eprintln!(
+            "strict-kwargs: fix opt-in enabled: synthesized constructors may change runtime behavior"
+        );
+    }
+    if opt_ins.ty_resolved {
+        eprintln!(
+            "strict-kwargs: fix opt-in enabled: ty-resolved calls depend on ty and the selected Python environment"
+        );
+    }
+    if opt_ins.unambiguous_overloads {
+        eprintln!(
+            "strict-kwargs: fix opt-in enabled: unambiguous overloads use ty's selected overload arm"
+        );
+    }
+}
+
 fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
+    let fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
     let python_env = resolve_python_env(args.python);
-    let fix_safety = if args.unsafe_fixes {
-        eprintln!(
-            "strict-kwargs: unsafe fixes enabled; these rewrites may change runtime behavior"
-        );
-        FixSafety::Unsafe
-    } else {
-        FixSafety::Safe
-    };
-    let outcome = fix_paths_with_safety(
+    report_enabled_fix_opt_ins(fix_opt_ins);
+    let outcome = fix_paths_with_opt_ins(
         &project_root,
         &args.paths,
         &config,
         python_env.as_deref(),
-        fix_safety,
+        fix_opt_ins,
     )?;
     let fixes = &outcome.files;
     if fixes.is_empty() {

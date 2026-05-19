@@ -20,8 +20,8 @@ use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{
-    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixOutcome,
-    FixSafety, Insertion,
+    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixCategory,
+    FixOptIns, FixOutcome, Insertion,
 };
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
@@ -369,7 +369,7 @@ fn scan_file(
     path: &Path,
     config: &Config,
     index: &DefinitionIndex,
-    fix_safety: FixSafety,
+    fix_opt_ins: FixOptIns,
 ) -> Result<ScanOutcome, CheckError> {
     let source = match read_python_source(path)? {
         Source::Decoded(source) => source,
@@ -388,7 +388,7 @@ fn scan_file(
             parsed.tokens(),
             index,
             config,
-            fix_safety,
+            fix_opt_ins,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -488,7 +488,8 @@ fn stream_scan_files(
             .par_iter()
             .enumerate()
             .for_each_with(tx, |tx, (i, path)| {
-                let result = scan_file(project_root, path, config, index, FixSafety::Safe);
+                let result =
+                    scan_file(project_root, path, config, index, FixOptIns::conservative());
                 // Ignore send errors: the consumer has exited early (e.g. a
                 // ty error was already recorded).
                 let _ = tx.send((i, path.clone(), result));
@@ -507,13 +508,13 @@ fn scan_files_for_fix(
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
-    fix_safety: FixSafety,
+    fix_opt_ins: FixOptIns,
 ) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
     with_large_stack_pool(|| {
         python_files
             .par_iter()
             .map(|path| {
-                let outcome = scan_file(project_root, path, config, index, fix_safety)?;
+                let outcome = scan_file(project_root, path, config, index, fix_opt_ins)?;
                 Ok((path.clone(), outcome))
             })
             .collect()
@@ -612,7 +613,7 @@ struct CallChecker<'a> {
     tokens: &'a Tokens,
     index: &'a DefinitionIndex,
     config: &'a Config,
-    fix_safety: FixSafety,
+    fix_opt_ins: FixOptIns,
     /// Violations found in this file. Owned (not a shared `&mut`) so each
     /// file's built-in pass is an independent, `Send` unit of work the
     /// whole-project run executes in parallel (issue #46); the single-threaded
@@ -684,7 +685,7 @@ impl<'a> CallChecker<'a> {
         tokens: &'a Tokens,
         index: &'a DefinitionIndex,
         config: &'a Config,
-        fix_safety: FixSafety,
+        fix_opt_ins: FixOptIns,
     ) -> Self {
         Self {
             path,
@@ -694,7 +695,7 @@ impl<'a> CallChecker<'a> {
             tokens,
             index,
             config,
-            fix_safety,
+            fix_opt_ins,
             diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
             ty_pending: Vec::new(),
@@ -1042,10 +1043,11 @@ impl<'a> CallChecker<'a> {
             max_positional,
         });
         // Auto-fix is applied by default only when a single, unambiguous
-        // signature is known and it is not synthesized from class fields.
-        // `--unsafe-fixes` opts into those synthesized data-constructor
-        // mappings, while overloads still need a deterministic selected arm.
-        if self.index.is_synthesized(&callee_fullname) && !self.fix_safety.allows_unsafe() {
+        // built-in signature is known and it is not synthesized from class
+        // fields. Higher-risk categories are explicit opt-ins.
+        if self.index.is_synthesized(&callee_fullname)
+            && !self.fix_opt_ins.allows(FixCategory::SynthesizedConstructor)
+        {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
@@ -1625,13 +1627,10 @@ fn call_fix_insertions(
 /// *and*, for the calls that misses, the (required) `ty` fallback steered by
 /// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
 /// stays conservative: a call is rewritten only when the parameter mapping is
-/// unambiguous. For `ty`-resolved calls that means a single concrete hover
-/// signature with complete parameter names. Built-in-detected overloads get a
-/// fix-only ty hover pass: they are rewritten only when that exact call site
-/// selects one indexed overload arm and the rewritten arguments have precise
-/// literal or annotation types; multi-arm and unmatched overload displays stay
-/// declined. Synthesized constructors are left alone by [`fix_paths`] but may
-/// be rewritten by [`fix_paths_with_safety`] with [`FixSafety::Unsafe`].
+/// unambiguous. By default, that means ordinary built-in, single-signature
+/// mappings only. [`fix_paths_with_opt_ins`] can also include synthesized
+/// constructors, `ty`-resolved calls, and overloads where `ty` selects one
+/// precise arm.
 /// Ambiguous callable displays and most goto-definition-only resolutions are
 /// left alone (a wrong parameter name would corrupt source, cf. issue #41);
 /// a single resolved `__call__` signature may still be fixed because it maps
@@ -1661,23 +1660,29 @@ pub fn fix_paths(
     config: &Config,
     python_env: Option<&Path>,
 ) -> Result<FixOutcome, CheckError> {
-    fix_paths_with_safety(project_root, paths, config, python_env, FixSafety::Safe)
+    fix_paths_with_opt_ins(
+        project_root,
+        paths,
+        config,
+        python_env,
+        FixOptIns::conservative(),
+    )
 }
 
-/// Like [`fix_paths`], but optionally includes unsafe fixes.
+/// Like [`fix_paths`], but includes the requested non-default fix categories.
 ///
 /// # Errors
 ///
 /// Returns the same errors as [`fix_paths`].
-pub fn fix_paths_with_safety(
+pub fn fix_paths_with_opt_ins(
     project_root: &Path,
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
-    fix_safety: FixSafety,
+    fix_opt_ins: FixOptIns,
 ) -> Result<FixOutcome, CheckError> {
     run_with_large_stack(move || {
-        fix_paths_impl(project_root, paths, config, python_env, fix_safety)
+        fix_paths_impl(project_root, paths, config, python_env, fix_opt_ins)
     })
 }
 
@@ -1686,7 +1691,7 @@ fn fix_paths_impl(
     paths: &[PathBuf],
     config: &Config,
     python_env: Option<&Path>,
-    fix_safety: FixSafety,
+    fix_opt_ins: FixOptIns,
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
@@ -1696,7 +1701,7 @@ fn fix_paths_impl(
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
     // chance to add safe single-signature hover fixes.
-    let scans = scan_files_for_fix(&python_files, project_root, config, &index, fix_safety)?;
+    let scans = scan_files_for_fix(&python_files, project_root, config, &index, fix_opt_ins)?;
 
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
@@ -1744,6 +1749,7 @@ fn fix_paths_impl(
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
                 declined_fix_reasons: &mut declined_fix_reasons,
+                opt_ins: fix_opt_ins,
             }),
         )?;
         resolve_overload_fixes_with_ty(
@@ -1758,6 +1764,7 @@ fn fix_paths_impl(
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
                 declined_fix_reasons: &mut declined_fix_reasons,
+                opt_ins: fix_opt_ins,
             }),
         );
         if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
@@ -2252,6 +2259,7 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
+    category: FixCategory,
     fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2263,6 +2271,10 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
+    if !fixes.opt_ins.allows(category) {
+        fixes.declined_fix_reasons.push(category.declined_reason());
+        return;
+    }
     let Some(fix_ast) = fix_ast else {
         fixes
             .declined_fix_reasons
@@ -2394,6 +2406,7 @@ struct TyFixes<'a> {
     insertions: &'a mut Vec<Insertion>,
     fixed_calls: &'a mut usize,
     declined_fix_reasons: &'a mut Vec<DeclinedFixReason>,
+    opt_ins: FixOptIns,
 }
 
 #[derive(Clone, Copy)]
@@ -2536,6 +2549,7 @@ fn record_selected_overload_fix(
         }
         record_ty_fix(
             fixes,
+            FixCategory::UnambiguousOverload,
             fix_ast,
             p,
             &item.callee_fullname,
@@ -2578,6 +2592,7 @@ fn record_selected_overload_fix(
     }
     record_ty_fix(
         fixes,
+        FixCategory::UnambiguousOverload,
         fix_ast,
         p,
         &item.callee_fullname,
@@ -2732,6 +2747,7 @@ fn resolve_pending_with_ty(
                 };
                 record_ty_fix(
                     &mut fixes,
+                    FixCategory::TyResolved,
                     fix_ast,
                     p,
                     &fullname,
@@ -2780,6 +2796,7 @@ fn resolve_pending_with_ty(
             if let [signature] = overloads.as_slice() {
                 record_ty_fix(
                     &mut fixes,
+                    FixCategory::TyResolved,
                     fix_ast,
                     p,
                     &fullname,
@@ -2851,6 +2868,7 @@ fn resolve_pending_with_ty(
                         attempted_fix = true;
                         record_ty_fix(
                             &mut fixes,
+                            FixCategory::TyResolved,
                             fix_ast,
                             &pending[i],
                             &fullname,
@@ -2875,7 +2893,7 @@ mod tests {
     use super::{
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver, without_leading_self,
-        DeclinedFixReason, FixSafety, PendingTy, TyFixAst, TyFixes,
+        DeclinedFixReason, FixCategory, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -3049,6 +3067,7 @@ mod tests {
         let mut no_fix_context = None;
         record_ty_fix(
             &mut no_fix_context,
+            FixCategory::TyResolved,
             None,
             &pending,
             "ty.f",
@@ -3074,6 +3093,10 @@ mod tests {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
             declined_fix_reasons: &mut declined_fix_reasons,
+            opt_ins: FixOptIns {
+                ty_resolved: true,
+                ..FixOptIns::conservative()
+            },
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let fix_ast = TyFixAst {
@@ -3082,6 +3105,7 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
+            FixCategory::TyResolved,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -3099,6 +3123,7 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
+            FixCategory::TyResolved,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -3422,7 +3447,7 @@ while cond:
             checker_parsed.tokens(),
             &index,
             &config,
-            FixSafety::Safe,
+            FixOptIns::conservative(),
         );
         setup(&mut checker);
 
@@ -3576,7 +3601,7 @@ while cond:
             parsed.tokens(),
             &index,
             &config,
-            FixSafety::Safe,
+            FixOptIns::conservative(),
         );
         assert!(!checker.binding_is_instance("never_bound"));
     }
