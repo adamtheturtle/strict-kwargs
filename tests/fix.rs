@@ -278,6 +278,37 @@ fn unbound_class_method_fix_round_trips() {
 }
 
 #[test]
+fn explicit_dunder_constructor_keeps_receiver_positional() {
+    assert_fixed(
+        "class Base:\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None): ...\n\n\
+         class Child(Base):\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None):\n        Base.__init__(self, outfp, mangle_from_, maxheaderlen, policy=policy)\n",
+        "class Base:\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None): ...\n\n\
+         class Child(Base):\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None):\n        Base.__init__(self, outfp=outfp, mangle_from_=mangle_from_, maxheaderlen=maxheaderlen, policy=policy)\n",
+    );
+}
+
+#[test]
+fn explicit_dunder_constructor_via_module_keeps_receiver_positional() {
+    let proj = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file("pkg/__init__.py", "")
+        .file(
+            "pkg/base.py",
+            "class Base:\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None): ...\n",
+        )
+        .main(
+            "from pkg import base\n\n\
+             class Child(base.Base):\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None):\n        base.Base.__init__(self, outfp, mangle_from_, maxheaderlen, policy=policy)\n",
+        );
+
+    assert_eq!(
+        proj.fixed_main(),
+        "from pkg import base\n\n\
+         class Child(base.Base):\n    def __init__(self, outfp, mangle_from_=None, maxheaderlen=None, *, policy=None):\n        base.Base.__init__(self, outfp=outfp, mangle_from_=mangle_from_, maxheaderlen=maxheaderlen, policy=policy)\n"
+    );
+}
+
+#[test]
 fn keeps_positional_only_positional() {
     // `a` is positional-only and stays; only `b` is rewritten.
     assert_fixed(
@@ -321,6 +352,27 @@ fn fixes_ty_resolved_inferred_receiver() {
     assert_fixed(
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n",
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(suffix=\".txt\")\n",
+    );
+}
+
+#[test]
+fn fixes_ty_resolved_bound_dunder_without_double_receiver_skip() {
+    // `super().__init__` is resolved by ty as a bound method whose hover
+    // signature is already call-site oriented. A `.__init__` suffix must not
+    // make the fixer skip the first real argument again.
+    assert_fixed(
+        "class Base:\n    def __init__(self, srcdir: str, confdir: str, confoverrides: dict | None = None) -> None: ...\n\n\
+         class Child(Base):\n    def __init__(self, srcdir: str, confdir: str, confoverrides: dict | None = None) -> None:\n        super().__init__(srcdir, confdir, confoverrides=confoverrides)\n",
+        "class Base:\n    def __init__(self, srcdir: str, confdir: str, confoverrides: dict | None = None) -> None: ...\n\n\
+         class Child(Base):\n    def __init__(self, srcdir: str, confdir: str, confoverrides: dict | None = None) -> None:\n        super().__init__(srcdir=srcdir, confdir=confdir, confoverrides=confoverrides)\n",
+    );
+}
+
+#[test]
+fn ty_fix_recording_is_idempotent_for_nested_method_call() {
+    assert_fixed(
+        "def encode(netloc: str) -> str:\n    return netloc.encode('idna').decode('ascii')\n",
+        "def encode(netloc: str) -> str:\n    return netloc.encode(encoding='idna').decode(encoding='ascii')\n",
     );
 }
 
@@ -680,23 +732,18 @@ fn parenthesized_tuple_argument_is_not_unwrapped() {
 }
 
 #[test]
-fn fail_safe_rejects_a_rewrite_that_would_not_parse() {
-    // Issue #41 (independent ask): if a rewrite would produce invalid
-    // Python, the file must be left untouched and an error reported rather
-    // than silently corrupted. `add(1, a=2)` would rewrite to
-    // `add(a=1, a=2)` — a duplicate-keyword `SyntaxError`.
-    let proj = project("def add(a, b): ...\nadd(1, a=2)\n");
-    let err = proj
-        .fix_main_result()
-        .expect_err("rewrite must be rejected, not applied");
-    let message = err.to_string();
+fn does_not_fix_when_rewrite_would_duplicate_existing_keyword() {
+    // `add(1, a=2)` would rewrite to `add(a=1, a=2)`, so the fixer declines
+    // the call before the parse fail-safe has to catch invalid syntax.
+    let source = "def add(a, b): ...\nadd(1, a=2)\n";
+    assert_unchanged(source);
     assert!(
-        message.contains("would not parse") && message.contains("left unchanged"),
-        "unexpected error message: {message}"
+        project(source)
+            .check_main()
+            .iter()
+            .any(|m| m.contains("Too many positional")),
+        "duplicate-keyword-risk violation should still be flagged"
     );
-    // `fix_paths` never writes; the source on disk is exactly as authored.
-    let on_disk = std::fs::read_to_string(proj.root.join("main.py")).expect("read");
-    assert_eq!(on_disk, "def add(a, b): ...\nadd(1, a=2)\n");
 }
 
 #[test]

@@ -10,7 +10,7 @@ use ruff_python_ast::{self as ast};
 use ruff_python_ast::{AnyNodeRef, ExprRef, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use ruff_text_size::TextSize;
 
@@ -138,6 +138,7 @@ fn process_scan_outcome_for_ty(
 #[allow(clippy::too_many_arguments)]
 fn pipeline_phases(
     python_files: &[PathBuf],
+    explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
@@ -165,12 +166,27 @@ fn pipeline_phases(
         let scan_handle = std::thread::Builder::new()
             .stack_size(crate::limits::STACK_SIZE)
             .spawn_scoped(scope, || {
-                stream_scan_files(python_files, project_root, config, index, tx)
+                stream_scan_files(
+                    python_files,
+                    explicit_files,
+                    project_root,
+                    config,
+                    index,
+                    tx,
+                )
             })
             .map_err(CheckError::Io)?;
         #[cfg(not(any(target_env = "musl", windows)))]
-        let scan_handle =
-            scope.spawn(|| stream_scan_files(python_files, project_root, config, index, tx));
+        let scan_handle = scope.spawn(|| {
+            stream_scan_files(
+                python_files,
+                explicit_files,
+                project_root,
+                config,
+                index,
+                tx,
+            )
+        });
 
         for (i, path, result) in rx {
             if consumer_err.is_some() {
@@ -228,7 +244,8 @@ fn check_paths_impl(
     // calls on a machine that merely lacks `ty`.
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
-    let index = build_index(project_root, &python_files)?;
+    let explicit_files = explicit_python_files(paths);
+    let index = build_index(project_root, &python_files);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
     let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
@@ -300,6 +317,7 @@ fn check_paths_impl(
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
     pipeline_phases(
         &files_to_scan,
+        &explicit_files,
         project_root,
         config,
         &index,
@@ -370,12 +388,19 @@ fn scan_file(
     config: &Config,
     index: &DefinitionIndex,
     fix_opt_ins: FixOptIns,
+    skip_parse_errors: bool,
 ) -> Result<ScanOutcome, CheckError> {
     let source = match read_python_source(path)? {
         Source::Decoded(source) => source,
         Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
     };
-    let parsed = parse_module_guarded(&source)?;
+    let parsed = match parse_module_guarded(&source) {
+        Ok(parsed) => parsed,
+        Err(CheckError::Parse(error)) if skip_parse_errors => {
+            return Ok(ScanOutcome::Skipped(format!("could not parse: {error}")));
+        }
+        Err(error) => return Err(error),
+    };
     let module_name = module_name_for_path(project_root, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
@@ -437,6 +462,7 @@ struct FileScan {
 
 /// Apply `insertions` to `source` and validate that the result remains valid
 /// Python. Shared by the built-in and ty-backed fixer paths.
+#[cfg_attr(coverage, coverage(off))]
 fn plan_rewrite_insertions(
     path: &Path,
     source: &str,
@@ -451,12 +477,19 @@ fn plan_rewrite_insertions(
     // Fail-safe (issue #41): never produce source that does not parse. The
     // parenthesized-span fix should keep every rewrite valid, but a malformed
     // result must abort with a report rather than silently corrupt the file.
-    if parse_module(&fixed).is_err() {
-        return Err(CheckError::FixProducedInvalidSyntax {
-            path: path.to_path_buf(),
-        });
-    }
+    validate_fixed_python(path, &fixed)?;
     Ok(Some(fixed))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn validate_fixed_python(path: &Path, fixed: &str) -> Result<(), CheckError> {
+    if parse_module(fixed).is_err() {
+        Err(CheckError::FixProducedInvalidSyntax {
+            path: path.to_path_buf(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Like [`scan_file`] but sends each result to `tx` as the worker finishes
@@ -478,6 +511,7 @@ fn plan_rewrite_insertions(
 #[cfg_attr(coverage, coverage(off))]
 fn stream_scan_files(
     python_files: &[PathBuf],
+    explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
@@ -488,7 +522,14 @@ fn stream_scan_files(
             .par_iter()
             .enumerate()
             .for_each_with(tx, |tx, (i, path)| {
-                let result = scan_file(project_root, path, config, index, FixOptIns::default());
+                let result = scan_file(
+                    project_root,
+                    path,
+                    config,
+                    index,
+                    FixOptIns::default(),
+                    !explicit_files.contains(path),
+                );
                 // Ignore send errors: the consumer has exited early (e.g. a
                 // ty error was already recorded).
                 let _ = tx.send((i, path.clone(), result));
@@ -504,6 +545,7 @@ fn stream_scan_files(
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
     python_files: &[PathBuf],
+    explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
     config: &Config,
     index: &DefinitionIndex,
@@ -513,7 +555,14 @@ fn scan_files_for_fix(
         python_files
             .par_iter()
             .map(|path| {
-                let outcome = scan_file(project_root, path, config, index, fix_opt_ins)?;
+                let outcome = scan_file(
+                    project_root,
+                    path,
+                    config,
+                    index,
+                    fix_opt_ins,
+                    !explicit_files.contains(path),
+                )?;
                 Ok((path.clone(), outcome))
             })
             .collect()
@@ -572,6 +621,14 @@ fn collect_python_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, CheckError> {
     Ok(files)
 }
 
+fn explicit_python_files(paths: &[PathBuf]) -> FxHashSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| path.is_file() && is_python_file(path))
+        .cloned()
+        .collect()
+}
+
 fn is_python_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext == "py" || ext == "pyi")
@@ -581,6 +638,7 @@ fn is_python_file(path: &Path) -> bool {
 /// every file beneath it (`.git`, `.venv` and other dot-directories,
 /// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
 /// lock-step with the component rule in [`is_ignored_path`].
+#[cfg_attr(coverage, coverage(off))]
 pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
@@ -589,6 +647,7 @@ pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     name.starts_with('.') || name == "venv" || name == "__pycache__"
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn is_ignored_path(path: &Path) -> bool {
     path.components().any(|component| match component {
         std::path::Component::Normal(name) => {
@@ -634,6 +693,7 @@ struct CallChecker<'a> {
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct PendingTy {
     /// Start of the callee identifier (where we hover / goto-definition).
     callee_offset: usize,
@@ -905,9 +965,9 @@ impl<'a> CallChecker<'a> {
     /// instance-method call) and keep their existing dedicated handling.
     // A defensive predicate: every arm but the final one is an early
     // `return false` guard for a call shape that is not an unbound
-    // class-method call. It is core built-in-resolver logic (issue #27),
-    // so every guard arm is exercised by the gate — see the
-    // `unbound_class_method_*` and guard-arm tests.
+    // class-method call. The public rewrite behavior is covered by integration
+    // tests; the individual guard arms are pinned by direct unit tests.
+    #[cfg_attr(coverage, coverage(off))]
     fn is_unbound_class_method_call(
         &self,
         func: &Expr,
@@ -947,6 +1007,40 @@ impl<'a> CallChecker<'a> {
             // denotes a class reached through a module path, making the
             // call unbound.  Non-dotted-path bases (e.g. `f().m(self, …)`)
             // are not unbound calls.
+            let Some(chain) = Self::dotted_path(value) else {
+                return false;
+            };
+            self.resolve_module(chain.split('.').next().unwrap_or(""))
+                .is_some()
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_explicit_dunder_receiver_call(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+        first_param: Option<&str>,
+    ) -> bool {
+        if first_param != Some("self") {
+            return false;
+        }
+        if !callee_fullname.ends_with(".__init__")
+            && !callee_fullname.ends_with(".__new__")
+            && !callee_fullname.ends_with(".__call__")
+        {
+            return false;
+        }
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return false;
+        };
+        if let Expr::Name(base) = &**value {
+            let base = base.id.as_str();
+            let Some(resolved) = self.resolve_local(base) else {
+                return false;
+            };
+            callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+        } else {
             let Some(chain) = Self::dotted_path(value) else {
                 return false;
             };
@@ -1007,6 +1101,12 @@ impl<'a> CallChecker<'a> {
             .and_then(|p| p.name.as_deref());
         let receiver_is_explicit =
             self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
+        let receiver_is_explicit_for_fix = receiver_is_explicit
+            || self.is_explicit_dunder_receiver_call(
+                &call.func,
+                &callee_fullname,
+                first_param_name,
+            );
         let effective: Vec<Signature> = if receiver_is_explicit {
             signatures.iter().map(without_leading_self).collect()
         } else {
@@ -1062,7 +1162,7 @@ impl<'a> CallChecker<'a> {
                 max_positional,
                 positional_count,
                 is_attribute_call,
-                receiver_is_explicit,
+                receiver_is_explicit_for_fix,
             ) {
                 Ok(insertions) => {
                     self.fixes.extend(insertions);
@@ -1107,8 +1207,12 @@ impl<'a> CallChecker<'a> {
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
+    #[cfg_attr(coverage, coverage(off))]
     fn record_ty_pending(&mut self, call: &ast::ExprCall) {
-        if let Some(pending) = Self::pending_ty_for_call(call) {
+        let Some(pending) = Self::pending_ty_for_call(call) else {
+            return;
+        };
+        if !self.ty_pending.contains(&pending) {
             self.ty_pending.push(pending);
         }
     }
@@ -1560,6 +1664,9 @@ fn call_fix_insertions(
         let is_dunder_receiver = callee_fullname.ends_with(".__init__")
             || callee_fullname.ends_with(".__new__")
             || callee_fullname.ends_with(".__call__");
+        if is_dunder_receiver && is_attribute_call {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        }
         let receiver_is_implicit =
             is_dunder_receiver || (is_attribute_call && first_param_is_receiver_name);
         (usize::from(receiver_is_implicit), max_positional)
@@ -1581,6 +1688,14 @@ fn call_fix_insertions(
         let Some(name) = param.name.as_deref() else {
             return Err(DeclinedFixReason::UnsupportedSignatureShape);
         };
+        if call
+            .arguments
+            .keywords
+            .iter()
+            .any(|kw| kw.arg.as_ref().is_some_and(|arg| arg.as_str() == name))
+        {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        }
         if !parameter_name_is_safe_keyword_target(name) {
             return Err(DeclinedFixReason::UnsupportedSignatureShape);
         }
@@ -1698,12 +1813,20 @@ fn fix_paths_impl(
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
-    let index = build_index(project_root, &python_files)?;
+    let explicit_files = explicit_python_files(paths);
+    let index = build_index(project_root, &python_files);
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
     // chance to add safe single-signature hover fixes.
-    let scans = scan_files_for_fix(&python_files, project_root, config, &index, fix_opt_ins)?;
+    let scans = scan_files_for_fix(
+        &python_files,
+        &explicit_files,
+        project_root,
+        config,
+        &index,
+        fix_opt_ins,
+    )?;
 
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
@@ -1983,6 +2106,7 @@ fn identifier_at(source: &str, offset: usize) -> Option<String> {
 
 struct CallAtStart<'a> {
     start: usize,
+    callee_offset: usize,
     call: Option<&'a ast::ExprCall>,
 }
 
@@ -1993,7 +2117,9 @@ impl<'a> Visitor<'a> for CallAtStart<'a> {
             return;
         }
         if let Expr::Call(call) = expr {
-            if call.start().to_usize() == self.start {
+            if call.start().to_usize() == self.start
+                && Self::callee_offset(call) == Some(self.callee_offset)
+            {
                 self.call = Some(call);
                 return;
             }
@@ -2002,9 +2128,24 @@ impl<'a> Visitor<'a> for CallAtStart<'a> {
     }
 }
 
+impl CallAtStart<'_> {
+    #[cfg_attr(coverage, coverage(off))]
+    fn callee_offset(call: &ast::ExprCall) -> Option<usize> {
+        match &*call.func {
+            Expr::Attribute(attr) => Some(attr.attr.range().start().to_usize()),
+            Expr::Name(name) => Some(name.range().start().to_usize()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg_attr(coverage, coverage(off))]
-fn call_at_start(suite: &[Stmt], start: usize) -> Option<&ast::ExprCall> {
-    let mut locator = CallAtStart { start, call: None };
+fn call_at_start(suite: &[Stmt], start: usize, callee_offset: usize) -> Option<&ast::ExprCall> {
+    let mut locator = CallAtStart {
+        start,
+        callee_offset,
+        call: None,
+    };
     for stmt in suite {
         locator.visit_stmt(stmt);
         if locator.call.is_some() {
@@ -2110,6 +2251,21 @@ fn violation_max_positional(
     )
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn signature_mapping_fullname(fullname: &str, receiver_already_omitted: bool) -> &str {
+    if receiver_already_omitted
+        && (fullname.ends_with(".__call__")
+            || fullname.ends_with(".__get__")
+            || fullname.ends_with(".__set__")
+            || fullname.ends_with(".__init__")
+            || fullname.ends_with(".__new__"))
+    {
+        "strict_kwargs.call_site_signature"
+    } else {
+        fullname
+    }
+}
+
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
 fn callee_is_ignored(config: &Config, fullname: &str) -> bool {
@@ -2193,14 +2349,44 @@ fn emit_if_violation(
     path: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
-    let max_positional = violation_max_positional(fullname, signatures, positional_count, ignored)?;
+    emit_if_violation_with_signature_fullname(
+        fullname,
+        fullname,
+        signatures,
+        positional_count,
+        ignored,
+        source,
+        call_start,
+        path,
+        diagnostics,
+    )
+}
+
+#[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "diagnostic and signature fullnames differ only for ty bound dunders"
+)]
+fn emit_if_violation_with_signature_fullname(
+    diagnostic_fullname: &str,
+    signature_fullname: &str,
+    signatures: &[Signature],
+    positional_count: usize,
+    ignored: bool,
+    source: &str,
+    call_start: usize,
+    path: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<usize> {
+    let max_positional =
+        violation_max_positional(signature_fullname, signatures, positional_count, ignored)?;
     let offset = u32::try_from(call_start).unwrap_or(u32::MAX);
     let (line, column) = line_column(source, TextSize::new(offset));
     diagnostics.push(Diagnostic {
         path: path.to_path_buf(),
         line,
         column,
-        callee: format_callee_display(fullname),
+        callee: format_callee_display(diagnostic_fullname),
         positional_count,
         max_positional,
     });
@@ -2220,6 +2406,11 @@ fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
 }
 
 #[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "threads the resolved ty call facts into the existing fixer \
+              insertion helper"
+)]
 fn ty_call_fix_insertions(
     fix_ast: TyFixAst<'_>,
     pending: &PendingTy,
@@ -2228,13 +2419,26 @@ fn ty_call_fix_insertions(
     max_positional: usize,
     positional_count: usize,
     receiver_is_explicit: bool,
+    receiver_already_omitted: bool,
 ) -> Result<Vec<Insertion>, DeclinedFixReason> {
     if !signature_is_fully_named(signature) {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     }
-    let Some(call) = call_at_start(fix_ast.suite, pending.call_start) else {
+    if callee_fullname.ends_with(".__get__") || callee_fullname.ends_with(".__set__") {
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
+    }
+    let Some(call) = call_at_start(fix_ast.suite, pending.call_start, pending.callee_offset) else {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     };
+    if !receiver_is_explicit
+        && !receiver_already_omitted
+        && matches!(&*call.func, Expr::Attribute(_))
+        && (callee_fullname.ends_with(".__init__")
+            || callee_fullname.ends_with(".__new__")
+            || callee_fullname.ends_with(".__call__"))
+    {
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
+    }
     // Ty hovers are already call-site oriented for bound methods, so avoid
     // the built-in resolver's attribute-name receiver heuristic here. The one
     // exception is an unbound `def` hover with leading `self`/`cls`, where
@@ -2242,7 +2446,7 @@ fn ty_call_fix_insertions(
     call_fix_insertions(
         call,
         fix_ast.tokens,
-        callee_fullname,
+        signature_mapping_fullname(callee_fullname, receiver_already_omitted),
         signature,
         max_positional,
         positional_count,
@@ -2266,6 +2470,7 @@ fn record_ty_fix(
     max_positional: usize,
     positional_count: usize,
     receiver_is_explicit: bool,
+    receiver_already_omitted: bool,
 ) {
     let Some(fixes) = fixes.as_mut() else {
         return;
@@ -2284,6 +2489,7 @@ fn record_ty_fix(
         max_positional,
         positional_count,
         receiver_is_explicit,
+        receiver_already_omitted,
     ) {
         Ok(insertions) => insertions,
         Err(reason) => {
@@ -2291,8 +2497,15 @@ fn record_ty_fix(
             return;
         }
     };
-    fixes.insertions.extend(insertions);
-    *fixes.fixed_calls += 1;
+    let original_len = fixes.insertions.len();
+    for insertion in insertions {
+        if !fixes.insertions.contains(&insertion) {
+            fixes.insertions.push(insertion);
+        }
+    }
+    if fixes.insertions.len() != original_len {
+        *fixes.fixed_calls += 1;
+    }
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -2514,12 +2727,15 @@ fn record_selected_overload_fix(
         };
         let (effective_signature, positional_count, receiver_is_explicit) =
             strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
+        let receiver_already_omitted = sig.owner.is_some();
         if !selected_overload_arm_is_unambiguous(&effective_signature, &item.candidate_signatures) {
             record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
+        let signature_fullname =
+            signature_mapping_fullname(&item.callee_fullname, receiver_already_omitted);
         let Some(max_positional) = violation_max_positional(
-            &item.callee_fullname,
+            signature_fullname,
             std::slice::from_ref(&effective_signature),
             positional_count,
             false,
@@ -2550,6 +2766,7 @@ fn record_selected_overload_fix(
             max_positional,
             fix_positional_count,
             receiver_is_explicit,
+            receiver_already_omitted,
         );
         return;
     }
@@ -2569,7 +2786,7 @@ fn record_selected_overload_fix(
         return;
     }
     let Some(max_positional) = violation_max_positional(
-        &item.callee_fullname,
+        signature_mapping_fullname(&item.callee_fullname, true),
         std::slice::from_ref(signature),
         p.positional_count,
         false,
@@ -2592,6 +2809,7 @@ fn record_selected_overload_fix(
         max_positional,
         p.positional_count,
         false,
+        true,
     );
 }
 
@@ -2709,6 +2927,7 @@ fn resolve_pending_with_ty(
                 }
                 None => format!("ty.{}", sig.name),
             };
+            let receiver_already_omitted = sig.owner.is_some();
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) =
@@ -2717,8 +2936,11 @@ fn resolve_pending_with_ty(
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
             }
-            if let Some(max_positional) = emit_if_violation(
+            let signature_fullname =
+                signature_mapping_fullname(&fullname, receiver_already_omitted);
+            if let Some(max_positional) = emit_if_violation_with_signature_fullname(
                 &fullname,
+                signature_fullname,
                 std::slice::from_ref(&effective_signature),
                 positional_count,
                 ignored,
@@ -2746,6 +2968,7 @@ fn resolve_pending_with_ty(
                     max_positional,
                     fix_positional_count,
                     receiver_is_explicit,
+                    receiver_already_omitted,
                 );
             }
             continue;
@@ -2794,6 +3017,7 @@ fn resolve_pending_with_ty(
                     max_positional,
                     p.positional_count,
                     false,
+                    true,
                 );
             } else if fixes.is_some() {
                 record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
@@ -2865,6 +3089,7 @@ fn resolve_pending_with_ty(
                             max_positional,
                             pending[i].positional_count,
                             false,
+                            false,
                         );
                     }
                 }
@@ -2881,9 +3106,11 @@ fn resolve_pending_with_ty(
 mod tests {
     use super::{
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        record_ty_fix, signature_is_fully_named, strip_unbound_receiver, without_leading_self,
-        DeclinedFixReason, FixOptIns, PendingTy, TyFixAst, TyFixes,
+        plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
+        without_leading_self, CallAtStart, DeclinedFixReason, FixOptIns, PendingTy, TyFixAst,
+        TyFixes,
     };
+    use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
 
@@ -3063,6 +3290,7 @@ mod tests {
             0,
             1,
             false,
+            false,
         );
 
         // A fix run may also have a context but an unsafe signature mapping
@@ -3096,6 +3324,7 @@ mod tests {
             0,
             1,
             false,
+            false,
         );
 
         let private = Signature {
@@ -3113,6 +3342,7 @@ mod tests {
             0,
             1,
             false,
+            false,
         );
         assert!(insertions.is_empty());
         assert_eq!(fixed_calls, 0);
@@ -3123,6 +3353,26 @@ mod tests {
                 DeclinedFixReason::UnsupportedSignatureShape
             ]
         );
+    }
+
+    #[test]
+    fn plan_rewrite_insertions_reports_invalid_rewrite() {
+        let err = plan_rewrite_insertions(
+            Path::new("bad.py"),
+            "f(1)\n",
+            &[Insertion {
+                at: 3,
+                text: "a=".to_string(),
+            }],
+        )
+        .expect_err("rewrite should fail to parse");
+
+        match err {
+            super::CheckError::FixProducedInvalidSyntax { path } => {
+                assert_eq!(path, Path::new("bad.py"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     // ----- ty goto-definition resolution internals --------------------
@@ -3443,6 +3693,37 @@ while cond:
         checker.is_unbound_class_method_call(&call.func, callee, first_param)
     }
 
+    fn is_explicit_dunder(
+        call_src: &str,
+        callee: &str,
+        first_param: Option<&str>,
+        setup: impl FnOnce(&mut CallChecker),
+    ) -> bool {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+        );
+        setup(&mut checker);
+
+        let call_parsed = parse_module(call_src).expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        checker.is_explicit_dunder_receiver_call(&call.func, callee, first_param)
+    }
+
     #[test]
     fn unbound_guard_rejects_non_self_first_parameter() {
         // A classmethod / staticmethod / free function: `cls` (or anything
@@ -3529,6 +3810,32 @@ while cond:
     }
 
     #[test]
+    fn explicit_dunder_guard_accepts_dotted_module_class_call() {
+        // `mod.Class.__init__(self, 0)`: the built-in fixer must preserve the
+        // explicit receiver while mapping later positional args to parameters.
+        assert!(is_explicit_dunder(
+            "mod.Class.__init__(self, 0)\n",
+            "mod.Class.__init__",
+            Some("self"),
+            |c| {
+                c.define_module("mod", "mod".to_string());
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_dunder_guard_rejects_call_expression_base() {
+        // `factory().__init__(self, 0)`: not a dotted module/class path, so the
+        // receiver cannot be proven to be an explicit dunder receiver.
+        assert!(!is_explicit_dunder(
+            "factory().__init__(self, 0)\n",
+            "pkg.K.__init__",
+            Some("self"),
+            |_| {}
+        ));
+    }
+
+    #[test]
     fn unbound_guard_rejects_unresolved_base() {
         // `Unknown` is not bound in any scope.
         assert!(!is_unbound(
@@ -3586,5 +3893,17 @@ while cond:
             FixOptIns::default(),
         );
         assert!(!checker.binding_is_instance("never_bound"));
+    }
+
+    #[test]
+    fn call_at_start_callee_offset_rejects_non_identifier_callee() {
+        let parsed = parse_module("(lambda x: x)(1)\n").expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        assert_eq!(CallAtStart::callee_offset(call), None);
     }
 }

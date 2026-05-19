@@ -643,10 +643,7 @@ struct Collected {
     data_constructor_bases: Vec<String>,
 }
 
-pub fn build_index(
-    project_root: &Path,
-    python_files: &[PathBuf],
-) -> Result<DefinitionIndex, CheckError> {
+pub fn build_index(project_root: &Path, python_files: &[PathBuf]) -> DefinitionIndex {
     let index = DefinitionIndex::new(ModuleResolver::new(project_root));
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
@@ -668,7 +665,9 @@ pub fn build_index(
         let Some(source) = read_python_source_lossy(path) else {
             continue;
         };
-        let parsed = parse_module_guarded(&source)?;
+        let Ok(parsed) = parse_module_guarded(&source) else {
+            continue;
+        };
         let module_name = module_name_for_path(project_root, path);
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue 'files;
@@ -677,7 +676,7 @@ pub fn build_index(
         drop(claim);
     }
 
-    Ok(index)
+    index
 }
 
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
