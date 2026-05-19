@@ -39,9 +39,6 @@ repos:
       - id: strict-kwargs
 ```
 
-Use the [mirror](https://github.com/adamtheturtle/strict-kwargs-pre-commit) (prebuilt wheel, no Rust toolchain).
-Pointing `repo:` at this repository works too but builds from source.
-
 ## Configuration
 
 In `pyproject.toml`:
