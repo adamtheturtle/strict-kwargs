@@ -122,8 +122,8 @@ annotated fields (each a positional-or-keyword parameter; `ClassVar` and
 hand-written constructor wins). Dataclass models merge inherited dataclass
 fields in runtime constructor order; `NamedTuple` subclasses inherit their
 base tuple fields without adding newly annotated subclass fields. The
-auto-fixer still declines synthesized constructors until the position→name
-mapping is guaranteed sound across every modeled constructor shape.
+default auto-fixer declines synthesized constructors; `--unsafe-fixes` opts
+into rewriting them from that field model.
 
 ### The ty fallback (`src/ty_resolver.rs`)
 
@@ -320,9 +320,11 @@ exit 2) rather than a silent fall back to defaults — a misconfigured
 `Result<Config, CheckError>`.
 
 CLI: `strict-kwargs [PATHS...] [--project-root DIR] [--python PATH]`, plus
-`strict-kwargs fix [PATHS...] [--project-root DIR] [--diff] [--python PATH]`.
+`strict-kwargs fix [PATHS...] [--project-root DIR] [--diff] [--unsafe-fixes] [--python PATH]`.
 `fix` writes in place (`--diff` previews instead) and reports a count of
-violations it detected but declined to rewrite.
+violations it detected but declined to rewrite. `--unsafe-fixes` includes
+rewrites that may change runtime behavior; synthesized dataclass and
+`NamedTuple` constructors are the first unsafe category.
 A path argument that does not exist is `CheckError::PathNotFound` (exit 2),
 like `ruff`, not a silent skip that would report "clean" (issue #55); an
 *existing* non-Python file passed directly is still a deliberate selection

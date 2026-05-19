@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use strict_kwargs::{check_paths, find_project_root, fix_paths, unified_diff, CheckError, Config};
+use strict_kwargs::{
+    check_paths, find_project_root, fix_paths_with_safety, unified_diff, CheckError, Config,
+    FixSafety,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -77,6 +80,10 @@ struct FixArgs {
     /// Print the unified diff of what would change instead of writing it.
     #[arg(long)]
     diff: bool,
+
+    /// Include fixes that may change runtime behaviour.
+    #[arg(long)]
+    unsafe_fixes: bool,
 
     /// Python environment for the `ty` inference fallback (see
     /// ``strict-kwargs --help``). The rewrite stays conservative and never
@@ -165,7 +172,7 @@ fn report_declined(declined: usize) {
     }
     eprintln!(
         "strict-kwargs: {declined} violation{} detected but not rewritten \
-         (overloaded, synthesized, or ty-resolved); run `strict-kwargs` to \
+         (ambiguous or unsupported fix category); run `strict-kwargs` to \
          see {}",
         if declined == 1 { "" } else { "s" },
         if declined == 1 { "it" } else { "them" }
@@ -185,7 +192,21 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
     let python_env = resolve_python_env(args.python);
-    let outcome = fix_paths(&project_root, &args.paths, &config, python_env.as_deref())?;
+    let fix_safety = if args.unsafe_fixes {
+        eprintln!(
+            "strict-kwargs: unsafe fixes enabled; these rewrites may change runtime behavior"
+        );
+        FixSafety::Unsafe
+    } else {
+        FixSafety::Safe
+    };
+    let outcome = fix_paths_with_safety(
+        &project_root,
+        &args.paths,
+        &config,
+        python_env.as_deref(),
+        fix_safety,
+    )?;
     let fixes = &outcome.files;
     if fixes.is_empty() {
         eprintln!("strict-kwargs: no fixes to apply");

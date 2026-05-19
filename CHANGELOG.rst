@@ -4,6 +4,12 @@ Changelog
 Next
 ----
 
+- Add ``strict-kwargs fix --unsafe-fixes``. The flag is a long-term opt-in
+  for rewrites that may change runtime behavior and can be used with or
+  without ``--diff``. The first unsafe category is synthesized data
+  constructors: dataclass and ``NamedTuple`` calls can now be rewritten from
+  the field model when users explicitly opt in.
+
 2026.5.19
 ---------
 
