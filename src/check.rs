@@ -1000,11 +1000,11 @@ impl<'a> CallChecker<'a> {
             let Some(resolved) = self.resolve_local(base) else {
                 return false;
             };
-            let direct = callee_fullname == format!("{resolved}.{attr}");
-            let inherited = callee_fullname
-                .strip_suffix(&format!(".{attr}"))
-                .is_some_and(|owner| self.index.class_inherits_from(&resolved, owner));
-            (direct || inherited) && !self.binding_is_instance(base)
+            self.callee_matches_resolved_attr_or_inherited_owner(
+                callee_fullname,
+                &resolved,
+                attr.as_str(),
+            ) && !self.binding_is_instance(base)
         } else {
             // Multi-level attribute chain (e.g. `module.Class.method(self, …)`):
             // if the leftmost name resolves as a module, the expression
@@ -1017,6 +1017,18 @@ impl<'a> CallChecker<'a> {
             self.resolve_module(chain.split('.').next().unwrap_or(""))
                 .is_some()
         }
+    }
+
+    fn callee_matches_resolved_attr_or_inherited_owner(
+        &self,
+        callee_fullname: &str,
+        resolved_class: &str,
+        attr: &str,
+    ) -> bool {
+        let Some(owner) = callee_fullname.strip_suffix(&format!(".{attr}")) else {
+            return false;
+        };
+        owner == resolved_class || self.index.class_inherits_from(resolved_class, owner)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1043,7 +1055,11 @@ impl<'a> CallChecker<'a> {
             let Some(resolved) = self.resolve_local(base) else {
                 return false;
             };
-            callee_fullname == format!("{resolved}.{attr}") && !self.binding_is_instance(base)
+            self.callee_matches_resolved_attr_or_inherited_owner(
+                callee_fullname,
+                &resolved,
+                attr.as_str(),
+            ) && !self.binding_is_instance(base)
         } else {
             let Some(chain) = Self::dotted_path(value) else {
                 return false;
