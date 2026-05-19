@@ -10,6 +10,12 @@ Next
   constructors: dataclass and ``NamedTuple`` calls can now be rewritten from
   the field model when users explicitly opt in.
 
+- ``strict-kwargs fix`` now reports declined rewrite reasons by category on
+  stderr, including synthesized constructors, unresolved overloads,
+  ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions, unsafe
+  call-site unpacking, and unsupported signature shapes. ``--diff`` stdout
+  remains patch-only.
+
 2026.5.19
 ---------
 

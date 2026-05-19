@@ -544,6 +544,10 @@ fn fix_reports_declined_when_no_fixes() {
         err.contains("1 violation detected but not rewritten") && err.contains("see it"),
         "stderr: {err}"
     );
+    assert!(
+        err.contains("declined synthesized constructor: 1"),
+        "stderr: {err}"
+    );
 }
 
 #[test]
@@ -563,6 +567,10 @@ fn fix_reports_declined_after_writing() {
         err.contains("2 violations detected but not rewritten") && err.contains("see them"),
         "stderr: {err}"
     );
+    assert!(
+        err.contains("declined synthesized constructor: 2"),
+        "stderr: {err}"
+    );
     assert!(project.read("main.py").contains("f(a=1, b=2)"));
 }
 
@@ -578,9 +586,17 @@ fn fix_diff_reports_declined() {
     assert_eq!(code(&output), 0);
     let patch = stdout(&output);
     assert!(patch.contains("+f(a=1, b=2)"), "patch: {patch}");
+    assert!(
+        !patch.contains("declined synthesized constructor"),
+        "patch: {patch}"
+    );
     let err = stderr(&output);
     assert!(
         err.contains("1 violation detected but not rewritten") && err.contains("see it"),
+        "stderr: {err}"
+    );
+    assert!(
+        err.contains("declined synthesized constructor: 1"),
         "stderr: {err}"
     );
 }

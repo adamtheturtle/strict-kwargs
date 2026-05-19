@@ -26,6 +26,71 @@ impl FixSafety {
     }
 }
 
+/// Why a detected violation was deliberately left untouched by the fixer.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum DeclinedFixReason {
+    /// A constructor signature was synthesized from dataclass / namedtuple
+    /// fields; safe mode keeps those calls unchanged.
+    SynthesizedConstructor,
+    /// An overloaded call could not be narrowed to one safe parameter-name
+    /// mapping at the call site.
+    UnresolvedOverload,
+    /// `ty` reported more than one callable hover signature.
+    AmbiguousTyHover,
+    /// `ty` could only resolve the call via goto-definition, not a concrete
+    /// call-site hover signature suitable for rewriting.
+    TyDefinitionOnly,
+    /// The call uses `*args` or `**kwargs`, so local argument positions are not
+    /// enough to build a sound keyword rewrite.
+    UnsafeCallSiteUnpacking,
+    /// The resolved signature or argument shape cannot be represented safely
+    /// as a keyword rewrite.
+    UnsupportedSignatureShape,
+}
+
+impl DeclinedFixReason {
+    pub(crate) const ORDERED: [Self; 6] = [
+        Self::SynthesizedConstructor,
+        Self::UnresolvedOverload,
+        Self::AmbiguousTyHover,
+        Self::TyDefinitionOnly,
+        Self::UnsafeCallSiteUnpacking,
+        Self::UnsupportedSignatureShape,
+    ];
+
+    /// Practical label shown in CLI output.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SynthesizedConstructor => "synthesized constructor",
+            Self::UnresolvedOverload => "unresolved overload",
+            Self::AmbiguousTyHover => "ambiguous ty hover",
+            Self::TyDefinitionOnly => "ty/goto-definition-only resolution",
+            Self::UnsafeCallSiteUnpacking => "unsafe call-site unpacking",
+            Self::UnsupportedSignatureShape => "unsupported signature shape",
+        }
+    }
+}
+
+/// Count for one declined fix category.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeclinedFixReasonCount {
+    /// Declined rewrite category.
+    pub reason: DeclinedFixReason,
+    /// Number of violations declined for this category.
+    pub count: usize,
+}
+
+pub fn declined_fix_reason_counts(reasons: &[DeclinedFixReason]) -> Vec<DeclinedFixReasonCount> {
+    DeclinedFixReason::ORDERED
+        .into_iter()
+        .filter_map(|reason| {
+            let count = reasons.iter().filter(|&&r| r == reason).count();
+            (count > 0).then_some(DeclinedFixReasonCount { reason, count })
+        })
+        .collect()
+}
+
 /// A single source insertion: `text` is spliced in at byte offset `at`.
 ///
 /// The fixer only ever *inserts* (`name=` before an argument), so it never
@@ -64,6 +129,8 @@ pub struct FixOutcome {
     pub files: Vec<FileFix>,
     /// Violations detected but not rewritten.
     pub declined: usize,
+    /// Violations detected but not rewritten, grouped by practical reason.
+    pub declined_reasons: Vec<DeclinedFixReasonCount>,
 }
 
 /// Apply `insertions` to `source`, returning the rewritten text.

@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use strict_kwargs::{check_paths, fix_paths, fix_paths_with_safety, Config, Diagnostic, FixSafety};
+use strict_kwargs::{
+    check_paths, fix_paths, fix_paths_with_safety, Config, DeclinedFixReason, Diagnostic, FixSafety,
+};
 
 struct TestProject {
     _temp: tempfile::TempDir,
@@ -491,7 +493,16 @@ fn does_not_fix_overloaded_callee_when_ty_selection_is_not_unique() {
          def f(text: str) -> str: ...\n\
          def f(value):\n    return value\n\
          def g(x: int | str):\n    f(x)\n";
-    assert_unchanged(source);
+    let proj = project(source);
+    let outcome = proj.fix_main_result().expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::UnresolvedOverload
+    );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]
@@ -745,11 +756,31 @@ fn declined_count_equals_violations_left_for_check() {
     let config = Config::load(&proj.root).expect("valid config");
     let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
     assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::SynthesizedConstructor
+    );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
     assert_eq!(outcome.files.len(), 1);
     assert_eq!(outcome.files[0].count, 1);
     // Applying the fix leaves exactly `declined` violations behind.
     std::fs::write(&main, &outcome.files[0].fixed).expect("write fixed");
     assert_eq!(proj.check_main().len(), outcome.declined);
+}
+
+#[test]
+fn declined_reason_tracks_unsafe_call_site_unpacking() {
+    let proj = project("def f(a, *, b): ...\n\nrest = (2,)\nf(1, *rest)\n");
+    let outcome = proj.fix_main_result().expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(outcome.declined_reasons.len(), 1);
+    assert_eq!(
+        outcome.declined_reasons[0].reason,
+        DeclinedFixReason::UnsafeCallSiteUnpacking
+    );
+    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]
