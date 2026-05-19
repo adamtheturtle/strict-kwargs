@@ -28,31 +28,6 @@ impl FixOptIns {
             unambiguous_overloads: false,
         }
     }
-
-    pub(crate) const fn allows(self, category: FixCategory) -> bool {
-        match category {
-            FixCategory::SynthesizedConstructor => self.synthesized_constructors,
-            FixCategory::TyResolved => true,
-            FixCategory::UnambiguousOverload => self.unambiguous_overloads,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FixCategory {
-    SynthesizedConstructor,
-    TyResolved,
-    UnambiguousOverload,
-}
-
-impl FixCategory {
-    pub const fn declined_reason(self) -> Option<DeclinedFixReason> {
-        match self {
-            Self::SynthesizedConstructor => Some(DeclinedFixReason::SynthesizedConstructor),
-            Self::UnambiguousOverload => Some(DeclinedFixReason::UnambiguousOverload),
-            Self::TyResolved => None,
-        }
-    }
 }
 
 /// Why a detected violation was deliberately left untouched by the fixer.

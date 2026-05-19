@@ -20,8 +20,8 @@ use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{
-    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixCategory,
-    FixOptIns, FixOutcome, Insertion,
+    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixOptIns,
+    FixOutcome, Insertion,
 };
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
@@ -38,6 +38,11 @@ use crate::ty_resolver::{
 enum IfBranchTraversal {
     Module,
     LocalBody,
+}
+
+#[derive(Clone, Copy)]
+enum FixCategory {
+    UnambiguousOverload,
 }
 
 /// Check every Python file reachable from `paths` and return the violations.
@@ -1045,8 +1050,7 @@ impl<'a> CallChecker<'a> {
         // Auto-fix is applied by default only when a single, unambiguous
         // built-in signature is known and it is not synthesized from class
         // fields. Higher-risk categories are explicit opt-ins.
-        if self.index.is_synthesized(&callee_fullname)
-            && !self.fix_opt_ins.allows(FixCategory::SynthesizedConstructor)
+        if self.index.is_synthesized(&callee_fullname) && !self.fix_opt_ins.synthesized_constructors
         {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::SynthesizedConstructor);
@@ -2259,7 +2263,7 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
-    category: FixCategory,
+    category: Option<FixCategory>,
     fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2271,10 +2275,12 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
-    if !fixes.opt_ins.allows(category) {
-        if let Some(reason) = category.declined_reason() {
-            fixes.declined_fix_reasons.push(reason);
-        }
+    if matches!(category, Some(FixCategory::UnambiguousOverload))
+        && !fixes.opt_ins.unambiguous_overloads
+    {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnambiguousOverload);
         return;
     }
     let Some(fix_ast) = fix_ast else {
@@ -2551,7 +2557,7 @@ fn record_selected_overload_fix(
         }
         record_ty_fix(
             fixes,
-            FixCategory::UnambiguousOverload,
+            Some(FixCategory::UnambiguousOverload),
             fix_ast,
             p,
             &item.callee_fullname,
@@ -2594,7 +2600,7 @@ fn record_selected_overload_fix(
     }
     record_ty_fix(
         fixes,
-        FixCategory::UnambiguousOverload,
+        Some(FixCategory::UnambiguousOverload),
         fix_ast,
         p,
         &item.callee_fullname,
@@ -2749,7 +2755,7 @@ fn resolve_pending_with_ty(
                 };
                 record_ty_fix(
                     &mut fixes,
-                    FixCategory::TyResolved,
+                    None,
                     fix_ast,
                     p,
                     &fullname,
@@ -2798,7 +2804,7 @@ fn resolve_pending_with_ty(
             if let [signature] = overloads.as_slice() {
                 record_ty_fix(
                     &mut fixes,
-                    FixCategory::TyResolved,
+                    None,
                     fix_ast,
                     p,
                     &fullname,
@@ -2870,7 +2876,7 @@ fn resolve_pending_with_ty(
                         attempted_fix = true;
                         record_ty_fix(
                             &mut fixes,
-                            FixCategory::TyResolved,
+                            None,
                             fix_ast,
                             &pending[i],
                             &fullname,
@@ -2895,7 +2901,7 @@ mod tests {
     use super::{
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver, without_leading_self,
-        DeclinedFixReason, FixCategory, FixOptIns, PendingTy, TyFixAst, TyFixes,
+        DeclinedFixReason, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -3069,7 +3075,7 @@ mod tests {
         let mut no_fix_context = None;
         record_ty_fix(
             &mut no_fix_context,
-            FixCategory::TyResolved,
+            None,
             None,
             &pending,
             "ty.f",
@@ -3104,7 +3110,7 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
-            FixCategory::TyResolved,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -3122,7 +3128,7 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
-            FixCategory::TyResolved,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
