@@ -22,10 +22,12 @@ uv tool install strict-kwargs   # or: pip install strict-kwargs
 strict-kwargs .                 # check a directory (exit 0 = clean, 1 = violations, 2 = error)
 strict-kwargs fix .             # rewrite positional args to keyword args in place
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
+strict-kwargs fix --unsafe-fixes .  # include rewrites that may change runtime behavior
 strict-kwargs --python .venv .  # point the ty fallback at an environment
 ```
 
 - `fix` only rewrites calls it can name unambiguously; ambiguous calls are counted as declined.
+- `--unsafe-fixes` includes broader rewrites that may change runtime behavior; today that means synthesized dataclass and `NamedTuple` constructors.
 - Use `--python` to point third-party resolution at an interpreter, venv, or `sys.prefix`.
 - Missing paths are errors. A missing `--python` path is warned about and ignored.
 

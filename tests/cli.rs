@@ -586,6 +586,27 @@ fn fix_diff_reports_declined() {
 }
 
 #[test]
+fn fix_unsafe_fixes_writes_synthesized_constructor() {
+    let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
+    let output = project.run(&["fix", "--unsafe-fixes", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let err = stderr(&output);
+    assert!(err.contains("unsafe fixes enabled"), "stderr: {err}");
+    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
+    assert!(project.read("main.py").contains("D(x=1, y=2)"));
+}
+
+#[test]
+fn fix_diff_unsafe_fixes_previews_synthesized_constructor() {
+    let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
+    let output = project.run(&["fix", "--diff", "--unsafe-fixes", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let patch = stdout(&output);
+    assert!(patch.contains("+D(x=1, y=2)"), "patch: {patch}");
+    assert!(project.read("main.py").contains("D(1, 2)"));
+}
+
+#[test]
 fn fix_accepts_python_flag() {
     // `--python` is now accepted by `fix` (issue #42). This call is fully
     // resolvable by the built-in resolver, so the ty fallback never starts

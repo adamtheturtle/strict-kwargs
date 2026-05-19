@@ -50,9 +50,8 @@ struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
-    /// ``def``. The auto-fixer declines these until the synthesized
-    /// positional->keyword mapping is proven sound across every supported
-    /// constructor shape.
+    /// ``def``. The default auto-fixer declines these; ``--unsafe-fixes``
+    /// may opt into the field-model mapping.
     synthesized: FxHashSet<String>,
     /// Field models for classes whose constructor is synthesized by
     /// dataclasses / ``NamedTuple`` machinery, or inherited from such a base.
@@ -1525,9 +1524,9 @@ fn is_namedtuple_class(class_def: &ast::StmtClassDef) -> bool {
 /// reverse direct-base order, each base's already-computed model, then the
 /// class's own eligible fields. ``NamedTuple`` subclasses inherit their base
 /// tuple fields but do not add newly annotated subclass fields at runtime.
-/// The auto-fixer still declines synthesized constructors (see
-/// [`Store::synthesized`]) until every synthesized mapping is proven sound
-/// across the full resolver surface. Out of scope: the functional
+/// The default auto-fixer still declines synthesized constructors (see
+/// [`Store::synthesized`]); `--unsafe-fixes` may rewrite them from this field
+/// model. Out of scope: the functional
 /// ``NamedTuple("N", [...])`` / ``namedtuple`` forms, ``attrs``, and
 /// ``TypedDict`` (whose constructor is keyword-only by definition).
 //

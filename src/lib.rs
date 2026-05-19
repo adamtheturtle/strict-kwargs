@@ -31,8 +31,8 @@ mod source;
 #[cfg_attr(coverage, coverage(off))]
 mod ty_resolver;
 
-pub use check::{check_paths, fix_paths};
+pub use check::{check_paths, fix_paths, fix_paths_with_safety};
 pub use config::{find_project_root, Config};
 pub use diagnostic::Diagnostic;
 pub use error::CheckError;
-pub use fix::{unified_diff, FileFix, FixOutcome};
+pub use fix::{unified_diff, FileFix, FixOutcome, FixSafety};
