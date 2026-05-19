@@ -626,31 +626,6 @@ fn fix_diff_synthesized_constructors_previews_synthesized_constructor() {
 }
 
 #[test]
-fn fix_help_documents_no_fix_unambiguous_overloads() {
-    let project = Project::new();
-    let output = project.run(&["fix", "--help"]);
-    assert_eq!(code(&output), 0);
-    let help = stdout(&output);
-    assert!(
-        help.contains("--no-fix-unambiguous-overloads"),
-        "help: {help}"
-    );
-    assert!(
-        !help.contains("--fix-unambiguous-overloads"),
-        "help: {help}"
-    );
-}
-
-#[test]
-fn fix_accepts_no_fix_unambiguous_overloads() {
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["fix", "--no-fix-unambiguous-overloads", "main.py"]);
-    assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    assert!(err.contains("no fixes to apply"), "stderr: {err}");
-}
-
-#[test]
 fn fix_accepts_python_flag() {
     // `--python` is now accepted by `fix` (issue #42). This call is fully
     // resolvable by the built-in resolver, so the ty fallback never starts

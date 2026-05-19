@@ -9,23 +9,12 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
 
-/// Fix categories a caller may enable or disable explicitly.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Fix categories a caller may opt into explicitly.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct FixOptIns {
     /// Rewrite dataclass and `NamedTuple` constructors whose signatures were
     /// synthesized from class fields.
     pub synthesized_constructors: bool,
-    /// Rewrite overloaded calls when analysis selects one precise overload arm.
-    pub unambiguous_overloads: bool,
-}
-
-impl Default for FixOptIns {
-    fn default() -> Self {
-        Self {
-            synthesized_constructors: false,
-            unambiguous_overloads: true,
-        }
-    }
 }
 
 /// Why a detected violation was deliberately left untouched by the fixer.
@@ -42,9 +31,6 @@ pub enum DeclinedFixReason {
     /// `ty` could only resolve the call via goto-definition, not a concrete
     /// call-site hover signature suitable for rewriting.
     TyDefinitionOnly,
-    /// An overloaded call was narrowed to one rewriteable arm, but overload
-    /// rewrites were disabled.
-    UnambiguousOverload,
     /// The call uses `*args` or `**kwargs`, so local argument positions are not
     /// enough to build a sound keyword rewrite.
     UnsafeCallSiteUnpacking,
@@ -54,12 +40,11 @@ pub enum DeclinedFixReason {
 }
 
 impl DeclinedFixReason {
-    pub(crate) const ORDERED: [Self; 7] = [
+    pub(crate) const ORDERED: [Self; 6] = [
         Self::SynthesizedConstructor,
         Self::UnresolvedOverload,
         Self::AmbiguousTyHover,
         Self::TyDefinitionOnly,
-        Self::UnambiguousOverload,
         Self::UnsafeCallSiteUnpacking,
         Self::UnsupportedSignatureShape,
     ];
@@ -72,7 +57,6 @@ impl DeclinedFixReason {
             Self::UnresolvedOverload => "unresolved overload",
             Self::AmbiguousTyHover => "ambiguous ty hover",
             Self::TyDefinitionOnly => "ty/goto-definition-only resolution",
-            Self::UnambiguousOverload => "unambiguous overload",
             Self::UnsafeCallSiteUnpacking => "unsafe call-site unpacking",
             Self::UnsupportedSignatureShape => "unsupported signature shape",
         }
@@ -261,7 +245,6 @@ mod tests {
             DeclinedFixReason::TyDefinitionOnly,
             DeclinedFixReason::AmbiguousTyHover,
             DeclinedFixReason::SynthesizedConstructor,
-            DeclinedFixReason::UnambiguousOverload,
         ];
 
         assert_eq!(
@@ -284,10 +267,6 @@ mod tests {
                     count: 1,
                 },
                 DeclinedFixReasonCount {
-                    reason: DeclinedFixReason::UnambiguousOverload,
-                    count: 1,
-                },
-                DeclinedFixReasonCount {
                     reason: DeclinedFixReason::UnsafeCallSiteUnpacking,
                     count: 1,
                 },
@@ -307,7 +286,6 @@ mod tests {
                 "ty/goto-definition-only resolution",
                 "ambiguous ty hover",
                 "synthesized constructor",
-                "unambiguous overload",
             ]
         );
     }

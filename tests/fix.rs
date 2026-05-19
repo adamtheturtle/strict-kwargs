@@ -124,7 +124,6 @@ fn assert_synthesized_constructor_fixed(source: &str, expected: &str) {
         expected,
         FixOptIns {
             synthesized_constructors: true,
-            ..FixOptIns::default()
         },
     );
 }
@@ -512,37 +511,6 @@ fn fixes_overloaded_callee_for_precisely_annotated_argument() {
          def f(value):\n    return value\n\
          def g(x: int):\n    f(count=x)\n",
     );
-}
-
-#[test]
-fn no_fix_unambiguous_overloads_keeps_selected_overload_declined() {
-    let source = "from typing import overload\n\
-         @overload\n\
-         def f(count: int) -> int: ...\n\
-         @overload\n\
-         def f(text: str) -> str: ...\n\
-         def f(value):\n    return value\n\
-         f(1)\n";
-    let proj = project(source);
-    let outcome = fix_paths_with_opt_ins(
-        &proj.root,
-        &[proj.root.join("main.py")],
-        &Config::load(&proj.root).expect("valid config"),
-        None,
-        FixOptIns {
-            unambiguous_overloads: false,
-            ..FixOptIns::default()
-        },
-    )
-    .expect("fix");
-    assert!(outcome.files.is_empty());
-    assert_eq!(outcome.declined, 1);
-    assert_eq!(outcome.declined_reasons.len(), 1);
-    assert_eq!(
-        outcome.declined_reasons[0].reason,
-        DeclinedFixReason::UnambiguousOverload
-    );
-    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]

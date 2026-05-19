@@ -90,11 +90,6 @@ struct FixArgs {
     #[arg(long)]
     fix_synthesized_constructors: bool,
 
-    /// Do not rewrite overloaded calls, even when analysis selects one precise
-    /// overload arm.
-    #[arg(long)]
-    no_fix_unambiguous_overloads: bool,
-
     /// Python environment for the `ty` inference fallback (see
     /// ``strict-kwargs --help``). The rewrite stays conservative and never
     /// edits a `ty`-resolved call, but passing this lets ``fix`` *detect*
@@ -211,7 +206,6 @@ fn diff_color() -> bool {
 const fn fix_opt_ins_from_args(args: &FixArgs) -> FixOptIns {
     FixOptIns {
         synthesized_constructors: args.fix_synthesized_constructors,
-        unambiguous_overloads: !args.no_fix_unambiguous_overloads,
     }
 }
 

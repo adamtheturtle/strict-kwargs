@@ -40,11 +40,6 @@ enum IfBranchTraversal {
     LocalBody,
 }
 
-#[derive(Clone, Copy)]
-enum FixCategory {
-    UnambiguousOverload,
-}
-
 /// Check every Python file reachable from `paths` and return the violations.
 ///
 /// # Errors
@@ -1752,7 +1747,6 @@ fn fix_paths_impl(
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
                 declined_fix_reasons: &mut declined_fix_reasons,
-                opt_ins: fix_opt_ins,
             }),
         )?;
         resolve_overload_fixes_with_ty(
@@ -1767,7 +1761,6 @@ fn fix_paths_impl(
                 insertions: &mut insertions,
                 fixed_calls: &mut fixed_calls,
                 declined_fix_reasons: &mut declined_fix_reasons,
-                opt_ins: fix_opt_ins,
             }),
         );
         if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
@@ -2262,7 +2255,6 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
-    category: Option<FixCategory>,
     fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2274,14 +2266,6 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
-    if matches!(category, Some(FixCategory::UnambiguousOverload))
-        && !fixes.opt_ins.unambiguous_overloads
-    {
-        fixes
-            .declined_fix_reasons
-            .push(DeclinedFixReason::UnambiguousOverload);
-        return;
-    }
     let Some(fix_ast) = fix_ast else {
         fixes
             .declined_fix_reasons
@@ -2413,7 +2397,6 @@ struct TyFixes<'a> {
     insertions: &'a mut Vec<Insertion>,
     fixed_calls: &'a mut usize,
     declined_fix_reasons: &'a mut Vec<DeclinedFixReason>,
-    opt_ins: FixOptIns,
 }
 
 #[derive(Clone, Copy)]
@@ -2556,7 +2539,6 @@ fn record_selected_overload_fix(
         }
         record_ty_fix(
             fixes,
-            Some(FixCategory::UnambiguousOverload),
             fix_ast,
             p,
             &item.callee_fullname,
@@ -2599,7 +2581,6 @@ fn record_selected_overload_fix(
     }
     record_ty_fix(
         fixes,
-        Some(FixCategory::UnambiguousOverload),
         fix_ast,
         p,
         &item.callee_fullname,
@@ -2754,7 +2735,6 @@ fn resolve_pending_with_ty(
                 };
                 record_ty_fix(
                     &mut fixes,
-                    None,
                     fix_ast,
                     p,
                     &fullname,
@@ -2803,7 +2783,6 @@ fn resolve_pending_with_ty(
             if let [signature] = overloads.as_slice() {
                 record_ty_fix(
                     &mut fixes,
-                    None,
                     fix_ast,
                     p,
                     &fullname,
@@ -2875,7 +2854,6 @@ fn resolve_pending_with_ty(
                         attempted_fix = true;
                         record_ty_fix(
                             &mut fixes,
-                            None,
                             fix_ast,
                             &pending[i],
                             &fullname,
@@ -3075,7 +3053,6 @@ mod tests {
         record_ty_fix(
             &mut no_fix_context,
             None,
-            None,
             &pending,
             "ty.f",
             &named,
@@ -3100,7 +3077,6 @@ mod tests {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
             declined_fix_reasons: &mut declined_fix_reasons,
-            opt_ins: FixOptIns::default(),
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let fix_ast = TyFixAst {
@@ -3109,7 +3085,6 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
-            None,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -3127,7 +3102,6 @@ mod tests {
         };
         record_ty_fix(
             &mut fixes,
-            None,
             Some(fix_ast),
             &pending,
             "ty.f",
