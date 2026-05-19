@@ -34,6 +34,10 @@ use crate::ty_resolver::{
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
 };
 
+/// Keep the ty LSP pipes bounded: large files can have thousands of fallback
+/// requests, and sending all of them before draining responses can deadlock.
+const TY_MAX_IN_FLIGHT: usize = 16;
+
 #[derive(Clone, Copy)]
 enum IfBranchTraversal {
     Module,
@@ -245,7 +249,6 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(paths)?;
     let explicit_files = explicit_python_files(paths);
-    let index = build_index(project_root, &python_files);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
     let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
@@ -287,6 +290,27 @@ fn check_paths_impl(
         }
     }
 
+    let mut diagnostics = Vec::new();
+
+    // Cache hits bypass the pipeline; their diagnostics are added directly.
+    for entry in &entries {
+        if let Some(cached) = &entry.cache_hit {
+            diagnostics.extend_from_slice(cached);
+        }
+    }
+
+    if files_to_scan.is_empty() {
+        diagnostics.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.column.cmp(&right.column))
+        });
+        return Ok(diagnostics);
+    }
+
+    let index = build_index(project_root, &python_files);
+
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
     // `python_env` (the `--python` value) only steers ty's third-party
@@ -302,17 +326,9 @@ fn check_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut diagnostics = Vec::new();
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
-
-    // Cache hits bypass the pipeline; their diagnostics are added directly.
-    for entry in &entries {
-        if let Some(cached) = &entry.cache_hit {
-            diagnostics.extend_from_slice(cached);
-        }
-    }
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
     pipeline_phases(
@@ -331,7 +347,6 @@ fn check_paths_impl(
 
     // Emit skip warnings in the original sorted-file order (issue #53 + #46).
     skip_warnings.sort_unstable_by_key(|(i, ..)| *i);
-    let skipped_paths: Vec<&PathBuf> = skip_warnings.iter().map(|(_, p, _)| p).collect();
     for (_, path, reason) in &skip_warnings {
         eprintln!(
             "strict-kwargs: warning: skipping {} ({reason})",
@@ -343,17 +358,24 @@ fn check_paths_impl(
     // file's diagnostics by path (Diagnostic::path is always the source file).
     // Skipped files are excluded — the skip reason may be transient.
     if let Some((ref cache, _)) = cache_and_fp {
-        for (key, path) in &cache_miss_keys {
-            if skipped_paths.contains(&path) {
-                continue;
-            }
-            let file_diags: Vec<Diagnostic> = diagnostics
-                .iter()
-                .filter(|d| &d.path == path)
-                .cloned()
-                .collect();
-            cache.put(*key, &file_diags);
+        let skipped_paths: FxHashSet<PathBuf> = skip_warnings
+            .iter()
+            .map(|(_, path, _)| path.clone())
+            .collect();
+        let mut diagnostics_by_path: FxHashMap<PathBuf, Vec<Diagnostic>> = FxHashMap::default();
+        for diagnostic in &diagnostics {
+            diagnostics_by_path
+                .entry(diagnostic.path.clone())
+                .or_default()
+                .push(diagnostic.clone());
         }
+        cache_miss_keys
+            .par_iter()
+            .filter(|(_, path)| !skipped_paths.contains(path))
+            .for_each(|(key, path)| {
+                let file_diags = diagnostics_by_path.get(path).map_or(&[][..], Vec::as_slice);
+                cache.put(*key, file_diags);
+            });
     }
 
     diagnostics.sort_by(|left, right| {
@@ -2767,24 +2789,26 @@ fn resolve_overload_fixes_with_ty(
         tokens: parsed.tokens(),
     });
 
-    let hover_ids: Vec<Option<i64>> = pending
-        .iter()
-        .map(|p| {
-            let (line, ch) = byte_offset_to_lsp(source, p.pending.callee_offset);
-            ty.ask("textDocument/hover", path, line, ch)
-        })
-        .collect();
+    for chunk in pending.chunks(TY_MAX_IN_FLIGHT) {
+        let hover_ids: Vec<Option<i64>> = chunk
+            .iter()
+            .map(|p| {
+                let (line, ch) = byte_offset_to_lsp(source, p.pending.callee_offset);
+                ty.ask("textDocument/hover", path, line, ch)
+            })
+            .collect();
 
-    for (item, hover_id) in pending.iter().zip(hover_ids) {
-        let raw = hover_id
-            .and_then(|id| ty.take(id))
-            .as_ref()
-            .and_then(hover_text);
-        let Some(raw) = raw else {
-            record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
-            continue;
-        };
-        record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+        for (item, hover_id) in chunk.iter().zip(hover_ids) {
+            let raw = hover_id
+                .and_then(|id| ty.take(id))
+                .as_ref()
+                .and_then(hover_text);
+            let Some(raw) = raw else {
+                record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
+                continue;
+            };
+            record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+        }
     }
 }
 
@@ -2945,10 +2969,10 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
             .all(|(left, right)| left.kind == right.kind && left.name == right.name)
 }
 
-/// Resolve, in one pipelined batch per file, the calls the built-in resolver
-/// missed: hover (precise, overload- and inheritance-resolved, stdlib too),
-/// then goto-definition for the rest (constructors and callable `__call__`
-/// definitions). Fails closed.
+/// Resolve, in bounded pipelined batches per file, the calls the built-in
+/// resolver missed: hover (precise, overload- and inheritance-resolved,
+/// stdlib too), then goto-definition for the rest (constructors and callable
+/// `__call__` definitions). Fails closed.
 ///
 /// This is pure orchestration of the `ty` LSP subprocess: it pipelines
 /// hover/goto-definition requests and dispatches each reply to the parsing
@@ -2985,42 +3009,109 @@ fn resolve_pending_with_ty(
         tokens: parsed.tokens(),
     });
 
-    // Phase A: pipeline all hover requests, then collect.
-    let hover_ids: Vec<Option<i64>> = pending
-        .iter()
-        .map(|p| {
-            let (line, ch) = byte_offset_to_lsp(source, p.callee_offset);
-            ty.ask("textDocument/hover", path, line, ch)
-        })
-        .collect();
-
+    // Phase A: pipeline hover requests in bounded batches, then collect.
     let mut needs_def: Vec<usize> = Vec::new();
-    for (i, p) in pending.iter().enumerate() {
-        let raw = hover_ids[i]
-            .and_then(|id| ty.take(id))
-            .as_ref()
-            .and_then(hover_text);
-        let Some(raw) = raw else {
-            needs_def.push(i);
-            continue;
-        };
+    for chunk_start in (0..pending.len()).step_by(TY_MAX_IN_FLIGHT) {
+        let chunk_end = pending.len().min(chunk_start + TY_MAX_IN_FLIGHT);
+        let hover_ids: Vec<(usize, Option<i64>)> = (chunk_start..chunk_end)
+            .map(|i| {
+                let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
+                (i, ty.ask("textDocument/hover", path, line, ch))
+            })
+            .collect();
 
-        // `def …`/`bound method …` display: a single, named signature.
-        if let Some(sig) = parse_hover_signature(&raw) {
-            let Some(signature) = signature_from_param_text(&sig.params) else {
+        for (i, hover_id) in hover_ids {
+            let p = &pending[i];
+            let raw = hover_id
+                .and_then(|id| ty.take(id))
+                .as_ref()
+                .and_then(hover_text);
+            let Some(raw) = raw else {
+                needs_def.push(i);
                 continue;
             };
-            let (effective_signature, positional_count, receiver_is_explicit) =
-                strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
-            let fullname = match &sig.owner {
-                Some(owner) => {
-                    let owner = owner.split('[').next().unwrap_or(owner);
-                    let owner = owner.rsplit('.').next().unwrap_or(owner);
-                    format!("ty.{owner}.{}", sig.name)
+
+            // `def …`/`bound method …` display: a single, named signature.
+            if let Some(sig) = parse_hover_signature(&raw) {
+                let Some(signature) = signature_from_param_text(&sig.params) else {
+                    continue;
+                };
+                let (effective_signature, positional_count, receiver_is_explicit) =
+                    strip_unbound_receiver(
+                        signature.clone(),
+                        p.positional_count,
+                        sig.owner.is_none(),
+                    );
+                let fullname = match &sig.owner {
+                    Some(owner) => {
+                        let owner = owner.split('[').next().unwrap_or(owner);
+                        let owner = owner.rsplit('.').next().unwrap_or(owner);
+                        format!("ty.{owner}.{}", sig.name)
+                    }
+                    None => format!("ty.{}", sig.name),
+                };
+                let receiver_already_omitted = sig.owner.is_some();
+                let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
+                if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
+                    if let Some((def_fullname, _)) =
+                        resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
+                    {
+                        ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
+                    }
                 }
-                None => format!("ty.{}", sig.name),
-            };
-            let receiver_already_omitted = sig.owner.is_some();
+                let signature_fullname =
+                    signature_mapping_fullname(&fullname, receiver_already_omitted);
+                if let Some(max_positional) = emit_if_violation_with_signature_fullname(
+                    &fullname,
+                    signature_fullname,
+                    std::slice::from_ref(&effective_signature),
+                    positional_count,
+                    ignored,
+                    source,
+                    p.call_start,
+                    path,
+                    diagnostics,
+                ) {
+                    let fix_signature = if receiver_is_explicit {
+                        &signature
+                    } else {
+                        &effective_signature
+                    };
+                    let fix_positional_count = if receiver_is_explicit {
+                        p.positional_count
+                    } else {
+                        positional_count
+                    };
+                    record_ty_fix(
+                        &mut fixes,
+                        fix_ast,
+                        p,
+                        &fullname,
+                        fix_signature,
+                        max_positional,
+                        fix_positional_count,
+                        receiver_is_explicit,
+                        receiver_already_omitted,
+                    );
+                }
+                continue;
+            }
+
+            // Callable-*type* display, incl. `Overload[…]`: ty already excluded
+            // `self` and kept typeshed positional-only `/` markers. Use it
+            // directly rather than falling through to goto-definition, which on
+            // an inferred stdlib receiver lands on runtime `.py` source whose
+            // signatures drop `/` and yield false positives (issue #14).
+            let overloads: Vec<Signature> = parse_callable_type_overloads(&raw)
+                .iter()
+                .filter_map(|params| signature_from_param_text(params))
+                .collect();
+            if overloads.is_empty() {
+                needs_def.push(i);
+                continue;
+            }
+            let name = identifier_at(source, p.callee_offset).unwrap_or_default();
+            let fullname = format!("ty.{name}");
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) =
@@ -3029,165 +3120,108 @@ fn resolve_pending_with_ty(
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
             }
-            let signature_fullname =
-                signature_mapping_fullname(&fullname, receiver_already_omitted);
-            if let Some(max_positional) = emit_if_violation_with_signature_fullname(
+            if let Some(max_positional) = emit_if_violation(
                 &fullname,
-                signature_fullname,
-                std::slice::from_ref(&effective_signature),
-                positional_count,
+                &overloads,
+                p.positional_count,
                 ignored,
                 source,
                 p.call_start,
                 path,
                 diagnostics,
             ) {
-                let fix_signature = if receiver_is_explicit {
-                    &signature
-                } else {
-                    &effective_signature
-                };
-                let fix_positional_count = if receiver_is_explicit {
-                    p.positional_count
-                } else {
-                    positional_count
-                };
-                record_ty_fix(
-                    &mut fixes,
-                    fix_ast,
-                    p,
-                    &fullname,
-                    fix_signature,
-                    max_positional,
-                    fix_positional_count,
-                    receiver_is_explicit,
-                    receiver_already_omitted,
-                );
-            }
-            continue;
-        }
-
-        // Callable-*type* display, incl. `Overload[…]`: ty already excluded
-        // `self` and kept typeshed positional-only `/` markers. Use it
-        // directly rather than falling through to goto-definition, which on
-        // an inferred stdlib receiver lands on runtime `.py` source whose
-        // signatures drop `/` and yield false positives (issue #14).
-        let overloads: Vec<Signature> = parse_callable_type_overloads(&raw)
-            .iter()
-            .filter_map(|params| signature_from_param_text(params))
-            .collect();
-        if overloads.is_empty() {
-            needs_def.push(i);
-            continue;
-        }
-        let name = identifier_at(source, p.callee_offset).unwrap_or_default();
-        let fullname = format!("ty.{name}");
-        let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
-        if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
-            if let Some((def_fullname, _)) =
-                resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
-            {
-                ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
-            }
-        }
-        if let Some(max_positional) = emit_if_violation(
-            &fullname,
-            &overloads,
-            p.positional_count,
-            ignored,
-            source,
-            p.call_start,
-            path,
-            diagnostics,
-        ) {
-            if let [signature] = overloads.as_slice() {
-                record_ty_fix(
-                    &mut fixes,
-                    fix_ast,
-                    p,
-                    &fullname,
-                    signature,
-                    max_positional,
-                    p.positional_count,
-                    false,
-                    true,
-                );
-            } else if fixes.is_some() {
-                record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
+                if let [signature] = overloads.as_slice() {
+                    record_ty_fix(
+                        &mut fixes,
+                        fix_ast,
+                        p,
+                        &fullname,
+                        signature,
+                        max_positional,
+                        p.positional_count,
+                        false,
+                        true,
+                    );
+                } else if fixes.is_some() {
+                    record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
+                }
             }
         }
     }
 
-    // Phase B: pipeline goto-definition for hover misses (constructors).
-    let def_ids: Vec<(usize, Option<i64>)> = needs_def
-        .iter()
-        .map(|&i| {
-            let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
-            (i, ty.ask("textDocument/definition", path, line, ch))
-        })
-        .collect();
-    for (i, id) in def_ids {
-        let Some(loc) = id
-            .and_then(|id| ty.take(id))
-            .as_ref()
-            .and_then(location_from_value)
-        else {
-            continue;
-        };
-        let target = if same_path(&loc.path, path) {
-            Some(source.to_string())
-        } else {
-            file_cache
-                .entry(loc.path.clone())
-                .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
-                .clone()
-        };
-        let Some(target) = target else { continue };
-        // A `ty` goto-definition target is a dependency/stub. Use the guarded
-        // parser so a deeply-nested target is rejected gracefully rather than
-        // crashing the analysis thread (issue #83 follow-up to #54). The
-        // two-stage pre-filter keeps typical stubs cheap (byte count only);
-        // only genuinely deep ones pay the tokeniser scan — and those would
-        // have crashed the old unguarded call. A too-deep or unparsable
-        // target is silently skipped, same fail-closed behaviour as before.
-        let Ok(parsed) = parse_module_guarded(&target) else {
-            continue;
-        };
-        let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {
-            continue;
-        };
-        if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
-            let ignored = ty_fallback_callee_is_ignored(config, &fullname);
-            let max_positional = emit_if_violation(
-                &fullname,
-                &sigs,
-                pending[i].positional_count,
-                ignored,
-                source,
-                pending[i].call_start,
-                path,
-                diagnostics,
-            );
-            if let Some(max_positional) = max_positional {
-                let mut attempted_fix = false;
-                if fullname.ends_with(".__call__") {
-                    if let [signature] = sigs.as_slice() {
-                        attempted_fix = true;
-                        record_ty_fix(
-                            &mut fixes,
-                            fix_ast,
-                            &pending[i],
-                            &fullname,
-                            signature,
-                            max_positional,
-                            pending[i].positional_count,
-                            false,
-                            false,
-                        );
+    // Phase B: pipeline goto-definition for hover misses (constructors) in
+    // bounded batches too.
+    for chunk in needs_def.chunks(TY_MAX_IN_FLIGHT) {
+        let def_ids: Vec<(usize, Option<i64>)> = chunk
+            .iter()
+            .map(|&i| {
+                let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
+                (i, ty.ask("textDocument/definition", path, line, ch))
+            })
+            .collect();
+        for (i, id) in def_ids {
+            let Some(loc) = id
+                .and_then(|id| ty.take(id))
+                .as_ref()
+                .and_then(location_from_value)
+            else {
+                continue;
+            };
+            let target = if same_path(&loc.path, path) {
+                Some(source.to_string())
+            } else {
+                file_cache
+                    .entry(loc.path.clone())
+                    .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
+                    .clone()
+            };
+            let Some(target) = target else { continue };
+            // A `ty` goto-definition target is a dependency/stub. Use the guarded
+            // parser so a deeply-nested target is rejected gracefully rather than
+            // crashing the analysis thread (issue #83 follow-up to #54). The
+            // two-stage pre-filter keeps typical stubs cheap (byte count only);
+            // only genuinely deep ones pay the tokeniser scan — and those would
+            // have crashed the old unguarded call. A too-deep or unparsable
+            // target is silently skipped, same fail-closed behaviour as before.
+            let Ok(parsed) = parse_module_guarded(&target) else {
+                continue;
+            };
+            let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {
+                continue;
+            };
+            if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
+                let ignored = ty_fallback_callee_is_ignored(config, &fullname);
+                let max_positional = emit_if_violation(
+                    &fullname,
+                    &sigs,
+                    pending[i].positional_count,
+                    ignored,
+                    source,
+                    pending[i].call_start,
+                    path,
+                    diagnostics,
+                );
+                if let Some(max_positional) = max_positional {
+                    let mut attempted_fix = false;
+                    if fullname.ends_with(".__call__") {
+                        if let [signature] = sigs.as_slice() {
+                            attempted_fix = true;
+                            record_ty_fix(
+                                &mut fixes,
+                                fix_ast,
+                                &pending[i],
+                                &fullname,
+                                signature,
+                                max_positional,
+                                pending[i].positional_count,
+                                false,
+                                false,
+                            );
+                        }
                     }
-                }
-                if !attempted_fix {
-                    record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+                    if !attempted_fix {
+                        record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+                    }
                 }
             }
         }
