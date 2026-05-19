@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_strict-kwargs");
+const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
 
 struct Project {
     _temp: tempfile::TempDir,
@@ -46,6 +47,16 @@ impl Project {
         Command::new(BIN)
             .args(args)
             .current_dir(&self.root)
+            .env_remove(CACHE_DIR_ENV_VAR)
+            .output()
+            .expect("spawn strict-kwargs")
+    }
+
+    fn run_with_cache_env(&self, args: &[&str], cache_dir: &Path) -> Output {
+        Command::new(BIN)
+            .args(args)
+            .current_dir(&self.root)
+            .env(CACHE_DIR_ENV_VAR, cache_dir)
             .output()
             .expect("spawn strict-kwargs")
     }
@@ -85,6 +96,7 @@ impl Project {
                 .args(args)
                 .current_dir(&self.root)
                 .env("PATH", path_dir)
+                .env_remove(CACHE_DIR_ENV_VAR)
                 .output();
             match result {
                 Err(ref error) if error.raw_os_error() == Some(26) => {
@@ -97,6 +109,7 @@ impl Project {
             .args(args)
             .current_dir(&self.root)
             .env("PATH", path_dir)
+            .env_remove(CACHE_DIR_ENV_VAR)
             .output()
             .expect("spawn strict-kwargs (after ETXTBSY retries)")
     }
@@ -514,6 +527,91 @@ fn check_invalid_config_is_fatal_exit_two() {
     assert!(
         err.contains("invalid `[tool.strict_kwargs]` table"),
         "stderr: {err}"
+    );
+}
+
+#[test]
+fn check_uses_cache_dir_from_pyproject_relative_to_project_root() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\ncache_dir = \".strict-kwargs-cache\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        project.root.join(".strict-kwargs-cache").is_dir(),
+        "configured cache dir should be created under the project root"
+    );
+}
+
+#[test]
+fn check_uses_absolute_cache_dir_from_pyproject_as_is() {
+    let project = Project::new();
+    let cache_dir = project.root.join("absolute-cache");
+    let cache_dir_toml = cache_dir
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let pyproject = format!("[tool.strict_kwargs]\ncache_dir = \"{cache_dir_toml}\"\n");
+    let project = project
+        .write("pyproject.toml", &pyproject)
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        cache_dir.is_dir(),
+        "absolute configured cache dir should be used without project-root joining"
+    );
+}
+
+#[test]
+fn check_uses_cache_dir_from_environment() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let cache_dir = project.root.join("env-cache");
+    let output = project.run_with_cache_env(&["main.py"], &cache_dir);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        cache_dir.is_dir(),
+        "environment cache dir should be created"
+    );
+}
+
+#[test]
+fn check_cache_dir_cli_overrides_config_and_environment() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\ncache_dir = \"bad\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    std::fs::write(project.root.join("bad"), b"not a directory").expect("write blocking file");
+    let env_cache = project.root.join("env-cache");
+    let output = project.run_with_cache_env(&["--cache-dir", "cli-cache", "main.py"], &env_cache);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(project.root.join("cli-cache").is_dir());
+    assert!(!env_cache.exists(), "CLI cache dir should take precedence");
+}
+
+#[test]
+fn check_cache_dir_config_overrides_environment() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\ncache_dir = \"bad\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    std::fs::write(project.root.join("bad"), b"not a directory").expect("write blocking file");
+    let env_cache = project.root.join("env-cache");
+    let output = project.run_with_cache_env(&["main.py"], &env_cache);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(
+        !env_cache.exists(),
+        "config cache dir should take precedence"
     );
 }
 
