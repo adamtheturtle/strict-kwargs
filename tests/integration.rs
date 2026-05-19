@@ -1907,6 +1907,54 @@ fn cache_warm_run_returns_same_diagnostics() {
     );
 }
 
+/// Warm all-hit runs with multiple cached diagnostics still sort their output
+/// deterministically after bypassing index construction.
+#[test]
+fn cache_all_hit_fast_path_sorts_multiple_diagnostics() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let file = root.join("main.py");
+    std::fs::write(
+        &file,
+        "def f(a, b): ...\n\
+         def g(a, b): ...\n\
+         g(1, 2)\n\
+         f(1, 2)\n",
+    )
+    .expect("write main");
+
+    let config = Config::load(&root).expect("config");
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    let warm = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check");
+
+    assert_eq!(warm, cold);
+    assert_eq!(warm.len(), 2);
+}
+
 /// Modifying a checked file invalidates the cache entry.
 #[test]
 fn cache_invalidated_on_file_change() {
