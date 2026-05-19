@@ -200,17 +200,23 @@ fn deeply_nested_source(depth: usize) -> String {
 fn check_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
     // Issue #54: this used to overflow the stack and abort the process with
     // SIGABRT (exit 134), taking a whole directory/pre-commit run down.
-    let project = Project::new().write("deep.py", &deeply_nested_source(5000));
-    let output = project.run(&["deep.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.contains("nesting too deep"), "stderr: {err}");
-    assert!(err.contains("5000"), "stderr: {err}");
+    //
+    // Issue #83: the original guard only moved the cliff: depths around 3000
+    // were graceful, while the reported 6000/10000-depth inputs still aborted.
+    // Pin those exact repro depths.
+    for depth in [6000, 10000] {
+        let project = Project::new().write("deep.py", &deeply_nested_source(depth));
+        let output = project.run(&["deep.py"]);
+        assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+        let err = stderr(&output);
+        assert!(err.contains("nesting too deep"), "stderr: {err}");
+        assert!(err.contains(&depth.to_string()), "stderr: {err}");
+    }
 }
 
 #[test]
 fn fix_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
-    let project = Project::new().write("deep.py", &deeply_nested_source(5000));
+    let project = Project::new().write("deep.py", &deeply_nested_source(6000));
     let output = project.run(&["fix", "deep.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("nesting too deep"));
