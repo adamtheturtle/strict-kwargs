@@ -550,10 +550,12 @@ fn check_uses_cache_dir_from_pyproject_relative_to_project_root() {
 fn check_uses_absolute_cache_dir_from_pyproject_as_is() {
     let project = Project::new();
     let cache_dir = project.root.join("absolute-cache");
-    let pyproject = format!(
-        "[tool.strict_kwargs]\ncache_dir = \"{}\"\n",
-        cache_dir.display()
-    );
+    let cache_dir_toml = cache_dir
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let pyproject = format!("[tool.strict_kwargs]\ncache_dir = \"{cache_dir_toml}\"\n");
     let project = project
         .write("pyproject.toml", &pyproject)
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
