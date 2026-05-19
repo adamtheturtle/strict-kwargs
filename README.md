@@ -5,6 +5,11 @@
 
 Enforce using keyword arguments where possible.
 
+`strict-kwargs` is a standalone CLI implemented in Rust. It parses Python with
+Ruff's Python parser and AST crates, then uses its own resolver plus
+[ty](https://docs.astral.sh/ty/) for type-aware call resolution where static
+names alone are not enough.
+
 For example, if we have a function which takes two regular arguments, there
 are three ways to call it. With this tool, only the form where keyword
 arguments are used is accepted.
@@ -37,6 +42,21 @@ add(1, b=2)  # strict-kwargs reports this
   requires that you count the arguments to see which one is wrong. With named
   arguments, you get
   `Argument "e" to "add" has incompatible type "str"; expected "int"`.
+
+## How it works
+
+`strict-kwargs` has two resolution layers:
+
+- A built-in resolver parses checked files, first-party modules, vendored
+  typeshed stubs, and discovered site-packages using Ruff's Python parser and
+  AST crates.
+- For calls that need richer inference, `strict-kwargs` asks ty's language
+  server for hover and definition information. `ty` is a required dependency of
+  the Python package so results do not depend on whether it happens to be
+  installed separately.
+
+The fixer uses the same detection path, but only rewrites calls when the target
+parameter names are known unambiguously.
 
 ## Installation
 
