@@ -93,13 +93,13 @@ counted as declined.
 
 `fix` has no blanket unsafe mode.
 Different declined rewrite categories carry different risks, so broad opt-ins are harder to reason about in review and CI.
-Ordinary single-signature fixes default to yes, including calls resolved through ty, because users should not need to know which resolver found the signature.
+Ordinary single-signature fixes default to yes, including calls that require deeper type inference.
 The remaining opt-ins default to no because they depend on generated constructor models or a selected overload arm rather than one concrete declared signature.
 Use the narrow flag for the category you accept:
 
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
   These can differ from runtime behaviour when class construction is customized.
-- `--fix-unambiguous-overloads`: rewrite overloaded calls only when ty selects one precise overload arm and the rewritten argument types are precise enough.
+- `--fix-unambiguous-overloads`: rewrite overloaded calls only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
 
 Use `--python` to point third-party resolution at an interpreter, virtual
 environment, or `sys.prefix`. Missing paths are errors. A missing `--python`

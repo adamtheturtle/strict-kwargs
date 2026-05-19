@@ -90,7 +90,7 @@ struct FixArgs {
     #[arg(long)]
     fix_synthesized_constructors: bool,
 
-    /// Rewrite overloaded calls when ty selects one precise overload arm.
+    /// Rewrite overloaded calls when analysis selects one precise overload arm.
     #[arg(long)]
     fix_unambiguous_overloads: bool,
 
@@ -222,7 +222,7 @@ fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
     }
     if opt_ins.unambiguous_overloads {
         eprintln!(
-            "strict-kwargs: fix opt-in enabled: unambiguous overloads use ty's selected overload arm"
+            "strict-kwargs: fix opt-in enabled: unambiguous overloads use the selected overload arm"
         );
     }
 }

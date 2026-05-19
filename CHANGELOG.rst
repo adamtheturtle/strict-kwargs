@@ -11,7 +11,7 @@ Next
 - Add category-specific ``strict-kwargs fix`` opt-ins instead of a blanket
   unsafe mode. ``--fix-synthesized-constructors`` rewrites dataclass and
   ``NamedTuple`` calls from synthesized field models, and
-  ``--fix-unambiguous-overloads`` rewrites overloads when ty selects one
+  ``--fix-unambiguous-overloads`` rewrites overloads when analysis selects one
   precise arm. Each can be used with or without ``--diff``; ordinary
   single-signature fixes remain default-on regardless of which resolver found
   the signature.
