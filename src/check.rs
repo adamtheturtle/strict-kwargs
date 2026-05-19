@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
@@ -247,7 +248,7 @@ fn check_paths_impl(
     // errors if `ty` is missing, so the same source can never resolve fewer
     // calls on a machine that merely lacks `ty`.
     require_ty_present()?;
-    let python_files = collect_python_files(paths)?;
+    let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
@@ -603,32 +604,100 @@ fn scan_files_for_fix(
 ///
 /// Returns [`CheckError::PathNotFound`] for the first path that does not
 /// exist.
-fn collect_python_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, CheckError> {
+struct FileSelection {
+    project_root: PathBuf,
+    extend_exclude: Gitignore,
+    force_exclude: bool,
+}
+
+impl FileSelection {
+    fn new(project_root: &Path, config: &Config) -> Result<Self, CheckError> {
+        let mut builder = GitignoreBuilder::new(project_root);
+        for pattern in &config.extend_exclude {
+            builder
+                .add_line(None, pattern)
+                .map_err(|error| CheckError::ConfigInvalid {
+                    path: project_root.join("pyproject.toml"),
+                    message: format!(
+                        "has an invalid `extend_exclude` pattern `{pattern}`: {error}"
+                    ),
+                })?;
+        }
+        let extend_exclude = build_extend_exclude(&builder, project_root)?;
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            extend_exclude,
+            force_exclude: config.force_exclude,
+        })
+    }
+
+    fn is_excluded(&self, path: &Path, is_dir: bool, explicit: bool) -> bool {
+        if explicit && !self.force_exclude {
+            return false;
+        }
+        if is_ignored_path(path) {
+            return true;
+        }
+        if self.project_root.is_absolute()
+            && path.is_absolute()
+            && !path.starts_with(&self.project_root)
+        {
+            return false;
+        }
+        self.extend_exclude
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
+    }
+}
+
+/// Build the already-validated gitignore matcher.
+///
+/// Excluded from the coverage gate because `GitignoreBuilder::add_line`
+/// validates each glob eagerly; a later `build` failure is a defensive
+/// third-party error path that is not practically triggerable through
+/// `extend_exclude`.
+#[cfg_attr(coverage, coverage(off))]
+fn build_extend_exclude(
+    builder: &GitignoreBuilder,
+    project_root: &Path,
+) -> Result<Gitignore, CheckError> {
+    builder.build().map_err(|error| CheckError::ConfigInvalid {
+        path: project_root.join("pyproject.toml"),
+        message: format!("has invalid `extend_exclude` patterns: {error}"),
+    })
+}
+
+fn collect_python_files(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<PathBuf>, CheckError> {
+    let selection = FileSelection::new(project_root, config)?;
     let mut files = Vec::new();
     for path in paths {
         if path.is_file() {
-            if is_python_file(path) {
+            if is_python_file(path) && !selection.is_excluded(path, false, true) {
                 files.push(path.clone());
             }
         } else if path.is_dir() {
-            // Prune `.venv`/`.git`/`__pycache__`/dot-directories instead of
-            // descending into them and discarding their files one by one: a
-            // real project's virtualenv alone is tens of thousands of
-            // entries, so the unpruned walk dominated whole-project runtime
-            // and was the main run-to-run variance source (cold vs warm FS
-            // cache over ~50k entries). `is_ignored_path` below stays the
-            // authoritative filter, so the result set is unchanged — only
-            // directories every one of whose files it would reject are
-            // skipped, and never the walk root (depth 0).
+            // Prune excluded directories instead of descending into them and
+            // discarding their files one by one: a real project's virtualenv
+            // alone is tens of thousands of entries, so the unpruned walk
+            // dominated whole-project runtime and run-to-run variance. The
+            // walk root is never pruned so `strict-kwargs .` keeps working
+            // even when `.` contains ignored path components.
             let walk = walkdir::WalkDir::new(path)
                 .into_iter()
-                .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e));
+                .filter_entry(|entry| {
+                    entry.depth() == 0
+                        || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
+                });
             for entry in walk
                 .filter_map(Result::ok)
                 .filter(|e| e.file_type().is_file())
             {
                 let entry_path = entry.path().to_path_buf();
-                if is_python_file(&entry_path) && !is_ignored_path(&entry_path) {
+                if is_python_file(&entry_path) {
                     files.push(entry_path);
                 }
             }
@@ -656,10 +725,9 @@ fn is_python_file(path: &Path) -> bool {
         .is_some_and(|ext| ext == "py" || ext == "pyi")
 }
 
-/// Whether `entry` is a directory that [`is_ignored_path`] would reject for
-/// every file beneath it (`.git`, `.venv` and other dot-directories,
-/// `venv`, `__pycache__`), so the walk can skip descending into it. Kept in
-/// lock-step with the component rule in [`is_ignored_path`].
+/// Whether `entry` is a built-in ignored directory (`.git`, `.venv` and other
+/// dot-directories, `venv`, `__pycache__`), so cache fingerprinting can avoid
+/// descending into default-skipped trees.
 #[cfg_attr(coverage, coverage(off))]
 pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
@@ -1927,7 +1995,7 @@ fn fix_paths_impl(
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
-    let python_files = collect_python_files(paths)?;
+    let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
     let index = build_index(project_root, &python_files);
 
@@ -3232,11 +3300,13 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        without_leading_self, CallAtStart, DeclinedFixReason, FixOptIns, PendingTy, TyFixAst,
-        TyFixes,
+        collect_python_files, is_ignored_path, is_typing_special_form_constructor,
+        parameter_name_is_safe_keyword_target, plan_rewrite_insertions, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, without_leading_self, CallAtStart,
+        DeclinedFixReason, FileSelection, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
+    use crate::config::Config;
+    use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -3253,6 +3323,103 @@ mod tests {
         // No special component anywhere: kept. Also exercises a non-`Normal`
         // (root) component falling through to the catch-all arm.
         assert!(!is_ignored_path(Path::new("/srv/app/src/pkg/mod.py")));
+    }
+
+    #[test]
+    fn file_selection_explicit_force_and_external_paths() {
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let other = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let generated = root.path().join("generated").join("api.py");
+        let hidden = root.path().join(".generated.py");
+        let external_generated = other.path().join("generated").join("api.py");
+        let config = Config {
+            extend_exclude: vec!["generated".to_string()],
+            ..Config::default()
+        };
+        let selection = FileSelection::new(root.path(), &config).expect("selection");
+
+        assert!(selection.is_excluded(&generated, false, false));
+        assert!(!selection.is_excluded(&generated, false, true));
+        assert!(selection.is_excluded(Path::new("generated/api.py"), false, false));
+        assert!(selection.is_excluded(&hidden, false, false));
+        assert!(!selection.is_excluded(&hidden, false, true));
+        assert!(!selection.is_excluded(&external_generated, false, false));
+
+        let relative_selection = FileSelection::new(
+            Path::new("project"),
+            &Config {
+                extend_exclude: vec!["generated".to_string()],
+                ..Config::default()
+            },
+        )
+        .expect("relative selection");
+        assert!(relative_selection.is_excluded(Path::new("generated/api.py"), false, false));
+
+        let forced = FileSelection::new(
+            root.path(),
+            &Config {
+                force_exclude: true,
+                ..config
+            },
+        )
+        .expect("forced selection");
+        assert!(forced.is_excluded(&generated, false, true));
+        assert!(forced.is_excluded(&hidden, false, true));
+    }
+
+    #[test]
+    fn collect_python_files_filters_non_python_and_excluded_files() {
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        for path in ["src/real.py", "src/generated.py", "src/data.txt"] {
+            let file = root.path().join(path);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&file, "").expect("write");
+        }
+
+        let files = collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config {
+                extend_exclude: vec!["src/generated.py".to_string()],
+                ..Config::default()
+            },
+        )
+        .expect("collect");
+
+        assert_eq!(files, vec![root.path().join("src/real.py")]);
+    }
+
+    #[test]
+    fn file_selection_reports_invalid_extend_exclude_pattern() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let Err(error) = FileSelection::new(
+            root.path(),
+            &Config {
+                extend_exclude: vec!["[z-a]".to_string()],
+                ..Config::default()
+            },
+        ) else {
+            panic!("invalid glob must be rejected");
+        };
+        match error {
+            CheckError::ConfigInvalid { path, message } => {
+                assert!(path.ends_with("pyproject.toml"));
+                assert!(
+                    message.contains("invalid `extend_exclude` pattern"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3780,7 +3947,6 @@ while cond:
     // visible to the coverage gate (issue #43).
 
     use super::CallChecker;
-    use crate::config::Config;
     use crate::index::DefinitionIndex;
     use ruff_python_ast::Expr;
     use std::path::PathBuf;

@@ -114,6 +114,8 @@ Configuration lives in `pyproject.toml`:
 [tool.strict_kwargs]
 required_version = ">=2026.5.19-post.3"
 ignore_names = ["main.func", "builtins.str"]
+extend_exclude = ["generated", "vendor"]
+force_exclude = true
 cache_dir = ".strict-kwargs-cache"
 fix_synthesized_constructors = true
 output_format = "full"  # or "json", "github"
@@ -125,6 +127,11 @@ Use the version reported by `strict-kwargs --version`.
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Use `extend_exclude` to skip generated or vendored Python files during directory runs.
+Patterns use `.gitignore`-style matching relative to the project root.
+By default, exclusions apply to directory traversal only: an explicitly passed file such as `strict-kwargs generated/api.py` is still checked.
+Set `force_exclude = true` to apply exclusions to explicitly passed files too, which is useful when pre-commit passes changed files directly.
+The built-in skips for dot-directories, `venv`, and `__pycache__` remain enabled.
 Set `cache_dir` to enable the persistent diagnostic cache for `strict-kwargs`
 checks. Relative `cache_dir` values in `pyproject.toml` are resolved against
 the project root. The cache location precedence is:
