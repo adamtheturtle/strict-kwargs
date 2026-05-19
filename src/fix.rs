@@ -252,6 +252,7 @@ mod tests {
             DeclinedFixReason::TyDefinitionOnly,
             DeclinedFixReason::AmbiguousTyHover,
             DeclinedFixReason::SynthesizedConstructor,
+            DeclinedFixReason::UnambiguousOverload,
         ];
 
         assert_eq!(
@@ -274,6 +275,10 @@ mod tests {
                     count: 1,
                 },
                 DeclinedFixReasonCount {
+                    reason: DeclinedFixReason::UnambiguousOverload,
+                    count: 1,
+                },
+                DeclinedFixReasonCount {
                     reason: DeclinedFixReason::UnsafeCallSiteUnpacking,
                     count: 1,
                 },
@@ -293,6 +298,7 @@ mod tests {
                 "ty/goto-definition-only resolution",
                 "ambiguous ty hover",
                 "synthesized constructor",
+                "unambiguous overload",
             ]
         );
     }
