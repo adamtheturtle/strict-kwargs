@@ -353,6 +353,36 @@ fn fixes_ty_resolved_third_party_env_package() {
 }
 
 #[test]
+fn does_not_fix_callable_value_returned_by_factory() {
+    // Issue #115: ty may hover a variable assigned from a factory call as the
+    // factory definition itself. Rewriting the later call with the factory's
+    // parameter name would produce `formatter(quote_char=value)`, but the
+    // returned callable accepts `value`.
+    assert_unchanged(
+        "from typing import Protocol\n\n\
+         class Formatter(Protocol):\n    def __call__(self, value: str) -> str: ...\n\n\
+         def build_formatter(quote_char: str) -> Formatter: ...\n\n\
+         formatter = build_formatter(quote_char='\"')\n\
+         value = 'hello'\n\
+         formatter(value)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_annotated_callable_value_returned_by_factory() {
+    // `Callable[[float], str]` does not carry a safe parameter name. The
+    // factory's `prefix` parameter must not be used for calls through the
+    // returned function value.
+    assert_unchanged(
+        "from collections.abc import Callable\n\n\
+         def build_wrapper(prefix: str) -> Callable[[float], str]: ...\n\n\
+         finite: Callable[[float], str] = build_wrapper(prefix='')\n\
+         value = 1.0\n\
+         finite(value)\n",
+    );
+}
+
+#[test]
 fn does_not_fix_private_parameter_name() {
     // Private/stub-style double-underscore parameter names are not safe
     // keyword targets. The checker can still report the call, but `fix` must
