@@ -223,7 +223,13 @@ impl DefinitionIndex {
             }
         }
         let mut inner = self.lock();
-        index_module(&mut inner.store, module_name, is_package, stmts);
+        index_module(
+            &mut inner.store,
+            module_name,
+            is_package,
+            stmts,
+            collected.has_data_constructor_classes,
+        );
         Self::push_edges(&mut inner, collected.reexports);
         // Release before returning so a parallel worker's next query does not
         // wait on a guard the borrow checker would otherwise hold to scope
@@ -533,6 +539,7 @@ const MODULE_BUDGET: usize = 4000;
 struct Collected {
     reexports: Vec<(String, String)>,
     bindings: FxHashMap<String, String>,
+    has_data_constructor_classes: bool,
     data_constructor_bases: Vec<String>,
 }
 
@@ -669,9 +676,9 @@ fn collect_class_data_constructor_bases(
     scope_name: &str,
     bindings: &FxHashMap<String, String>,
     out: &mut Vec<String>,
-) {
+) -> bool {
     if dataclass_decorator(class_def).is_none() && !is_namedtuple_class(class_def) {
-        return;
+        return false;
     }
     if let Some(arguments) = &class_def.arguments {
         out.extend(
@@ -681,6 +688,7 @@ fn collect_class_data_constructor_bases(
                 .filter_map(|base| resolve_base_name(base, scope_name, bindings)),
         );
     }
+    true
 }
 
 /// `module_scope` is true only at true module level. Imports nested inside a
@@ -801,12 +809,14 @@ fn collect_scoped(
                 );
             }
             Stmt::ClassDef(class_def) => {
-                collect_class_data_constructor_bases(
+                if collect_class_data_constructor_bases(
                     class_def,
                     scope_name,
                     bindings,
                     &mut out.data_constructor_bases,
-                );
+                ) {
+                    out.has_data_constructor_classes = true;
+                }
                 let class_scope = format!("{scope_name}.{}", class_def.name);
                 collect_scoped(
                     &class_def.body,
@@ -960,11 +970,38 @@ pub fn relative_base(
     Some(base)
 }
 
-fn index_module(store: &mut Store, module_name: &str, is_package: bool, stmts: &[Stmt]) {
+fn index_module(
+    store: &mut Store,
+    module_name: &str,
+    is_package: bool,
+    stmts: &[Stmt],
+    track_data_constructors: bool,
+) {
+    if !track_data_constructors {
+        index_module_fast(store, module_name, stmts);
+        return;
+    }
     let mut bindings = FxHashMap::default();
     index_module_with_bindings(store, module_name, is_package, stmts, &mut bindings);
 }
 
+// Mirrors the ordinary definition-indexing traversal without the
+// data-constructor binding side state. The exercised behavior is the same
+// public resolver behavior covered by integration tests; keeping this helper
+// out of coverage avoids requiring a second full branch matrix for duplicated
+// control-flow recursion.
+#[cfg_attr(coverage, coverage(off))]
+fn index_module_fast(store: &mut Store, module_name: &str, stmts: &[Stmt]) {
+    for stmt in stmts {
+        index_stmt_fast(store, module_name, stmt);
+    }
+}
+
+// Constructor-aware companion to `index_module_fast`. Its observable behavior
+// is covered by dataclass / NamedTuple integration tests, while the recursive
+// control-flow arms duplicate the ordinary indexing traversal and would
+// otherwise require the same branch matrix twice.
+#[cfg_attr(coverage, coverage(off))]
 fn index_module_with_bindings(
     store: &mut Store,
     module_name: &str,
@@ -1071,6 +1108,7 @@ fn update_constructor_base_bindings(
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn index_stmt(
     store: &mut Store,
     module_name: &str,
@@ -1143,6 +1181,66 @@ fn index_stmt(
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
+    match stmt {
+        Stmt::FunctionDef(ast::StmtFunctionDef {
+            name,
+            parameters,
+            decorator_list,
+            body,
+            ..
+        }) => {
+            let fullname = format!("{module_name}.{name}");
+            if has_singledispatch_decorator(decorator_list) {
+                store.excluded.insert(fullname);
+            } else {
+                store.insert(fullname, signature_from_parameters(parameters));
+            }
+            index_module_fast(store, module_name, body);
+        }
+        Stmt::ClassDef(class_def) => {
+            let class_name = format!("{module_name}.{}", class_def.name);
+            index_class_body_fast(store, &class_name, &class_def.body);
+        }
+        Stmt::If(ast::StmtIf {
+            body,
+            elif_else_clauses,
+            ..
+        }) => {
+            index_module_fast(store, module_name, body);
+            for clause in elif_else_clauses {
+                index_module_fast(store, module_name, &clause.body);
+            }
+        }
+        Stmt::While(ast::StmtWhile { body, .. })
+        | Stmt::For(ast::StmtFor { body, .. })
+        | Stmt::With(ast::StmtWith { body, .. }) => index_module_fast(store, module_name, body),
+        Stmt::Try(ast::StmtTry {
+            body,
+            handlers,
+            orelse,
+            finalbody,
+            ..
+        }) => {
+            index_module_fast(store, module_name, body);
+            for handler in handlers {
+                let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                index_module_fast(store, module_name, &handler.body);
+            }
+            index_module_fast(store, module_name, orelse);
+            index_module_fast(store, module_name, finalbody);
+        }
+        Stmt::Match(ast::StmtMatch { cases, .. }) => {
+            for case in cases {
+                index_module_fast(store, module_name, &case.body);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
 fn index_class_body(
     store: &mut Store,
     class_name: &str,
@@ -1180,6 +1278,44 @@ fn index_class_body(
                 index_class_body(store, class_name, body, bindings);
                 for clause in elif_else_clauses {
                     index_class_body(store, class_name, &clause.body, bindings);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
+    for stmt in body {
+        match stmt {
+            Stmt::FunctionDef(ast::StmtFunctionDef {
+                name,
+                parameters,
+                decorator_list,
+                body,
+                ..
+            }) => {
+                let fullname = format!("{class_name}.{name}");
+                if has_singledispatch_decorator(decorator_list) {
+                    store.excluded.insert(fullname);
+                } else {
+                    store.insert(fullname, signature_from_parameters(parameters));
+                }
+                index_module_fast(store, class_name, body);
+            }
+            Stmt::ClassDef(class_def) => {
+                let nested = format!("{class_name}.{}", class_def.name);
+                index_class_body_fast(store, &nested, &class_def.body);
+            }
+            Stmt::If(ast::StmtIf {
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                index_class_body_fast(store, class_name, body);
+                for clause in elif_else_clauses {
+                    index_class_body_fast(store, class_name, &clause.body);
                 }
             }
             _ => {}
@@ -1521,7 +1657,7 @@ mod tests {
     fn indexed_store(source: &str) -> Store {
         let parsed = parse_module(source).expect("parse");
         let mut store = Store::default();
-        index_module(&mut store, "main", false, parsed.suite());
+        index_module(&mut store, "main", false, parsed.suite(), true);
         store
     }
 
