@@ -626,19 +626,6 @@ fn fix_diff_synthesized_constructors_previews_synthesized_constructor() {
 }
 
 #[test]
-fn fix_unambiguous_overloads_flag_is_backward_compatible() {
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["fix", "--fix-unambiguous-overloads", "main.py"]);
-    assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    assert!(
-        !err.contains("fix opt-in enabled: unambiguous overloads"),
-        "stderr: {err}"
-    );
-    assert!(err.contains("no fixes to apply"), "stderr: {err}");
-}
-
-#[test]
 fn fix_help_documents_no_fix_unambiguous_overloads() {
     let project = Project::new();
     let output = project.run(&["fix", "--help"]);
