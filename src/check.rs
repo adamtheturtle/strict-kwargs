@@ -623,10 +623,7 @@ impl FileSelection {
                     ),
                 })?;
         }
-        let extend_exclude = builder.build().map_err(|error| CheckError::ConfigInvalid {
-            path: project_root.join("pyproject.toml"),
-            message: format!("has invalid `extend_exclude` patterns: {error}"),
-        })?;
+        let extend_exclude = build_extend_exclude(&builder, project_root)?;
         Ok(Self {
             project_root: project_root.to_path_buf(),
             extend_exclude,
@@ -651,6 +648,23 @@ impl FileSelection {
             .matched_path_or_any_parents(path, is_dir)
             .is_ignore()
     }
+}
+
+/// Build the already-validated gitignore matcher.
+///
+/// Excluded from the coverage gate because `GitignoreBuilder::add_line`
+/// validates each glob eagerly; a later `build` failure is a defensive
+/// third-party error path that is not practically triggerable through
+/// `extend_exclude`.
+#[cfg_attr(coverage, coverage(off))]
+fn build_extend_exclude(
+    builder: &GitignoreBuilder,
+    project_root: &Path,
+) -> Result<Gitignore, CheckError> {
+    builder.build().map_err(|error| CheckError::ConfigInvalid {
+        path: project_root.join("pyproject.toml"),
+        message: format!("has invalid `extend_exclude` patterns: {error}"),
+    })
 }
 
 fn collect_python_files(
@@ -683,8 +697,7 @@ fn collect_python_files(
                 .filter(|e| e.file_type().is_file())
             {
                 let entry_path = entry.path().to_path_buf();
-                if is_python_file(&entry_path) && !selection.is_excluded(&entry_path, false, false)
-                {
+                if is_python_file(&entry_path) {
                     files.push(entry_path);
                 }
             }
@@ -3287,11 +3300,13 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        without_leading_self, CallAtStart, DeclinedFixReason, FixOptIns, PendingTy, TyFixAst,
-        TyFixes,
+        collect_python_files, is_ignored_path, is_typing_special_form_constructor,
+        parameter_name_is_safe_keyword_target, plan_rewrite_insertions, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, without_leading_self, CallAtStart,
+        DeclinedFixReason, FileSelection, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
+    use crate::config::Config;
+    use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
@@ -3308,6 +3323,103 @@ mod tests {
         // No special component anywhere: kept. Also exercises a non-`Normal`
         // (root) component falling through to the catch-all arm.
         assert!(!is_ignored_path(Path::new("/srv/app/src/pkg/mod.py")));
+    }
+
+    #[test]
+    fn file_selection_explicit_force_and_external_paths() {
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let other = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let generated = root.path().join("generated").join("api.py");
+        let hidden = root.path().join(".generated.py");
+        let external_generated = other.path().join("generated").join("api.py");
+        let config = Config {
+            extend_exclude: vec!["generated".to_string()],
+            ..Config::default()
+        };
+        let selection = FileSelection::new(root.path(), &config).expect("selection");
+
+        assert!(selection.is_excluded(&generated, false, false));
+        assert!(!selection.is_excluded(&generated, false, true));
+        assert!(selection.is_excluded(Path::new("generated/api.py"), false, false));
+        assert!(selection.is_excluded(&hidden, false, false));
+        assert!(!selection.is_excluded(&hidden, false, true));
+        assert!(!selection.is_excluded(&external_generated, false, false));
+
+        let relative_selection = FileSelection::new(
+            Path::new("project"),
+            &Config {
+                extend_exclude: vec!["generated".to_string()],
+                ..Config::default()
+            },
+        )
+        .expect("relative selection");
+        assert!(relative_selection.is_excluded(Path::new("generated/api.py"), false, false));
+
+        let forced = FileSelection::new(
+            root.path(),
+            &Config {
+                force_exclude: true,
+                ..config
+            },
+        )
+        .expect("forced selection");
+        assert!(forced.is_excluded(&generated, false, true));
+        assert!(forced.is_excluded(&hidden, false, true));
+    }
+
+    #[test]
+    fn collect_python_files_filters_non_python_and_excluded_files() {
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        for path in ["src/real.py", "src/generated.py", "src/data.txt"] {
+            let file = root.path().join(path);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&file, "").expect("write");
+        }
+
+        let files = collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config {
+                extend_exclude: vec!["src/generated.py".to_string()],
+                ..Config::default()
+            },
+        )
+        .expect("collect");
+
+        assert_eq!(files, vec![root.path().join("src/real.py")]);
+    }
+
+    #[test]
+    fn file_selection_reports_invalid_extend_exclude_pattern() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let Err(error) = FileSelection::new(
+            root.path(),
+            &Config {
+                extend_exclude: vec!["[z-a]".to_string()],
+                ..Config::default()
+            },
+        ) else {
+            panic!("invalid glob must be rejected");
+        };
+        match error {
+            CheckError::ConfigInvalid { path, message } => {
+                assert!(path.ends_with("pyproject.toml"));
+                assert!(
+                    message.contains("invalid `extend_exclude` pattern"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3835,7 +3947,6 @@ while cond:
     // visible to the coverage gate (issue #43).
 
     use super::CallChecker;
-    use crate::config::Config;
     use crate::index::DefinitionIndex;
     use ruff_python_ast::Expr;
     use std::path::PathBuf;
