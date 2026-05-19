@@ -66,6 +66,7 @@ strict-kwargs fix .             # rewrite positional args to keyword args in pla
 strict-kwargs fix --diff .      # preview the rewrite, write nothing
 strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
 strict-kwargs --python .venv .  # point type resolution at an environment
+strict-kwargs --cache-dir .strict-kwargs-cache .  # enable the diagnostic cache
 ```
 
 Exit codes are:
@@ -104,11 +105,17 @@ Configuration lives in `pyproject.toml`:
 ```toml
 [tool.strict_kwargs]
 ignore_names = ["main.func", "builtins.str"]
+cache_dir = ".strict-kwargs-cache"
 fix_synthesized_constructors = true
 ```
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Set `cache_dir` to enable the persistent diagnostic cache for `strict-kwargs`
+checks. Relative `cache_dir` values in `pyproject.toml` are resolved against
+the project root. The cache location precedence is:
+`--cache-dir`, then `[tool.strict_kwargs].cache_dir`, then
+`STRICT_KWARGS_CACHE_DIR`. If none are set, the cache is disabled.
 Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
 
 To find the name of a function to ignore, set the following configuration:

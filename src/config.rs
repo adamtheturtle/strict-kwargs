@@ -12,6 +12,12 @@ pub struct Config {
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
     pub ignore_names: Vec<String>,
+    /// Directory for the persistent on-disk diagnostic cache.
+    ///
+    /// This affects where diagnostics are stored, not the diagnostics
+    /// themselves, so it is omitted from cache fingerprints.
+    #[serde(default, skip_serializing)]
+    pub cache_dir: Option<PathBuf>,
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
     pub debug: bool,
@@ -124,6 +130,7 @@ mod tests {
             r#"
       [tool.strict_kwargs]
       ignore_names = ["main.func", "builtins.str"]
+      cache_dir = ".strict-kwargs-cache"
       debug = true
       fix_synthesized_constructors = true
       "#,
@@ -132,6 +139,10 @@ mod tests {
         assert_eq!(
             config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
+        );
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
@@ -153,6 +164,7 @@ mod tests {
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
+        assert_eq!(config.cache_dir, None);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
     }
@@ -199,6 +211,16 @@ mod tests {
     }
 
     #[test]
+    fn wrong_cache_dir_type_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\ncache_dir = [\"dir\"]\n")
+            .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
     fn is_ignored_matches_exact_names() {
         let config = Config::from_pyproject_str("[tool.strict_kwargs]\nignore_names = [\"a.b\"]\n")
             .expect("valid config");
@@ -225,6 +247,21 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
+    }
+
+    #[test]
+    fn load_reads_cache_dir_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\ncache_dir = \".strict-kwargs-cache\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
+        );
     }
 
     #[test]

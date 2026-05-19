@@ -4,6 +4,13 @@ Changelog
 Next
 ----
 
+- ``strict-kwargs`` checks can now enable the persistent diagnostic cache
+  through ``[tool.strict_kwargs].cache_dir`` or the
+  ``STRICT_KWARGS_CACHE_DIR`` environment variable. The effective cache
+  location precedence is ``--cache-dir``, then pyproject configuration, then
+  the environment variable. Relative pyproject paths resolve against the
+  project root.
+
 2026.5.19-post.3
 ----------------
 
