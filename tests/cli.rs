@@ -187,6 +187,35 @@ fn check_unparsable_file_is_fatal_exit_two() {
     );
 }
 
+#[test]
+fn check_directory_skips_parse_incompatible_file_with_warning() {
+    let project = Project::new()
+        .write("pkg/ok.py", "def f(a: int) -> None: ...\nf(1)\n")
+        .write(
+            "pkg/future_syntax.py",
+            "match x:\n    case +1:\n        pass\n",
+        );
+    let output = project.run(&["pkg"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 1, "stderr: {err}");
+    assert!(err.contains("Too many positional"), "stderr: {err}");
+    assert!(err.contains("ok.py"), "stderr: {err}");
+    assert!(err.contains("warning: skipping"), "stderr: {err}");
+    assert!(err.contains("future_syntax.py"), "stderr: {err}");
+    assert!(err.contains("could not parse"), "stderr: {err}");
+}
+
+#[test]
+fn check_explicit_parse_incompatible_file_is_fatal() {
+    let project =
+        Project::new().write("future_syntax.py", "match x:\n    case +1:\n        pass\n");
+    let output = project.run(&["future_syntax.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("Unary '+'"), "stderr: {err}");
+}
+
 /// `f(f(f(…f(1)…)))` nested `depth` deep, plus the `f` it calls.
 fn deeply_nested_source(depth: usize) -> String {
     format!(
@@ -377,6 +406,26 @@ fn fix_skips_non_utf8_file_and_still_fixes_others() {
     assert_eq!(
         std::fs::read(project.root.join("pkg/legacy.py")).expect("read"),
         b"x = \"\xe9\"\n"
+    );
+}
+
+#[test]
+fn fix_directory_skips_parse_incompatible_file_and_still_fixes_others() {
+    let project = Project::new()
+        .write("pkg/ok.py", "def f(a: int) -> None: ...\nf(1)\n")
+        .write(
+            "pkg/future_syntax.py",
+            "match x:\n    case +1:\n        pass\n",
+        );
+
+    let output = project.run(&["fix", "pkg"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 0, "stderr: {err}");
+    assert!(err.contains("warning: skipping"), "stderr: {err}");
+    assert!(err.contains("future_syntax.py"), "stderr: {err}");
+    assert_eq!(
+        project.read("pkg/ok.py"),
+        "def f(a: int) -> None: ...\nf(a=1)\n"
     );
 }
 

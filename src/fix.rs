@@ -86,7 +86,7 @@ pub fn declined_fix_reason_counts(reasons: &[DeclinedFixReason]) -> Vec<Declined
 ///
 /// The fixer only ever *inserts* (`name=` before an argument), so it never
 /// changes the file's line count — a property the diff renderer relies on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Insertion {
     pub at: usize,
     pub text: String,
