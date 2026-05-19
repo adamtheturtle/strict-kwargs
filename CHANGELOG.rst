@@ -4,9 +4,16 @@ Changelog
 Next
 ----
 
+- Synthesized ``@dataclass`` constructor models now include inherited
+  dataclass fields in runtime order, while preserving exclusions such as
+  ``ClassVar``, ``field(init=False)``, ``@dataclass(init=False)``, and
+  hand-written constructors (issue #96). ``NamedTuple`` subclasses now reuse
+  inherited tuple fields without treating newly annotated subclass attributes
+  as constructor parameters. The auto-fixer still declines synthesized
+  constructors.
+
 2026.5.18-post.4
 ----------------
-
 
 2026.5.18-post.3
 ----------------
@@ -177,9 +184,8 @@ Next
   ``D(x=1, y=2)`` is accepted. ``ClassVar`` and ``field(init=False)`` fields
   are excluded, ``@dataclass(init=False)`` synthesizes nothing, and a
   hand-written constructor still wins. The auto-fixer conservatively declines
-  these (a synthesized signature omits inherited base-class fields). The
-  functional ``NamedTuple("N", [...])``/``namedtuple`` forms, ``attrs``, and
-  ``TypedDict`` remain out of scope.
+  these. The functional ``NamedTuple("N", [...])``/``namedtuple`` forms,
+  ``attrs``, and ``TypedDict`` remain out of scope.
 - Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects
   can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A
   `strict-kwargs-pre-commit
