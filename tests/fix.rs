@@ -368,6 +368,21 @@ fn does_not_fix_annotated_callable_value_returned_by_factory() {
 }
 
 #[test]
+fn does_not_fix_private_parameter_name() {
+    // Private/stub-style double-underscore parameter names are not safe
+    // keyword targets. The checker can still report the call, but `fix` must
+    // not emit an unsafe keyword such as `load(__fp=fp)` (issue #114).
+    let source = "def load(__fp):\n    return __fp\n\nfp = object()\nload(fp)\n";
+    let proj = project(source);
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 1);
+    assert_eq!(std::fs::read_to_string(main).expect("read source"), source);
+}
+
+#[test]
 fn does_not_fix_overloaded_builtin() {
     // `str` is overloaded in typeshed: still flagged by the checker, but the
     // overload safety rule (not a builtins carve-out) keeps the fixer away.

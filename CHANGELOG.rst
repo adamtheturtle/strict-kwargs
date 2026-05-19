@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+2026.5.19
+---------
+
+
 - Synthesized ``@dataclass`` constructor models now include inherited
   dataclass fields in runtime order, while preserving exclusions such as
   ``ClassVar``, ``field(init=False)``, ``@dataclass(init=False)``, and
