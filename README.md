@@ -25,9 +25,9 @@ strict-kwargs fix --diff .      # preview the rewrite, write nothing
 strict-kwargs --python .venv .  # point the ty fallback at an environment
 ```
 
-`fix` is conservative: it never rewrites a call it would not report, and leaves `*args`/`**kwargs` unpacking, synthesized constructors, unmatched overloads, and ambiguous `ty` resolutions untouched (reporting how many it declined). `ty`-resolved calls are rewritten only when `ty` reports one concrete callable signature with complete parameter names; overloaded callees are rewritten only when the call-site hover selects one indexed overload arm and the rewritten arguments have precise literal or annotation types.
-`--python` accepts an interpreter, venv, or `sys.prefix` (mirrors `ty check --python`) for third-party packages outside an activated venv or `<project>/.venv`.
-A path that does not exist is a hard error (exit 2), like `ruff`, rather than a silent "clean" result; a nonexistent `--python` is reported on stderr and the run falls back to `ty`'s own environment discovery.
+- `fix` only rewrites calls it can name unambiguously; ambiguous calls are counted as declined.
+- Use `--python` to point third-party resolution at an interpreter, venv, or `sys.prefix`.
+- Missing paths are errors. A missing `--python` path is warned about and ignored.
 
 ## pre-commit
 
