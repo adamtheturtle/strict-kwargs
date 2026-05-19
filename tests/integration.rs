@@ -1113,13 +1113,13 @@ fn assignment_from_call_is_not_an_alias() {
 }
 
 // `ty` is a hard requirement (it is verified up front by
-// `check_paths`/`fix_paths`), so the whole suite — not just these
-// `ty_`-prefixed tests — needs `ty` on `PATH`. There is therefore no
+// `check_paths`/`fix_paths`), so the whole suite - not just these
+// `ty_`-prefixed tests - needs `ty` on `PATH`. There is therefore no
 // per-test availability guard: without `ty` every test fails, which is the
 // intended, deterministic behaviour. CI installs `ty` (see the workflows).
 
 #[test]
-fn ty_resolves_inherited_method() {
+fn builtin_resolves_inherited_method() {
     assert_error(
         r"
 class A:
@@ -1133,6 +1133,27 @@ B().method(1)
         8,
         "Too many positional",
     );
+}
+
+#[test]
+fn builtin_resolves_imported_inherited_method() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "base.py",
+            "class A:\n    def method(self, a: int) -> None: ...\n",
+        )
+        .main(
+            r"
+from base import A
+
+class B(A):
+    pass
+
+B().method(1)
+",
+        );
+    assert_error_at(&project, 7, "Too many positional");
 }
 
 #[test]

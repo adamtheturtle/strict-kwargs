@@ -837,12 +837,30 @@ fn fix_without_ty_is_fatal_exit_two() {
     assert_eq!(project.read("main.py"), source);
 }
 
-// An inherited-method call the built-in resolver cannot resolve, so it is
-// deferred to `ty` — exercising the per-file driver where a failed lazy
+// A return-typed method call the built-in resolver cannot resolve, so it is
+// deferred to `ty`, exercising the per-file driver where a failed lazy
 // server start becomes the fatal `TyServerFailed`.
 #[cfg(unix)]
 const TY_DEFERRED: &str =
+    "class A:\n    def m(self, a: int) -> None: ...\n\ndef make() -> A:\n    return A()\n\nmake().m(1)\n";
+
+// Inherited methods are handled by the built-in resolver, so this should not
+// attempt to start the lazy `ty server` even when the only discoverable `ty`
+// is the intentionally broken shim.
+#[cfg(unix)]
+const BUILTIN_INHERITED_METHOD: &str =
     "class A:\n    def m(self, a: int) -> None: ...\n\nclass B(A):\n    pass\n\nB().m(1)\n";
+
+#[cfg(unix)]
+#[test]
+fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
+    let project = Project::new().write("main.py", BUILTIN_INHERITED_METHOD);
+    let output = project.run_with_broken_ty_server(&["main.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("Too many positional"), "stderr: {err}");
+    assert!(!err.contains("ty server"), "stderr: {err}");
+}
 
 #[cfg(unix)]
 #[test]
