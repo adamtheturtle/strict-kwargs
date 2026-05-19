@@ -308,28 +308,10 @@ fn fixes_builtins() {
 fn fixes_ty_resolved_stdlib_single_signature() {
     // Issue #94: stdlib calls that only ty resolves can be rewritten when
     // ty's hover gives one concrete, fully named signature.
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "import math\n\nmath.isclose(1.0, 2.0, 0.1)\n",
         "import math\n\nmath.isclose(a=1.0, b=2.0, rel_tol=0.1)\n",
-        FixOptIns {
-            ty_resolved: true,
-            ..FixOptIns::conservative()
-        },
     );
-}
-
-#[test]
-fn default_fix_declines_ty_resolved_stdlib_single_signature() {
-    let proj = project("from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n");
-    let outcome = proj.fix_main_result().expect("fix");
-    assert!(outcome.files.is_empty());
-    assert_eq!(outcome.declined, 1);
-    assert_eq!(outcome.declined_reasons.len(), 1);
-    assert_eq!(
-        outcome.declined_reasons[0].reason,
-        DeclinedFixReason::TyResolved
-    );
-    assert_eq!(outcome.declined_reasons[0].count, 1);
 }
 
 #[test]
@@ -337,13 +319,9 @@ fn fixes_ty_resolved_inferred_receiver() {
     // `p` is inferred from `Path.cwd()`, not from a direct constructor call
     // the built-in resolver tracks. ty's bound-method hover maps the call-site
     // argument directly to `suffix`.
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(\".txt\")\n",
         "from pathlib import Path\n\np = Path.cwd()\np.with_suffix(suffix=\".txt\")\n",
-        FixOptIns {
-            ty_resolved: true,
-            ..FixOptIns::conservative()
-        },
     );
 }
 
@@ -373,15 +351,11 @@ fn fixes_ty_resolved_third_party_env_package() {
     let proj = project("import extdep\n\nextdep.configure(\"localhost\", 8080)\n");
     let main = proj.root.join("main.py");
     let config = Config::load(&proj.root).expect("valid config");
-    let outcome = fix_paths_with_opt_ins(
+    let outcome = fix_paths(
         &proj.root,
         std::slice::from_ref(&main),
         &config,
         Some(venv.as_path()),
-        FixOptIns {
-            ty_resolved: true,
-            ..FixOptIns::conservative()
-        },
     )
     .expect("fix");
     assert_eq!(outcome.declined, 0);
@@ -397,7 +371,7 @@ fn fixes_protocol_callable_value_returned_by_factory() {
     // Follow-up to issue #115: when ty can resolve the callable value to a
     // Protocol `__call__`, use that call signature, not the factory's
     // parameter names.
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "from typing import Protocol\n\n\
          class Formatter(Protocol):\n    def __call__(self, value: str) -> str: ...\n\n\
          def build_formatter(quote_char: str) -> Formatter: ...\n\n\
@@ -410,10 +384,6 @@ fn fixes_protocol_callable_value_returned_by_factory() {
          formatter = build_formatter(quote_char='\"')\n\
          value = 'hello'\n\
          formatter(value=value)\n",
-        FixOptIns {
-            ty_resolved: true,
-            ..FixOptIns::conservative()
-        },
     );
 }
 
@@ -433,7 +403,7 @@ fn does_not_fix_annotated_callable_value_returned_by_factory() {
 
 #[test]
 fn fixes_callable_instance_value_returned_by_factory() {
-    assert_fixed_with_opt_ins(
+    assert_fixed(
         "class Formatter:\n    def __call__(self, value: str) -> str: ...\n\n\
          def build_formatter(quote_char: str) -> Formatter: ...\n\n\
          formatter = build_formatter(quote_char='\"')\n\
@@ -444,10 +414,6 @@ fn fixes_callable_instance_value_returned_by_factory() {
          formatter = build_formatter(quote_char='\"')\n\
          value = 'hello'\n\
          formatter(value=value)\n",
-        FixOptIns {
-            ty_resolved: true,
-            ..FixOptIns::conservative()
-        },
     );
 }
 

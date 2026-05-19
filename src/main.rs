@@ -90,10 +90,6 @@ struct FixArgs {
     #[arg(long)]
     fix_synthesized_constructors: bool,
 
-    /// Rewrite calls resolved only by ty's environment-dependent inference.
-    #[arg(long)]
-    fix_ty_resolved: bool,
-
     /// Rewrite overloaded calls when ty selects one precise overload arm.
     #[arg(long)]
     fix_unambiguous_overloads: bool,
@@ -214,7 +210,6 @@ fn diff_color() -> bool {
 const fn fix_opt_ins_from_args(args: &FixArgs) -> FixOptIns {
     FixOptIns {
         synthesized_constructors: args.fix_synthesized_constructors,
-        ty_resolved: args.fix_ty_resolved,
         unambiguous_overloads: args.fix_unambiguous_overloads,
     }
 }
@@ -223,11 +218,6 @@ fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
     if opt_ins.synthesized_constructors {
         eprintln!(
             "strict-kwargs: fix opt-in enabled: synthesized constructors may change runtime behavior"
-        );
-    }
-    if opt_ins.ty_resolved {
-        eprintln!(
-            "strict-kwargs: fix opt-in enabled: ty-resolved calls depend on ty and the selected Python environment"
         );
     }
     if opt_ins.unambiguous_overloads {

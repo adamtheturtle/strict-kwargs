@@ -2272,7 +2272,9 @@ fn record_ty_fix(
         return;
     };
     if !fixes.opt_ins.allows(category) {
-        fixes.declined_fix_reasons.push(category.declined_reason());
+        if let Some(reason) = category.declined_reason() {
+            fixes.declined_fix_reasons.push(reason);
+        }
         return;
     }
     let Some(fix_ast) = fix_ast else {
@@ -3093,10 +3095,7 @@ mod tests {
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
             declined_fix_reasons: &mut declined_fix_reasons,
-            opt_ins: FixOptIns {
-                ty_resolved: true,
-                ..FixOptIns::conservative()
-            },
+            opt_ins: FixOptIns::conservative(),
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let fix_ast = TyFixAst {

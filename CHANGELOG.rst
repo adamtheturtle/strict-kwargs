@@ -10,16 +10,17 @@ Next
 
 - Add category-specific ``strict-kwargs fix`` opt-ins instead of a blanket
   unsafe mode. ``--fix-synthesized-constructors`` rewrites dataclass and
-  ``NamedTuple`` calls from synthesized field models, ``--fix-ty-resolved``
-  rewrites ty-derived parameter mappings, and
+  ``NamedTuple`` calls from synthesized field models, and
   ``--fix-unambiguous-overloads`` rewrites overloads when ty selects one
-  precise arm. Each can be used with or without ``--diff``.
+  precise arm. Each can be used with or without ``--diff``; ordinary
+  single-signature fixes remain default-on regardless of which resolver found
+  the signature.
 
 - ``strict-kwargs fix`` now reports declined rewrite reasons by category on
   stderr, including synthesized constructors, unresolved overloads,
   ambiguous ``ty`` hovers, goto-definition-only ``ty`` resolutions,
-  ty-resolved calls, unambiguous overloads, unsafe call-site unpacking, and
-  unsupported signature shapes. ``--diff`` stdout remains patch-only.
+  unambiguous overloads, unsafe call-site unpacking, and unsupported signature
+  shapes. ``--diff`` stdout remains patch-only.
 
 2026.5.19
 ---------

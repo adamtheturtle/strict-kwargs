@@ -15,8 +15,6 @@ pub struct FixOptIns {
     /// Rewrite dataclass and `NamedTuple` constructors whose signatures were
     /// synthesized from class fields.
     pub synthesized_constructors: bool,
-    /// Rewrite calls whose parameter mapping comes from `ty`.
-    pub ty_resolved: bool,
     /// Rewrite overloaded calls when `ty` selects one precise overload arm.
     pub unambiguous_overloads: bool,
 }
@@ -27,7 +25,6 @@ impl FixOptIns {
     pub const fn conservative() -> Self {
         Self {
             synthesized_constructors: false,
-            ty_resolved: false,
             unambiguous_overloads: false,
         }
     }
@@ -35,7 +32,7 @@ impl FixOptIns {
     pub(crate) const fn allows(self, category: FixCategory) -> bool {
         match category {
             FixCategory::SynthesizedConstructor => self.synthesized_constructors,
-            FixCategory::TyResolved => self.ty_resolved,
+            FixCategory::TyResolved => true,
             FixCategory::UnambiguousOverload => self.unambiguous_overloads,
         }
     }
@@ -49,11 +46,11 @@ pub enum FixCategory {
 }
 
 impl FixCategory {
-    pub const fn declined_reason(self) -> DeclinedFixReason {
+    pub const fn declined_reason(self) -> Option<DeclinedFixReason> {
         match self {
-            Self::SynthesizedConstructor => DeclinedFixReason::SynthesizedConstructor,
-            Self::TyResolved => DeclinedFixReason::TyResolved,
-            Self::UnambiguousOverload => DeclinedFixReason::UnambiguousOverload,
+            Self::SynthesizedConstructor => Some(DeclinedFixReason::SynthesizedConstructor),
+            Self::UnambiguousOverload => Some(DeclinedFixReason::UnambiguousOverload),
+            Self::TyResolved => None,
         }
     }
 }
@@ -72,9 +69,6 @@ pub enum DeclinedFixReason {
     /// `ty` could only resolve the call via goto-definition, not a concrete
     /// call-site hover signature suitable for rewriting.
     TyDefinitionOnly,
-    /// The call was resolved by `ty`; default `fix` keeps those
-    /// environment-dependent rewrites opt-in.
-    TyResolved,
     /// An overloaded call was narrowed to one rewriteable arm; default `fix`
     /// keeps overload-derived parameter mappings opt-in.
     UnambiguousOverload,
@@ -87,12 +81,11 @@ pub enum DeclinedFixReason {
 }
 
 impl DeclinedFixReason {
-    pub(crate) const ORDERED: [Self; 8] = [
+    pub(crate) const ORDERED: [Self; 7] = [
         Self::SynthesizedConstructor,
         Self::UnresolvedOverload,
         Self::AmbiguousTyHover,
         Self::TyDefinitionOnly,
-        Self::TyResolved,
         Self::UnambiguousOverload,
         Self::UnsafeCallSiteUnpacking,
         Self::UnsupportedSignatureShape,
@@ -106,7 +99,6 @@ impl DeclinedFixReason {
             Self::UnresolvedOverload => "unresolved overload",
             Self::AmbiguousTyHover => "ambiguous ty hover",
             Self::TyDefinitionOnly => "ty/goto-definition-only resolution",
-            Self::TyResolved => "ty-resolved call",
             Self::UnambiguousOverload => "unambiguous overload",
             Self::UnsafeCallSiteUnpacking => "unsafe call-site unpacking",
             Self::UnsupportedSignatureShape => "unsupported signature shape",
