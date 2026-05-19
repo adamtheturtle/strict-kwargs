@@ -849,3 +849,39 @@ Child(base=1)
         "keyword construction should remain accepted; got: {messages:?}"
     );
 }
+
+#[test]
+fn namedtuple_subclass_inherits_fields_from_imported_base() {
+    let project = TestProject::new()
+        .dep(
+            "models.py",
+            r"
+from typing import NamedTuple
+
+class Base(NamedTuple):
+    base: int
+",
+        )
+        .file(
+            "app.py",
+            r"
+from models import Base
+
+class Child(Base):
+    child: int
+
+Child(1)
+Child(base=1)
+",
+        );
+    let messages = project.check();
+    assert!(
+        has(&messages, "app.py:7:", "Too many positional"),
+        "imported NamedTuple base fields must be modeled; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "keyword construction should remain accepted; got: {messages:?}"
+    );
+}

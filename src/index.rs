@@ -214,9 +214,25 @@ impl DefinitionIndex {
     /// definitions and its re-export edges. Shared by the eager pass
     /// (builtins / checked files) and lazy [`Self::ensure_module`].
     fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
+        self.index_source_with_imported_base_preload(module_name, is_package, stmts, true);
+    }
+
+    fn index_source_with_imported_base_preload(
+        &self,
+        module_name: &str,
+        is_package: bool,
+        stmts: &[Stmt],
+        preload_imported_bases: bool,
+    ) {
         let mut active_modules = FxHashSet::default();
         active_modules.insert(module_name.to_string());
-        self.index_source_with_active(module_name, is_package, stmts, &mut active_modules);
+        self.index_source_with_active(
+            module_name,
+            is_package,
+            stmts,
+            preload_imported_bases,
+            &mut active_modules,
+        );
     }
 
     fn index_source_with_active(
@@ -224,10 +240,17 @@ impl DefinitionIndex {
         module_name: &str,
         is_package: bool,
         stmts: &[Stmt],
+        preload_imported_bases: bool,
         active_modules: &mut FxHashSet<String>,
     ) {
         let mut collected = Collected::default();
-        collect(stmts, module_name, is_package, &mut collected);
+        collect(
+            stmts,
+            module_name,
+            is_package,
+            preload_imported_bases,
+            &mut collected,
+        );
         let mut query_budget = MAX_QUERY_MODULES;
         for base in &collected.data_constructor_bases {
             if !same_module_or_nested(module_name, base) {
@@ -235,12 +258,17 @@ impl DefinitionIndex {
             }
         }
         let mut inner = self.lock();
+        let track_data_constructors = collected.has_data_constructor_classes
+            || collected
+                .data_constructor_bases
+                .iter()
+                .any(|base| inner.store.data_models.contains_key(base));
         index_module(
             &mut inner.store,
             module_name,
             is_package,
             stmts,
-            collected.has_data_constructor_classes,
+            track_data_constructors,
         );
         Self::push_edges(&mut inner, collected.reexports);
         // Release before returning so a parallel worker's next query does not
@@ -325,7 +353,12 @@ impl DefinitionIndex {
         let Ok(parsed) = parsed else {
             return;
         };
-        self.index_source(dotted, m.is_package, parsed.suite());
+        self.index_source_with_imported_base_preload(
+            dotted,
+            m.is_package,
+            parsed.suite(),
+            m.guard_nesting,
+        );
         drop(claim);
     }
 
@@ -386,7 +419,13 @@ impl DefinitionIndex {
             return;
         };
         active_modules.insert(dotted.to_string());
-        self.index_source_with_active(dotted, m.is_package, parsed.suite(), active_modules);
+        self.index_source_with_active(
+            dotted,
+            m.is_package,
+            parsed.suite(),
+            m.guard_nesting,
+            active_modules,
+        );
         active_modules.remove(dotted);
         drop(claim);
     }
@@ -599,6 +638,7 @@ const MODULE_BUDGET: usize = 4000;
 struct Collected {
     reexports: Vec<(String, String)>,
     bindings: FxHashMap<String, String>,
+    preload_imported_bases: bool,
     has_data_constructor_classes: bool,
     data_constructor_bases: Vec<String>,
 }
@@ -642,7 +682,14 @@ pub fn build_index(
 
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
 /// resolving relative imports against ``module_name``/``is_package``.
-fn collect(stmts: &[Stmt], module_name: &str, is_package: bool, out: &mut Collected) {
+fn collect(
+    stmts: &[Stmt],
+    module_name: &str,
+    is_package: bool,
+    preload_imported_bases: bool,
+    out: &mut Collected,
+) {
+    out.preload_imported_bases = preload_imported_bases;
     let mut bindings: FxHashMap<String, String> = FxHashMap::default();
     collect_scoped(
         stmts,
@@ -731,24 +778,41 @@ fn resolve_base_name(
 }
 
 #[cfg_attr(coverage, coverage(off))]
+fn resolve_imported_base_name(
+    base: &Expr,
+    scope_name: &str,
+    bindings: &FxHashMap<String, String>,
+) -> Option<String> {
+    let segments = reference_path(base_reference(base))?;
+    let head = segments.first()?;
+    bindings
+        .contains_key(head)
+        .then(|| resolve_reference(bindings, scope_name, &segments))
+        .flatten()
+}
+
+#[cfg_attr(coverage, coverage(off))]
 fn collect_class_data_constructor_bases(
     class_def: &ast::StmtClassDef,
     scope_name: &str,
     bindings: &FxHashMap<String, String>,
     out: &mut Vec<String>,
+    preload_imported_bases: bool,
 ) -> bool {
-    if dataclass_decorator(class_def).is_none() && !is_namedtuple_class(class_def) {
-        return false;
-    }
+    let directly_data_constructor =
+        dataclass_decorator(class_def).is_some() || is_namedtuple_class(class_def);
     if let Some(arguments) = &class_def.arguments {
-        out.extend(
-            arguments
-                .args
-                .iter()
-                .filter_map(|base| resolve_base_name(base, scope_name, bindings)),
-        );
+        out.extend(arguments.args.iter().filter_map(|base| {
+            if directly_data_constructor {
+                resolve_base_name(base, scope_name, bindings)
+            } else if preload_imported_bases {
+                resolve_imported_base_name(base, scope_name, bindings)
+            } else {
+                None
+            }
+        }));
     }
-    true
+    directly_data_constructor
 }
 
 /// `module_scope` is true only at true module level. Imports nested inside a
@@ -874,6 +938,7 @@ fn collect_scoped(
                     scope_name,
                     bindings,
                     &mut out.data_constructor_bases,
+                    out.preload_imported_bases,
                 ) {
                     out.has_data_constructor_classes = true;
                 }
