@@ -10,7 +10,7 @@
 // See `lib.rs` for the library-crate rationale.
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
-use std::io::IsTerminal as _;
+use std::io::{BufWriter, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -183,11 +183,14 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
         python_env.as_deref(),
         cache_dir.as_deref(),
     )?;
+    let stderr = std::io::stderr();
+    let mut stderr = BufWriter::new(stderr.lock());
     let mut failed = false;
     for diagnostic in &diagnostics {
-        eprintln!("{}", diagnostic.display_path());
+        writeln!(stderr, "{}", diagnostic.display_path())?;
         failed = true;
     }
+    stderr.flush()?;
     if failed {
         Ok(ExitCode::from(1))
     } else {
