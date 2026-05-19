@@ -89,7 +89,7 @@ impl std::fmt::Display for CheckError {
                 formatter,
                 "the `ty` type-inference backend is required but no `ty` \
                  executable was found on PATH; install it (e.g. `uv tool \
-                 install ty`) or see docs/ARCHITECTURE.md"
+                 install ty`)"
             ),
             Self::TyServerFailed => write!(
                 formatter,

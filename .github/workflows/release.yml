@@ -94,13 +94,19 @@ jobs:
             exit 1
           fi
 
-      - name: Set package version
+      - name: Set package and README versions
         env:
           NEW_TAG: ${{ steps.version.outputs.release }}
         run: |
+          pre_commit_rev="${NEW_TAG/-post./.post}"
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" Cargo.toml
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
-          rm -f Cargo.toml.bak pyproject.toml.bak
+          sed -i.bak -E "s/^(    rev: ).*(  # pin to a release tag)$/\1${pre_commit_rev}\2/" README.md
+          if ! grep -Fq "    rev: ${pre_commit_rev}  # pin to a release tag" README.md; then
+            echo "Error: README pre-commit hook revision was not updated"
+            exit 1
+          fi
+          rm -f Cargo.toml.bak pyproject.toml.bak README.md.bak
           cargo metadata --format-version 1 >/dev/null
           uv lock
 
@@ -108,7 +114,7 @@ jobs:
         id: commit
         with:
           commit_message: Bump CHANGELOG and version for release
-          file_pattern: CHANGELOG.rst Cargo.toml Cargo.lock pyproject.toml uv.lock
+          file_pattern: CHANGELOG.rst Cargo.toml Cargo.lock pyproject.toml uv.lock README.md
           skip_dirty_check: true
 
       - name: Bump version and push tag

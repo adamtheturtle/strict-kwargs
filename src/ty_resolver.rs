@@ -95,8 +95,7 @@ type FxPending = std::collections::HashMap<i64, Value>;
 /// `ty server` accepts dynamic options during initialize for clients (like
 /// this one) that do not implement `workspace/configuration`. A bad path is
 /// not validated here: ty just resolves nothing against it, so the fallback
-/// fails closed (no wrong diagnostics) exactly as when no env is configured
-/// (see `docs/ARCHITECTURE.md`, "Forwarding an explicit environment").
+/// fails closed (no wrong diagnostics) exactly as when no env is configured.
 fn initialize_params(project_root: &Path, python_env: Option<&Path>) -> Value {
     let mut params = json!({
         "processId": std::process::id(),
@@ -124,9 +123,8 @@ impl TyResolver {
     /// is forwarded to `ty server` so the inference fallback resolves
     /// third-party imports against that environment without the user editing
     /// ty's own config. `ty server` takes no CLI args, so this is delivered
-    /// over LSP via `initializationOptions.configuration.environment.python`
-    /// — the inline-config channel that mirrors ty's `[environment]` table
-    /// (see `docs/ARCHITECTURE.md`, "Forwarding an explicit environment").
+    /// over LSP via `initializationOptions.configuration.environment.python`,
+    /// the inline-config channel that mirrors ty's `[environment]` table.
     /// A bad path is not validated here: ty just resolves nothing against
     /// it, so the fallback fails closed (no wrong diagnostics) exactly as
     /// when no env is configured.
