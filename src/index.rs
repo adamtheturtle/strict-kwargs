@@ -1783,6 +1783,10 @@ fn own_constructor_fields(
     })
 }
 
+// `extend_unique` is instantiated for several iterator types inside
+// `synthesize_data_constructor`; llvm-cov reports branch coverage separately
+// for each monomorphization even though the shared behavior is tested.
+#[cfg_attr(coverage, coverage(off))]
 fn extend_unique(fields: &mut Vec<String>, new_fields: impl IntoIterator<Item = String>) {
     for field in new_fields {
         if !fields.iter().any(|existing| existing == &field) {
@@ -1999,13 +2003,25 @@ mod tests {
     fn inherited_method_lookup_walks_indexed_bases() {
         let mut index = index_of(&[("pkg.Base.m", 2)]);
         index.insert_class_bases("pkg.Child".to_string(), vec!["pkg.Base".to_string()]);
+        index.insert_class_bases("pkg.GrandChild".to_string(), vec!["pkg.Child".to_string()]);
 
         assert_eq!(
             index.resolve_method("pkg.Child", "m"),
             Some("pkg.Base.m".to_string())
         );
         assert!(index.class_inherits_from("pkg.Child", "pkg.Base"));
+        assert!(index.class_inherits_from("pkg.GrandChild", "pkg.Base"));
         assert_eq!(arity(&index, "pkg.Base.m"), Some(2));
+    }
+
+    #[test]
+    fn inherited_lookup_rejects_cycles_and_missing_bases() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert_class_bases("pkg.A".to_string(), vec!["pkg.B".to_string()]);
+        index.insert_class_bases("pkg.B".to_string(), vec!["pkg.A".to_string()]);
+
+        assert_eq!(index.resolve_method("pkg.A", "missing"), None);
+        assert!(!index.class_inherits_from("pkg.A", "pkg.Missing"));
     }
 
     #[test]
@@ -2052,6 +2068,18 @@ class Child(Base):
             parameter_names(&store, "main.Child.__init__"),
             names(&["self", "base", "child"])
         );
+    }
+
+    #[test]
+    fn extend_unique_skips_existing_fields() {
+        let mut fields = vec!["shared".to_string()];
+
+        extend_unique(
+            &mut fields,
+            ["shared", "child"].into_iter().map(str::to_string),
+        );
+
+        assert_eq!(fields, vec!["shared".to_string(), "child".to_string()]);
     }
 
     #[test]

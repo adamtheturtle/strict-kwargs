@@ -503,6 +503,27 @@ fn check_invalid_config_is_fatal_exit_two() {
 }
 
 #[test]
+fn fix_invalid_config_is_fatal_exit_two() {
+    // Same config validation as `check`: `fix` must not silently run with
+    // defaults when the user supplied an invalid table.
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nignore_names = \"not-a-list\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["fix", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.contains("pyproject.toml"), "stderr: {err}");
+    assert!(
+        err.contains("invalid `[tool.strict_kwargs]` table"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
 fn check_invalid_python_warns_but_continues() {
     // A nonexistent `--python` no longer silently disables the explicit
     // environment: it is reported, then the run falls back to ty's own
