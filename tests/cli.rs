@@ -176,6 +176,21 @@ fn check_explicit_project_root_flag() {
 }
 
 #[test]
+fn check_required_version_mismatch_is_fatal_exit_two() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nrequired_version = \">=9999.0.0\"\n",
+        )
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(err.contains("required_version"), "stderr: {err}");
+    assert!(err.contains("not satisfied"), "stderr: {err}");
+}
+
+#[test]
 fn check_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
     let output = project.run(&["broken.py"]);

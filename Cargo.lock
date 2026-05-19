@@ -1117,6 +1117,7 @@ dependencies = [
  "rustpython-ruff_python_ast",
  "rustpython-ruff_python_parser",
  "rustpython-ruff_text_size",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
