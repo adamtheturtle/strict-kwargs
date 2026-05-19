@@ -1816,7 +1816,7 @@ impl DefinitionIndex {
         Self::push_edges(inner, edges);
     }
 
-    fn insert(&mut self, fullname: String, signature: Signature) {
+    pub(crate) fn insert(&mut self, fullname: String, signature: Signature) {
         self.inner
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1824,7 +1824,7 @@ impl DefinitionIndex {
             .insert(fullname, signature);
     }
 
-    fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
+    pub(crate) fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
         self.inner
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)

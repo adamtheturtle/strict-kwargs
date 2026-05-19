@@ -44,6 +44,24 @@ enum IfBranchTraversal {
     LocalBody,
 }
 
+fn decorator_tail(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+        Expr::Call(ast::ExprCall { func, .. }) => decorator_tail(func),
+        _ => None,
+    }
+}
+
+fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list.iter().any(|decorator| {
+        matches!(
+            decorator_tail(&decorator.expression),
+            Some("staticmethod" | "classmethod")
+        )
+    })
+}
+
 /// Check every Python file reachable from `paths` and return the violations.
 ///
 /// # Errors
@@ -700,6 +718,7 @@ struct CallChecker<'a> {
     /// `ty` fallback then merges them.
     diagnostics: Vec<Diagnostic>,
     scopes: Vec<Scope>,
+    class_stack: Vec<String>,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
     ty_pending: Vec<PendingTy>,
@@ -779,6 +798,7 @@ impl<'a> CallChecker<'a> {
             fix_opt_ins,
             diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
+            class_stack: Vec::new(),
             ty_pending: Vec::new(),
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
@@ -823,6 +843,76 @@ impl<'a> CallChecker<'a> {
 
     fn mark_param_opaque(&mut self, name: &str) {
         self.current_scope().opaque_params.insert(name.to_string());
+    }
+
+    fn bind_function_parameters(&mut self, parameters: &ast::Parameters) {
+        for param in parameters
+            .posonlyargs
+            .iter()
+            .chain(parameters.args.iter())
+            .chain(parameters.kwonlyargs.iter())
+        {
+            self.mark_param_opaque_and_annotation(
+                param.parameter.name.as_str(),
+                param.parameter.annotation.as_deref(),
+            );
+        }
+        if let Some(vararg) = &parameters.vararg {
+            self.mark_param_opaque_and_annotation(
+                vararg.name.as_str(),
+                vararg.annotation.as_deref(),
+            );
+        }
+        if let Some(kwarg) = &parameters.kwarg {
+            self.mark_param_opaque_and_annotation(kwarg.name.as_str(), kwarg.annotation.as_deref());
+        }
+    }
+
+    fn leading_self_parameter(parameters: &ast::Parameters) -> Option<&str> {
+        parameters
+            .posonlyargs
+            .first()
+            .or_else(|| parameters.args.first())
+            .map(|param| param.parameter.name.as_str())
+            .filter(|name| *name == "self")
+    }
+
+    fn bind_method_parameters(
+        &mut self,
+        parameters: &ast::Parameters,
+        class_fullname: &str,
+        bind_self: bool,
+    ) {
+        let self_parameter = if bind_self {
+            Self::leading_self_parameter(parameters)
+        } else {
+            None
+        };
+        for param in parameters
+            .posonlyargs
+            .iter()
+            .chain(parameters.args.iter())
+            .chain(parameters.kwonlyargs.iter())
+        {
+            let name = param.parameter.name.as_str();
+            if Some(name) == self_parameter {
+                self.record_instance(name, class_fullname.to_string());
+                if let Some(annotation) = param.parameter.annotation.as_deref() {
+                    self.define_annotation(name, annotation);
+                }
+            } else {
+                self.mark_param_opaque_and_annotation(name, param.parameter.annotation.as_deref());
+            }
+        }
+        if let Some(vararg) = &parameters.vararg {
+            self.mark_param_opaque_and_annotation(
+                vararg.name.as_str(),
+                vararg.annotation.as_deref(),
+            );
+        }
+        if let Some(kwarg) = &parameters.kwarg {
+            self.mark_param_opaque_and_annotation(kwarg.name.as_str(), kwarg.annotation.as_deref());
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1555,29 +1645,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // a Callable-typed (or otherwise unresolvable) parameter
                 // don't fall back to a module-level function with the same
                 // name (issue #71).
-                for param in parameters
-                    .posonlyargs
-                    .iter()
-                    .chain(parameters.args.iter())
-                    .chain(parameters.kwonlyargs.iter())
-                {
-                    self.mark_param_opaque_and_annotation(
-                        param.parameter.name.as_str(),
-                        param.parameter.annotation.as_deref(),
-                    );
-                }
-                if let Some(vararg) = &parameters.vararg {
-                    self.mark_param_opaque_and_annotation(
-                        vararg.name.as_str(),
-                        vararg.annotation.as_deref(),
-                    );
-                }
-                if let Some(kwarg) = &parameters.kwarg {
-                    self.mark_param_opaque_and_annotation(
-                        kwarg.name.as_str(),
-                        kwarg.annotation.as_deref(),
-                    );
-                }
+                self.bind_function_parameters(parameters);
                 for inner in body {
                     self.visit_body_stmt(inner);
                 }
@@ -1592,8 +1660,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 for decorator in decorator_list {
                     self.visit_expr(&decorator.expression);
                 }
-                let class_fullname = format!("{}.{}", self.module_name, name);
-                self.define(name, class_fullname);
+                let class_fullname = self.class_stack.last().map_or_else(
+                    || format!("{}.{}", self.module_name, name),
+                    |parent| format!("{parent}.{name}"),
+                );
+                self.define(name, class_fullname.clone());
+                self.class_stack.push(class_fullname.clone());
                 self.push_scope();
                 for inner in body {
                     match inner {
@@ -1607,29 +1679,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 self.visit_expr(&decorator.expression);
                             }
                             self.push_scope();
-                            for param in method_parameters
-                                .posonlyargs
-                                .iter()
-                                .chain(method_parameters.args.iter())
-                                .chain(method_parameters.kwonlyargs.iter())
-                            {
-                                self.mark_param_opaque_and_annotation(
-                                    param.parameter.name.as_str(),
-                                    param.parameter.annotation.as_deref(),
-                                );
-                            }
-                            if let Some(vararg) = &method_parameters.vararg {
-                                self.mark_param_opaque_and_annotation(
-                                    vararg.name.as_str(),
-                                    vararg.annotation.as_deref(),
-                                );
-                            }
-                            if let Some(kwarg) = &method_parameters.kwarg {
-                                self.mark_param_opaque_and_annotation(
-                                    kwarg.name.as_str(),
-                                    kwarg.annotation.as_deref(),
-                                );
-                            }
+                            let binds_instance_self =
+                                !has_staticmethod_or_classmethod_decorator(method_decorators);
+                            self.bind_method_parameters(
+                                method_parameters,
+                                &class_fullname,
+                                binds_instance_self,
+                            );
                             for method_stmt in method_body {
                                 self.visit_body_stmt(method_stmt);
                             }
@@ -1639,6 +1695,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
                 self.pop_scope();
+                self.class_stack.pop();
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 if let Some(class_fullname) = self.class_from_constructor(value) {
@@ -3782,8 +3839,95 @@ while cond:
     use super::CallChecker;
     use crate::config::Config;
     use crate::index::DefinitionIndex;
+    use ruff_python_ast::visitor::Visitor;
     use ruff_python_ast::Expr;
     use std::path::PathBuf;
+
+    fn run_checker_with_index(source: &str, index: &DefinitionIndex) -> (usize, usize) {
+        let config = Config::default();
+        let parsed = parse_module(source).expect("parse source");
+        let mut checker = CallChecker::new(
+            PathBuf::from("main.py"),
+            "main".to_string(),
+            false,
+            source,
+            parsed.tokens(),
+            index,
+            &config,
+            FixOptIns::default(),
+        );
+        for stmt in parsed.suite() {
+            checker.visit_stmt(stmt);
+        }
+        (checker.diagnostics.len(), checker.ty_pending.len())
+    }
+
+    #[test]
+    fn method_self_binding_resolves_inherited_self_calls_without_ty_fallback() {
+        let source = "\
+class Base:
+    def method(self, a: int) -> None: ...
+
+class Child(Base):
+    def check(self) -> None:
+        self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.Base.method".to_string(), sig(&["self", "a"]));
+        index.insert_class_bases("main.Child".to_string(), vec!["main.Base".to_string()]);
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn method_self_binding_uses_nested_class_fullname() {
+        let source = "\
+class Outer:
+    class Base:
+        def method(self, a: int) -> None: ...
+
+    class Child(Base):
+        def check(self) -> None:
+            self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.Outer.Base.method".to_string(), sig(&["self", "a"]));
+        index.insert_class_bases(
+            "main.Outer.Child".to_string(),
+            vec!["main.Outer.Base".to_string()],
+        );
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn staticmethod_and_classmethod_do_not_bind_literal_self_as_instance() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+    @staticmethod
+    def static(self) -> None:
+        self.method(1)
+
+    @classmethod
+    def class_method(self) -> None:
+        self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 2);
+    }
 
     /// Build a bare `CallChecker`, let `setup` populate its scopes, then
     /// evaluate `is_unbound_class_method_call` for the single call in
