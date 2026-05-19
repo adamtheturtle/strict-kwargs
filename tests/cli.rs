@@ -549,6 +549,25 @@ fn fix_diff_prints_patch_without_writing() {
 }
 
 #[test]
+fn fix_diff_plural_summary() {
+    let project = Project::new()
+        .write(
+            "a.py",
+            "def f(a: int, b: int) -> None: ...\nf(1, 2)\nf(3, 4)\n",
+        )
+        .write("b.py", "def g(a: int) -> None: ...\ng(9)\n");
+    let output = project.run(&["fix", "--diff", "a.py", "b.py"]);
+    assert_eq!(code(&output), 0);
+    let err = stderr(&output);
+    assert!(
+        err.contains("would fix 3 calls in 2 files"),
+        "stderr: {err}"
+    );
+    assert!(project.read("a.py").contains("f(1, 2)"));
+    assert!(project.read("b.py").contains("g(9)"));
+}
+
+#[test]
 fn fix_single_call_singular_messages() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["fix", "main.py"]);
