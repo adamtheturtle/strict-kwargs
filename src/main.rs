@@ -17,8 +17,10 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use strict_kwargs::{
     check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    DeclinedFixReasonCount, FileFix, FixOptIns,
+    DeclinedFixReasonCount, Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
+
+const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -62,10 +64,14 @@ struct CheckArgs {
 
     /// Directory for the persistent on-disk diagnostic cache.  When set,
     /// resolved results are stored here and reused on future runs where
-    /// the file and its environment are unchanged.  Omit to disable the
-    /// cache (every run is cold, the previous behaviour).
+    /// the file and its environment are unchanged.  Takes precedence over
+    /// ``[tool.strict_kwargs].cache_dir`` and ``STRICT_KWARGS_CACHE_DIR``.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+
+    /// Diagnostic output format for check results.
+    #[arg(long, value_enum)]
+    output_format: Option<OutputFormat>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -138,6 +144,29 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> PathBuf {
     })
 }
 
+fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
+    if cache_dir.is_absolute() {
+        cache_dir.clone()
+    } else {
+        project_root.join(cache_dir)
+    }
+}
+
+fn effective_cache_dir(
+    cli_cache_dir: Option<PathBuf>,
+    config: &Config,
+    project_root: &std::path::Path,
+) -> Option<PathBuf> {
+    cli_cache_dir
+        .or_else(|| {
+            config
+                .cache_dir
+                .as_ref()
+                .map(|dir| resolve_configured_cache_dir(project_root, dir))
+        })
+        .or_else(|| std::env::var_os(CACHE_DIR_ENV_VAR).map(PathBuf::from))
+}
+
 fn run() -> Result<ExitCode, CheckError> {
     let cli = Cli::parse();
     match cli.command {
@@ -149,24 +178,78 @@ fn run() -> Result<ExitCode, CheckError> {
 fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
+    let output_format = args.output_format.unwrap_or(config.output_format);
     let python_env = resolve_python_env(args.python);
+    let cache_dir = effective_cache_dir(args.cache_dir, &config, &project_root);
     let diagnostics = check_paths(
         &project_root,
         &args.paths,
         &config,
         python_env.as_deref(),
-        args.cache_dir.as_deref(),
+        cache_dir.as_deref(),
     )?;
-    let mut failed = false;
-    for diagnostic in &diagnostics {
-        eprintln!("{}", diagnostic.display_path());
-        failed = true;
-    }
-    if failed {
-        Ok(ExitCode::from(1))
-    } else {
+    report_check_diagnostics(&diagnostics, output_format);
+    if diagnostics.is_empty() {
         Ok(ExitCode::from(0))
+    } else {
+        Ok(ExitCode::from(1))
     }
+}
+
+#[derive(serde::Serialize)]
+struct JsonDiagnostic<'a> {
+    path: String,
+    line: usize,
+    column: usize,
+    callee: &'a str,
+    positional_count: usize,
+    max_positional_count: usize,
+}
+
+impl<'a> From<&'a Diagnostic> for JsonDiagnostic<'a> {
+    fn from(diagnostic: &'a Diagnostic) -> Self {
+        Self {
+            path: diagnostic.path.display().to_string(),
+            line: diagnostic.line,
+            column: diagnostic.column,
+            callee: &diagnostic.callee,
+            positional_count: diagnostic.positional_count,
+            max_positional_count: diagnostic.max_positional,
+        }
+    }
+}
+
+fn report_check_diagnostics(diagnostics: &[Diagnostic], output_format: OutputFormat) {
+    match output_format {
+        OutputFormat::Full => {
+            for diagnostic in diagnostics {
+                eprintln!("{}", diagnostic.display_path());
+            }
+        }
+        OutputFormat::Json => {
+            let diagnostics = diagnostics
+                .iter()
+                .map(JsonDiagnostic::from)
+                .collect::<Vec<_>>();
+            let json = json_diagnostics(&diagnostics);
+            println!("{json}");
+        }
+        OutputFormat::Github => {
+            for diagnostic in diagnostics {
+                println!("{}", diagnostic.github_annotation());
+            }
+        }
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::expect_used,
+    reason = "serializing this fixed struct shape to a JSON string cannot fail"
+)]
+fn json_diagnostics(diagnostics: &[JsonDiagnostic<'_>]) -> String {
+    serde_json::to_string_pretty(diagnostics)
+        .expect("serializing strict-kwargs diagnostics to JSON should be infallible")
 }
 
 /// Report violations `fix` detected but deliberately did not rewrite, so a

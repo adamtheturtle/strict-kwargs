@@ -7,6 +7,28 @@ use serde::Deserialize;
 
 use crate::error::CheckError;
 
+#[cfg_attr(coverage, coverage(off))]
+mod output_format {
+    use serde::Deserialize;
+
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[derive(
+        Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, clap::ValueEnum,
+    )]
+    #[serde(rename_all = "kebab-case")]
+    pub enum OutputFormat {
+        /// Human-oriented `path:line:column: error: ...` lines on stderr.
+        #[default]
+        Full,
+        /// A JSON array of structured diagnostics on stdout.
+        Json,
+        /// GitHub Actions workflow command annotations on stdout.
+        Github,
+    }
+}
+
+pub use output_format::OutputFormat;
+
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Resolved `[tool.strict_kwargs]` configuration.
@@ -26,6 +48,12 @@ pub struct Config {
     /// passed file paths.
     #[serde(default)]
     pub force_exclude: bool,
+    /// Directory for the persistent on-disk diagnostic cache.
+    ///
+    /// This affects where diagnostics are stored, not the diagnostics
+    /// themselves, so it is omitted from cache fingerprints.
+    #[serde(default, skip_serializing)]
+    pub cache_dir: Option<PathBuf>,
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
     pub debug: bool,
@@ -33,6 +61,9 @@ pub struct Config {
     /// were synthesized from class fields.
     #[serde(default)]
     pub fix_synthesized_constructors: bool,
+    /// Diagnostic output format for `strict-kwargs check`.
+    #[serde(default)]
+    pub output_format: OutputFormat,
 }
 
 impl Config {
@@ -123,7 +154,7 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
     let current = parse_version(current_version, "current strict-kwargs version")?;
     if let Some(minimum) = required_version.strip_prefix(">=") {
         let minimum = parse_version(minimum.trim(), "`required_version` minimum")?;
-        if current >= minimum {
+        if minimum_required_version_is_satisfied(&current, &minimum) {
             return Ok(());
         }
         return Err(format!(
@@ -145,6 +176,22 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
         "`required_version = \"{required_version}\"` is not satisfied by strict-kwargs \
          {current_version}; install strict-kwargs {required_version} or update the setting"
     ))
+}
+
+fn minimum_required_version_is_satisfied(current: &Version, minimum: &Version) -> bool {
+    if current >= minimum {
+        return true;
+    }
+    minimum.pre.is_empty()
+        && current.major == minimum.major
+        && current.minor == minimum.minor
+        && current.patch == minimum.patch
+        && current
+            .pre
+            .as_str()
+            .split('.')
+            .next()
+            .is_some_and(|identifier| identifier == "post")
 }
 
 fn parse_version(version: &str, label: &str) -> Result<Version, String> {
@@ -185,8 +232,10 @@ mod tests {
       ignore_names = ["main.func", "builtins.str"]
       extend_exclude = ["generated", "vendor"]
       force_exclude = true
+      cache_dir = ".strict-kwargs-cache"
       debug = true
       fix_synthesized_constructors = true
+      output_format = "json"
       "#,
         )
         .expect("valid config");
@@ -203,8 +252,13 @@ mod tests {
             config.required_version,
             Some("2026.5.19-post.3".to_string())
         );
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
+        );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Json);
     }
 
     #[test]
@@ -226,8 +280,10 @@ mod tests {
         assert!(config.extend_exclude.is_empty());
         assert!(!config.force_exclude);
         assert!(config.required_version.is_none());
+        assert_eq!(config.cache_dir, None);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
+        assert_eq!(config.output_format, OutputFormat::Full);
     }
 
     #[test]
@@ -287,6 +343,33 @@ mod tests {
     }
 
     #[test]
+    fn wrong_output_format_value_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"xml\"\n")
+            .expect_err("wrong value must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn wrong_cache_dir_type_is_an_error() {
+        let message = Config::from_pyproject_str("[tool.strict_kwargs]\ncache_dir = [\"dir\"]\n")
+            .expect_err("wrong value type must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_full_output_format_is_valid() {
+        let config = Config::from_pyproject_str("[tool.strict_kwargs]\noutput_format = \"full\"\n")
+            .expect("full output format is valid");
+        assert_eq!(config.output_format, OutputFormat::Full);
+    }
+
+    #[test]
     fn exact_required_version_can_match_current_version() {
         let config = Config::from_pyproject_str(&format!(
             "[tool.strict_kwargs]\nrequired_version = \"{}\"\n",
@@ -319,6 +402,30 @@ mod tests {
     }
 
     #[test]
+    fn bare_minimum_required_version_accepts_matching_post_release() {
+        validate_required_version(">=2026.5.19", "2026.5.19-post.3")
+            .expect("post release satisfies its calendar-version minimum");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_non_post_prerelease() {
+        let message = validate_required_version(">=2026.5.19", "2026.5.19-alpha.1")
+            .expect_err("non-post prerelease must stay below the bare release");
+        assert!(message.contains("required_version"), "message: {message}");
+        assert!(message.contains("not satisfied"), "message: {message}");
+    }
+
+    #[test]
+    fn bare_minimum_required_version_rejects_post_release_before_required_base() {
+        for required_version in [">=2027.5.19", ">=2026.6.19", ">=2026.5.20"] {
+            let message = validate_required_version(required_version, "2026.5.19-post.3")
+                .expect_err("post release must not satisfy a newer base version");
+            assert!(message.contains("required_version"), "message: {message}");
+            assert!(message.contains("not satisfied"), "message: {message}");
+        }
+    }
+
+    #[test]
     fn required_version_rejects_too_old_binary() {
         let message = validate_required_version(">=2026.5.19-post.4", "2026.5.19-post.3")
             .expect_err("too-old binary must be rejected");
@@ -347,17 +454,35 @@ mod tests {
 
     #[test]
     fn required_version_rejects_unsupported_syntax() {
-        let message = validate_required_version("~=2026.5.19", "2026.5.19-post.3")
-            .expect_err("unsupported syntax must be rejected");
-        assert!(message.contains("unsupported syntax"), "message: {message}");
-        assert!(message.contains("exact versions"), "message: {message}");
-        assert!(message.contains(">="), "message: {message}");
+        for specifier in [
+            "<2026.5.19",
+            ">2026.5.19",
+            "=2026.5.19",
+            "~=2026.5.19",
+            "^2026.5.19",
+        ] {
+            let message = validate_required_version(specifier, "2026.5.19-post.3")
+                .expect_err("unsupported syntax must be rejected");
+            assert!(message.contains("unsupported syntax"), "message: {message}");
+            assert!(message.contains("exact versions"), "message: {message}");
+            assert!(message.contains(">="), "message: {message}");
+        }
     }
 
     #[test]
     fn required_version_rejects_invalid_version() {
         let message = validate_required_version(">=definitely-not-a-version", "2026.5.19-post.3")
             .expect_err("invalid version must be rejected");
+        assert!(
+            message.contains("must be a valid version"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn required_version_rejects_invalid_exact_version() {
+        let message = validate_required_version("definitely-not-a-version", "2026.5.19-post.3")
+            .expect_err("invalid exact version must be rejected");
         assert!(
             message.contains("must be a valid version"),
             "message: {message}"
@@ -415,6 +540,21 @@ mod tests {
     }
 
     #[test]
+    fn load_reads_cache_dir_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\ncache_dir = \".strict-kwargs-cache\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(
+            config.cache_dir,
+            Some(PathBuf::from(".strict-kwargs-cache"))
+        );
+    }
+
+    #[test]
     fn load_reads_fix_synthesized_constructors_from_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -424,6 +564,18 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert!(config.fix_synthesized_constructors);
+    }
+
+    #[test]
+    fn load_reads_output_format_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\noutput_format = \"github\"\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("valid config");
+        assert_eq!(config.output_format, OutputFormat::Github);
     }
 
     #[test]
