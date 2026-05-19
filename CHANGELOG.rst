@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+2026.5.19-post.3
+----------------
+
+
 - ``--fix-synthesized-constructors`` can now also be enabled in
   ``pyproject.toml`` with
   ``[tool.strict_kwargs].fix_synthesized_constructors = true``.

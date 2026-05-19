@@ -92,7 +92,7 @@ A missing `--python` path is warned about and ignored.
 ```yaml
 repos:
   - repo: https://github.com/adamtheturtle/strict-kwargs-pre-commit
-    rev: 2026.5.19.post2  # pin to a release tag
+    rev: 2026.5.19.post3  # pin to a release tag
     hooks:
       - id: strict-kwargs
 ```
