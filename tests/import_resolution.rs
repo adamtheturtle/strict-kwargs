@@ -11,80 +11,9 @@
 // integration-test crate (not `#[cfg(test)]`), so allow them here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::path::PathBuf;
+mod common;
 
-use strict_kwargs::{check_paths, Config};
-
-struct TestProject {
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-    paths: Vec<PathBuf>,
-}
-
-impl TestProject {
-    fn new() -> Self {
-        // Use a non-dotted prefix: `tempfile`'s default `.tmpXXXX` dirs have
-        // a leading-dot component that the directory walker would ignore.
-        let temp = tempfile::Builder::new()
-            .prefix("strictkw")
-            .tempdir()
-            .expect("tempdir");
-        let root = temp.path().to_path_buf();
-        std::fs::write(
-            root.join("pyproject.toml"),
-            "[project]\nname = \"t\"\nversion = \"0\"\n",
-        )
-        .expect("write pyproject");
-        Self {
-            _temp: temp,
-            root,
-            paths: Vec::new(),
-        }
-    }
-
-    /// Write a project file. Files named here are also the explicit set of
-    /// paths handed to `check_paths` (so directory-ignore rules never
-    /// interfere with multi-file package fixtures).
-    fn file(mut self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(&file_path, content).expect("write file");
-        self.paths.push(file_path);
-        self
-    }
-
-    /// Write a project file that is *not* passed to `check_paths` directly:
-    /// it is only discovered transitively via imports (exercising the
-    /// import-resolution queue in the index builder).
-    fn dep(self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(&file_path, content).expect("write file");
-        self
-    }
-
-    /// Run `check_paths` over the explicitly-added files and return
-    /// diagnostics formatted as ``<filename>:<line>: <message>``.
-    fn check(&self) -> Vec<String> {
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &self.paths, &config, None, None).expect("check");
-        diagnostics
-            .iter()
-            .map(|d| {
-                format!(
-                    "{}:{}: {}",
-                    d.path.file_name().unwrap().to_string_lossy(),
-                    d.line,
-                    d.message()
-                )
-            })
-            .collect()
-    }
-}
+use common::TestProject;
 
 fn has(messages: &[String], prefix: &str, contains: &str) -> bool {
     messages
@@ -100,7 +29,7 @@ fn imported_module_with_syntax_error_is_skipped() {
         .dep("broken.py", "def (((( this is not valid python\n")
         .file("app.py", "import broken\nimport good\n\ngood.helper(1)\n")
         .dep("good.py", "def helper(a: int) -> None: ...\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:4:", "Too many positional"),
         "good module should still be indexed; got: {messages:?}"
@@ -120,7 +49,7 @@ fn import_inside_function_is_non_module_scope() {
             "app.py",
             "def driver() -> None:\n    import svc\n    svc.run(1)\n",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         messages.is_empty(),
         "function-local import must not resolve to a module-level target; got: {messages:?}"
@@ -149,7 +78,7 @@ def driver(flag: bool) -> None:
         renamed.run(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         messages.is_empty(),
         "if-nested function-local imports must not resolve as module-level targets; got: {messages:?}"
@@ -181,7 +110,7 @@ beta(1)
 gamma(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:11:", "Too many positional"),
         "for-nested import alias; got: {messages:?}"
@@ -220,7 +149,7 @@ beta(1)
 gamma(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:9:", "Too many positional"),
         "if-nested import alias; got: {messages:?}"
@@ -263,7 +192,7 @@ fc(1)
 fd(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:11:", "Too many positional"),
         "try-body import; got: {messages:?}"
@@ -303,7 +232,7 @@ made_in_while(1)
 made_in_with(1)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:11:", "Too many positional"),
         "for-nested def indexed; got: {messages:?}"
@@ -340,7 +269,7 @@ in_else(1)
 in_finally(1)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:11:", "Too many positional"),
         "try-body def; got: {messages:?}"
@@ -377,7 +306,7 @@ matched_empty(1)
 matched_other(1)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:10:", "Too many positional"),
         "first case-body def indexed; got: {messages:?}"
@@ -400,7 +329,7 @@ fn double_dot_relative_import_pops_a_package_level() {
             "pkg/sub/app.py",
             "from ..helper import helper\n\nhelper(1)\n",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "`from ..helper import helper` should resolve; got: {messages:?}"
@@ -414,7 +343,7 @@ fn over_deep_relative_import_returns_none_and_is_skipped() {
     let project = TestProject::new()
         .dep("pkg/__init__.py", "")
         .file("pkg/app.py", "from ... import helper\n\nhelper(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         !has(&messages, "app.py:3:", "Too many positional"),
         "over-deep relative import must resolve to nothing; got: {messages:?}"
@@ -428,7 +357,7 @@ fn dot_import_from_top_level_module_empty_base() {
     let project = TestProject::new()
         .dep("helper.py", "def helper(a: int) -> None: ...\n")
         .file("app.py", "from . import helper\n\nhelper.helper(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "`from . import helper` at top level should resolve helper module; got: {messages:?}"
@@ -442,7 +371,7 @@ fn dotted_relative_import_from_top_level_module_empty_package() {
     let project = TestProject::new()
         .dep("helper.py", "def fn(a: int) -> None: ...\n")
         .file("app.py", "from .helper import fn\n\nfn(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "`from .helper import fn` at top level should resolve; got: {messages:?}"
@@ -471,7 +400,7 @@ obj.attr = aliased = real
 aliased(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:10:", "Too many positional"),
         "Name target should alias even alongside an attribute target; got: {messages:?}"
@@ -499,7 +428,7 @@ good = real
 good(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:10:", "Too many positional"),
         "pure-reference alias `good = real` must still resolve; got: {messages:?}"
@@ -513,7 +442,7 @@ fn star_import_reexports_all_names() {
     let project = TestProject::new()
         .dep("kit.py", "def widget(a: int) -> None: ...\n")
         .file("app.py", "from kit import *\n\nwidget(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "star import should re-export `widget`; got: {messages:?}"
@@ -530,7 +459,7 @@ fn star_import_inside_function_is_not_module_reexport() {
             "app.py",
             "def loader() -> None:\n    from kit2 import *\n\nwidget(1)\n",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         !has(&messages, "app.py:4:", "Too many positional"),
         "function-local star import must not create a module re-export; got: {messages:?}"
@@ -551,7 +480,7 @@ def local(a: int) -> None: ...
 local(1)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:6:", "Too many positional"),
         "empty-base star import must be a harmless no-op; got: {messages:?}"
@@ -567,7 +496,7 @@ fn dotted_import_queues_every_prefix() {
         .dep("a/b/__init__.py", "")
         .dep("a/b/c.py", "def fn(x: int) -> None: ...\n")
         .file("app.py", "import a.b.c\n\na.b.c.fn(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "deep dotted import should index `a.b.c.fn`; got: {messages:?}"
@@ -582,7 +511,7 @@ fn dotted_import_with_asname_binds_alias() {
         .dep("p/__init__.py", "")
         .dep("p/q.py", "def fn(x: int) -> None: ...\n")
         .file("app.py", "import p.q as pq\n\npq.fn(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "`import p.q as pq` alias should resolve; got: {messages:?}"
@@ -597,7 +526,7 @@ fn package_init_reexports_resolve_via_fixpoint() {
         .dep("pkg/__init__.py", "from .impl import thing\n")
         .dep("pkg/impl.py", "def thing(a: int) -> None: ...\n")
         .file("app.py", "from pkg import thing\n\nthing(1)\n");
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:3:", "Too many positional"),
         "re-exported `pkg.thing` should resolve via fixpoint; got: {messages:?}"
@@ -621,7 +550,7 @@ helper: Callable = impl.real
 helper(1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:7:", "Too many positional"),
         "annotated-assignment alias should resolve to impl.real; got: {messages:?}"
@@ -638,7 +567,7 @@ fn assignment_alias_via_import_binding() {
             "app.py",
             "from impl import real\n\nhelper = real\n\nhelper(1)\n",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:5:", "Too many positional"),
         "`helper = real` should alias the imported `real`; got: {messages:?}"
@@ -658,7 +587,7 @@ fn import_closure_module_budget_is_enforced() {
     }
     app.push_str("\n\ndef local(a: int) -> None: ...\n\nlocal(1)\n");
     let project = TestProject::new().file("app.py", &app);
-    let messages = project.check();
+    let messages = project.check_explicit();
     // The run completes; the genuine first-party violation is still found.
     assert!(
         has(&messages, "app.py:", "Too many positional"),
@@ -695,7 +624,7 @@ class D:
 D(1, 2)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:", "Too many positional") || has(&messages, "app.py:", "\"D\""),
         "dataclass synth must skip ClassVar/attribute fields; got: {messages:?}"
@@ -729,7 +658,7 @@ Child(1)
 Child(base=1, child=2)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:9:", "Too many positional"),
         "imported dataclass base fields must be modeled; got: {messages:?}"
@@ -768,7 +697,7 @@ class Base:
     base: int
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:9:", "Too many positional"),
         "checked imported dataclass base should be modeled once; got: {messages:?}"
@@ -809,7 +738,7 @@ Child(1)
 Child(base=1, child=2)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:11:", "Too many positional"),
         "dataclass base aliases must be resolved before synthesis; got: {messages:?}"
@@ -838,7 +767,7 @@ Child(1)
 Child(base=1)
 ",
     );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:10:", "Too many positional"),
         "NamedTuple subclass constructor must inherit base fields; got: {messages:?}"
@@ -874,7 +803,7 @@ Child(1)
 Child(base=1)
 ",
         );
-    let messages = project.check();
+    let messages = project.check_explicit();
     assert!(
         has(&messages, "app.py:7:", "Too many positional"),
         "imported NamedTuple base fields must be modeled; got: {messages:?}"

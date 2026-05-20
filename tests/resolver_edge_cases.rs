@@ -8,89 +8,17 @@
 
 // `expect`/`unwrap` are idiomatic in tests: a failed fixture *should* abort the
 // test with a clear message. Clippy's `allow-*-in-tests` does not apply to an
-// integration-test crate (it is not `#[cfg(test)]`), so allow them here. Each
-// integration-test crate is standalone, so duplicating the `TestProject`
-// harness here (as `tests/fix.rs` already does) is intentional.
+// integration-test crate (it is not `#[cfg(test)]`), so allow them here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-
-use std::path::PathBuf;
 
 use strict_kwargs::{check_paths, Config, Diagnostic};
 
-struct TestProject {
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-}
+mod common;
 
-impl TestProject {
-    fn new() -> Self {
-        // A non-dotted prefix: `tempfile`'s default `.tmpXXXX` name would be
-        // swallowed by the directory-ignore rule when a directory is checked.
-        let temp = tempfile::Builder::new()
-            .prefix("strictkw")
-            .tempdir()
-            .expect("tempdir");
-        let root = temp.path().to_path_buf();
-        Self { _temp: temp, root }
-    }
-
-    fn file(self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(file_path, content).expect("write file");
-        self
-    }
-
-    fn main(self, content: &str) -> Self {
-        self.file("main.py", content)
-    }
-
-    fn pyproject(self, content: &str) -> Self {
-        self.file("pyproject.toml", content)
-    }
-
-    /// Diagnostics for `main.py`, formatted `main:<line>: <message>`.
-    fn check(&self) -> Vec<String> {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
-        diagnostics
-            .iter()
-            .map(|d| format!("main:{}: {}", d.line, d.message()))
-            .collect()
-    }
-
-    /// Diagnostics for the whole project directory (exercises directory walk).
-    fn check_dir(&self) -> Vec<String> {
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(
-            &self.root,
-            std::slice::from_ref(&self.root),
-            &config,
-            None,
-            None,
-        )
-        .expect("check");
-        diagnostics
-            .iter()
-            .map(|d| {
-                format!(
-                    "{}:{}: {}",
-                    d.path.file_name().unwrap().to_string_lossy(),
-                    d.line,
-                    d.message()
-                )
-            })
-            .collect()
-    }
-}
+use common::{TestProject, DEFAULT_PYPROJECT};
 
 fn plain_project(source: &str) -> TestProject {
-    TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
-        .main(source)
+    TestProject::new().pyproject(DEFAULT_PYPROJECT).main(source)
 }
 
 fn check_source(source: &str) -> Vec<String> {
