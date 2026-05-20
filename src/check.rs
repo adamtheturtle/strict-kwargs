@@ -922,7 +922,9 @@ impl<'a> CallChecker<'a> {
     fn define(&mut self, local_name: &str, fullname: String) {
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname);
-        scope.functions.remove(local_name);
+        if scope.had_function_binding {
+            scope.functions.remove(local_name);
+        }
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
         scope.opaque_locals.remove(local_name);
@@ -968,7 +970,9 @@ impl<'a> CallChecker<'a> {
     fn mark_opaque_local(&mut self, name: &str) {
         let scope = self.current_scope();
         scope.names.remove(name);
-        scope.functions.remove(name);
+        if scope.had_function_binding {
+            scope.functions.remove(name);
+        }
         scope.modules.remove(name);
         scope.instances.remove(name);
         scope.opaque_locals.insert(name.to_string());
@@ -977,7 +981,9 @@ impl<'a> CallChecker<'a> {
     fn clear_instance_binding(&mut self, name: &str) {
         let scope = self.current_scope();
         scope.names.remove(name);
-        scope.functions.remove(name);
+        if scope.had_function_binding {
+            scope.functions.remove(name);
+        }
         scope.instances.remove(name);
     }
 
@@ -1109,7 +1115,9 @@ impl<'a> CallChecker<'a> {
     fn define_module(&mut self, local_name: &str, module_path: String) {
         let scope = self.current_scope();
         scope.names.remove(local_name);
-        scope.functions.remove(local_name);
+        if scope.had_function_binding {
+            scope.functions.remove(local_name);
+        }
         scope.instances.remove(local_name);
         scope.opaque_locals.remove(local_name);
         scope.modules.insert(local_name.to_string(), module_path);
@@ -1118,7 +1126,9 @@ impl<'a> CallChecker<'a> {
     fn define_imported_name_and_module(&mut self, local_name: &str, fullname: String) {
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname.clone());
-        scope.functions.remove(local_name);
+        if scope.had_function_binding {
+            scope.functions.remove(local_name);
+        }
         scope.modules.insert(local_name.to_string(), fullname);
         scope.instances.remove(local_name);
         scope.opaque_locals.remove(local_name);
@@ -1199,7 +1209,9 @@ impl<'a> CallChecker<'a> {
     fn record_instance(&mut self, local_name: &str, class_fullname: String) {
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), class_fullname);
-        scope.functions.remove(local_name);
+        if scope.had_function_binding {
+            scope.functions.remove(local_name);
+        }
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
         scope.opaque_locals.remove(local_name);
