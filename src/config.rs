@@ -340,7 +340,6 @@ mod tests {
         let config = Config::from_pyproject_str(
             r#"
       [tool.strict_kwargs]
-      required_version = "2026.5.19-post.3"
       ignore_names = ["main.func", "builtins.str"]
       src = ["src", "lib"]
       namespace_packages = ["src/airflow/providers"]
@@ -373,10 +372,6 @@ mod tests {
             vec!["generated".to_string(), "vendor".to_string()]
         );
         assert!(config.force_exclude);
-        assert_eq!(
-            config.required_version,
-            Some("2026.5.19-post.3".to_string())
-        );
         assert_eq!(
             config.cache_dir,
             Some(PathBuf::from(".strict-kwargs-cache"))
@@ -580,6 +575,10 @@ mod tests {
         );
     }
 
+    // `from_pyproject_str` validates `required_version` against the binary.
+    // Use synthetic versions in `validate_required_version` tests; integration
+    // tests here must omit the field, use `>=` with an old floor, or pin
+    // `env!("CARGO_PKG_VERSION")` so releases do not break unrelated parsing tests.
     #[test]
     fn exact_required_version_can_match_current_version() {
         let config = Config::from_pyproject_str(&format!(
