@@ -58,9 +58,13 @@ jobs:
         run: cargo audit --deny warnings
 
   pre-commit:
-    # Runs the all-hooks prek workflow documented in
-    # `.pre-commit-config.yaml`. This includes `cargo fmt` and
-    # `cargo clippy`; docs and tests stay in their dedicated jobs.
+    # Runs the explicit prek stages documented in `.pre-commit-config.yaml`.
+    # `pre-commit` owns file hygiene and workflow checks; `pre-push` owns
+    # `cargo fmt` and `cargo clippy`.
+    strategy:
+      matrix:
+        hook-stage: [pre-commit, pre-push]
+
     runs-on: ubuntu-latest
 
     steps:
@@ -81,8 +85,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Run prek hooks
-        run: uvx prek run --all-files
+      - name: Run prek hooks (${{ matrix.hook-stage }})
+        run: uvx prek run --all-files --hook-stage ${{ matrix.hook-stage }}
           --show-diff-on-failure --color=always --verbose
 
   completion-lint:
