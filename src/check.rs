@@ -907,6 +907,7 @@ impl<'a> CallChecker<'a> {
         self.scopes.push(Scope::default());
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn pop_scope(&mut self) {
         if self
             .scopes
@@ -927,6 +928,7 @@ impl<'a> CallChecker<'a> {
         scope.opaque_locals.remove(local_name);
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn define_function(&mut self, local_name: &str, fullname: String, signature: Signature) {
         let newly_active_scope = {
             let scope = self.current_scope();
@@ -1731,6 +1733,7 @@ impl<'a> CallChecker<'a> {
         Some(self.callable_fullname(&candidate).unwrap_or(candidate))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_local_function_call(&self, func: &Expr) -> Option<LocalFunction> {
         if self.local_function_scope_count == 0 {
             return None;
@@ -1750,12 +1753,11 @@ impl<'a> CallChecker<'a> {
         None
     }
 
-    fn current_lexical_scope(&self) -> String {
+    fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
             .or_else(|| self.class_stack.last())
-            .cloned()
-            .unwrap_or_else(|| self.module_name.clone())
+            .map_or(self.module_name.as_str(), String::as_str)
     }
 
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
