@@ -811,6 +811,8 @@ struct CallChecker<'a> {
     diagnostics: Vec<Diagnostic>,
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
+    function_stack: Vec<String>,
+    local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
@@ -852,6 +854,10 @@ struct PendingTyOverloadFix {
 struct Scope {
     /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
+    /// Local name -> the currently visible local function signature.
+    functions: FxHashMap<String, LocalFunction>,
+    /// Whether this scope has ever contained a local function binding.
+    had_function_binding: bool,
     /// Local name -> fully-qualified *module* path (from ``import``).
     modules: FxHashMap<String, String>,
     /// Names in `names` that are bound to an *instance* (`x = C()`), as
@@ -870,6 +876,19 @@ struct Scope {
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
     annotations: FxHashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalFunction {
+    fullname: String,
+    signature: Signature,
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn remove_function_binding(scope: &mut Scope, local_name: &str) {
+    if scope.had_function_binding {
+        scope.functions.remove(local_name);
+    }
 }
 
 impl<'a> CallChecker<'a> {
@@ -901,6 +920,8 @@ impl<'a> CallChecker<'a> {
             diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
+            function_stack: Vec::new(),
+            local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
             ty_overload_fix_pending: Vec::new(),
@@ -926,7 +947,15 @@ impl<'a> CallChecker<'a> {
         self.scopes.push(Scope::default());
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn pop_scope(&mut self) {
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.had_function_binding)
+        {
+            self.local_function_scope_count = self.local_function_scope_count.saturating_sub(1);
+        }
         self.scopes.pop();
     }
 
@@ -934,12 +963,37 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname);
+        remove_function_binding(scope, local_name);
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn define_function(&mut self, local_name: &str, fullname: String, signature: Signature) {
+        let newly_active_scope = {
+            let scope = self.current_scope();
+            let newly_active_scope = !scope.had_function_binding;
+            scope.had_function_binding = true;
+            scope.names.insert(local_name.to_string(), fullname.clone());
+            scope.functions.insert(
+                local_name.to_string(),
+                LocalFunction {
+                    fullname,
+                    signature,
+                },
+            );
+            scope.modules.remove(local_name);
+            scope.instances.remove(local_name);
+            scope.opaque_locals.remove(local_name);
+            newly_active_scope
+        };
+        if newly_active_scope {
+            self.local_function_scope_count += 1;
+        }
     }
 
     fn resolve_local(&self, name: &str) -> Option<String> {
@@ -959,6 +1013,7 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(name);
+        remove_function_binding(scope, name);
         scope.modules.remove(name);
         scope.instances.remove(name);
         if plan_fixes {
@@ -971,6 +1026,7 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(name);
+        remove_function_binding(scope, name);
         scope.instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -1106,6 +1162,7 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(local_name);
+        remove_function_binding(scope, local_name);
         scope.instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
@@ -1118,6 +1175,7 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname.clone());
+        remove_function_binding(scope, local_name);
         scope.modules.insert(local_name.to_string(), fullname);
         scope.instances.remove(local_name);
         if plan_fixes {
@@ -1202,6 +1260,7 @@ impl<'a> CallChecker<'a> {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), class_fullname);
+        remove_function_binding(scope, local_name);
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
         if plan_fixes {
@@ -1492,11 +1551,21 @@ impl<'a> CallChecker<'a> {
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
-        let Some(callee_fullname) = self.resolve_callee(&call.func) else {
-            // Built-in resolver couldn't resolve: defer to a pipelined ty
-            // query (handled once per file after the walk).
-            self.record_ty_pending(call);
-            return;
+        let local_function = if self.local_function_scope_count == 0 {
+            None
+        } else {
+            self.resolve_local_function_call(&call.func)
+        };
+        let callee_fullname = if let Some(local_function) = &local_function {
+            local_function.fullname.clone()
+        } else {
+            let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+                // Built-in resolver couldn't resolve: defer to a pipelined ty
+                // query (handled once per file after the walk).
+                self.record_ty_pending(call);
+                return;
+            };
+            callee_fullname
         };
         // Functions whose first argument must stay positional at runtime
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
@@ -1504,7 +1573,15 @@ impl<'a> CallChecker<'a> {
         if self.index.is_excluded(&callee_fullname) {
             return;
         }
-        let Some(signatures) = self.index.get(&callee_fullname) else {
+        let indexed_signatures;
+        let local_signatures;
+        let signatures: &[Signature] = if let Some(local_function) = &local_function {
+            local_signatures = [local_function.signature.clone()];
+            &local_signatures
+        } else if let Some(signatures) = self.index.get(&callee_fullname) {
+            indexed_signatures = signatures;
+            indexed_signatures.as_ref()
+        } else {
             // A known class with no indexed constructor and no positional
             // arguments cannot violate this rule. This keeps expressions like
             // `Derived().method(1)` from starting `ty` just to resolve the
@@ -1586,7 +1663,7 @@ impl<'a> CallChecker<'a> {
         self.plan_builtin_fix_for_violation(
             call,
             &callee_fullname,
-            signatures.as_ref(),
+            signatures,
             max_positional,
             positional_count,
             receiver_is_explicit,
@@ -1889,6 +1966,30 @@ impl<'a> CallChecker<'a> {
         Some(self.callable_fullname(&candidate).unwrap_or(candidate))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_local_function_call(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Name(name) = func else {
+            return None;
+        };
+        let local = name.id.as_str();
+        for scope in self.scopes.iter().rev() {
+            if let Some(function) = scope.functions.get(local) {
+                return Some(function.clone());
+            }
+            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn current_lexical_scope(&self) -> &str {
+        self.function_stack
+            .last()
+            .or_else(|| self.class_stack.last())
+            .map_or(self.module_name.as_str(), String::as_str)
+    }
+
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             Expr::Name(name) => {
@@ -1968,6 +2069,7 @@ impl<'a> CallChecker<'a> {
 
     fn visit_method_def(&mut self, method_def: &'a StmtFunctionDef) {
         let StmtFunctionDef {
+            name,
             parameters,
             body,
             decorator_list,
@@ -1977,7 +2079,9 @@ impl<'a> CallChecker<'a> {
             self.visit_expr(&decorator.expression);
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
+        let method_fullname = format!("{class_fullname}.{name}");
         self.push_scope();
+        self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
         self.bind_method_parameters(parameters, &class_fullname, binds_instance_self);
 
@@ -1987,6 +2091,7 @@ impl<'a> CallChecker<'a> {
             self.visit_body_stmt(method_stmt);
         }
         self.class_body_depth = class_body_depth;
+        self.function_stack.pop();
         self.pop_scope();
     }
 
@@ -2113,7 +2218,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 for decorator in decorator_list {
                     self.visit_expr(&decorator.expression);
                 }
-                self.define(name, format!("{}.{}", self.module_name, name));
+                let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                if self.function_stack.is_empty() {
+                    self.define(name, fullname.clone());
+                } else {
+                    self.define_function(
+                        name,
+                        fullname.clone(),
+                        signature_from_parameters(parameters),
+                    );
+                }
+                self.function_stack.push(fullname);
                 self.push_scope();
                 // Register every parameter as opaque so that calls through
                 // a Callable-typed (or otherwise unresolvable) parameter
@@ -2124,6 +2239,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_body_stmt(inner);
                 }
                 self.pop_scope();
+                self.function_stack.pop();
             }
             Stmt::ClassDef(StmtClassDef {
                 name,
@@ -2134,10 +2250,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 for decorator in decorator_list {
                     self.visit_expr(&decorator.expression);
                 }
-                let class_fullname = self.class_stack.last().map_or_else(
-                    || format!("{}.{}", self.module_name, name),
-                    |parent| format!("{parent}.{name}"),
-                );
+                let class_fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.define(name, class_fullname.clone());
                 self.class_stack.push(class_fullname);
                 self.push_scope();

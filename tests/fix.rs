@@ -7,88 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
-use strict_kwargs::{
-    check_paths, fix_paths, fix_paths_with_opt_ins, Config, DeclinedFixReason, Diagnostic,
-    FixOptIns,
-};
+use strict_kwargs::{fix_paths, Config, DeclinedFixReason, FixOptIns};
 
-struct TestProject {
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-}
+mod common;
 
-impl TestProject {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
-        Self { _temp: temp, root }
-    }
-
-    fn file(self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(file_path, content).expect("write file");
-        self
-    }
-
-    fn main(self, content: &str) -> Self {
-        self.file("main.py", content)
-    }
-
-    fn pyproject(self, content: &str) -> Self {
-        self.file("pyproject.toml", content)
-    }
-
-    /// Run the fixer over `main.py` and return the rewritten source (or the
-    /// original when nothing was fixed).
-    fn fixed_main(&self) -> String {
-        self.fixed_main_with_opt_ins(FixOptIns::default())
-    }
-
-    fn fixed_main_with_opt_ins(&self, fix_opt_ins: FixOptIns) -> String {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        let outcome = fix_paths_with_opt_ins(
-            &self.root,
-            std::slice::from_ref(&main),
-            &config,
-            None,
-            fix_opt_ins,
-        )
-        .expect("fix");
-        outcome
-            .files
-            .into_iter()
-            .find(|f| f.path == main)
-            .map_or_else(
-                || std::fs::read_to_string(&main).expect("read"),
-                |f| f.fixed,
-            )
-    }
-
-    /// Run the fixer over `main.py`, returning the raw result so a test can
-    /// assert on the fail-safe error (issue #41).
-    fn fix_main_result(&self) -> Result<strict_kwargs::FixOutcome, strict_kwargs::CheckError> {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        fix_paths(&self.root, std::slice::from_ref(&main), &config, None)
-    }
-
-    /// Diagnostics for `main.py`, formatted like the other test harness.
-    fn check_main(&self) -> Vec<String> {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
-        diagnostics.iter().map(Diagnostic::message).collect()
-    }
-}
+use common::{TestProject, DEFAULT_PYPROJECT};
 
 fn project(source: &str) -> TestProject {
-    TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
-        .main(source)
+    TestProject::new().pyproject(DEFAULT_PYPROJECT).main(source)
 }
 
 fn assert_fixed(source: &str, expected: &str) {

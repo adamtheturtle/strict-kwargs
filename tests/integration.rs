@@ -6,54 +6,17 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::PathBuf;
-
 #[cfg(unix)]
 use strict_kwargs::CheckError;
 use strict_kwargs::{check_paths, Config};
 
-struct TestProject {
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-}
+mod common;
 
-impl TestProject {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
-        Self { _temp: temp, root }
-    }
-
-    fn file(self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(file_path, content).expect("write file");
-        self
-    }
-
-    fn main(self, content: &str) -> Self {
-        self.file("main.py", content)
-    }
-
-    fn pyproject(self, content: &str) -> Self {
-        self.file("pyproject.toml", content)
-    }
-
-    fn check(&self) -> Vec<String> {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
-        diagnostics
-            .iter()
-            .map(|d| format!("main:{}: {}", d.line, d.message()))
-            .collect()
-    }
-}
+use common::{TestProject, DEFAULT_PYPROJECT};
 
 fn check_source(source: &str) -> Vec<String> {
     TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .pyproject(DEFAULT_PYPROJECT)
         .main(source)
         .check()
 }
@@ -2193,6 +2156,81 @@ def outer() -> None:
 ",
         5,
         "Too many positional",
+    );
+}
+
+#[test]
+fn same_named_nested_helpers_use_their_lexical_scope() {
+    let messages = check_source(
+        r"
+def first() -> None:
+    def check(value: int) -> None: ...
+
+    check(1)
+
+
+def second() -> None:
+    def check(value: int, /) -> None: ...
+
+    check(1)
+",
+    );
+
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].starts_with("main:5:") && messages[0].contains("Too many positional"),
+        "expected only the first helper call to be flagged, got: {messages:?}"
+    );
+}
+
+#[test]
+fn branch_local_helper_redefinition_does_not_create_overload() {
+    let messages = check_source(
+        r"
+def caller(flag: bool) -> None:
+    if flag:
+        def check(value: int) -> None: ...
+
+        check(1)
+    else:
+        def check(value: int, /) -> None: ...
+
+        check(1)
+",
+    );
+
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].starts_with("main:6:") && messages[0].contains("Too many positional"),
+        "expected only the first branch helper call to be flagged, got: {messages:?}"
+    );
+}
+
+#[test]
+fn nested_helper_does_not_leak_to_sibling_scope() {
+    assert_ok(
+        r"
+def owner() -> None:
+    def check(value: int) -> None: ...
+
+
+def sibling(check) -> None:
+    check(1)
+",
+    );
+}
+
+#[test]
+fn method_local_helper_is_not_indexed_as_class_attribute() {
+    assert_ok(
+        r"
+class Owner:
+    def method(self) -> None:
+        def check(value: int) -> None: ...
+
+
+Owner.check(1)
+",
     );
 }
 
