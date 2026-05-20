@@ -6,9 +6,9 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
-use ruff_python_ast::Expr;
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{AnyNodeRef, ExprRef, Stmt, StmtClassDef, StmtFunctionDef};
+use ruff_python_ast::{Expr, Number};
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -809,11 +809,11 @@ struct Scope {
     /// opposed to the class object itself. Lets `Class.method(recv, …)` be
     /// told apart from a bound `instance.method(…)` call (issue #27).
     instances: rustc_hash::FxHashSet<String>,
-    /// Parameter names for the function that owns this scope.  Calls through
-    /// a parameter (e.g. a `Callable`-typed arg) cannot be resolved to a
-    /// concrete indexed signature, so they are skipped rather than matched
-    /// against a homonymous module-level or nested function (issue #71).
-    opaque_params: rustc_hash::FxHashSet<String>,
+    /// Local names whose runtime binding is not known to this resolver.
+    /// Calls through these names cannot be resolved to a concrete indexed
+    /// signature, so they are skipped rather than matched against a
+    /// homonymous module-level or nested function (issue #71).
+    opaque_locals: rustc_hash::FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -875,9 +875,11 @@ impl<'a> CallChecker<'a> {
     }
 
     fn define(&mut self, local_name: &str, fullname: String) {
-        self.current_scope()
-            .names
-            .insert(local_name.to_string(), fullname);
+        let scope = self.current_scope();
+        scope.names.insert(local_name.to_string(), fullname);
+        scope.modules.remove(local_name);
+        scope.instances.remove(local_name);
+        scope.opaque_locals.remove(local_name);
     }
 
     fn resolve_local(&self, name: &str) -> Option<String> {
@@ -890,7 +892,21 @@ impl<'a> CallChecker<'a> {
     }
 
     fn mark_param_opaque(&mut self, name: &str) {
-        self.current_scope().opaque_params.insert(name.to_string());
+        self.mark_opaque_local(name);
+    }
+
+    fn mark_opaque_local(&mut self, name: &str) {
+        let scope = self.current_scope();
+        scope.names.remove(name);
+        scope.modules.remove(name);
+        scope.instances.remove(name);
+        scope.opaque_locals.insert(name.to_string());
+    }
+
+    fn clear_instance_binding(&mut self, name: &str) {
+        let scope = self.current_scope();
+        scope.names.remove(name);
+        scope.instances.remove(name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -927,7 +943,7 @@ impl<'a> CallChecker<'a> {
             if scope.names.contains_key(name) {
                 return false;
             }
-            if scope.opaque_params.contains(name) {
+            if scope.opaque_locals.contains(name) {
                 return true;
             }
         }
@@ -935,9 +951,19 @@ impl<'a> CallChecker<'a> {
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
-        self.current_scope()
-            .modules
-            .insert(local_name.to_string(), module_path);
+        let scope = self.current_scope();
+        scope.names.remove(local_name);
+        scope.instances.remove(local_name);
+        scope.opaque_locals.remove(local_name);
+        scope.modules.insert(local_name.to_string(), module_path);
+    }
+
+    fn define_imported_name_and_module(&mut self, local_name: &str, fullname: String) {
+        let scope = self.current_scope();
+        scope.names.insert(local_name.to_string(), fullname.clone());
+        scope.modules.insert(local_name.to_string(), fullname);
+        scope.instances.remove(local_name);
+        scope.opaque_locals.remove(local_name);
     }
 
     fn resolve_module(&self, name: &str) -> Option<String> {
@@ -996,8 +1022,7 @@ impl<'a> CallChecker<'a> {
             };
             // The imported name may be a submodule or a callable; bind both
             // interpretations so attribute and direct calls work.
-            self.define(local, fullname.clone());
-            self.define_module(local, fullname);
+            self.define_imported_name_and_module(local, fullname);
         }
     }
 
@@ -1017,6 +1042,8 @@ impl<'a> CallChecker<'a> {
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), class_fullname);
         scope.instances.insert(local_name.to_string());
+        scope.modules.remove(local_name);
+        scope.opaque_locals.remove(local_name);
     }
 
     /// Whether the nearest binding of `name` (the one [`resolve_local`] would
@@ -1159,6 +1186,28 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn is_bound_instance_method_call(&self, func: &Expr, first_param: Option<&str>) -> bool {
+        if first_param != Some("self") {
+            return false;
+        }
+        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+            return false;
+        };
+        if Self::class_from_literal_expr(value).is_some() {
+            return true;
+        }
+        if self
+            .class_from_constructor(value)
+            .is_some_and(|class_fullname| class_fullname != "builtins.super")
+        {
+            return true;
+        }
+        if let Expr::Name(base) = &**value {
+            return self.binding_is_instance(base.id.as_str());
+        }
+        false
+    }
+
     // Covered by integration tests that exercise constructor receivers through
     // real calls. Excluded from the coverage gate because llvm-cov reports an
     // unexecuted per-test-binary instantiation even when those paths are hit.
@@ -1167,6 +1216,9 @@ impl<'a> CallChecker<'a> {
         match func {
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                if self.is_opaque_local(local) {
+                    return None;
+                }
                 self.resolve_local(local)
                     .or_else(|| {
                         let candidate = format!("{}.{}", self.module_name, local);
@@ -1181,6 +1233,9 @@ impl<'a> CallChecker<'a> {
                 let attr_name = attr.id.as_str();
                 let candidate = if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
+                    if self.is_opaque_local(base_name) {
+                        return None;
+                    }
                     if let Some(local) = self.resolve_local(base_name) {
                         format!("{local}.{attr_name}")
                     } else if let Some(module_path) = self.resolve_module(base_name) {
@@ -1205,6 +1260,36 @@ impl<'a> CallChecker<'a> {
             Expr::Call(ast::ExprCall { func, .. }) => self.class_from_constructor_func(func),
             _ => None,
         }
+    }
+
+    const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::StringLiteral(_) => Some("builtins.str"),
+            Expr::BytesLiteral(_) => Some("builtins.bytes"),
+            Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }) => match value {
+                Number::Int(_) => Some("builtins.int"),
+                Number::Float(_) => Some("builtins.float"),
+                Number::Complex { .. } => Some("builtins.complex"),
+            },
+            Expr::BooleanLiteral(_) => Some("builtins.bool"),
+            Expr::List(_) => Some("builtins.list"),
+            Expr::Tuple(_) => Some("builtins.tuple"),
+            Expr::Dict(_) => Some("builtins.dict"),
+            Expr::Set(_) => Some("builtins.set"),
+            _ => None,
+        }
+    }
+
+    fn class_from_obvious_instance(&self, expr: &Expr) -> Option<String> {
+        self.class_from_constructor(expr)
+            .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
+    }
+
+    fn resolve_instance_method(&self, class_fullname: &str, attr_name: &str) -> String {
+        let candidate = format!("{class_fullname}.{attr_name}");
+        self.index
+            .resolve_method(class_fullname, attr_name)
+            .unwrap_or(candidate)
     }
 
     fn check_call(&mut self, call: &ast::ExprCall) {
@@ -1258,13 +1343,14 @@ impl<'a> CallChecker<'a> {
             .and_then(|p| p.name.as_deref());
         let receiver_is_explicit =
             self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
+        let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
         let receiver_is_explicit_for_fix = receiver_is_explicit
             || self.is_explicit_dunder_receiver_call(
                 &call.func,
                 &callee_fullname,
                 first_param_name,
             );
-        let effective: Vec<Signature> = if receiver_is_explicit {
+        let effective: Vec<Signature> = if receiver_is_explicit || receiver_is_implicit {
             signatures.iter().map(without_leading_self).collect()
         } else {
             signatures.to_vec()
@@ -1466,6 +1552,9 @@ impl<'a> CallChecker<'a> {
     fn resolve_dotted_module_attr(&self, value: &Expr, attr_name: &str) -> Option<String> {
         let chain = Self::dotted_path(value)?;
         let (head, rest) = chain.split_once('.')?;
+        if self.is_opaque_local(head) {
+            return None;
+        }
         let module_path = self.resolve_module(head)?;
         let candidate = format!("{module_path}.{rest}.{attr_name}");
         Some(self.callable_fullname(&candidate).unwrap_or(candidate))
@@ -1505,15 +1594,16 @@ impl<'a> CallChecker<'a> {
                     if class_fullname == "builtins.super" {
                         return None;
                     }
-                    let candidate = format!("{class_fullname}.{attr_name}");
-                    return Some(
-                        self.index
-                            .resolve_method(&class_fullname, attr_name)
-                            .unwrap_or(candidate),
-                    );
+                    return Some(self.resolve_instance_method(&class_fullname, attr_name));
+                }
+                if let Some(class_fullname) = Self::class_from_literal_expr(value) {
+                    return Some(self.resolve_instance_method(class_fullname, attr_name));
                 }
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
+                    if self.is_opaque_local(base_name) {
+                        return None;
+                    }
                     // Local bindings (incl. a locally redefined class) take
                     // precedence over a stale ``import`` module binding.
                     let candidate = if let Some(local) = self.resolve_local(base_name) {
@@ -1709,26 +1799,32 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.pop_scope();
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
-                if let Some(class_fullname) = self.class_from_constructor(value) {
-                    for target in targets {
-                        if let Expr::Name(name) = target {
+                let class_fullname = self.class_from_obvious_instance(value);
+                walk_stmt(self, stmt);
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
+                        } else {
+                            self.clear_instance_binding(name.id.as_str());
                         }
                     }
                 }
-                walk_stmt(self, stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
                 value: Some(value),
                 ..
             }) => {
-                if let Some(class_fullname) = self.class_from_constructor(value) {
-                    if let Expr::Name(name) = &**target {
+                let class_fullname = self.class_from_obvious_instance(value);
+                walk_stmt(self, stmt);
+                if let Expr::Name(name) = &**target {
+                    if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                    } else {
+                        self.clear_instance_binding(name.id.as_str());
                     }
                 }
-                walk_stmt(self, stmt);
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Import(import) => self.record_plain_import(import),
