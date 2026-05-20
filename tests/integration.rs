@@ -5,7 +5,6 @@
 // integration-test crate (it is not `#[cfg(test)]`), so allow them here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use strict_kwargs::CheckError;
