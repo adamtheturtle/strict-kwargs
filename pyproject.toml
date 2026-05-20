@@ -41,11 +41,35 @@ urls.Source = "https://github.com/adamtheturtle/strict-kwargs"
 urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANGELOG.rst"
 
 [project.optional-dependencies]
-release = [ "check-wheel-contents==0.6.3" ]
+release = [ "check-wheel-contents==0.6.3", "towncrier==25.8.0" ]
 
 [tool.maturin]
 bindings = "bin"
 module-name = "strict_kwargs"
+
+[tool.towncrier]
+# The changelog and the per-release GitHub release notes are both built
+# from news fragments under ``newsfragments/``.  The release workflow
+# runs ``towncrier build`` to assemble them; contributors add one
+# fragment file per user-facing change.
+directory = "newsfragments"
+filename = "CHANGELOG.rst"
+# Custom template so an assembled version reproduces the historical
+# style exactly: a bare ``<version>`` heading (no project name, no
+# date) followed by a flat bullet list with no per-type sub-headings.
+template = "towncrier_template.rst.jinja"
+title_format = "{version}"
+# ``title_format`` underline first, then any nested headings.  A bare
+# version such as ``2026.05.18`` underlined with ``-`` matches every
+# pre-towncrier entry in CHANGELOG.rst.
+underlines = [ "-", "~", "^" ]
+issue_format = "#{issue}"
+type = [
+    # A single, unnamed fragment type keeps the assembled output as one
+    # flat bullet list, matching the historical changelog (which never
+    # grouped entries under "Features"/"Bugfixes"/... sub-headings).
+    { directory = "change", name = "", showcontent = true },
+]
 
 [tool.strict_kwargs]
 ignore_names = []
