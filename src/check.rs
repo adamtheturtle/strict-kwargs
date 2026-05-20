@@ -1437,7 +1437,7 @@ impl<'a> CallChecker<'a> {
             .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
     }
 
-    fn value_is_callable_attribute_alias(expr: &Expr) -> bool {
+    const fn value_is_callable_attribute_alias(expr: &Expr) -> bool {
         matches!(expr, Expr::Attribute(_))
     }
 
