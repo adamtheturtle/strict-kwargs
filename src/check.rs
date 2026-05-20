@@ -3289,7 +3289,8 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
+        decorator_tail, has_staticmethod_or_classmethod_decorator, is_ignored_path,
+        is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         without_leading_self, CallAtStart, DeclinedFixReason, FixOptIns, PendingTy, TyFixAst,
         TyFixes,
@@ -3346,6 +3347,38 @@ mod tests {
                 "{fullname} must not be exempt"
             );
         }
+    }
+
+    #[test]
+    fn decorator_tail_covers_attribute_call_and_dynamic_shapes() {
+        let parsed = parse_module(
+            "\
+class C:
+    @decorators.staticmethod
+    @classmethod()
+    @(lambda fn: fn)
+    def m(self): ...
+",
+        )
+        .expect("parse decorators");
+        let Some(super::Stmt::ClassDef(class_def)) = parsed.suite().first() else {
+            panic!("expected class");
+        };
+        let Some(super::Stmt::FunctionDef(method_def)) = class_def.body.first() else {
+            panic!("expected method");
+        };
+
+        let decorators = &method_def.decorator_list;
+        assert_eq!(
+            decorator_tail(&decorators[0].expression),
+            Some("staticmethod")
+        );
+        assert_eq!(
+            decorator_tail(&decorators[1].expression),
+            Some("classmethod")
+        );
+        assert_eq!(decorator_tail(&decorators[2].expression), None);
+        assert!(has_staticmethod_or_classmethod_decorator(decorators));
     }
 
     fn sig(names: &[&str]) -> Signature {
@@ -3904,6 +3937,24 @@ class Outer:
 
         assert_eq!(diagnostics, 1);
         assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn method_self_binding_requires_literal_self_name() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+    def check(this) -> None:
+        this.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 1);
     }
 
     #[test]
