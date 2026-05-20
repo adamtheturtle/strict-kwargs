@@ -1459,7 +1459,11 @@ impl<'a> CallChecker<'a> {
     }
 
     fn check_call(&mut self, call: &ast::ExprCall) {
-        let local_function = self.resolve_local_function_call(&call.func);
+        let local_function = if self.local_function_scope_count == 0 {
+            None
+        } else {
+            self.resolve_local_function_call(&call.func)
+        };
         let callee_fullname = if let Some(local_function) = &local_function {
             local_function.fullname.clone()
         } else {
@@ -1742,9 +1746,6 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_local_function_call(&self, func: &Expr) -> Option<LocalFunction> {
-        if self.local_function_scope_count == 0 {
-            return None;
-        }
         let Expr::Name(name) = func else {
             return None;
         };
