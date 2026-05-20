@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
-use strict_kwargs::{check_paths, fix_paths, Config};
+use strict_kwargs::{check_paths, fix_paths, unified_diff, Config};
 
 fn main() {
     divan::main();
@@ -145,6 +145,106 @@ const WHOLE_PROJECT_MODS_PER_PKG: usize = 25;
 /// Call-site variants per module (plain, keyword-only, default-bearing). More
 /// patterns means the checker's visitor code is exercised more thoroughly.
 const WHOLE_PROJECT_FUNCS_PER_MOD: usize = 5;
+/// Packages in the larger generated whole-project benchmark. This is intended
+/// to provide a PR-visible `CodSpeed` signal at a scale closer to real projects
+/// without pulling in network checkout / install overhead from Sphinx or `CPython`.
+const LARGE_PROJECT_PKGS: usize = 10;
+/// Independent modules per package in the large generated benchmark.
+const LARGE_PROJECT_MODS_PER_PKG: usize = 50;
+/// Functions and matching positional call sites per generated module.
+const LARGE_PROJECT_FUNCS_PER_MOD: usize = 5;
+/// Modules in the `ty` fallback benchmark. Kept moderate because every sample
+/// starts a `ty server` and sends LSP hover requests.
+const TY_FALLBACK_MODULES: usize = 8;
+/// return-typed factory calls per module in the `ty` fallback benchmark.
+const TY_FALLBACK_CALLS_PER_MODULE: usize = 12;
+/// Environment variable pointing at an optional pinned `CPython` checkout.
+const CPYTHON_BENCH_CHECKOUT_ENV: &str = "STRICT_KWARGS_BENCH_CPYTHON_CHECKOUT";
+
+fn cpython_benchmark_checkout() -> Option<PathBuf> {
+    let raw = std::env::var_os(CPYTHON_BENCH_CHECKOUT_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    path.exists().then_some(path)
+}
+
+/// Generate a deterministic multi-package project under `root`.
+fn write_project_fixture(
+    root: &Path,
+    project_name: &str,
+    packages: usize,
+    modules_per_package: usize,
+    functions_per_module: usize,
+) {
+    std::fs::write(
+        root.join("pyproject.toml"),
+        format!("[project]\nname = \"{project_name}\"\nversion = \"0\"\n"),
+    )
+    .expect("write pyproject.toml");
+
+    for pkg_idx in 0..packages {
+        let pkg_name = format!("pkg_{pkg_idx}");
+        let pkg_dir = root.join(&pkg_name);
+        std::fs::create_dir_all(&pkg_dir).expect("create package dir");
+        std::fs::write(pkg_dir.join("__init__.py"), "").expect("write package __init__.py");
+
+        for mod_idx in 0..modules_per_package {
+            let mut src = format!("\"\"\"Generated module p{pkg_idx}m{mod_idx}.\"\"\"\n\n");
+            for func_idx in 0..functions_per_module {
+                // Vary the signature shape so the checker visits different
+                // ParameterKind combinations.
+                match func_idx % 3 {
+                    0 => writeln!(
+                        src,
+                        "def f_{pkg_idx}_{mod_idx}_{func_idx}(alpha: int, beta: int, gamma: int = 0) -> int:\n    return alpha + beta + gamma\n"
+                    ),
+                    1 => writeln!(
+                        src,
+                        "def f_{pkg_idx}_{mod_idx}_{func_idx}(x: str, y: str) -> str:\n    return x + y\n"
+                    ),
+                    _ => writeln!(
+                        src,
+                        "def f_{pkg_idx}_{mod_idx}_{func_idx}(n: int) -> int:\n    return n\n"
+                    ),
+                }
+                .expect("format function def");
+            }
+            std::fs::write(pkg_dir.join(format!("mod_{mod_idx:03}.py")), src)
+                .expect("write generated module");
+        }
+    }
+
+    // app.py: import every function and call it positionally (so every call
+    // site is a potential violation the checker must evaluate).
+    let mut app = String::from("\"\"\"Entry point that exercises every package.\"\"\"\n\n");
+    for pkg_idx in 0..packages {
+        for mod_idx in 0..modules_per_package {
+            for func_idx in 0..functions_per_module {
+                let pkg = format!("pkg_{pkg_idx}");
+                let mod_ = format!("mod_{mod_idx:03}");
+                let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                writeln!(app, "from {pkg}.{mod_} import {func}").expect("format import");
+            }
+        }
+    }
+    app.push('\n');
+    for pkg_idx in 0..packages {
+        for mod_idx in 0..modules_per_package {
+            for func_idx in 0..functions_per_module {
+                let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
+                match func_idx % 3 {
+                    0 => writeln!(app, "{func}(1, 2, 3)"),
+                    1 => writeln!(app, "{func}(\"a\", \"b\")"),
+                    _ => writeln!(app, "{func}(42)"),
+                }
+                .expect("format call");
+            }
+        }
+    }
+    std::fs::write(root.join("app.py"), app).expect("write app.py");
+}
 
 /// A deterministic first-party project whose package root re-exports a wide,
 /// chained `import *` web — `pkg/__init__` ← `pkg.api` ← `pkg.agg` ←
@@ -237,81 +337,74 @@ fn whole_project_dir() -> &'static Path {
     PROJECT
         .get_or_init(|| {
             let temp = tempfile::tempdir().expect("create whole-project fixture tempdir");
+            write_project_fixture(
+                temp.path(),
+                "whole-project-fixture",
+                WHOLE_PROJECT_PKGS,
+                WHOLE_PROJECT_MODS_PER_PKG,
+                WHOLE_PROJECT_FUNCS_PER_MOD,
+            );
+            temp
+        })
+        .path()
+}
+
+/// Larger generated whole-project directory: 500 modules plus `app.py`, with
+/// 2,500 imported positional call sites. This keeps the benchmark hermetic like
+/// the smaller fixtures while making end-to-end directory-run scaling visible
+/// in `CodSpeed`.
+fn large_project_dir() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create large-project fixture tempdir");
+            write_project_fixture(
+                temp.path(),
+                "large-project-fixture",
+                LARGE_PROJECT_PKGS,
+                LARGE_PROJECT_MODS_PER_PKG,
+                LARGE_PROJECT_FUNCS_PER_MOD,
+            );
+            temp
+        })
+        .path()
+}
+
+/// A deterministic project whose calls intentionally go through the `ty`
+/// fallback. Calls through `make_worker().configure(...)` are not direct
+/// constructor receivers the built-in resolver tracks, but `ty` can infer the
+/// return type and provide a bound-method hover for safe fixes.
+fn ty_fallback_project_dir() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create ty-fallback fixture tempdir");
             let root = temp.path();
             std::fs::write(
                 root.join("pyproject.toml"),
-                "[project]\nname = \"whole-project-fixture\"\nversion = \"0\"\n",
+                "[project]\nname = \"ty-fallback-fixture\"\nversion = \"0\"\n",
             )
             .expect("write pyproject.toml");
 
-            // Generate WHOLE_PROJECT_PKGS independent packages.
-            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
-                let pkg_name = format!("pkg_{pkg_idx}");
-                let pkg_dir = root.join(&pkg_name);
-                std::fs::create_dir_all(&pkg_dir).expect("create package dir");
-                std::fs::write(pkg_dir.join("__init__.py"), "")
-                    .expect("write package __init__.py");
+            let pkg = root.join("pkg");
+            std::fs::create_dir_all(&pkg).expect("create package dir");
+            std::fs::write(pkg.join("__init__.py"), "").expect("write package __init__.py");
 
-                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
-                    let mut src =
-                        format!("\"\"\"Generated module p{pkg_idx}m{mod_idx}.\"\"\"\n\n");
-                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
-                        // Vary the signature shape so the checker visits
-                        // different ParameterKind combinations.
-                        match func_idx % 3 {
-                            0 => writeln!(
-                                src,
-                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(alpha: int, beta: int, gamma: int = 0) -> int:\n    return alpha + beta + gamma\n"
-                            ),
-                            1 => writeln!(
-                                src,
-                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(x: str, y: str) -> str:\n    return x + y\n"
-                            ),
-                            _ => writeln!(
-                                src,
-                                "def f_{pkg_idx}_{mod_idx}_{func_idx}(n: int) -> int:\n    return n\n"
-                            ),
-                        }
-                        .expect("format function def");
-                    }
-                    std::fs::write(
-                        pkg_dir.join(format!("mod_{mod_idx:03}.py")),
+            for module in 0..TY_FALLBACK_MODULES {
+                let mut src = String::from(
+                    "class Worker:\n    def configure(self, host: str, port: int) -> None: ...\n\n\
+                     def make_worker() -> Worker:\n    return Worker()\n\n",
+                );
+                for call in 0..TY_FALLBACK_CALLS_PER_MODULE {
+                    writeln!(
                         src,
+                        "make_worker().configure(\"host-{module}-{call}\", {call})"
                     )
-                    .expect("write generated module");
+                    .expect("format return-typed method call");
                 }
+                std::fs::write(pkg.join(format!("mod_{module:03}.py")), src)
+                    .expect("write ty fallback module");
             }
-
-            // app.py: import every function and call it positionally (so every
-            // call site is a potential violation the checker must evaluate).
-            let mut app =
-                String::from("\"\"\"Entry point that exercises every package.\"\"\"\n\n");
-            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
-                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
-                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
-                        let pkg = format!("pkg_{pkg_idx}");
-                        let mod_ = format!("mod_{mod_idx:03}");
-                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
-                        writeln!(app, "from {pkg}.{mod_} import {func}")
-                            .expect("format import");
-                    }
-                }
-            }
-            app.push('\n');
-            for pkg_idx in 0..WHOLE_PROJECT_PKGS {
-                for mod_idx in 0..WHOLE_PROJECT_MODS_PER_PKG {
-                    for func_idx in 0..WHOLE_PROJECT_FUNCS_PER_MOD {
-                        let func = format!("f_{pkg_idx}_{mod_idx}_{func_idx}");
-                        match func_idx % 3 {
-                            0 => writeln!(app, "{func}(1, 2, 3)"),
-                            1 => writeln!(app, "{func}(\"a\", \"b\")"),
-                            _ => writeln!(app, "{func}(42)"),
-                        }
-                        .expect("format call");
-                    }
-                }
-            }
-            std::fs::write(root.join("app.py"), app).expect("write app.py");
 
             temp
         })
@@ -354,6 +447,14 @@ fn reexport_closure() -> usize {
 #[divan::bench]
 fn whole_project() -> usize {
     check(whole_project_dir())
+}
+
+/// Larger end-to-end directory run. This is the generated-project analogue of
+/// the scheduled Sphinx/CPython dry runs: big enough to expose scaling changes,
+/// but deterministic and cheap enough to report through `CodSpeed` on PRs.
+#[divan::bench]
+fn large_project() -> usize {
+    check(large_project_dir())
 }
 
 /// Packages in the ty-exercising whole-project fixture. Kept smaller than
@@ -527,6 +628,65 @@ fn fix_first_party_closure() -> usize {
         .expect("fix_paths over a benchmark fixture must succeed")
         .files
         .len()
+}
+
+/// The scheduled full-checkout workflow runs `strict-kwargs fix --diff`.
+/// This keeps the same hermetic large generated project as [`large_project`],
+/// but includes fix planning, fixed-source validation, and unified diff
+/// rendering. It still cannot model `CPython`'s exact source distribution, but
+/// it is a much closer benchmark for the dry-run command shape than `check`.
+#[divan::bench]
+fn fix_large_project_diff() -> usize {
+    let root = large_project_dir();
+    let config = Config::load(root).expect("valid benchmark-fixture config");
+    let paths = [root.to_path_buf()];
+    let outcome = fix_paths(root, &paths, &config, None)
+        .expect("fix_paths over a benchmark fixture must succeed");
+    outcome
+        .files
+        .iter()
+        .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
+        .sum()
+}
+
+/// `fix --diff` over a project where many calls require `ty` call-site hovers.
+/// This is the closest `CodSpeed` signal to a real checkout whose wall time is
+/// dominated by the inference fallback rather than by the built-in resolver.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn fix_ty_fallback_diff() -> usize {
+    let root = ty_fallback_project_dir();
+    let config = Config::load(root).expect("valid benchmark-fixture config");
+    let paths = [root.to_path_buf()];
+    let outcome = fix_paths(root, &paths, &config, None)
+        .expect("fix_paths over a ty-fallback benchmark fixture must succeed");
+    outcome
+        .files
+        .iter()
+        .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
+        .sum()
+}
+
+/// Opt-in real-checkout benchmark for `CPython`. This is ignored unless
+/// [`CPYTHON_BENCH_CHECKOUT_ENV`] points at an existing checkout, because
+/// cloning and scanning `CPython` is too expensive for ordinary local
+/// `cargo bench` and every-PR `CodSpeed` runs.
+#[divan::bench(
+    ignore = cpython_benchmark_checkout().is_none(),
+    sample_count = 1,
+    sample_size = 1
+)]
+fn cpython_fix_diff() -> usize {
+    let root = cpython_benchmark_checkout()
+        .expect("CPython benchmark checkout env should exist when benchmark is enabled");
+    let config = Config::load(&root).expect("valid CPython benchmark config");
+    let paths = [root.clone()];
+    let outcome = fix_paths(&root, &paths, &config, None)
+        .expect("fix_paths over the CPython benchmark checkout must succeed");
+    outcome
+        .files
+        .iter()
+        .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
+        .sum()
 }
 
 // ---------------------------------------------------------------------------

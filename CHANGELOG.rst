@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+- Add configurable project-level file exclusions. ``[tool.strict_kwargs]`` now
+  accepts ``extend_exclude`` patterns for directory runs and
+  ``force_exclude = true`` to apply those exclusions to explicitly passed
+  files, matching pre-commit workflows (issue #141).
 - ``strict-kwargs`` checks can now enable the persistent diagnostic cache
   through ``[tool.strict_kwargs].cache_dir`` or the
   ``STRICT_KWARGS_CACHE_DIR`` environment variable. The effective cache

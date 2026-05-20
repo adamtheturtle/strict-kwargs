@@ -40,6 +40,31 @@ impl Diagnostic {
             self.message()
         )
     }
+
+    /// GitHub Actions annotation line for CI-native output.
+    #[must_use]
+    pub fn github_annotation(&self) -> String {
+        format!(
+            "::error file={},line={},col={}::{}",
+            escape_github_property(&self.path.display().to_string()),
+            self.line,
+            self.column,
+            escape_github_data(&self.message())
+        )
+    }
+}
+
+fn escape_github_data(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn escape_github_property(value: &str) -> String {
+    escape_github_data(value)
+        .replace(':', "%3A")
+        .replace(',', "%2C")
 }
 
 #[cfg(test)]
@@ -69,6 +94,25 @@ mod tests {
             diagnostic.display_path(),
             "pkg/mod.py:7:3: error: \
              Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
+        );
+        assert_eq!(
+            diagnostic.github_annotation(),
+            "::error file=pkg/mod.py,line=7,col=3::\
+             Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
+        );
+    }
+
+    #[test]
+    fn github_annotation_escapes_workflow_command_syntax() {
+        let diagnostic = Diagnostic {
+            path: PathBuf::from("pkg/a,b%:mod.py"),
+            callee: "pkg.mod.f%\n".to_string(),
+            ..sample()
+        };
+        assert_eq!(
+            diagnostic.github_annotation(),
+            "::error file=pkg/a%2Cb%25%3Amod.py,line=7,col=3::\
+             Too many positional arguments for pkg.mod.f%25%0A (got 4, maximum 2)"
         );
     }
 
