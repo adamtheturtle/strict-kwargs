@@ -1049,6 +1049,29 @@ const TY_DEFERRED: &str =
 const BUILTIN_INHERITED_METHOD: &str =
     "class A:\n    def m(self, a: int) -> None: ...\n\nclass B(A):\n    pass\n\nB().m(1)\n";
 
+// Literal receivers and simple assignments from literals are handled by the
+// built-in resolver, so this should not attempt to start the lazy `ty server`
+// even when the only discoverable `ty` is the intentionally broken shim.
+#[cfg(unix)]
+const BUILTIN_LITERAL_METHODS: &str = r#"
+"abc".encode()
+b"abc".decode()
+(1).to_bytes()
+[].append(1)
+(1,).index(1)
+{}.get("x")
+{1}.add(1)
+
+s = "abc"
+s.upper()
+b: bytes = b"abc"
+b.decode()
+n = 1
+n.to_bytes()
+xs: list[int] = []
+xs.append(1)
+"#;
+
 #[cfg(unix)]
 #[test]
 fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
@@ -1058,6 +1081,15 @@ fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
     let err = stderr(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(!err.contains("ty server"), "stderr: {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn check_literal_methods_with_unstartable_ty_server_use_builtin_resolution() {
+    let project = Project::new().write("main.py", BUILTIN_LITERAL_METHODS);
+    let output = project.run_with_broken_ty_server(&["main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(!stderr(&output).contains("ty server"));
 }
 
 #[cfg(unix)]
