@@ -5,55 +5,19 @@
 // integration-test crate (it is not `#[cfg(test)]`), so allow them here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[cfg(unix)]
 use std::path::PathBuf;
-
 #[cfg(unix)]
 use strict_kwargs::CheckError;
 use strict_kwargs::{check_paths, Config};
 
-struct TestProject {
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-}
+mod common;
 
-impl TestProject {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
-        Self { _temp: temp, root }
-    }
-
-    fn file(self, path: &str, content: &str) -> Self {
-        let file_path = self.root.join(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(file_path, content).expect("write file");
-        self
-    }
-
-    fn main(self, content: &str) -> Self {
-        self.file("main.py", content)
-    }
-
-    fn pyproject(self, content: &str) -> Self {
-        self.file("pyproject.toml", content)
-    }
-
-    fn check(&self) -> Vec<String> {
-        let main = self.root.join("main.py");
-        let config = Config::load(&self.root).expect("valid config");
-        let diagnostics = check_paths(&self.root, &[main], &config, None, None).expect("check");
-        diagnostics
-            .iter()
-            .map(|d| format!("main:{}: {}", d.line, d.message()))
-            .collect()
-    }
-}
+use common::{TestProject, DEFAULT_PYPROJECT};
 
 fn check_source(source: &str) -> Vec<String> {
     TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .pyproject(DEFAULT_PYPROJECT)
         .main(source)
         .check()
 }
