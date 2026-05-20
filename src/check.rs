@@ -5015,6 +5015,88 @@ class C:
         check(&call.func);
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn with_call(call_src: &str, check: impl FnOnce(&super::ast::ExprCall)) {
+        let parsed = parse_module(call_src).expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        check(call);
+    }
+
+    #[test]
+    fn pending_ty_tracks_static_rewrite_precision() {
+        with_empty_checker(true, |checker| {
+            with_call("f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("name call")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("attribute call")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("factory().f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("dynamic receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+        with_empty_checker(true, |checker| {
+            checker.mark_opaque_local("f");
+            checker.mark_opaque_local("obj");
+            with_call("f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("opaque name")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("opaque receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            checker.define_imported_name_and_module("obj", "pkg.obj".to_string());
+            with_call("f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("imported name")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("imported receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+    }
+
     #[test]
     fn static_precision_guards_cover_malformed_callee_names() {
         let mut index = DefinitionIndex::for_test();
