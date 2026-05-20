@@ -543,20 +543,27 @@ impl DefinitionIndex {
 
     #[cfg_attr(coverage, coverage(off))]
     pub fn has_overriding_method(&self, class_fullname: &str, method: &str) -> bool {
+        let subclasses = self.classes_defining_method(method);
+        subclasses.into_iter().any(|subclass| {
+            subclass != class_fullname && self.class_inherits_from(&subclass, class_fullname)
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn classes_defining_method(&self, method: &str) -> Vec<String> {
         let inner = self.lock();
-        inner.store.classes.iter().any(|subclass| {
-            subclass != class_fullname
-                && inner
+        inner
+            .store
+            .classes
+            .iter()
+            .filter(|class| {
+                inner
                     .store
                     .signatures
-                    .contains_key(&format!("{subclass}.{method}"))
-                && store_class_inherits_from(
-                    &inner.store,
-                    subclass,
-                    class_fullname,
-                    &mut FxHashSet::default(),
-                )
-        })
+                    .contains_key(&format!("{class}.{method}"))
+            })
+            .cloned()
+            .collect()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -571,27 +578,22 @@ impl DefinitionIndex {
             .rsplit('.')
             .next()
             .unwrap_or(class_name_or_tail);
-        let inner = self.lock();
-        inner
-            .store
-            .classes
-            .iter()
-            .filter(|class| class.rsplit('.').next() == Some(class_tail))
-            .any(|class| {
-                inner.store.classes.iter().any(|subclass| {
-                    subclass != class
-                        && inner
-                            .store
-                            .signatures
-                            .contains_key(&format!("{subclass}.{method}"))
-                        && store_class_inherits_from(
-                            &inner.store,
-                            subclass,
-                            class,
-                            &mut FxHashSet::default(),
-                        )
-                })
-            })
+        let matching_classes: Vec<String> = {
+            let inner = self.lock();
+            inner
+                .store
+                .classes
+                .iter()
+                .filter(|class| class.rsplit('.').next() == Some(class_tail))
+                .cloned()
+                .collect()
+        };
+        let subclasses = self.classes_defining_method(method);
+        matching_classes.iter().any(|class| {
+            subclasses
+                .iter()
+                .any(|subclass| subclass != class && self.class_inherits_from(subclass, class))
+        })
     }
 
     fn class_inherits_from_inner(
@@ -777,26 +779,6 @@ impl DefinitionIndex {
         self.ensure_for(fullname, &mut query_budget);
         self.lock().store.classes.contains(fullname)
     }
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn store_class_inherits_from(
-    store: &Store,
-    class_fullname: &str,
-    base_fullname: &str,
-    visited: &mut FxHashSet<String>,
-) -> bool {
-    if !visited.insert(class_fullname.to_string()) {
-        return false;
-    }
-    store
-        .class_bases
-        .get(class_fullname)
-        .into_iter()
-        .flatten()
-        .any(|base| {
-            base == base_fullname || store_class_inherits_from(store, base, base_fullname, visited)
-        })
 }
 
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
@@ -2130,6 +2112,8 @@ mod tests {
     use super::{
         extend_unique, index_module, resolve_reference, DefinitionIndex, ModuleState, Store,
     };
+    use crate::config::{Config, SourceRoots};
+    use crate::resolve::ModuleResolver;
     use crate::signature::{Parameter, ParameterKind, Signature};
     use ruff_python_parser::parse_module;
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -2301,6 +2285,47 @@ mod tests {
 
         assert_eq!(index.resolve_method("pkg.A", "missing"), None);
         assert!(!index.class_inherits_from("pkg.A", "pkg.Missing"));
+    }
+
+    #[test]
+    fn overriding_method_checks_load_lazy_base_chain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("base.py"),
+            r"
+class Base:
+    def m(self, a): ...
+",
+        )
+        .expect("write base");
+        std::fs::write(
+            root.join("mid.py"),
+            r"
+from base import Base
+
+class Mid(Base):
+    pass
+",
+        )
+        .expect("write mid");
+        let config = Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots));
+        let parsed = parse_module(
+            r"
+from mid import Mid
+
+class Child(Mid):
+    def m(self, renamed): ...
+",
+        )
+        .expect("parse");
+        index.index_source("child", false, parsed.suite());
+
+        assert!(index.is_class("base.Base"));
+        assert!(index.has_overriding_method("base.Base", "m"));
+        assert!(index.has_overriding_method_matching_class_name("base.Base", "m"));
     }
 
     #[test]
