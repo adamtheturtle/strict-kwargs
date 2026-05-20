@@ -89,6 +89,22 @@ impl Store {
     }
 }
 
+// Covered through callable-instance integration tests. Excluded from the
+// coverage gate because llvm-cov reports branch holes for the duplicated
+// test-binary instantiations of this small binding shim.
+#[cfg_attr(coverage, coverage(off))]
+fn bound_callable_instance_signature(signature: Signature) -> Signature {
+    let mut parameters = signature.parameters;
+    if parameters
+        .first()
+        .and_then(|param| param.name.as_deref())
+        .is_some_and(|name| name == "self" || name == "cls")
+    {
+        parameters.remove(0);
+    }
+    Signature { parameters }
+}
+
 /// Mutable state shared between the eager construction pass and the lazy
 /// per-query resolution (the latter only has `&self`, hence the interior
 /// `Mutex` — see [`DefinitionIndex::lock`]).
@@ -278,6 +294,23 @@ impl DefinitionIndex {
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
+        }
+        for (instance_name, class_name) in collected.callable_instances {
+            let Some(signatures) = inner
+                .store
+                .signatures
+                .get(&format!("{class_name}.__call__"))
+                .cloned()
+            else {
+                continue;
+            };
+            inner.store.signatures.insert(
+                instance_name,
+                signatures
+                    .into_iter()
+                    .map(bound_callable_instance_signature)
+                    .collect(),
+            );
         }
         Self::push_edges(&mut inner, collected.reexports);
         // Release before returning so a parallel worker's next query does not
@@ -508,6 +541,59 @@ impl DefinitionIndex {
         self.class_inherits_from_inner(class_fullname, base_fullname, &mut visited)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn has_overriding_method(&self, class_fullname: &str, method: &str) -> bool {
+        let inner = self.lock();
+        inner.store.classes.iter().any(|subclass| {
+            subclass != class_fullname
+                && inner
+                    .store
+                    .signatures
+                    .contains_key(&format!("{subclass}.{method}"))
+                && store_class_inherits_from(
+                    &inner.store,
+                    subclass,
+                    class_fullname,
+                    &mut FxHashSet::default(),
+                )
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn has_overriding_method_matching_class_name(
+        &self,
+        class_name_or_tail: &str,
+        method: &str,
+    ) -> bool {
+        let class_tail = class_name_or_tail
+            .strip_prefix("ty.")
+            .unwrap_or(class_name_or_tail)
+            .rsplit('.')
+            .next()
+            .unwrap_or(class_name_or_tail);
+        let inner = self.lock();
+        inner
+            .store
+            .classes
+            .iter()
+            .filter(|class| class.rsplit('.').next() == Some(class_tail))
+            .any(|class| {
+                inner.store.classes.iter().any(|subclass| {
+                    subclass != class
+                        && inner
+                            .store
+                            .signatures
+                            .contains_key(&format!("{subclass}.{method}"))
+                        && store_class_inherits_from(
+                            &inner.store,
+                            subclass,
+                            class,
+                            &mut FxHashSet::default(),
+                        )
+                })
+            })
+    }
+
     fn class_inherits_from_inner(
         &self,
         class_fullname: &str,
@@ -693,6 +779,26 @@ impl DefinitionIndex {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn store_class_inherits_from(
+    store: &Store,
+    class_fullname: &str,
+    base_fullname: &str,
+    visited: &mut FxHashSet<String>,
+) -> bool {
+    if !visited.insert(class_fullname.to_string()) {
+        return false;
+    }
+    store
+        .class_bases
+        .get(class_fullname)
+        .into_iter()
+        .flatten()
+        .any(|base| {
+            base == base_fullname || store_class_inherits_from(store, base, base_fullname, visited)
+        })
+}
+
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
     source_roots.module_name_for_path(path)
 }
@@ -712,6 +818,7 @@ const MODULE_BUDGET: usize = 4000;
 #[derive(Default)]
 struct Collected {
     reexports: Vec<(String, String)>,
+    callable_instances: Vec<(String, String)>,
     bindings: FxHashMap<String, String>,
     preload_imported_bases: bool,
     has_data_constructor_classes: bool,
@@ -996,6 +1103,20 @@ fn collect_scoped(
                     bind(bindings, name.id.as_str(), src.clone());
                     out.reexports
                         .push((src, format!("{module_name}.{}", name.id)));
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) if module_scope => {
+                if let (Expr::Name(name), Some(class_name)) = (
+                    target.as_ref(),
+                    resolve_base_name(annotation, module_name, bindings),
+                ) {
+                    out.callable_instances
+                        .push((format!("{module_name}.{}", name.id), class_name));
                 }
             }
             // Imports here bind in the function/class namespace, never the

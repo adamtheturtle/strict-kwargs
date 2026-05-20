@@ -149,6 +149,49 @@ fn rewrites_method_excluding_self() {
 }
 
 #[test]
+fn does_not_fix_self_method_call_when_subclass_override_renames_parameter() {
+    // A base-class `self.m(...)` call may dispatch to a subclass override.
+    // Rewriting with the base parameter name can break overrides that chose a
+    // different keyword name.
+    assert_unchanged(
+        "class Base:\n    def m(self, value): ...\n    def run(self, x):\n        self.m(x)\n\n\
+         class Child(Base):\n    def m(self, renamed): ...\n",
+    );
+}
+
+#[test]
+fn does_not_fix_self_call_to_inherited_method() {
+    // Inherited methods can come from descriptor/wrapper implementations whose
+    // runtime keyword behavior is narrower than the visible signature.
+    assert_unchanged(
+        "class Base:\n    def m(self, fullname): ...\n\n\
+         class Child(Base):\n    def run(self, fullname):\n        self.m(fullname)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_inherited_constructor_call() {
+    // A subclass can inherit a constructor from a library base whose runtime
+    // keyword behavior is narrower than the indexed/hovered signature.
+    assert_unchanged(
+        "class Base:\n    def __init__(self, document): ...\n\n\
+         class Child(Base):\n    pass\n\n\
+         Child('doc')\n",
+    );
+}
+
+#[test]
+fn does_not_fix_polymorphic_method_call_when_subclass_override_renames_parameter() {
+    // The same hazard exists when a base-typed local or parameter receives a
+    // subclass instance at runtime.
+    assert_unchanged(
+        "class Base:\n    def m(self, value): ...\n\n\
+         class Child(Base):\n    def m(self, renamed): ...\n\n\
+         def run(base: Base, x):\n    base.m(x)\n",
+    );
+}
+
+#[test]
 fn standalone_function_named_self_is_not_skipped() {
     // Regression (PR #24 review): a standalone function may name its first
     // parameter `self`. It is called by name with `self` passed explicitly,
@@ -273,6 +316,38 @@ fn fixes_builtins() {
 }
 
 #[test]
+fn does_not_fix_private_callable_boundary() {
+    // Private helpers are commonly monkeypatched with simpler callables whose
+    // parameter names do not match the implementation.
+    assert_unchanged("def _helper(outdir, filename): ...\n\n_helper('out', 'file')\n");
+}
+
+#[test]
+fn does_not_fix_imported_callable_boundary() {
+    // Directly imported callables are also commonly monkeypatched at the
+    // importing module boundary.
+    let proj = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file("other.py", "def build_main(argv): ...\n")
+        .main("from other import build_main\n\nbuild_main(['x'])\n");
+    assert_eq!(
+        proj.fixed_main(),
+        "from other import build_main\n\nbuild_main(['x'])\n"
+    );
+}
+
+#[test]
+fn does_not_corrupt_typeshed_annotated_callable_instance_overloads() {
+    // `unittest.mock.patch` is a module variable annotated as a `_patcher`
+    // instance in typeshed. Resolve it through `_patcher.__call__` rather than
+    // relying on ty hover, which can expose the already-bound tail signature
+    // and rewrite the target string as `spec=...`.
+    assert_unchanged(
+        "from unittest.mock import patch\n\n@patch('pkg.mod.obj')\ndef test(obj):\n    pass\n",
+    );
+}
+
+#[test]
 fn fixes_ty_resolved_stdlib_single_signature() {
     // Issue #94: stdlib calls that only ty resolves can be rewritten when
     // ty's hover gives one concrete, fully named signature.
@@ -352,6 +427,77 @@ fn fixes_ty_resolved_third_party_env_package() {
     assert_eq!(
         outcome.files[0].fixed,
         "import extdep\n\nextdep.configure(host=\"localhost\", port=8080)\n"
+    );
+}
+
+#[test]
+fn does_not_fix_ty_self_hover_that_may_hide_positional_only() {
+    // ty can display third-party `super().__init__` hovers as `Self@__init__`
+    // and lose runtime positional-only markers. Decline the fix rather than
+    // rewriting to a keyword that may raise TypeError.
+    let env_temp = tempfile::tempdir().expect("tempdir");
+    let Some(venv) = make_venv(&env_temp.path().join("ext-env")) else {
+        eprintln!("skipping: `python -m venv` unavailable");
+        return;
+    };
+    let Some(site) = venv_site_packages(&venv) else {
+        eprintln!("skipping: venv has no site-packages");
+        return;
+    };
+    let pkg = site.join("extdep");
+    std::fs::create_dir_all(&pkg).expect("mkdir pkg");
+    std::fs::write(pkg.join("py.typed"), "").expect("py.typed");
+    std::fs::write(
+        pkg.join("__init__.py"),
+        "class Base:\n    def __init__(self, document, /): ...\n",
+    )
+    .expect("pkg init");
+
+    let source = "from extdep import Base\n\n\
+                  class Child(Base):\n    def __init__(self, document):\n        super().__init__(document)\n";
+    let proj = project(source);
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(
+        &proj.root,
+        std::slice::from_ref(&main),
+        &config,
+        Some(venv.as_path()),
+    )
+    .expect("fix");
+    assert!(outcome.files.is_empty(), "{outcome:?}");
+}
+
+#[test]
+fn does_not_fix_call_through_opaque_callable_parameter() {
+    // A callable parameter can receive a different implementation at runtime
+    // whose parameter names do not match the annotation/protocol names.
+    assert_unchanged(
+        "from typing import Protocol\n\n\
+         class Formatter(Protocol):\n    def __call__(self, date, format, *, locale): ...\n\n\
+         def run(date, format, locale, formatter: Formatter):\n    return formatter(date, format, locale=locale)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_method_call_through_opaque_parameter() {
+    // Annotated object parameters are injection boundaries: tests and callers
+    // can pass mocks/proxies whose method call assertions depend on the
+    // original positional shape.
+    assert_unchanged(
+        "class Renderer:\n    def render(self, template_name, context): ...\n\n\
+         def run(renderer: Renderer, context):\n    return renderer.render('module', context)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_call_through_bound_method_alias() {
+    // A bound method saved in a local can still dispatch to subclass
+    // implementations with different parameter names.
+    assert_unchanged(
+        "class SearchLanguage:\n    def word_filter(self, word): ...\n\n\
+         class SearchJapanese(SearchLanguage):\n    def word_filter(self, stemmed_word): ...\n\n\
+         def feed(lang: SearchLanguage, stemmed_word):\n    _filter = lang.word_filter\n    return _filter(stemmed_word)\n",
     );
 }
 

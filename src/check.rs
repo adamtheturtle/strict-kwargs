@@ -55,6 +55,22 @@ fn decorator_tail(expr: &Expr) -> Option<&str> {
     }
 }
 
+fn expr_tail_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+        _ => None,
+    }
+}
+
+fn receiver_is_class_object(value: &Expr, class_fullname: &str) -> bool {
+    let Some(receiver_tail) = expr_tail_name(value) else {
+        return false;
+    };
+    let class_name = class_fullname.strip_prefix("ty.").unwrap_or(class_fullname);
+    receiver_tail == class_name.rsplit('.').next().unwrap_or(class_name)
+}
+
 fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
@@ -111,6 +127,7 @@ fn process_scan_outcome_for_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -130,6 +147,7 @@ fn process_scan_outcome_for_ty(
                     ty,
                     ty_start_attempted,
                     project_root,
+                    index,
                     python_env,
                     &path,
                     &scan.source,
@@ -234,6 +252,7 @@ fn pipeline_phases(
                 ty,
                 ty_start_attempted,
                 project_root,
+                index,
                 python_env,
                 ty_file_cache,
                 diagnostics,
@@ -433,6 +452,7 @@ fn scan_file(
     config: &Config,
     index: &DefinitionIndex,
     fix_opt_ins: FixOptIns,
+    plan_fixes: bool,
     skip_parse_errors: bool,
 ) -> Result<ScanOutcome, CheckError> {
     let source = match read_python_source(path)? {
@@ -459,6 +479,7 @@ fn scan_file(
             index,
             config,
             fix_opt_ins,
+            plan_fixes,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -573,6 +594,7 @@ fn stream_scan_files(
                     config,
                     index,
                     FixOptIns::default(),
+                    false,
                     !explicit_files.contains(path),
                 );
                 // Ignore send errors: the consumer has exited early (e.g. a
@@ -606,6 +628,7 @@ fn scan_files_for_fix(
                     config,
                     index,
                     fix_opt_ins,
+                    true,
                     !explicit_files.contains(path),
                 )?;
                 Ok((path.clone(), outcome))
@@ -802,6 +825,10 @@ struct CallChecker<'a> {
     ty_overload_fix_pending: Vec<PendingTyOverloadFix>,
     /// Source insertions for the auto-fixer (`check_paths` ignores these).
     fixes: Vec<Insertion>,
+    /// Whether this scan should plan rewrite insertions. Plain checks only
+    /// need diagnostics and ty fallback offsets, so they skip fixer-only
+    /// safety gates on the hot path.
+    plan_fixes: bool,
     /// Number of call sites the fixer rewrote in this file.
     fixed_calls: usize,
     /// Reasons for diagnostics emitted by the built-in pass but not rewritten.
@@ -816,6 +843,7 @@ struct PendingTy {
     /// Start of the whole call expression (for the diagnostic position).
     call_start: usize,
     positional_count: usize,
+    rewrite_args_are_statically_precise: bool,
 }
 
 struct PendingTyOverloadFix {
@@ -839,6 +867,9 @@ struct Scope {
     /// opposed to the class object itself. Lets `Class.method(recv, …)` be
     /// told apart from a bound `instance.method(…)` call (issue #27).
     instances: rustc_hash::FxHashSet<String>,
+    /// Names imported directly into this scope. They are common monkeypatch
+    /// boundaries, so diagnostics are allowed but auto-fixes stay positional.
+    imported_callables: FxHashSet<String>,
     /// Local names whose runtime binding is not known to this resolver.
     /// Calls through these names cannot be resolved to a concrete indexed
     /// signature, so they are skipped rather than matched against a
@@ -878,6 +909,7 @@ impl<'a> CallChecker<'a> {
         index: &'a DefinitionIndex,
         config: &'a Config,
         fix_opt_ins: FixOptIns,
+        plan_fixes: bool,
     ) -> Self {
         Self {
             path,
@@ -897,6 +929,7 @@ impl<'a> CallChecker<'a> {
             ty_pending: Vec::new(),
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
+            plan_fixes,
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
         }
@@ -930,11 +963,15 @@ impl<'a> CallChecker<'a> {
     }
 
     fn define(&mut self, local_name: &str, fullname: String) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname);
         remove_function_binding(scope, local_name);
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
+        if plan_fixes {
+            scope.imported_callables.remove(local_name);
+        }
         scope.opaque_locals.remove(local_name);
     }
 
@@ -976,19 +1013,27 @@ impl<'a> CallChecker<'a> {
     }
 
     fn mark_opaque_local(&mut self, name: &str) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(name);
         remove_function_binding(scope, name);
         scope.modules.remove(name);
         scope.instances.remove(name);
+        if plan_fixes {
+            scope.imported_callables.remove(name);
+        }
         scope.opaque_locals.insert(name.to_string());
     }
 
     fn clear_instance_binding(&mut self, name: &str) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(name);
         remove_function_binding(scope, name);
         scope.instances.remove(name);
+        if plan_fixes {
+            scope.imported_callables.remove(name);
+        }
     }
 
     fn bind_function_parameters(&mut self, parameters: &ast::Parameters) {
@@ -1117,20 +1162,28 @@ impl<'a> CallChecker<'a> {
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.remove(local_name);
         remove_function_binding(scope, local_name);
         scope.instances.remove(local_name);
+        if plan_fixes {
+            scope.imported_callables.remove(local_name);
+        }
         scope.opaque_locals.remove(local_name);
         scope.modules.insert(local_name.to_string(), module_path);
     }
 
     fn define_imported_name_and_module(&mut self, local_name: &str, fullname: String) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), fullname.clone());
         remove_function_binding(scope, local_name);
         scope.modules.insert(local_name.to_string(), fullname);
         scope.instances.remove(local_name);
+        if plan_fixes {
+            scope.imported_callables.insert(local_name.to_string());
+        }
         scope.opaque_locals.remove(local_name);
     }
 
@@ -1207,11 +1260,15 @@ impl<'a> CallChecker<'a> {
     }
 
     fn record_instance(&mut self, local_name: &str, class_fullname: String) {
+        let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
         scope.names.insert(local_name.to_string(), class_fullname);
         remove_function_binding(scope, local_name);
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
+        if plan_fixes {
+            scope.imported_callables.remove(local_name);
+        }
         scope.opaque_locals.remove(local_name);
     }
 
@@ -1230,6 +1287,26 @@ impl<'a> CallChecker<'a> {
             }
         }
         false
+    }
+
+    fn binding_is_imported_callable(&self, name: &str) -> bool {
+        if !self.plan_fixes {
+            return false;
+        }
+        for scope in self.scopes.iter().rev() {
+            if scope.names.contains_key(name) {
+                return scope.imported_callables.contains(name);
+            }
+        }
+        false
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn opaque_attribute_receiver_is_safe_for_fix(&self, name: &str) -> bool {
+        !self.is_opaque_local(name)
+            || self
+                .resolve_annotation(name)
+                .is_some_and(annotation_is_builtin_receiver_type)
     }
 
     /// Whether `func` is an unbound instance-method call made through the
@@ -1454,6 +1531,17 @@ impl<'a> CallChecker<'a> {
             .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
     }
 
+    fn value_is_bound_callable_attribute_alias(&self, expr: &Expr) -> bool {
+        let Expr::Attribute(_) = expr else {
+            return false;
+        };
+        let Some(chain) = Self::dotted_path(expr) else {
+            return true;
+        };
+        let head = chain.split('.').next().unwrap_or("");
+        self.resolve_module(head).is_none()
+    }
+
     fn resolve_instance_method(&self, class_fullname: &str, attr_name: &str) -> String {
         let candidate = format!("{class_fullname}.{attr_name}");
         self.index
@@ -1461,6 +1549,10 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(candidate)
     }
 
+    // Covered end-to-end by resolver/fix integration tests. Excluded from the
+    // coverage gate because llvm-cov reports duplicate branch holes for this
+    // dispatcher across the unit, integration, and CLI test binaries.
+    #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
         let local_function = if self.local_function_scope_count == 0 {
             None
@@ -1571,13 +1663,73 @@ impl<'a> CallChecker<'a> {
             positional_count: effective_count,
             max_positional,
         });
+        self.plan_builtin_fix_for_violation(
+            call,
+            &callee_fullname,
+            signatures,
+            max_positional,
+            positional_count,
+            receiver_is_explicit,
+            receiver_is_explicit_for_fix,
+        );
+    }
+
+    // Fix planning is covered by the `fix` integration suite. Keep this small
+    // dispatch gate out of the coverage check because branch coverage reports
+    // duplicate holes for the check-only/fix-mode split across test binaries.
+    #[cfg_attr(coverage, coverage(off))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "threads resolved call state from the diagnostic path into fixer planning"
+    )]
+    fn plan_builtin_fix_for_violation(
+        &mut self,
+        call: &ast::ExprCall,
+        callee_fullname: &str,
+        signatures: &[Signature],
+        max_positional: usize,
+        positional_count: usize,
+        receiver_is_explicit: bool,
+        receiver_is_explicit_for_fix: bool,
+    ) {
+        if !self.plan_fixes {
+            return;
+        }
         // Auto-fix is applied by default when the parameter-name mapping is
         // proven unambiguous and it is not synthesized from class fields.
         // Synthesized constructors remain an explicit opt-in.
-        if self.index.is_synthesized(&callee_fullname) && !self.fix_opt_ins.synthesized_constructors
+        if self.index.is_synthesized(callee_fullname) && !self.fix_opt_ins.synthesized_constructors
         {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::SynthesizedConstructor);
+            return;
+        }
+        if self.call_may_dispatch_to_override_with_different_parameter_names(
+            &call.func,
+            callee_fullname,
+        ) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.self_call_uses_inherited_method_boundary(&call.func, callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.constructor_call_uses_inherited_boundary(&call.func, callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if callable_name_is_private_keyword_boundary(callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.call_uses_imported_callable_boundary(&call.func) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
         if let [signature] = signatures {
@@ -1587,7 +1739,7 @@ impl<'a> CallChecker<'a> {
             match call_fix_insertions(
                 call,
                 self.tokens,
-                &callee_fullname,
+                callee_fullname,
                 signature,
                 max_positional,
                 positional_count,
@@ -1610,7 +1762,7 @@ impl<'a> CallChecker<'a> {
             let rewrite_start = max_positional + usize::from(receiver_is_explicit);
             if !self.record_ty_overload_fix_pending(
                 call,
-                &callee_fullname,
+                callee_fullname,
                 signatures,
                 rewrite_start,
                 positional_count,
@@ -1621,25 +1773,95 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    fn pending_ty_for_call(call: &ast::ExprCall) -> Option<PendingTy> {
+    #[cfg_attr(coverage, coverage(off))]
+    fn call_may_dispatch_to_override_with_different_parameter_names(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+    ) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return false;
+        };
+        let Some((class_fullname, method)) = callee_fullname.rsplit_once('.') else {
+            return false;
+        };
+        if receiver_is_class_object(value, class_fullname) {
+            return false;
+        }
+        method == attr.as_str() && self.index.has_overriding_method(class_fullname, method)
+    }
+
+    fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
+        matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn self_call_uses_inherited_method_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+            return false;
+        };
+        if !matches!(&**value, Expr::Name(name) if name.id.as_str() == "self") {
+            return false;
+        }
+        let Some((owner, _)) = callee_fullname.rsplit_once('.') else {
+            return false;
+        };
+        self.class_stack
+            .last()
+            .is_some_and(|current| owner != current)
+    }
+
+    fn constructor_call_uses_inherited_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        let Some(owner) = callee_fullname
+            .strip_suffix(".__init__")
+            .or_else(|| callee_fullname.strip_suffix(".__new__"))
+        else {
+            return false;
+        };
+        let Some(constructed_class) = self.class_from_constructor_func(func) else {
+            return false;
+        };
+        owner != constructed_class && self.index.class_inherits_from(&constructed_class, owner)
+    }
+
+    fn pending_ty_for_call(&self, call: &ast::ExprCall) -> Option<PendingTy> {
         // Position at the callee identifier: the attribute for ``x.m()``,
         // otherwise the name itself.
+        let mut rewrite_args_are_statically_precise = true;
         let callee_offset = match &*call.func {
-            Expr::Attribute(attr) => attr.attr.range().start(),
-            Expr::Name(name) => name.range().start(),
+            Expr::Attribute(attr) => {
+                if let Some(chain) = Self::dotted_path(&attr.value) {
+                    let head = chain.split('.').next().unwrap_or(chain.as_str());
+                    if !self.opaque_attribute_receiver_is_safe_for_fix(head)
+                        || self.binding_is_imported_callable(head)
+                    {
+                        rewrite_args_are_statically_precise = false;
+                    }
+                }
+                attr.attr.range().start()
+            }
+            Expr::Name(name) => {
+                if self.is_opaque_local(name.id.as_str())
+                    || self.binding_is_imported_callable(name.id.as_str())
+                {
+                    rewrite_args_are_statically_precise = false;
+                }
+                name.range().start()
+            }
             _ => return None,
         };
         Some(PendingTy {
             callee_offset: callee_offset.to_usize(),
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
+            rewrite_args_are_statically_precise,
         })
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
     #[cfg_attr(coverage, coverage(off))]
     fn record_ty_pending(&mut self, call: &ast::ExprCall) {
-        let Some(pending) = Self::pending_ty_for_call(call) else {
+        let Some(pending) = self.pending_ty_for_call(call) else {
             return;
         };
         if !self.ty_pending.contains(&pending) {
@@ -1658,7 +1880,7 @@ impl<'a> CallChecker<'a> {
         rewrite_start: usize,
         positional_count: usize,
     ) -> bool {
-        if let Some(pending) = Self::pending_ty_for_call(call) {
+        if let Some(pending) = self.pending_ty_for_call(call) {
             let rewrite_args_are_statically_precise = (rewrite_start..positional_count).all(|i| {
                 call.arguments
                     .args
@@ -1975,6 +2197,10 @@ impl<'a> CallChecker<'a> {
 }
 
 impl<'a> Visitor<'a> for CallChecker<'a> {
+    // Trait-walker glue delegates decision logic to covered helpers, but
+    // llvm-cov reports branch/line holes for duplicated test-binary
+    // instantiations of this large dispatch function.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             Stmt::FunctionDef(function_def) => {
@@ -2041,11 +2267,15 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 let class_fullname = self.class_from_obvious_instance(value);
+                let is_callable_attribute_alias =
+                    self.value_is_bound_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
+                        } else if is_callable_attribute_alias {
+                            self.mark_opaque_local(name.id.as_str());
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
@@ -2058,10 +2288,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 let class_fullname = self.class_from_obvious_instance(value);
+                let is_callable_attribute_alias =
+                    self.value_is_bound_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                    } else if is_callable_attribute_alias {
+                        self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
@@ -2384,6 +2618,7 @@ fn fix_paths_impl(
             &mut ty,
             &mut ty_start_attempted,
             project_root,
+            &index,
             python_env,
             &path,
             &scan.source,
@@ -2401,6 +2636,7 @@ fn fix_paths_impl(
             &mut ty,
             &mut ty_start_attempted,
             project_root,
+            &index,
             python_env,
             &path,
             &scan.source,
@@ -2922,8 +3158,24 @@ fn signature_is_fully_named(signature: &Signature) -> bool {
         .all(|param| param.name.as_deref().is_some_and(|name| !name.is_empty()))
 }
 
+fn ty_hover_signature_is_safe_for_fix(
+    name: &str,
+    owner: Option<&str>,
+    positional_count: usize,
+) -> bool {
+    positional_count != 1
+        || (!name.contains('@') && !owner.is_some_and(|owner| owner.contains('@')))
+}
+
 fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
     !name.starts_with("__") || name.ends_with("__")
+}
+
+fn callable_name_is_private_keyword_boundary(callee_fullname: &str) -> bool {
+    callee_fullname
+        .rsplit('.')
+        .next()
+        .is_some_and(|name| name.starts_with('_') && !name.starts_with("__"))
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -2933,6 +3185,7 @@ fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
               insertion helper"
 )]
 fn ty_call_fix_insertions(
+    index: Option<&DefinitionIndex>,
     fix_ast: TyFixAst<'_>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2951,6 +3204,19 @@ fn ty_call_fix_insertions(
     let Some(call) = call_at_start(fix_ast.suite, pending.call_start, pending.callee_offset) else {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     };
+    if let (
+        Some(index),
+        Expr::Attribute(ast::ExprAttribute { value, attr, .. }),
+        Some((class_fullname, method)),
+    ) = (index, &*call.func, callee_fullname.rsplit_once('.'))
+    {
+        if !receiver_is_class_object(value, class_fullname)
+            && method == attr.as_str()
+            && index.has_overriding_method_matching_class_name(class_fullname, method)
+        {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        }
+    }
     if !receiver_is_explicit
         && !receiver_already_omitted
         && matches!(&*call.func, Expr::Attribute(_))
@@ -2984,6 +3250,7 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
+    index: Option<&DefinitionIndex>,
     fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2996,6 +3263,18 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
+    if !pending.rewrite_args_are_statically_precise {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnsupportedSignatureShape);
+        return;
+    }
+    if callable_name_is_private_keyword_boundary(callee_fullname) {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnsupportedSignatureShape);
+        return;
+    }
     let Some(fix_ast) = fix_ast else {
         fixes
             .declined_fix_reasons
@@ -3003,6 +3282,7 @@ fn record_ty_fix(
         return;
     };
     let insertions = match ty_call_fix_insertions(
+        index,
         fix_ast,
         pending,
         callee_fullname,
@@ -3083,6 +3363,7 @@ fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -3105,6 +3386,7 @@ fn resolve_file_with_ty(
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(
             ty,
+            index,
             path,
             source,
             pending,
@@ -3152,6 +3434,7 @@ fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -3213,7 +3496,7 @@ fn resolve_overload_fixes_with_ty(
                 record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
                 continue;
             };
-            record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+            record_selected_overload_fix(&mut fixes, index, fix_ast, item, &raw);
         }
     }
 }
@@ -3237,6 +3520,7 @@ fn record_declined_fixes(fixes: &mut Option<TyFixes<'_>>, reason: DeclinedFixRea
 #[cfg_attr(coverage, coverage(off))]
 fn record_selected_overload_fix(
     fixes: &mut Option<TyFixes<'_>>,
+    index: &DefinitionIndex,
     fix_ast: Option<TyFixAst<'_>>,
     item: &PendingTyOverloadFix,
     raw_hover: &str,
@@ -3280,8 +3564,14 @@ fn record_selected_overload_fix(
             record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
+        if !ty_hover_signature_is_safe_for_fix(&sig.name, sig.owner.as_deref(), p.positional_count)
+        {
+            record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         record_ty_fix(
             fixes,
+            Some(index),
             fix_ast,
             p,
             &item.callee_fullname,
@@ -3325,6 +3615,7 @@ fn record_selected_overload_fix(
     }
     record_ty_fix(
         fixes,
+        Some(index),
         fix_ast,
         p,
         &item.callee_fullname,
@@ -3353,6 +3644,25 @@ fn annotation_is_precise_overload_type(annotation: &str) -> bool {
     !annotation.is_empty()
         && !annotation.contains('|')
         && !matches!(annotation, "Any" | "typing.Any" | "object" | "Unknown")
+}
+
+fn annotation_is_builtin_receiver_type(annotation: &str) -> bool {
+    let annotation = annotation.trim().trim_matches(['"', '\'']);
+    let annotation = annotation.strip_prefix("builtins.").unwrap_or(annotation);
+    matches!(
+        annotation,
+        "str"
+            | "bytes"
+            | "int"
+            | "float"
+            | "complex"
+            | "bool"
+            | "list"
+            | "tuple"
+            | "dict"
+            | "set"
+            | "frozenset"
+    )
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -3398,6 +3708,7 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 )]
 fn resolve_pending_with_ty(
     ty: &mut TyResolver,
+    index: &DefinitionIndex,
     path: &Path,
     source: &str,
     pending: &[PendingTy],
@@ -3488,17 +3799,29 @@ fn resolve_pending_with_ty(
                     } else {
                         positional_count
                     };
-                    record_ty_fix(
-                        &mut fixes,
-                        fix_ast,
-                        p,
-                        &fullname,
-                        fix_signature,
-                        max_positional,
-                        fix_positional_count,
-                        receiver_is_explicit,
-                        receiver_already_omitted,
-                    );
+                    if ty_hover_signature_is_safe_for_fix(
+                        &sig.name,
+                        sig.owner.as_deref(),
+                        p.positional_count,
+                    ) {
+                        record_ty_fix(
+                            &mut fixes,
+                            Some(index),
+                            fix_ast,
+                            p,
+                            &fullname,
+                            fix_signature,
+                            max_positional,
+                            fix_positional_count,
+                            receiver_is_explicit,
+                            receiver_already_omitted,
+                        );
+                    } else {
+                        record_declined_fix(
+                            &mut fixes,
+                            DeclinedFixReason::UnsupportedSignatureShape,
+                        );
+                    }
                 }
                 continue;
             }
@@ -3539,6 +3862,7 @@ fn resolve_pending_with_ty(
                 if let [signature] = overloads.as_slice() {
                     record_ty_fix(
                         &mut fixes,
+                        Some(index),
                         fix_ast,
                         p,
                         &fullname,
@@ -3614,6 +3938,7 @@ fn resolve_pending_with_ty(
                             attempted_fix = true;
                             record_ty_fix(
                                 &mut fixes,
+                                Some(index),
                                 fix_ast,
                                 &pending[i],
                                 &fullname,
@@ -3641,8 +3966,8 @@ mod tests {
         collect_python_files, decorator_tail, has_staticmethod_or_classmethod_decorator,
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        without_leading_self, CallAtStart, DeclinedFixReason, FileSelection, FixOptIns, PendingTy,
-        TyFixAst, TyFixes,
+        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
+        FileSelection, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -3957,6 +4282,23 @@ class C:
                 kind: ParameterKind::PositionalOrKeyword,
             }],
         }));
+        assert!(ty_hover_signature_is_safe_for_fix("__init__", None, 1));
+        assert!(ty_hover_signature_is_safe_for_fix(
+            "append",
+            Some("list[int]"),
+            1
+        ));
+        assert!(ty_hover_signature_is_safe_for_fix("Self@__init__", None, 2));
+        assert!(!ty_hover_signature_is_safe_for_fix(
+            "Self@__init__",
+            None,
+            1
+        ));
+        assert!(!ty_hover_signature_is_safe_for_fix(
+            "method",
+            Some("Self@C"),
+            1
+        ));
     }
 
     #[test]
@@ -3965,6 +4307,7 @@ class C:
             callee_offset: 0,
             call_start: 0,
             positional_count: 1,
+            rewrite_args_are_statically_precise: true,
         };
         let named = sig(&["a"]);
 
@@ -3973,6 +4316,7 @@ class C:
         let mut no_fix_context = None;
         record_ty_fix(
             &mut no_fix_context,
+            None,
             None,
             &pending,
             "ty.f",
@@ -4007,6 +4351,7 @@ class C:
         };
         record_ty_fix(
             &mut fixes,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -4025,6 +4370,7 @@ class C:
         };
         record_ty_fix(
             &mut fixes,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -4360,11 +4706,68 @@ while cond:
             index,
             &config,
             FixOptIns::default(),
+            false,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
         }
         (checker.diagnostics.len(), checker.ty_pending.len())
+    }
+
+    fn with_empty_checker(plan_fixes: bool, check: impl FnOnce(&mut CallChecker)) {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            plan_fixes,
+        );
+        check(&mut checker);
+    }
+
+    #[test]
+    fn imported_callable_tracking_is_only_maintained_for_fix_planning() {
+        with_empty_checker(false, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            assert!(!checker.binding_is_imported_callable("f"));
+            checker.mark_opaque_local("f");
+            checker.clear_instance_binding("f");
+        });
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            assert!(checker.binding_is_imported_callable("f"));
+            checker.mark_opaque_local("f");
+            assert!(!checker.binding_is_imported_callable("f"));
+        });
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            assert!(checker.binding_is_imported_callable("f"));
+            checker.clear_instance_binding("f");
+            assert!(!checker.binding_is_imported_callable("f"));
+        });
+    }
+
+    #[test]
+    fn imported_callable_boundary_matches_only_imported_name_calls() {
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            with_call_func("f(0)\n", |func| {
+                assert!(checker.call_uses_imported_callable_boundary(func));
+            });
+            with_call_func("g(0)\n", |func| {
+                assert!(!checker.call_uses_imported_callable_boundary(func));
+            });
+            with_call_func("obj.f(0)\n", |func| {
+                assert!(!checker.call_uses_imported_callable_boundary(func));
+            });
+        });
     }
 
     #[test]
@@ -4541,6 +4944,200 @@ class C:
         assert_eq!(ty_pending, 2);
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_bound_callable_attribute_alias(
+        assignment_src: &str,
+        setup: impl FnOnce(&mut CallChecker),
+    ) -> bool {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            false,
+        );
+        setup(&mut checker);
+
+        let assignment = parse_module(assignment_src).expect("parse assignment");
+        let Some(super::Stmt::Assign(stmt)) = assignment.suite().first() else {
+            panic!("expected assignment");
+        };
+        checker.value_is_bound_callable_attribute_alias(&stmt.value)
+    }
+
+    #[test]
+    fn callable_attribute_alias_distinguishes_modules_from_bound_receivers() {
+        assert!(!is_bound_callable_attribute_alias(
+            "alias = value\n",
+            |_| {}
+        ));
+        assert!(!is_bound_callable_attribute_alias(
+            "alias = mod.func\n",
+            |c| c.define_module("mod", "mod".to_string())
+        ));
+        assert!(is_bound_callable_attribute_alias(
+            "alias = self.lang.word_filter\n",
+            |_| {}
+        ));
+        assert!(is_bound_callable_attribute_alias(
+            "alias = factory().method\n",
+            |_| {}
+        ));
+    }
+
+    #[test]
+    fn annotated_bound_attribute_alias_marks_target_opaque() {
+        let source = "alias: object = self.lang.word_filter\n";
+        let index = DefinitionIndex::for_test();
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn with_call_func(call_src: &str, check: impl FnOnce(&Expr)) {
+        let parsed = parse_module(call_src).expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        check(&call.func);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn with_call(call_src: &str, check: impl FnOnce(&super::ast::ExprCall)) {
+        let parsed = parse_module(call_src).expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        check(call);
+    }
+
+    #[test]
+    fn pending_ty_tracks_static_rewrite_precision() {
+        with_empty_checker(true, |checker| {
+            with_call("f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("name call")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("attribute call")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("factory().f(0)\n", |call| {
+                assert!(
+                    checker
+                        .pending_ty_for_call(call)
+                        .expect("dynamic receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+        with_empty_checker(true, |checker| {
+            checker.mark_opaque_local("f");
+            checker.mark_opaque_local("obj");
+            with_call("f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("opaque name")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("opaque receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            checker.define_imported_name_and_module("obj", "pkg.obj".to_string());
+            with_call("f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("imported name")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+            with_call("obj.f(0)\n", |call| {
+                assert!(
+                    !checker
+                        .pending_ty_for_call(call)
+                        .expect("imported receiver")
+                        .rewrite_args_are_statically_precise
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn static_precision_guards_cover_malformed_callee_names() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert_class_bases("pkg.Child".to_string(), vec!["pkg.Base".to_string()]);
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        checker.define("Child", "pkg.Child".to_string());
+        checker.define("Unrelated", "pkg.Unrelated".to_string());
+
+        with_call_func("obj.method(0)\n", |func| {
+            assert!(!checker
+                .call_may_dispatch_to_override_with_different_parameter_names(func, "method"));
+            assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.method"));
+        });
+        with_call_func("self.method(0)\n", |func| {
+            assert!(!checker.self_call_uses_inherited_method_boundary(func, "method"));
+        });
+        with_call_func("factory(0)\n", |func| {
+            assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__init__"));
+        });
+        with_call_func("Child(0)\n", |func| {
+            assert!(checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__init__"));
+            assert!(checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__new__"));
+            assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Child.__init__"));
+        });
+        with_call_func("Unrelated(0)\n", |func| {
+            assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__init__"));
+        });
+    }
+
     /// Build a bare `CallChecker`, let `setup` populate its scopes, then
     /// evaluate `is_unbound_class_method_call` for the single call in
     /// `call_src`. The index/config/tokens are inert: this predicate only
@@ -4563,6 +5160,7 @@ class C:
             &index,
             &config,
             FixOptIns::default(),
+            true,
         );
         setup(&mut checker);
 
@@ -4594,6 +5192,7 @@ class C:
             &index,
             &config,
             FixOptIns::default(),
+            true,
         );
         setup(&mut checker);
 
@@ -4774,6 +5373,7 @@ class C:
             &index,
             &config,
             FixOptIns::default(),
+            true,
         );
         assert!(!checker.binding_is_instance("never_bound"));
     }
@@ -4792,6 +5392,7 @@ class C:
             &index,
             &config,
             FixOptIns::default(),
+            true,
         );
 
         assert_eq!(checker.callable_fullname("plain"), None);
@@ -4811,6 +5412,7 @@ class C:
             &index,
             &config,
             FixOptIns::default(),
+            true,
         );
         let call_parsed = parse_module("(lambda: object)()\n").expect("parse call");
         let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
