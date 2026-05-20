@@ -6,7 +6,6 @@
 Enforce using keyword arguments where possible.
 
 `strict-kwargs` is a standalone CLI implemented in Rust.
-It parses Python with Ruff's Python parser and AST crates, then uses its own resolver plus [ty](https://docs.astral.sh/ty/) for type-aware call resolution where static names alone are not enough.
 
 For example, if we have a function which takes two regular arguments, there are three ways to call it.
 With this tool, only the form where keyword arguments are used is accepted.
@@ -21,28 +20,19 @@ def add(a: int, b: int) -> int:
 
 
 add(a=1, b=2)  # OK
-add(1, 2)  # strict-kwargs reports this
-add(1, b=2)  # strict-kwargs reports this
+add(1, 2)  # strict-kwargs reports this; strict-kwargs fix can rewrite it
+add(1, b=2)  # strict-kwargs reports this; strict-kwargs fix can rewrite it
 ```
 
 ## Why?
 
-- In the same spirit as a formatter - think `black` or `ruff format` - this lets you stop spending time discussing whether a particular function call should use keyword arguments.
-- Sometimes positional arguments are best at first, and then more and more are added and code becomes unclear, without anyone stopping to refactor to keyword arguments.
+- Like a formatter, such as `black` or `ruff format`, this lets you stop discussing whether a particular function call should use keyword arguments.
+- Positional arguments can be fine at first.
+  As more are added, calls can become unclear without anyone stopping to refactor them to keyword arguments.
 - Type checkers give better errors when keyword arguments are used.
   For example, with positional arguments, you may see, `Argument 5 to "add" has incompatible type "str"; expected "int"`.
   This requires that you count the arguments to see which one is wrong.
   With named arguments, you get `Argument "e" to "add" has incompatible type "str"; expected "int"`.
-
-## How it works
-
-`strict-kwargs` has two resolution layers:
-
-- A built-in resolver parses checked files, first-party modules, vendored typeshed stubs, and discovered site-packages using Ruff's Python parser and AST crates.
-- For calls that need richer inference, `strict-kwargs` asks ty's language server for hover and definition information.
-  `ty` is a required dependency of the Python package so results do not depend on whether it happens to be installed separately.
-
-The fixer uses the same detection path, but only rewrites calls when the target parameter names are known unambiguously.
 
 ## Installation
 
@@ -77,24 +67,33 @@ Exit codes are:
 - `1`: violations found
 - `2`: operational error
 
-For `check`, the default `full` output format preserves the traditional
-human-readable diagnostics on stderr. `json` and `github` write diagnostics to
-stdout so machine consumers can read them without mixing in operational
-messages. Warnings and operational errors are always written to stderr.
+### Output
 
-`fix` only rewrites calls it can name unambiguously. Ambiguous calls are
-counted as declined.
-Single-signature calls are rewritten by default, including calls that require deeper type inference.
-Overloaded calls are rewritten by default only when analysis selects one precise overload arm and the rewritten argument types are precise enough.
-Synthesized constructors are the only opt-in category, because generated constructor models can differ from runtime behaviour when class construction is customized.
-`fix --diff` writes the unified diff to stdout and its summary to stderr.
+- `full`, the default check output, keeps human-readable diagnostics on stderr.
+- `json` and `github` write diagnostics to stdout so machine consumers can read them without mixing in operational messages.
+- Warnings and operational errors are always written to stderr.
+- `fix --diff` writes the unified diff to stdout and its summary to stderr.
+
+### Fix behavior
+
+`fix` only rewrites calls whose target parameter names are known unambiguously.
+Ambiguous calls are counted as declined.
+
+By default, `fix` rewrites:
+
+- single-signature calls
+- overloaded calls, when one precise overload arm can be selected and the rewritten argument types are precise enough
+
+Synthesized constructors are the only opt-in category because generated constructor models can differ from runtime behaviour when class construction is customized.
 
 - `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
-  These can differ from runtime behaviour when class construction is customized.
+
+### Python environment
 
 Use `--python` to point third-party resolution at an interpreter, virtual environment, or `sys.prefix`.
-Missing paths are errors.
-A missing `--python` path is warned about and ignored.
+
+- Missing paths are errors.
+- A missing `--python` path is warned about and ignored.
 
 ## pre-commit
 
@@ -127,24 +126,51 @@ Set `required_version` to make older or incompatible `strict-kwargs` binaries fa
 Supported specifiers are exact versions, such as `2026.5.19-post.3`, and minimum versions, such as `>=2026.5.19-post.3`.
 Use the version reported by `strict-kwargs --version`.
 
+### Ignored functions
+
+Use `ignore_names` for functions that should still allow positional arguments.
 This is useful especially for builtins which can look strange with keyword arguments.
+
 For example, `str(object=1)` is not idiomatic.
-Set `src` to source-code directories that should be searched for first-party
-imports and stripped when deriving module names. Relative paths are resolved
-against the project root, so `src = ["src"]` maps `src/pkg/mod.py` to
-`pkg.mod` while preserving the repository root as a fallback source root.
-Set `namespace_packages` to directories that should be treated as namespace
-packages for module resolution even when they have no `__init__.py`.
+
+### Source discovery
+
+Set `src` to source-code directories that should be:
+
+- searched for first-party imports
+- stripped when deriving module names
+
+Relative paths are resolved against the project root.
+For example, `src = ["src"]` maps `src/pkg/mod.py` to `pkg.mod` while preserving the repository root as a fallback source root.
+
+Set `namespace_packages` to directories that should be treated as namespace packages for module resolution even when they have no `__init__.py`.
+
+### Exclusions
+
 Use `extend_exclude` to skip generated or vendored Python files during directory runs.
-Patterns use `.gitignore`-style matching relative to the project root.
-By default, exclusions apply to directory traversal only: an explicitly passed file such as `strict-kwargs generated/api.py` is still checked.
-Set `force_exclude = true` to apply exclusions to explicitly passed files too, which is useful when pre-commit passes changed files directly.
-The built-in skips for dot-directories, `venv`, and `__pycache__` remain enabled.
-Set `cache_dir` to enable the persistent diagnostic cache for `strict-kwargs`
-checks. Relative `cache_dir` values in `pyproject.toml` are resolved against
-the project root. The cache location precedence is:
-`--cache-dir`, then `[tool.strict_kwargs].cache_dir`, then
-`STRICT_KWARGS_CACHE_DIR`. If none are set, the cache is disabled.
+
+- Patterns use `.gitignore`-style matching relative to the project root.
+- By default, exclusions apply to directory traversal only.
+- An explicitly passed file, such as `strict-kwargs generated/api.py`, is still checked.
+- Set `force_exclude = true` to apply exclusions to explicitly passed files too.
+  This is useful when pre-commit passes changed files directly.
+- The built-in skips for dot-directories, `venv`, and `__pycache__` remain enabled.
+
+### Cache
+
+Set `cache_dir` to enable the persistent diagnostic cache for `strict-kwargs` checks.
+Relative `cache_dir` values in `pyproject.toml` are resolved against the project root.
+
+The cache location precedence is:
+
+1. `--cache-dir`
+2. `[tool.strict_kwargs].cache_dir`
+3. `STRICT_KWARGS_CACHE_DIR`
+
+If none are set, the cache is disabled.
+
+### Fix defaults
+
 Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
 
 To find the name of a function to ignore, set the following configuration:
@@ -160,4 +186,8 @@ Then run `strict-kwargs` and look for the debug output.
 
 [mypy-strict-kwargs](https://github.com/adamtheturtle/mypy-strict-kwargs) is a `mypy` plugin that enforces the same rule during type checking.
 
-Use `strict-kwargs` if you type-check with [ty](https://docs.astral.sh/ty/), if you prefer a standalone linter without plugins, or if you want automatic rewrites with `strict-kwargs fix`.
+Use `strict-kwargs` if you:
+
+- type-check with [ty](https://docs.astral.sh/ty/)
+- prefer a standalone linter without plugins
+- want automatic rewrites with `strict-kwargs fix`
