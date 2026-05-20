@@ -260,6 +260,29 @@ K.n(K())
 }
 
 #[test]
+fn unbound_imported_module_method_receiver_not_flagged() {
+    let messages = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "lib.py",
+            r"
+class K:
+    def n(self) -> int:
+        return 0
+",
+        )
+        .main(
+            r"
+import lib
+
+lib.K.n(lib.K())
+",
+        )
+        .check();
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
 fn unbound_first_party_method_flags_only_real_positional() {
     // `K.m(K(), 1)`: the receiver is excluded, but `a` is a genuine
     // keyword-able positional — reported as `got 1`, not `got 2`.
@@ -1408,6 +1431,17 @@ fn builtin_resolves_builtin_constructor_receiver() {
 }
 
 #[test]
+fn builtin_resolves_scalar_literal_receivers() {
+    assert_ok(
+        r"
+(True).bit_length()
+(1.0).hex()
+(1j).conjugate()
+",
+    );
+}
+
+#[test]
 fn builtin_ignores_unresolved_deep_constructor_receiver() {
     assert_ok("missing.ns.Child().method(1)\n");
 }
@@ -1498,7 +1532,7 @@ f(1, 2)
 }
 
 #[test]
-fn ty_stdlib_via_inferred_receiver() {
+fn builtin_stdlib_via_literal_assignment_receiver() {
     let messages = check_source(
         r"
 xs: list[int] = []
@@ -1507,7 +1541,8 @@ xs.append(1)
 ",
     );
     // append's `object` is positional-only in typeshed: append(1) is fine,
-    // append(1, 2) exceeds it. Proves stdlib resolves via ty inference.
+    // append(1, 2) exceeds it. The literal assignment lets the built-in
+    // resolver handle this without ty inference.
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("main:3:"));
     assert!(messages[0].contains("\"append\""));
