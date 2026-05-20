@@ -67,13 +67,9 @@ jobs:
 
   pre-commit:
     # Runs the all-hooks prek workflow documented in
-    # `.pre-commit-config.yaml`. The cargo hooks are skipped here because
-    # this workflow's `build` matrix runs the same `cargo fmt` and
-    # `cargo clippy` commands, while `ci.yml` covers `cargo test`.
+    # `.pre-commit-config.yaml`. Rust checks are covered by this
+    # workflow's `build` matrix and by `ci.yml`.
     runs-on: ubuntu-latest
-
-    env:
-      SKIP: cargo-fmt,cargo-clippy
 
     steps:
       - uses: actions/checkout@v6

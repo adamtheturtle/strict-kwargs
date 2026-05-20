@@ -10,8 +10,7 @@
 #
 #     uvx prek run --all-files
 #
-# CI sets `SKIP=cargo-fmt,cargo-clippy` for this command because
-# `.github/workflows/lint.yml` runs those exact Cargo checks separately.
+# Rust checks are intentionally handled by the dedicated Cargo jobs in CI.
 #
 fail_fast: false
 
@@ -67,18 +66,4 @@ repos:
         entry: uv lock --check
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
-        pass_filenames: false
-
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt --all -- --check
-        language: system
-        types: [rust]
-        pass_filenames: false
-
-      - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --locked --all-targets --all-features -- -D warnings
-        language: system
-        types: [rust]
         pass_filenames: false
