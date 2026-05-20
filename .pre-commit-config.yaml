@@ -6,35 +6,59 @@
 #
 #     prek install      # or: pre-commit install
 #
+# Run both installed stages locally, matching CI's pre-commit job:
+#
+#     uvx prek run --all-files --hook-stage pre-commit
+#     uvx prek run --all-files --hook-stage pre-push
+#
+# File hygiene and workflow checks run at pre-commit. `cargo fmt` and
+# `cargo clippy` run at pre-push. CI docs and tests have their own jobs.
+#
 fail_fast: false
+default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: meta
     hooks:
       - id: check-useless-excludes
+        stages: [pre-commit]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
+        stages: [pre-commit]
       - id: check-case-conflict
+        stages: [pre-commit]
       - id: check-executables-have-shebangs
+        stages: [pre-commit]
       - id: check-shebang-scripts-are-executable
+        stages: [pre-commit]
       - id: check-merge-conflict
+        stages: [pre-commit]
       - id: check-symlinks
+        stages: [pre-commit]
       - id: check-vcs-permalinks
+        stages: [pre-commit]
       - id: check-json
+        stages: [pre-commit]
       - id: check-toml
+        stages: [pre-commit]
       - id: check-yaml
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: mixed-line-ending
+        stages: [pre-commit]
         args: [--fix=lf]
       - id: trailing-whitespace
+        stages: [pre-commit]
 
   - repo: https://github.com/crate-ci/typos
     rev: v1.46.2
     hooks:
       - id: typos
+        stages: [pre-commit]
         # Do not auto-apply fixes. When pre-commit passes explicit
         # filenames, typos bypasses `_typos.toml`'s `extend-exclude`, so
         # mirror those exclusions here.
@@ -45,11 +69,13 @@ repos:
     rev: v1.7.12
     hooks:
       - id: actionlint
+        stages: [pre-commit]
 
   - repo: https://github.com/woodruffw/zizmor-pre-commit
     rev: v1.25.2
     hooks:
       - id: zizmor
+        stages: [pre-commit]
         # Rule policy lives in the repo-root `zizmor.yml` (mirrors
         # mypy-strict-kwargs), so no severity flags are needed here.
 
@@ -57,6 +83,7 @@ repos:
     hooks:
       - id: uv-lock
         name: uv lock
+        stages: [pre-commit]
         entry: uv lock --check
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
@@ -64,6 +91,7 @@ repos:
 
       - id: cargo-fmt
         name: cargo fmt
+        stages: [pre-push]
         entry: cargo fmt --all -- --check
         language: system
         types: [rust]
@@ -71,6 +99,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
+        stages: [pre-push]
         entry: cargo clippy --locked --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
