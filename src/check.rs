@@ -789,6 +789,7 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
@@ -827,6 +828,8 @@ struct Scope {
     names: FxHashMap<String, String>,
     /// Local name -> the currently visible local function signature.
     functions: FxHashMap<String, LocalFunction>,
+    /// Whether this scope has ever contained a local function binding.
+    had_function_binding: bool,
     /// Local name -> fully-qualified *module* path (from ``import``).
     modules: FxHashMap<String, String>,
     /// Names in `names` that are bound to an *instance* (`x = C()`), as
@@ -879,6 +882,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
             ty_overload_fix_pending: Vec::new(),
@@ -904,6 +908,13 @@ impl<'a> CallChecker<'a> {
     }
 
     fn pop_scope(&mut self) {
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.had_function_binding)
+        {
+            self.local_function_scope_count = self.local_function_scope_count.saturating_sub(1);
+        }
         self.scopes.pop();
     }
 
@@ -917,18 +928,26 @@ impl<'a> CallChecker<'a> {
     }
 
     fn define_function(&mut self, local_name: &str, fullname: String, signature: Signature) {
-        let scope = self.current_scope();
-        scope.names.insert(local_name.to_string(), fullname.clone());
-        scope.functions.insert(
-            local_name.to_string(),
-            LocalFunction {
-                fullname,
-                signature,
-            },
-        );
-        scope.modules.remove(local_name);
-        scope.instances.remove(local_name);
-        scope.opaque_locals.remove(local_name);
+        let newly_active_scope = {
+            let scope = self.current_scope();
+            let newly_active_scope = !scope.had_function_binding;
+            scope.had_function_binding = true;
+            scope.names.insert(local_name.to_string(), fullname.clone());
+            scope.functions.insert(
+                local_name.to_string(),
+                LocalFunction {
+                    fullname,
+                    signature,
+                },
+            );
+            scope.modules.remove(local_name);
+            scope.instances.remove(local_name);
+            scope.opaque_locals.remove(local_name);
+            newly_active_scope
+        };
+        if newly_active_scope {
+            self.local_function_scope_count += 1;
+        }
     }
 
     fn resolve_local(&self, name: &str) -> Option<String> {
@@ -1713,6 +1732,9 @@ impl<'a> CallChecker<'a> {
     }
 
     fn resolve_local_function_call(&self, func: &Expr) -> Option<LocalFunction> {
+        if self.local_function_scope_count == 0 {
+            return None;
+        }
         let Expr::Name(name) = func else {
             return None;
         };
