@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
 
+use crate::config::SourceRoots;
 use crate::source::read_python_source_lossy;
 
 /// Vendored typeshed `stdlib/` stubs, embedded at the pinned commit recorded
@@ -15,14 +16,19 @@ static TYPESHED_STDLIB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/vendored/typ
 pub struct ModuleResolver {
     /// First-party search roots (the project itself).
     first_party: Vec<PathBuf>,
+    /// Configured namespace-package directories.
+    namespace_packages: Option<Vec<PathBuf>>,
     /// Discovered `site-packages` directories (third-party / PEP 561 stubs).
     site_packages: Vec<PathBuf>,
 }
 
 impl ModuleResolver {
-    pub fn new(project_root: &Path) -> Self {
+    pub(crate) fn new(project_root: &Path, source_roots: &SourceRoots) -> Self {
+        let namespace_packages = source_roots.namespace_packages();
         Self {
-            first_party: vec![project_root.to_path_buf()],
+            first_party: source_roots.first_party_for_resolution(),
+            namespace_packages: (!namespace_packages.is_empty())
+                .then(|| namespace_packages.to_vec()),
             site_packages: discover_site_packages(project_root),
         }
     }
@@ -33,9 +39,23 @@ impl ModuleResolver {
         let rel = dotted.replace('.', "/");
 
         // 1. First-party source (`.py` then `.pyi`).
-        for root in &self.first_party {
-            if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
-                return Some(m);
+        if let Some(namespace_packages) = &self.namespace_packages {
+            for root in &self.first_party {
+                if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
+                    return Some(m);
+                }
+                let namespace_dir = root.join(&rel);
+                if namespace_dir.is_dir()
+                    && is_namespace_package(namespace_packages, &namespace_dir)
+                {
+                    return Some(ResolvedModule::namespace_package());
+                }
+            }
+        } else {
+            for root in &self.first_party {
+                if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
+                    return Some(m);
+                }
             }
         }
 
@@ -75,6 +95,10 @@ impl ModuleResolver {
     }
 }
 
+fn is_namespace_package(namespace_packages: &[PathBuf], path: &Path) -> bool {
+    namespace_packages.iter().any(|namespace| namespace == path)
+}
+
 /// A resolved module's source and whether it is a package (`__init__`),
 /// which determines the base for relative imports inside it.
 pub struct ResolvedModule {
@@ -110,6 +134,13 @@ impl ResolvedModule {
             source: source.into(),
             is_package: true,
             guard_nesting: false,
+        }
+    }
+    const fn namespace_package() -> Self {
+        Self {
+            source: String::new(),
+            is_package: true,
+            guard_nesting: true,
         }
     }
 }
@@ -183,7 +214,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         std::fs::write(root.join("mypkg.py"), "def f(): ...\n").expect("write");
-        let resolver = ModuleResolver::new(root);
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots);
 
         // First-party `.py`.
         let first = resolver.resolve("mypkg").expect("first-party module");
@@ -210,9 +243,39 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("pkg")).expect("mkdir");
         std::fs::write(root.join("pkg").join("__init__.pyi"), "x: int\n").expect("write");
-        let resolver = ModuleResolver::new(root);
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots);
         let module = resolver.resolve("pkg").expect("package");
         assert!(module.is_package);
+    }
+
+    #[test]
+    fn resolves_configured_source_root_and_namespace_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let namespace = root.join("src").join("airflow").join("providers");
+        std::fs::create_dir_all(&namespace).expect("mkdir namespace");
+        std::fs::write(namespace.join("tasks.py"), "def run(a: int) -> None: ...\n")
+            .expect("write");
+        let config = crate::config::Config {
+            src: vec![PathBuf::from("src")],
+            namespace_packages: vec![PathBuf::from("src/airflow/providers")],
+            ..crate::config::Config::default()
+        };
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots);
+
+        let namespace = resolver
+            .resolve("airflow.providers")
+            .expect("namespace package");
+        assert!(namespace.is_package);
+        assert!(namespace.source.is_empty());
+        assert!(resolver
+            .resolve("airflow.providers.tasks")
+            .expect("module under namespace")
+            .source
+            .contains("def run"));
     }
 
     #[test]
@@ -229,7 +292,9 @@ mod tests {
         std::fs::write(sp.join("inline.pyi"), "z: int\n").expect("write");
 
         let _guard = ENV_LOCK.lock().expect("lock");
-        let resolver = ModuleResolver::new(root);
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots);
         // `*-stubs` distribution is preferred for a submodule.
         assert!(resolver
             .resolve("vendor.sub")

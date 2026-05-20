@@ -4,6 +4,11 @@ Changelog
 Next
 ----
 
+- Add ``[tool.strict_kwargs].src`` and ``namespace_packages`` settings for
+  first-party module resolution. ``src`` roots are searched alongside the
+  repository root and are used when deriving module names, so ``src/pkg/mod.py``
+  can resolve as ``pkg.mod`` while namespace-package directories can be marked
+  even without ``__init__.py`` (issue #142).
 - Add configurable project-level file exclusions. ``[tool.strict_kwargs]`` now
   accepts ``extend_exclude`` patterns for directory runs and
   ``force_exclude = true`` to apply those exclusions to explicitly passed

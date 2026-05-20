@@ -114,6 +114,8 @@ Configuration lives in `pyproject.toml`:
 [tool.strict_kwargs]
 required_version = ">=2026.5.19-post.3"
 ignore_names = ["main.func", "builtins.str"]
+src = ["src"]
+namespace_packages = ["src/airflow/providers"]
 extend_exclude = ["generated", "vendor"]
 force_exclude = true
 cache_dir = ".strict-kwargs-cache"
@@ -127,6 +129,12 @@ Use the version reported by `strict-kwargs --version`.
 
 This is useful especially for builtins which can look strange with keyword arguments.
 For example, `str(object=1)` is not idiomatic.
+Set `src` to source-code directories that should be searched for first-party
+imports and stripped when deriving module names. Relative paths are resolved
+against the project root, so `src = ["src"]` maps `src/pkg/mod.py` to
+`pkg.mod` while preserving the repository root as a fallback source root.
+Set `namespace_packages` to directories that should be treated as namespace
+packages for module resolution even when they have no `__init__.py`.
 Use `extend_exclude` to skip generated or vendored Python files during directory runs.
 Patterns use `.gitignore`-style matching relative to the project root.
 By default, exclusions apply to directory traversal only: an explicitly passed file such as `strict-kwargs generated/api.py` is still checked.

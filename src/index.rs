@@ -9,6 +9,7 @@ use ruff_python_parser::parse_module;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
+use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
@@ -692,20 +693,8 @@ impl DefinitionIndex {
     }
 }
 
-pub fn module_name_for_path(project_root: &Path, path: &Path) -> String {
-    let relative = path
-        .strip_prefix(project_root)
-        .unwrap_or(path)
-        .with_extension("");
-    let mut parts: Vec<String> = relative
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    // ``pkg/__init__.py`` is the module ``pkg``, not ``pkg.__init__``.
-    if parts.last().map(String::as_str) == Some("__init__") {
-        parts.pop();
-    }
-    parts.join(".")
+pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
+    source_roots.module_name_for_path(path)
 }
 
 /// Whether ``path`` is a package initializer (``__init__.py``/``.pyi``).
@@ -730,8 +719,12 @@ struct Collected {
     class_bases: FxHashMap<String, Vec<String>>,
 }
 
-pub fn build_index(project_root: &Path, python_files: &[PathBuf]) -> DefinitionIndex {
-    let index = DefinitionIndex::new(ModuleResolver::new(project_root));
+pub fn build_index(
+    project_root: &Path,
+    python_files: &[PathBuf],
+    source_roots: &SourceRoots,
+) -> DefinitionIndex {
+    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots));
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
     // eagerly (small, and the bare-name fallback hits it constantly); this is
@@ -755,7 +748,7 @@ pub fn build_index(project_root: &Path, python_files: &[PathBuf]) -> DefinitionI
         let Ok(parsed) = parse_module_guarded(&source) else {
             continue;
         };
-        let module_name = module_name_for_path(project_root, path);
+        let module_name = module_name_for_path(source_roots, path);
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue 'files;
         };

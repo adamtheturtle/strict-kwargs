@@ -17,7 +17,7 @@ use ruff_text_size::TextSize;
 
 use crate::ast_util::{line_column, positional_argument_count, signature_from_parameters};
 use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
-use crate::config::Config;
+use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{
@@ -164,6 +164,7 @@ fn pipeline_phases(
     python_files: &[PathBuf],
     explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
+    source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
     python_env: Option<&Path>,
@@ -193,7 +194,7 @@ fn pipeline_phases(
                 stream_scan_files(
                     python_files,
                     explicit_files,
-                    project_root,
+                    source_roots,
                     config,
                     index,
                     tx,
@@ -205,7 +206,7 @@ fn pipeline_phases(
             stream_scan_files(
                 python_files,
                 explicit_files,
-                project_root,
+                source_roots,
                 config,
                 index,
                 tx,
@@ -269,6 +270,7 @@ fn check_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
+    let source_roots = SourceRoots::from_config(project_root, config);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
     let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
@@ -329,7 +331,7 @@ fn check_paths_impl(
         return Ok(diagnostics);
     }
 
-    let index = build_index(project_root, &python_files);
+    let index = build_index(project_root, &python_files, &source_roots);
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -355,6 +357,7 @@ fn check_paths_impl(
         &files_to_scan,
         &explicit_files,
         project_root,
+        &source_roots,
         config,
         &index,
         python_env,
@@ -425,7 +428,7 @@ fn check_paths_impl(
 /// runs on a [`with_large_stack_pool`] worker, so legitimately-accepted deep
 /// nesting has the same large stack the serial path gets (issue #54 + #46).
 fn scan_file(
-    project_root: &Path,
+    source_roots: &SourceRoots,
     path: &Path,
     config: &Config,
     index: &DefinitionIndex,
@@ -443,7 +446,7 @@ fn scan_file(
         }
         Err(error) => return Err(error),
     };
-    let module_name = module_name_for_path(project_root, path);
+    let module_name = module_name_for_path(source_roots, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
     let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls, declined_fix_reasons) = {
@@ -554,7 +557,7 @@ fn validate_fixed_python(path: &Path, fixed: &str) -> Result<(), CheckError> {
 fn stream_scan_files(
     python_files: &[PathBuf],
     explicit_files: &FxHashSet<PathBuf>,
-    project_root: &Path,
+    source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
     tx: std::sync::mpsc::Sender<(usize, PathBuf, Result<ScanOutcome, CheckError>)>,
@@ -565,7 +568,7 @@ fn stream_scan_files(
             .enumerate()
             .for_each_with(tx, |tx, (i, path)| {
                 let result = scan_file(
-                    project_root,
+                    source_roots,
                     path,
                     config,
                     index,
@@ -588,7 +591,7 @@ fn stream_scan_files(
 fn scan_files_for_fix(
     python_files: &[PathBuf],
     explicit_files: &FxHashSet<PathBuf>,
-    project_root: &Path,
+    source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
     fix_opt_ins: FixOptIns,
@@ -598,7 +601,7 @@ fn scan_files_for_fix(
             .par_iter()
             .map(|path| {
                 let outcome = scan_file(
-                    project_root,
+                    source_roots,
                     path,
                     config,
                     index,
@@ -2331,7 +2334,8 @@ fn fix_paths_impl(
     require_ty_present()?;
     let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
-    let index = build_index(project_root, &python_files);
+    let source_roots = SourceRoots::from_config(project_root, config);
+    let index = build_index(project_root, &python_files, &source_roots);
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
@@ -2339,7 +2343,7 @@ fn fix_paths_impl(
     let scans = scan_files_for_fix(
         &python_files,
         &explicit_files,
-        project_root,
+        &source_roots,
         config,
         &index,
         fix_opt_ins,
