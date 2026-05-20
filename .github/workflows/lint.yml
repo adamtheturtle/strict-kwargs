@@ -32,19 +32,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint-${{ matrix.platform }}
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Docs (warnings are errors)
         env:
@@ -67,14 +59,24 @@ jobs:
 
   pre-commit:
     # Runs the all-hooks prek workflow documented in
-    # `.pre-commit-config.yaml`. Rust checks are covered by this
-    # workflow's `build` matrix and by `ci.yml`.
+    # `.pre-commit-config.yaml`. This includes `cargo fmt` and
+    # `cargo clippy`; docs and tests stay in their dedicated jobs.
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-pre-commit
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
