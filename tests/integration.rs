@@ -2159,6 +2159,67 @@ def outer() -> None:
     );
 }
 
+#[test]
+fn same_named_nested_helpers_use_their_lexical_scope() {
+    let messages = check_source(
+        r"
+def first() -> None:
+    def check(value: int) -> None: ...
+
+    check(1)
+
+
+def second() -> None:
+    def check(value: int, /) -> None: ...
+
+    check(1)
+",
+    );
+
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].starts_with("main:5:") && messages[0].contains("Too many positional"),
+        "expected only the first helper call to be flagged, got: {messages:?}"
+    );
+}
+
+#[test]
+fn branch_local_helper_redefinition_does_not_create_overload() {
+    let messages = check_source(
+        r"
+def caller(flag: bool) -> None:
+    if flag:
+        def check(value: int) -> None: ...
+
+        check(1)
+    else:
+        def check(value: int, /) -> None: ...
+
+        check(1)
+",
+    );
+
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].starts_with("main:6:") && messages[0].contains("Too many positional"),
+        "expected only the first branch helper call to be flagged, got: {messages:?}"
+    );
+}
+
+#[test]
+fn nested_helper_does_not_leak_to_sibling_scope() {
+    assert_ok(
+        r"
+def owner() -> None:
+    def check(value: int) -> None: ...
+
+
+def sibling(check) -> None:
+    check(1)
+",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Persistent cache (issue #68)
 // ---------------------------------------------------------------------------

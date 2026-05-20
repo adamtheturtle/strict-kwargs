@@ -1073,6 +1073,16 @@ xs.append(1)
 "#;
 
 #[cfg(unix)]
+const BUILTIN_METHOD_LOCAL_HELPER: &str = "\
+class TestCase:
+    def test_something(self) -> None:
+        def check(actual: int) -> None:
+            ...
+
+        check(1)
+";
+
+#[cfg(unix)]
 #[test]
 fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_INHERITED_METHOD);
@@ -1090,6 +1100,17 @@ fn check_literal_methods_with_unstartable_ty_server_use_builtin_resolution() {
     let output = project.run_with_broken_ty_server(&["main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(!stderr(&output).contains("ty server"));
+}
+
+#[cfg(unix)]
+#[test]
+fn check_method_local_helper_with_unstartable_ty_server_uses_builtin_resolution() {
+    let project = Project::new().write("main.py", BUILTIN_METHOD_LOCAL_HELPER);
+    let output = project.run_with_broken_ty_server(&["main.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("Too many positional"), "stderr: {err}");
+    assert!(!err.contains("ty server"), "stderr: {err}");
 }
 
 #[cfg(unix)]
