@@ -43,6 +43,7 @@ const TY_MAX_IN_FLIGHT: usize = 16;
 enum IfBranchTraversal {
     Module,
     LocalBody,
+    ClassBody,
 }
 
 fn decorator_tail(expr: &Expr) -> Option<&str> {
@@ -787,6 +788,7 @@ struct CallChecker<'a> {
     diagnostics: Vec<Diagnostic>,
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
+    class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
     ty_pending: Vec<PendingTy>,
@@ -867,6 +869,7 @@ impl<'a> CallChecker<'a> {
             diagnostics: Vec::new(),
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
+            class_body_depth: 0,
             ty_pending: Vec::new(),
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
@@ -1741,10 +1744,38 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn visit_method_def(&mut self, method_def: &'a StmtFunctionDef) {
+        let StmtFunctionDef {
+            parameters,
+            body,
+            decorator_list,
+            ..
+        } = method_def;
+        for decorator in decorator_list {
+            self.visit_expr(&decorator.expression);
+        }
+        let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
+        self.push_scope();
+        let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
+        self.bind_method_parameters(parameters, &class_fullname, binds_instance_self);
+
+        let class_body_depth = self.class_body_depth;
+        self.class_body_depth = 0;
+        for method_stmt in body {
+            self.visit_body_stmt(method_stmt);
+        }
+        self.class_body_depth = class_body_depth;
+        self.pop_scope();
+    }
+
+    // LLVM reports duplicate uncovered instantiations for this tiny dispatcher
+    // even though each traversal mode is covered by source-level tests.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_if_branch_stmt(&mut self, stmt: &'a Stmt, traversal: IfBranchTraversal) {
         match traversal {
             IfBranchTraversal::Module => self.visit_stmt(stmt),
             IfBranchTraversal::LocalBody => self.visit_body_stmt(stmt),
+            IfBranchTraversal::ClassBody => self.visit_class_body_stmt(stmt),
         }
     }
 
@@ -1775,8 +1806,8 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    /// Walk a statement that appears in the body of a function, class, or
-    /// control-flow branch. Statements that carry custom `visit_stmt` logic
+    /// Walk a statement that appears in a function body or local control-flow
+    /// branch. Statements that carry custom `visit_stmt` logic
     /// (`Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
     /// through `visit_stmt` so instance tracking and definition registration
     /// fire correctly. `If` uses the custom branch traversal so the
@@ -1793,18 +1824,63 @@ impl<'a> CallChecker<'a> {
             _ => walk_stmt(self, stmt),
         }
     }
+
+    /// Walk a statement that appears in a class body or class-level branch.
+    /// Function definitions in this context are methods, including those under
+    /// class-level control flow, so their leading `self` parameter can bind to
+    /// the containing class.
+    fn visit_class_body_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::ClassBody),
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                for inner in body {
+                    self.visit_class_body_stmt(inner);
+                }
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(type_) = &handler.type_ {
+                        self.visit_expr(type_);
+                    }
+                    for inner in &handler.body {
+                        self.visit_class_body_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_class_body_stmt(inner);
+                }
+                for inner in finalbody {
+                    self.visit_class_body_stmt(inner);
+                }
+            }
+            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+                self.visit_stmt(stmt);
+            }
+            _ => walk_stmt(self, stmt),
+        }
+    }
 }
 
 impl<'a> Visitor<'a> for CallChecker<'a> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
-            Stmt::FunctionDef(StmtFunctionDef {
-                name,
-                parameters,
-                body,
-                decorator_list,
-                ..
-            }) => {
+            Stmt::FunctionDef(function_def) => {
+                if self.class_body_depth > 0 {
+                    self.visit_method_def(function_def);
+                    return;
+                }
+                let StmtFunctionDef {
+                    name,
+                    parameters,
+                    body,
+                    decorator_list,
+                    ..
+                } = function_def;
                 // Decorator expressions are evaluated in the enclosing
                 // scope, so visit them before defining/scoping the function
                 // (issue #51: decorator-factory calls were never checked).
@@ -1837,35 +1913,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     |parent| format!("{parent}.{name}"),
                 );
                 self.define(name, class_fullname.clone());
-                self.class_stack.push(class_fullname.clone());
+                self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.class_body_depth += 1;
                 for inner in body {
-                    match inner {
-                        Stmt::FunctionDef(StmtFunctionDef {
-                            parameters: method_parameters,
-                            body: method_body,
-                            decorator_list: method_decorators,
-                            ..
-                        }) => {
-                            for decorator in method_decorators {
-                                self.visit_expr(&decorator.expression);
-                            }
-                            self.push_scope();
-                            let binds_instance_self =
-                                !has_staticmethod_or_classmethod_decorator(method_decorators);
-                            self.bind_method_parameters(
-                                method_parameters,
-                                &class_fullname,
-                                binds_instance_self,
-                            );
-                            for method_stmt in method_body {
-                                self.visit_body_stmt(method_stmt);
-                            }
-                            self.pop_scope();
-                        }
-                        _ => self.visit_body_stmt(inner),
-                    }
+                    self.visit_class_body_stmt(inner);
                 }
+                self.class_body_depth -= 1;
                 self.pop_scope();
                 self.class_stack.pop();
             }
@@ -3567,6 +3621,31 @@ mod tests {
     }
 
     #[test]
+    fn collect_python_files_reports_invalid_extend_exclude_pattern() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let Err(error) = collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config {
+                extend_exclude: vec!["[z-a]".to_string()],
+                ..Config::default()
+            },
+        ) else {
+            panic!("invalid glob must be rejected");
+        };
+        match error {
+            CheckError::ConfigInvalid { path, message } => {
+                assert!(path.ends_with("pyproject.toml"));
+                assert!(
+                    message.contains("invalid `extend_exclude` pattern"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn file_selection_reports_invalid_extend_exclude_pattern() {
         let root = tempfile::tempdir().expect("tempdir");
         let Err(error) = FileSelection::new(
@@ -4189,6 +4268,77 @@ class Child(Base):
 
         assert_eq!(diagnostics, 1);
         assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn class_branch_method_self_binding_resolves_inherited_self_calls_without_ty_fallback() {
+        let source = "\
+class Base:
+    def method(self, a: int) -> None: ...
+
+class Child(Base):
+    if True:
+        def check(self) -> None:
+            self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.Base.method".to_string(), sig(&["self", "a"]));
+        index.insert_class_bases("main.Child".to_string(), vec!["main.Base".to_string()]);
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn nested_class_branch_method_self_binding_resolves_inherited_self_calls_without_ty_fallback() {
+        let source = "\
+class Base:
+    def method(self, a: int) -> None: ...
+
+class Child(Base):
+    try:
+        if True:
+            def check(self) -> None:
+                self.method(1)
+    except Exception:
+        pass
+    except:
+        pass
+    else:
+        pass
+    finally:
+        pass
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.Base.method".to_string(), sig(&["self", "a"]));
+        index.insert_class_bases("main.Child".to_string(), vec!["main.Base".to_string()]);
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn class_branch_staticmethod_does_not_bind_literal_self_as_instance() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+    if True:
+        @staticmethod
+        def static(self) -> None:
+            self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 1);
     }
 
     #[test]
