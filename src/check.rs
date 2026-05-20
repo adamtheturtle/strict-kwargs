@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
@@ -20,10 +19,7 @@ use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
 use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
-use crate::fix::{
-    apply_insertions, declined_fix_reason_counts, DeclinedFixReason, FileFix, FixOptIns,
-    FixOutcome, Insertion,
-};
+use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
@@ -34,6 +30,15 @@ use crate::ty_resolver::{
     byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
     parse_hover_signature, same_path, ty_binary_present, TyResolver,
 };
+
+mod file_selection;
+mod fix_runner;
+
+pub use file_selection::is_prunable_dir;
+use file_selection::{collect_python_files, explicit_python_files};
+#[cfg(test)]
+use file_selection::{is_ignored_path, FileSelection};
+pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 
 /// Keep the ty LSP pipes bounded: large files can have thousands of fallback
 /// requests, and sending all of them before draining responses can deadlock.
@@ -634,162 +639,6 @@ fn scan_files_for_fix(
                 Ok((path.clone(), outcome))
             })
             .collect()
-    })
-}
-
-/// Collect the `.py`/`.pyi` files reachable from `paths`.
-///
-/// A path that is neither a file nor a directory does not exist: that is a
-/// hard error ([`CheckError::PathNotFound`]), like `ruff`, rather than a
-/// silent skip that would let a mistyped target report "clean" in CI
-/// (issue #55). An *existing* file passed directly that is not Python is
-/// still skipped — that is a deliberate selection, not a mistake.
-///
-/// # Errors
-///
-/// Returns [`CheckError::PathNotFound`] for the first path that does not
-/// exist.
-struct FileSelection {
-    project_root: PathBuf,
-    extend_exclude: Gitignore,
-    force_exclude: bool,
-}
-
-impl FileSelection {
-    fn new(project_root: &Path, config: &Config) -> Result<Self, CheckError> {
-        let mut builder = GitignoreBuilder::new(project_root);
-        for pattern in &config.extend_exclude {
-            builder
-                .add_line(None, pattern)
-                .map_err(|error| CheckError::ConfigInvalid {
-                    path: project_root.join("pyproject.toml"),
-                    message: format!(
-                        "has an invalid `extend_exclude` pattern `{pattern}`: {error}"
-                    ),
-                })?;
-        }
-        let extend_exclude = build_extend_exclude(&builder, project_root)?;
-        Ok(Self {
-            project_root: project_root.to_path_buf(),
-            extend_exclude,
-            force_exclude: config.force_exclude,
-        })
-    }
-
-    fn is_excluded(&self, path: &Path, is_dir: bool, explicit: bool) -> bool {
-        if explicit && !self.force_exclude {
-            return false;
-        }
-        if is_ignored_path(path) {
-            return true;
-        }
-        if self.project_root.is_absolute()
-            && path.is_absolute()
-            && !path.starts_with(&self.project_root)
-        {
-            return false;
-        }
-        self.extend_exclude
-            .matched_path_or_any_parents(path, is_dir)
-            .is_ignore()
-    }
-}
-
-/// Build the already-validated gitignore matcher.
-///
-/// Excluded from the coverage gate because `GitignoreBuilder::add_line`
-/// validates each glob eagerly; a later `build` failure is a defensive
-/// third-party error path that is not practically triggerable through
-/// `extend_exclude`.
-#[cfg_attr(coverage, coverage(off))]
-fn build_extend_exclude(
-    builder: &GitignoreBuilder,
-    project_root: &Path,
-) -> Result<Gitignore, CheckError> {
-    builder.build().map_err(|error| CheckError::ConfigInvalid {
-        path: project_root.join("pyproject.toml"),
-        message: format!("has invalid `extend_exclude` patterns: {error}"),
-    })
-}
-
-fn collect_python_files(
-    project_root: &Path,
-    paths: &[PathBuf],
-    config: &Config,
-) -> Result<Vec<PathBuf>, CheckError> {
-    let selection = FileSelection::new(project_root, config)?;
-    let mut files = Vec::new();
-    for path in paths {
-        if path.is_file() {
-            if is_python_file(path) && !selection.is_excluded(path, false, true) {
-                files.push(path.clone());
-            }
-        } else if path.is_dir() {
-            // Prune excluded directories instead of descending into them and
-            // discarding their files one by one: a real project's virtualenv
-            // alone is tens of thousands of entries, so the unpruned walk
-            // dominated whole-project runtime and run-to-run variance. The
-            // walk root is never pruned so `strict-kwargs .` keeps working
-            // even when `.` contains ignored path components.
-            let walk = walkdir::WalkDir::new(path)
-                .into_iter()
-                .filter_entry(|entry| {
-                    entry.depth() == 0
-                        || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
-                });
-            for entry in walk
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().is_file())
-            {
-                let entry_path = entry.path().to_path_buf();
-                if is_python_file(&entry_path) {
-                    files.push(entry_path);
-                }
-            }
-        } else {
-            // Neither a file nor a directory: the path does not exist (a
-            // mistyped target). Fail loudly instead of reporting "clean".
-            return Err(CheckError::PathNotFound { path: path.clone() });
-        }
-    }
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-fn explicit_python_files(paths: &[PathBuf]) -> FxHashSet<PathBuf> {
-    paths
-        .iter()
-        .filter(|path| path.is_file() && is_python_file(path))
-        .cloned()
-        .collect()
-}
-
-fn is_python_file(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext == "py" || ext == "pyi")
-}
-
-/// Whether `entry` is a built-in ignored directory (`.git`, `.venv` and other
-/// dot-directories, `venv`, `__pycache__`), so cache fingerprinting can avoid
-/// descending into default-skipped trees.
-#[cfg_attr(coverage, coverage(off))]
-pub fn is_prunable_dir(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    let name = entry.file_name().to_string_lossy();
-    name.starts_with('.') || name == "venv" || name == "__pycache__"
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn is_ignored_path(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        std::path::Component::Normal(name) => {
-            let name = name.to_string_lossy();
-            name.starts_with('.') || name == "venv" || name == "__pycache__"
-        }
-        _ => false,
     })
 }
 
@@ -2480,196 +2329,6 @@ fn call_fix_insertions(
     } else {
         Ok(insertions)
     }
-}
-
-/// Rewrite positional call arguments to keyword arguments for every fixable
-/// violation reachable from `paths`.
-///
-/// Mirrors [`check_paths`]: it runs the same detection — built-in resolver
-/// *and*, for the calls that misses, the (required) `ty` fallback steered by
-/// `python_env` (the `--python` value). The *rewrite*, by design (issue #7),
-/// stays conservative: a call is rewritten only when the parameter mapping is
-/// unambiguous. By default, that means ordinary built-in, single-signature
-/// mappings only. [`fix_paths_with_opt_ins`] can also include synthesized
-/// constructors, `ty`-resolved calls, and overloads where `ty` selects one
-/// precise arm.
-/// Ambiguous callable displays and most goto-definition-only resolutions are
-/// left alone (a wrong parameter name would corrupt source, cf. issue #41);
-/// a single resolved `__call__` signature may still be fixed because it maps
-/// directly to the callable value being invoked.
-///
-/// Running the `ty` fallback here also lets the returned
-/// [`FixOutcome::declined`] account for *every* violation `check` would
-/// report, so `fix` then `check` (with the same `--python`) is predictable
-/// rather than silently inconsistent (issue #42). The fallback still starts
-/// lazily — only when the built-in resolver leaves a file with unresolved
-/// calls — so the all-first-party common case pays nothing.
-///
-/// Files without changes are omitted from [`FixOutcome::files`].
-///
-/// # Errors
-///
-/// Returns [`CheckError`] if a path argument does not exist
-/// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
-/// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
-/// its server cannot start ([`CheckError::TyServerFailed`]). A file nested
-/// deeper than the supported limit is rejected
-/// ([`CheckError::TooDeeplyNested`]) rather than overflowing the stack; the
-/// walk runs on a large dedicated stack (issue #54).
-pub fn fix_paths(
-    project_root: &Path,
-    paths: &[PathBuf],
-    config: &Config,
-    python_env: Option<&Path>,
-) -> Result<FixOutcome, CheckError> {
-    fix_paths_with_opt_ins(
-        project_root,
-        paths,
-        config,
-        python_env,
-        FixOptIns::default(),
-    )
-}
-
-/// Like [`fix_paths`], but includes the requested non-default fix categories.
-///
-/// # Errors
-///
-/// Returns the same errors as [`fix_paths`].
-pub fn fix_paths_with_opt_ins(
-    project_root: &Path,
-    paths: &[PathBuf],
-    config: &Config,
-    python_env: Option<&Path>,
-    fix_opt_ins: FixOptIns,
-) -> Result<FixOutcome, CheckError> {
-    let fix_opt_ins = FixOptIns {
-        synthesized_constructors: config.fix_synthesized_constructors
-            || fix_opt_ins.synthesized_constructors,
-    };
-    run_with_large_stack(move || {
-        fix_paths_impl(project_root, paths, config, python_env, fix_opt_ins)
-    })
-}
-
-// Fix orchestration is covered end-to-end by CLI/fix tests. Keep it out of the
-// coverage gate because the remaining uncovered arm is the fail-safe propagation
-// from `plan_rewrite_insertions`: parser-derived insertions should not be able
-// to construct that invalid rewrite, and the validator is unit-tested directly.
-#[cfg_attr(coverage, coverage(off))]
-fn fix_paths_impl(
-    project_root: &Path,
-    paths: &[PathBuf],
-    config: &Config,
-    python_env: Option<&Path>,
-    fix_opt_ins: FixOptIns,
-) -> Result<FixOutcome, CheckError> {
-    // `ty` is a hard requirement; verify it up front (see `check_paths`).
-    require_ty_present()?;
-    let python_files = collect_python_files(project_root, paths, config)?;
-    let explicit_files = explicit_python_files(paths);
-    let source_roots = SourceRoots::from_config(project_root, config);
-    let index = build_index(project_root, &python_files, &source_roots);
-
-    // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
-    // file. Rewrites are planned serially below after the ty fallback has a
-    // chance to add safe single-signature hover fixes.
-    let scans = scan_files_for_fix(
-        &python_files,
-        &explicit_files,
-        &source_roots,
-        config,
-        &index,
-        fix_opt_ins,
-    )?;
-
-    let mut ty: Option<TyResolver> = None;
-    let mut ty_start_attempted = false;
-    let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    // Every violation the checker would report, across all files (built-in
-    // and ty-resolved). Used for the declined count; ty may also append safe
-    // hover-derived insertions to the built-in rewrite plan.
-    let mut diagnostics = Vec::new();
-    let mut declined_fix_reasons = Vec::new();
-    let mut fixed_total = 0usize;
-    let mut results = Vec::new();
-    for (path, outcome) in scans {
-        // Warn (deterministically, see `check_paths`) and skip an undecodable
-        // file; it produces no fix and no diagnostics (issue #53).
-        let scan = match outcome {
-            ScanOutcome::Skipped(reason) => {
-                eprintln!(
-                    "strict-kwargs: warning: skipping {} ({reason})",
-                    path.display()
-                );
-                continue;
-            }
-            ScanOutcome::Scanned(scan) => scan,
-        };
-        diagnostics.extend(scan.diagnostics);
-        declined_fix_reasons.extend(scan.declined_fix_reasons);
-        let mut insertions = scan.fixes;
-        let mut fixed_calls = scan.fixed_calls;
-        // The ty fallback adds diagnostics, and for a single concrete named
-        // hover signature can now add the same conservative `name=` insertions
-        // as the built-in resolver. Ambiguous ty displays remain diagnostics
-        // only, so the declined count still matches a following `check`.
-        resolve_file_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            &index,
-            python_env,
-            &path,
-            &scan.source,
-            &scan.pending,
-            config,
-            &mut ty_file_cache,
-            &mut diagnostics,
-            Some(TyFixes {
-                insertions: &mut insertions,
-                fixed_calls: &mut fixed_calls,
-                declined_fix_reasons: &mut declined_fix_reasons,
-            }),
-        )?;
-        resolve_overload_fixes_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            &index,
-            python_env,
-            &path,
-            &scan.source,
-            &scan.overload_fix_pending,
-            Some(TyFixes {
-                insertions: &mut insertions,
-                fixed_calls: &mut fixed_calls,
-                declined_fix_reasons: &mut declined_fix_reasons,
-            }),
-        );
-        if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
-            fixed_total += fixed_calls;
-            results.push(FileFix {
-                path,
-                original: scan.source,
-                fixed,
-                count: fixed_calls,
-            });
-        }
-    }
-    results.sort_by_key(|fix| fix.path.clone());
-    // Each violation pushes exactly one diagnostic, then is rewritten or not;
-    // the ty fallback only ever adds diagnostics. So the un-rewritten count
-    // is the total detected minus the total rewritten. `saturating_sub` is
-    // defensive — `fixed_total` can never exceed the diagnostic count.
-    let declined = declined_fix_reasons.len();
-    debug_assert_eq!(declined, diagnostics.len().saturating_sub(fixed_total));
-    let declined_reasons = declined_fix_reason_counts(&declined_fix_reasons);
-    Ok(FixOutcome {
-        files: results,
-        declined,
-        declined_reasons,
-    })
 }
 
 /// `typing` / `typing_extensions` *special-form* constructors whose name is
