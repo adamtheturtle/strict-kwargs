@@ -980,10 +980,11 @@ impl<'a> CallChecker<'a> {
         {
             let name = param.parameter.name.as_str();
             if Some(name) == self_parameter {
-                self.record_instance(name, class_fullname.to_string());
-                if let Some(annotation) = param.parameter.annotation.as_deref() {
-                    self.define_annotation(name, annotation);
-                }
+                self.record_instance_and_annotation(
+                    name,
+                    class_fullname,
+                    param.parameter.annotation.as_deref(),
+                );
             } else {
                 self.mark_param_opaque_and_annotation(name, param.parameter.annotation.as_deref());
             }
@@ -996,6 +997,19 @@ impl<'a> CallChecker<'a> {
         }
         if let Some(kwarg) = &parameters.kwarg {
             self.mark_param_opaque_and_annotation(kwarg.name.as_str(), kwarg.annotation.as_deref());
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_instance_and_annotation(
+        &mut self,
+        name: &str,
+        class_fullname: &str,
+        annotation: Option<&Expr>,
+    ) {
+        self.record_instance(name, class_fullname.to_string());
+        if let Some(annotation) = annotation {
+            self.define_annotation(name, annotation);
         }
     }
 
@@ -4170,6 +4184,24 @@ class Child(Base):
         let mut index = DefinitionIndex::for_test();
         index.insert("main.Base.method".to_string(), sig(&["self", "a"]));
         index.insert_class_bases("main.Child".to_string(), vec!["main.Base".to_string()]);
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn method_self_binding_preserves_self_annotation() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+    def check(self: 'C') -> None:
+        self.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
 
         let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
 
