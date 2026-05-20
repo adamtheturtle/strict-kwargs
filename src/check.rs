@@ -54,6 +54,22 @@ fn decorator_tail(expr: &Expr) -> Option<&str> {
     }
 }
 
+fn expr_tail_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+        _ => None,
+    }
+}
+
+fn receiver_is_class_object(value: &Expr, class_fullname: &str) -> bool {
+    let Some(receiver_tail) = expr_tail_name(value) else {
+        return false;
+    };
+    let class_name = class_fullname.strip_prefix("ty.").unwrap_or(class_fullname);
+    receiver_tail == class_name.rsplit('.').next().unwrap_or(class_name)
+}
+
 fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
@@ -110,6 +126,7 @@ fn process_scan_outcome_for_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -129,6 +146,7 @@ fn process_scan_outcome_for_ty(
                     ty,
                     ty_start_attempted,
                     project_root,
+                    index,
                     python_env,
                     &path,
                     &scan.source,
@@ -232,6 +250,7 @@ fn pipeline_phases(
                 ty,
                 ty_start_attempted,
                 project_root,
+                index,
                 python_env,
                 ty_file_cache,
                 diagnostics,
@@ -809,6 +828,7 @@ struct PendingTy {
     /// Start of the whole call expression (for the diagnostic position).
     call_start: usize,
     positional_count: usize,
+    rewrite_args_are_statically_precise: bool,
 }
 
 struct PendingTyOverloadFix {
@@ -828,6 +848,9 @@ struct Scope {
     /// opposed to the class object itself. Lets `Class.method(recv, …)` be
     /// told apart from a bound `instance.method(…)` call (issue #27).
     instances: rustc_hash::FxHashSet<String>,
+    /// Names imported directly into this scope. They are common monkeypatch
+    /// boundaries, so diagnostics are allowed but auto-fixes stay positional.
+    imported_callables: FxHashSet<String>,
     /// Local names whose runtime binding is not known to this resolver.
     /// Calls through these names cannot be resolved to a concrete indexed
     /// signature, so they are skipped rather than matched against a
@@ -899,6 +922,7 @@ impl<'a> CallChecker<'a> {
         scope.names.insert(local_name.to_string(), fullname);
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
+        scope.imported_callables.remove(local_name);
         scope.opaque_locals.remove(local_name);
     }
 
@@ -920,6 +944,7 @@ impl<'a> CallChecker<'a> {
         scope.names.remove(name);
         scope.modules.remove(name);
         scope.instances.remove(name);
+        scope.imported_callables.remove(name);
         scope.opaque_locals.insert(name.to_string());
     }
 
@@ -927,6 +952,7 @@ impl<'a> CallChecker<'a> {
         let scope = self.current_scope();
         scope.names.remove(name);
         scope.instances.remove(name);
+        scope.imported_callables.remove(name);
     }
 
     fn bind_function_parameters(&mut self, parameters: &ast::Parameters) {
@@ -1058,6 +1084,7 @@ impl<'a> CallChecker<'a> {
         let scope = self.current_scope();
         scope.names.remove(local_name);
         scope.instances.remove(local_name);
+        scope.imported_callables.remove(local_name);
         scope.opaque_locals.remove(local_name);
         scope.modules.insert(local_name.to_string(), module_path);
     }
@@ -1067,6 +1094,7 @@ impl<'a> CallChecker<'a> {
         scope.names.insert(local_name.to_string(), fullname.clone());
         scope.modules.insert(local_name.to_string(), fullname);
         scope.instances.remove(local_name);
+        scope.imported_callables.insert(local_name.to_string());
         scope.opaque_locals.remove(local_name);
     }
 
@@ -1147,6 +1175,7 @@ impl<'a> CallChecker<'a> {
         scope.names.insert(local_name.to_string(), class_fullname);
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
+        scope.imported_callables.remove(local_name);
         scope.opaque_locals.remove(local_name);
     }
 
@@ -1165,6 +1194,22 @@ impl<'a> CallChecker<'a> {
             }
         }
         false
+    }
+
+    fn binding_is_imported_callable(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.names.contains_key(name) {
+                return scope.imported_callables.contains(name);
+            }
+        }
+        false
+    }
+
+    fn opaque_attribute_receiver_is_safe_for_fix(&self, name: &str) -> bool {
+        !self.is_opaque_local(name)
+            || self
+                .resolve_annotation(name)
+                .is_some_and(annotation_is_builtin_receiver_type)
     }
 
     /// Whether `func` is an unbound instance-method call made through the
@@ -1389,6 +1434,10 @@ impl<'a> CallChecker<'a> {
             .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
     }
 
+    fn value_is_callable_attribute_alias(expr: &Expr) -> bool {
+        matches!(expr, Expr::Attribute(_))
+    }
+
     fn resolve_instance_method(&self, class_fullname: &str, attr_name: &str) -> String {
         let candidate = format!("{class_fullname}.{attr_name}");
         self.index
@@ -1497,6 +1546,34 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
+        if self.call_may_dispatch_to_override_with_different_parameter_names(
+            &call.func,
+            &callee_fullname,
+        ) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.self_call_uses_inherited_method_boundary(&call.func, &callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.constructor_call_uses_inherited_boundary(&call.func, &callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if callable_name_is_private_keyword_boundary(&callee_fullname) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.call_uses_imported_callable_boundary(&call.func) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         if let [signature] = signatures.as_ref() {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
@@ -1538,25 +1615,93 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    fn pending_ty_for_call(call: &ast::ExprCall) -> Option<PendingTy> {
+    fn call_may_dispatch_to_override_with_different_parameter_names(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+    ) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return false;
+        };
+        let Some((class_fullname, method)) = callee_fullname.rsplit_once('.') else {
+            return false;
+        };
+        if receiver_is_class_object(value, class_fullname) {
+            return false;
+        }
+        method == attr.as_str() && self.index.has_overriding_method(class_fullname, method)
+    }
+
+    fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
+        matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+    }
+
+    fn self_call_uses_inherited_method_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+            return false;
+        };
+        if !matches!(&**value, Expr::Name(name) if name.id.as_str() == "self") {
+            return false;
+        }
+        let Some((owner, _)) = callee_fullname.rsplit_once('.') else {
+            return false;
+        };
+        self.class_stack
+            .last()
+            .is_some_and(|current| owner != current)
+    }
+
+    fn constructor_call_uses_inherited_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        if !callee_fullname.ends_with(".__init__") && !callee_fullname.ends_with(".__new__") {
+            return false;
+        }
+        let Some(constructed_class) = self.class_from_constructor_func(func) else {
+            return false;
+        };
+        let Some((owner, _)) = callee_fullname.rsplit_once('.') else {
+            return false;
+        };
+        owner != constructed_class && self.index.class_inherits_from(&constructed_class, owner)
+    }
+
+    fn pending_ty_for_call(&self, call: &ast::ExprCall) -> Option<PendingTy> {
         // Position at the callee identifier: the attribute for ``x.m()``,
         // otherwise the name itself.
+        let mut rewrite_args_are_statically_precise = true;
         let callee_offset = match &*call.func {
-            Expr::Attribute(attr) => attr.attr.range().start(),
-            Expr::Name(name) => name.range().start(),
+            Expr::Attribute(attr) => {
+                if let Some(chain) = Self::dotted_path(&attr.value) {
+                    let head = chain.split('.').next().unwrap_or(chain.as_str());
+                    if !self.opaque_attribute_receiver_is_safe_for_fix(head)
+                        || self.binding_is_imported_callable(head)
+                    {
+                        rewrite_args_are_statically_precise = false;
+                    }
+                }
+                attr.attr.range().start()
+            }
+            Expr::Name(name) => {
+                if self.is_opaque_local(name.id.as_str())
+                    || self.binding_is_imported_callable(name.id.as_str())
+                {
+                    rewrite_args_are_statically_precise = false;
+                }
+                name.range().start()
+            }
             _ => return None,
         };
         Some(PendingTy {
             callee_offset: callee_offset.to_usize(),
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
+            rewrite_args_are_statically_precise,
         })
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
     #[cfg_attr(coverage, coverage(off))]
     fn record_ty_pending(&mut self, call: &ast::ExprCall) {
-        let Some(pending) = Self::pending_ty_for_call(call) else {
+        let Some(pending) = self.pending_ty_for_call(call) else {
             return;
         };
         if !self.ty_pending.contains(&pending) {
@@ -1575,7 +1720,7 @@ impl<'a> CallChecker<'a> {
         rewrite_start: usize,
         positional_count: usize,
     ) -> bool {
-        if let Some(pending) = Self::pending_ty_for_call(call) {
+        if let Some(pending) = self.pending_ty_for_call(call) {
             let rewrite_args_are_statically_precise = (rewrite_start..positional_count).all(|i| {
                 call.arguments
                     .args
@@ -1871,11 +2016,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 let class_fullname = self.class_from_obvious_instance(value);
+                let is_callable_attribute_alias = Self::value_is_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
+                        } else if is_callable_attribute_alias {
+                            self.mark_opaque_local(name.id.as_str());
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
@@ -1888,10 +2036,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 let class_fullname = self.class_from_obvious_instance(value);
+                let is_callable_attribute_alias = Self::value_is_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                    } else if is_callable_attribute_alias {
+                        self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
@@ -2213,6 +2364,7 @@ fn fix_paths_impl(
             &mut ty,
             &mut ty_start_attempted,
             project_root,
+            &index,
             python_env,
             &path,
             &scan.source,
@@ -2230,6 +2382,7 @@ fn fix_paths_impl(
             &mut ty,
             &mut ty_start_attempted,
             project_root,
+            &index,
             python_env,
             &path,
             &scan.source,
@@ -2751,8 +2904,24 @@ fn signature_is_fully_named(signature: &Signature) -> bool {
         .all(|param| param.name.as_deref().is_some_and(|name| !name.is_empty()))
 }
 
+fn ty_hover_signature_is_safe_for_fix(
+    name: &str,
+    owner: Option<&str>,
+    positional_count: usize,
+) -> bool {
+    positional_count != 1
+        || (!name.contains('@') && !owner.is_some_and(|owner| owner.contains('@')))
+}
+
 fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
     !name.starts_with("__") || name.ends_with("__")
+}
+
+fn callable_name_is_private_keyword_boundary(callee_fullname: &str) -> bool {
+    callee_fullname
+        .rsplit('.')
+        .next()
+        .is_some_and(|name| name.starts_with('_') && !name.starts_with("__"))
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -2762,6 +2931,7 @@ fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
               insertion helper"
 )]
 fn ty_call_fix_insertions(
+    index: Option<&DefinitionIndex>,
     fix_ast: TyFixAst<'_>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2780,6 +2950,19 @@ fn ty_call_fix_insertions(
     let Some(call) = call_at_start(fix_ast.suite, pending.call_start, pending.callee_offset) else {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     };
+    if let (
+        Some(index),
+        Expr::Attribute(ast::ExprAttribute { value, attr, .. }),
+        Some((class_fullname, method)),
+    ) = (index, &*call.func, callee_fullname.rsplit_once('.'))
+    {
+        if !receiver_is_class_object(value, class_fullname)
+            && method == attr.as_str()
+            && index.has_overriding_method_matching_class_name(class_fullname, method)
+        {
+            return Err(DeclinedFixReason::UnsupportedSignatureShape);
+        }
+    }
     if !receiver_is_explicit
         && !receiver_already_omitted
         && matches!(&*call.func, Expr::Attribute(_))
@@ -2813,6 +2996,7 @@ fn ty_call_fix_insertions(
 )]
 fn record_ty_fix(
     fixes: &mut Option<TyFixes<'_>>,
+    index: Option<&DefinitionIndex>,
     fix_ast: Option<TyFixAst<'_>>,
     pending: &PendingTy,
     callee_fullname: &str,
@@ -2825,6 +3009,18 @@ fn record_ty_fix(
     let Some(fixes) = fixes.as_mut() else {
         return;
     };
+    if !pending.rewrite_args_are_statically_precise {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnsupportedSignatureShape);
+        return;
+    }
+    if callable_name_is_private_keyword_boundary(callee_fullname) {
+        fixes
+            .declined_fix_reasons
+            .push(DeclinedFixReason::UnsupportedSignatureShape);
+        return;
+    }
     let Some(fix_ast) = fix_ast else {
         fixes
             .declined_fix_reasons
@@ -2832,6 +3028,7 @@ fn record_ty_fix(
         return;
     };
     let insertions = match ty_call_fix_insertions(
+        index,
         fix_ast,
         pending,
         callee_fullname,
@@ -2912,6 +3109,7 @@ fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -2934,6 +3132,7 @@ fn resolve_file_with_ty(
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(
             ty,
+            index,
             path,
             source,
             pending,
@@ -2981,6 +3180,7 @@ fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -3042,7 +3242,7 @@ fn resolve_overload_fixes_with_ty(
                 record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
                 continue;
             };
-            record_selected_overload_fix(&mut fixes, fix_ast, item, &raw);
+            record_selected_overload_fix(&mut fixes, index, fix_ast, item, &raw);
         }
     }
 }
@@ -3066,6 +3266,7 @@ fn record_declined_fixes(fixes: &mut Option<TyFixes<'_>>, reason: DeclinedFixRea
 #[cfg_attr(coverage, coverage(off))]
 fn record_selected_overload_fix(
     fixes: &mut Option<TyFixes<'_>>,
+    index: &DefinitionIndex,
     fix_ast: Option<TyFixAst<'_>>,
     item: &PendingTyOverloadFix,
     raw_hover: &str,
@@ -3109,8 +3310,14 @@ fn record_selected_overload_fix(
             record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
+        if !ty_hover_signature_is_safe_for_fix(&sig.name, sig.owner.as_deref(), p.positional_count)
+        {
+            record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         record_ty_fix(
             fixes,
+            Some(index),
             fix_ast,
             p,
             &item.callee_fullname,
@@ -3154,6 +3361,7 @@ fn record_selected_overload_fix(
     }
     record_ty_fix(
         fixes,
+        Some(index),
         fix_ast,
         p,
         &item.callee_fullname,
@@ -3182,6 +3390,25 @@ fn annotation_is_precise_overload_type(annotation: &str) -> bool {
     !annotation.is_empty()
         && !annotation.contains('|')
         && !matches!(annotation, "Any" | "typing.Any" | "object" | "Unknown")
+}
+
+fn annotation_is_builtin_receiver_type(annotation: &str) -> bool {
+    let annotation = annotation.trim().trim_matches(['"', '\'']);
+    let annotation = annotation.strip_prefix("builtins.").unwrap_or(annotation);
+    matches!(
+        annotation,
+        "str"
+            | "bytes"
+            | "int"
+            | "float"
+            | "complex"
+            | "bool"
+            | "list"
+            | "tuple"
+            | "dict"
+            | "set"
+            | "frozenset"
+    )
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -3227,6 +3454,7 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 )]
 fn resolve_pending_with_ty(
     ty: &mut TyResolver,
+    index: &DefinitionIndex,
     path: &Path,
     source: &str,
     pending: &[PendingTy],
@@ -3317,17 +3545,29 @@ fn resolve_pending_with_ty(
                     } else {
                         positional_count
                     };
-                    record_ty_fix(
-                        &mut fixes,
-                        fix_ast,
-                        p,
-                        &fullname,
-                        fix_signature,
-                        max_positional,
-                        fix_positional_count,
-                        receiver_is_explicit,
-                        receiver_already_omitted,
-                    );
+                    if ty_hover_signature_is_safe_for_fix(
+                        &sig.name,
+                        sig.owner.as_deref(),
+                        p.positional_count,
+                    ) {
+                        record_ty_fix(
+                            &mut fixes,
+                            Some(index),
+                            fix_ast,
+                            p,
+                            &fullname,
+                            fix_signature,
+                            max_positional,
+                            fix_positional_count,
+                            receiver_is_explicit,
+                            receiver_already_omitted,
+                        );
+                    } else {
+                        record_declined_fix(
+                            &mut fixes,
+                            DeclinedFixReason::UnsupportedSignatureShape,
+                        );
+                    }
                 }
                 continue;
             }
@@ -3368,6 +3608,7 @@ fn resolve_pending_with_ty(
                 if let [signature] = overloads.as_slice() {
                     record_ty_fix(
                         &mut fixes,
+                        Some(index),
                         fix_ast,
                         p,
                         &fullname,
@@ -3443,6 +3684,7 @@ fn resolve_pending_with_ty(
                             attempted_fix = true;
                             record_ty_fix(
                                 &mut fixes,
+                                Some(index),
                                 fix_ast,
                                 &pending[i],
                                 &fullname,
@@ -3470,8 +3712,8 @@ mod tests {
         collect_python_files, decorator_tail, has_staticmethod_or_classmethod_decorator,
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        without_leading_self, CallAtStart, DeclinedFixReason, FileSelection, FixOptIns, PendingTy,
-        TyFixAst, TyFixes,
+        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
+        FileSelection, FixOptIns, PendingTy, TyFixAst, TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -3761,6 +4003,23 @@ class C:
                 kind: ParameterKind::PositionalOrKeyword,
             }],
         }));
+        assert!(ty_hover_signature_is_safe_for_fix("__init__", None, 1));
+        assert!(ty_hover_signature_is_safe_for_fix(
+            "append",
+            Some("list[int]"),
+            1
+        ));
+        assert!(ty_hover_signature_is_safe_for_fix("Self@__init__", None, 2));
+        assert!(!ty_hover_signature_is_safe_for_fix(
+            "Self@__init__",
+            None,
+            1
+        ));
+        assert!(!ty_hover_signature_is_safe_for_fix(
+            "method",
+            Some("Self@C"),
+            1
+        ));
     }
 
     #[test]
@@ -3769,6 +4028,7 @@ class C:
             callee_offset: 0,
             call_start: 0,
             positional_count: 1,
+            rewrite_args_are_statically_precise: true,
         };
         let named = sig(&["a"]);
 
@@ -3777,6 +4037,7 @@ class C:
         let mut no_fix_context = None;
         record_ty_fix(
             &mut no_fix_context,
+            None,
             None,
             &pending,
             "ty.f",
@@ -3811,6 +4072,7 @@ class C:
         };
         record_ty_fix(
             &mut fixes,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
@@ -3829,6 +4091,7 @@ class C:
         };
         record_ty_fix(
             &mut fixes,
+            None,
             Some(fix_ast),
             &pending,
             "ty.f",
