@@ -1203,7 +1203,14 @@ fn index_module(
         return;
     }
     let mut bindings = FxHashMap::default();
-    index_module_with_bindings(store, module_name, is_package, stmts, &mut bindings);
+    index_module_with_bindings(
+        store,
+        module_name,
+        is_package,
+        module_name,
+        stmts,
+        &mut bindings,
+    );
 }
 
 // Mirrors the ordinary definition-indexing traversal without the
@@ -1212,9 +1219,53 @@ fn index_module(
 // out of coverage avoids requiring a second full branch matrix for duplicated
 // control-flow recursion.
 #[cfg_attr(coverage, coverage(off))]
-fn index_module_fast(store: &mut Store, module_name: &str, stmts: &[Stmt]) {
+fn index_module_fast(store: &mut Store, scope_name: &str, stmts: &[Stmt]) {
     for stmt in stmts {
-        index_stmt_fast(store, module_name, stmt);
+        index_stmt_fast(store, scope_name, stmt);
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn body_may_contain_indexed_def(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_may_contain_indexed_def)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn stmt_may_contain_indexed_def(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::FunctionDef(_) | Stmt::ClassDef(_) => true,
+        Stmt::If(ast::StmtIf {
+            body,
+            elif_else_clauses,
+            ..
+        }) => {
+            body_may_contain_indexed_def(body)
+                || elif_else_clauses
+                    .iter()
+                    .any(|clause| body_may_contain_indexed_def(&clause.body))
+        }
+        Stmt::While(ast::StmtWhile { body, .. })
+        | Stmt::For(ast::StmtFor { body, .. })
+        | Stmt::With(ast::StmtWith { body, .. }) => body_may_contain_indexed_def(body),
+        Stmt::Try(ast::StmtTry {
+            body,
+            handlers,
+            orelse,
+            finalbody,
+            ..
+        }) => {
+            body_may_contain_indexed_def(body)
+                || handlers.iter().any(|handler| {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    body_may_contain_indexed_def(&handler.body)
+                })
+                || body_may_contain_indexed_def(orelse)
+                || body_may_contain_indexed_def(finalbody)
+        }
+        Stmt::Match(ast::StmtMatch { cases, .. }) => cases
+            .iter()
+            .any(|case| body_may_contain_indexed_def(&case.body)),
+        _ => false,
     }
 }
 
@@ -1227,11 +1278,12 @@ fn index_module_with_bindings(
     store: &mut Store,
     module_name: &str,
     is_package: bool,
+    scope_name: &str,
     stmts: &[Stmt],
     bindings: &mut FxHashMap<String, String>,
 ) {
     for stmt in stmts {
-        index_stmt(store, module_name, is_package, module_name, stmt, bindings);
+        index_stmt(store, module_name, is_package, scope_name, stmt, bindings);
     }
 }
 
@@ -1347,20 +1399,37 @@ fn index_stmt(
             body,
             ..
         }) => {
-            let fullname = format!("{module_name}.{name}");
+            let fullname = format!("{scope_name}.{name}");
             if has_singledispatch_decorator(decorator_list) {
                 store.excluded.insert(fullname.clone());
             } else {
-                store.insert(fullname.clone(), signature_from_parameters(parameters));
+                let signature = signature_from_parameters(parameters);
+                store.insert(fullname.clone(), signature);
+            }
+            if body_may_contain_indexed_def(body) {
+                let mut nested_bindings = bindings.clone();
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    &fullname,
+                    body,
+                    &mut nested_bindings,
+                );
             }
             bind(bindings, name.as_str(), fullname);
-            let mut nested_bindings = bindings.clone();
-            index_module_with_bindings(store, module_name, is_package, body, &mut nested_bindings);
         }
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
-            index_class_body(store, &class_name, &class_def.body, bindings);
+            index_class_body(
+                store,
+                module_name,
+                is_package,
+                &class_name,
+                &class_def.body,
+                bindings,
+            );
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
         }
@@ -1369,15 +1438,22 @@ fn index_stmt(
             elif_else_clauses,
             ..
         }) => {
-            index_module_with_bindings(store, module_name, is_package, body, bindings);
+            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for clause in elif_else_clauses {
-                index_module_with_bindings(store, module_name, is_package, &clause.body, bindings);
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    &clause.body,
+                    bindings,
+                );
             }
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            index_module_with_bindings(store, module_name, is_package, body, bindings);
+            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -1386,17 +1462,45 @@ fn index_stmt(
             finalbody,
             ..
         }) => {
-            index_module_with_bindings(store, module_name, is_package, body, bindings);
+            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module_with_bindings(store, module_name, is_package, &handler.body, bindings);
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    &handler.body,
+                    bindings,
+                );
             }
-            index_module_with_bindings(store, module_name, is_package, orelse, bindings);
-            index_module_with_bindings(store, module_name, is_package, finalbody, bindings);
+            index_module_with_bindings(
+                store,
+                module_name,
+                is_package,
+                scope_name,
+                orelse,
+                bindings,
+            );
+            index_module_with_bindings(
+                store,
+                module_name,
+                is_package,
+                scope_name,
+                finalbody,
+                bindings,
+            );
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
-                index_module_with_bindings(store, module_name, is_package, &case.body, bindings);
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    &case.body,
+                    bindings,
+                );
             }
         }
         _ => {}
@@ -1404,7 +1508,7 @@ fn index_stmt(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
+fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
     match stmt {
         Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
@@ -1413,16 +1517,26 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
             body,
             ..
         }) => {
-            let fullname = format!("{module_name}.{name}");
+            let fullname = format!("{scope_name}.{name}");
             if has_singledispatch_decorator(decorator_list) {
-                store.excluded.insert(fullname);
+                if body_may_contain_indexed_def(body) {
+                    store.excluded.insert(fullname.clone());
+                    index_module_fast(store, &fullname, body);
+                } else {
+                    store.excluded.insert(fullname);
+                }
             } else {
-                store.insert(fullname, signature_from_parameters(parameters));
+                let signature = signature_from_parameters(parameters);
+                if body_may_contain_indexed_def(body) {
+                    store.insert(fullname.clone(), signature);
+                    index_module_fast(store, &fullname, body);
+                } else {
+                    store.insert(fullname, signature);
+                }
             }
-            index_module_fast(store, module_name, body);
         }
         Stmt::ClassDef(class_def) => {
-            let class_name = format!("{module_name}.{}", class_def.name);
+            let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
             index_class_body_fast(store, &class_name, &class_def.body);
         }
@@ -1431,14 +1545,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
             elif_else_clauses,
             ..
         }) => {
-            index_module_fast(store, module_name, body);
+            index_module_fast(store, scope_name, body);
             for clause in elif_else_clauses {
-                index_module_fast(store, module_name, &clause.body);
+                index_module_fast(store, scope_name, &clause.body);
             }
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => index_module_fast(store, module_name, body),
+        | Stmt::With(ast::StmtWith { body, .. }) => index_module_fast(store, scope_name, body),
         Stmt::Try(ast::StmtTry {
             body,
             handlers,
@@ -1446,17 +1560,17 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            index_module_fast(store, module_name, body);
+            index_module_fast(store, scope_name, body);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module_fast(store, module_name, &handler.body);
+                index_module_fast(store, scope_name, &handler.body);
             }
-            index_module_fast(store, module_name, orelse);
-            index_module_fast(store, module_name, finalbody);
+            index_module_fast(store, scope_name, orelse);
+            index_module_fast(store, scope_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
-                index_module_fast(store, module_name, &case.body);
+                index_module_fast(store, scope_name, &case.body);
             }
         }
         _ => {}
@@ -1466,6 +1580,8 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, stmt: &Stmt) {
 #[cfg_attr(coverage, coverage(off))]
 fn index_class_body(
     store: &mut Store,
+    module_name: &str,
+    is_package: bool,
     class_name: &str,
     body: &[Stmt],
     bindings: &FxHashMap<String, String>,
@@ -1481,17 +1597,49 @@ fn index_class_body(
             }) => {
                 let fullname = format!("{class_name}.{name}");
                 if has_singledispatch_decorator(decorator_list) {
-                    store.excluded.insert(fullname);
+                    if body_may_contain_indexed_def(body) {
+                        store.excluded.insert(fullname.clone());
+                        let mut nested_bindings = bindings.clone();
+                        index_module_with_bindings(
+                            store,
+                            module_name,
+                            is_package,
+                            &fullname,
+                            body,
+                            &mut nested_bindings,
+                        );
+                    } else {
+                        store.excluded.insert(fullname);
+                    }
                 } else {
-                    store.insert(fullname, signature_from_parameters(parameters));
+                    let signature = signature_from_parameters(parameters);
+                    if body_may_contain_indexed_def(body) {
+                        store.insert(fullname.clone(), signature);
+                        let mut nested_bindings = bindings.clone();
+                        index_module_with_bindings(
+                            store,
+                            module_name,
+                            is_package,
+                            &fullname,
+                            body,
+                            &mut nested_bindings,
+                        );
+                    } else {
+                        store.insert(fullname, signature);
+                    }
                 }
-                let mut nested_bindings = bindings.clone();
-                index_module_with_bindings(store, class_name, false, body, &mut nested_bindings);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
                 store.classes.insert(nested.clone());
-                index_class_body(store, &nested, &class_def.body, bindings);
+                index_class_body(
+                    store,
+                    module_name,
+                    is_package,
+                    &nested,
+                    &class_def.body,
+                    bindings,
+                );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
             Stmt::If(ast::StmtIf {
@@ -1499,9 +1647,16 @@ fn index_class_body(
                 elif_else_clauses,
                 ..
             }) => {
-                index_class_body(store, class_name, body, bindings);
+                index_class_body(store, module_name, is_package, class_name, body, bindings);
                 for clause in elif_else_clauses {
-                    index_class_body(store, class_name, &clause.body, bindings);
+                    index_class_body(
+                        store,
+                        module_name,
+                        is_package,
+                        class_name,
+                        &clause.body,
+                        bindings,
+                    );
                 }
             }
             _ => {}
@@ -1522,11 +1677,21 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
             }) => {
                 let fullname = format!("{class_name}.{name}");
                 if has_singledispatch_decorator(decorator_list) {
-                    store.excluded.insert(fullname);
+                    if body_may_contain_indexed_def(body) {
+                        store.excluded.insert(fullname.clone());
+                        index_module_fast(store, &fullname, body);
+                    } else {
+                        store.excluded.insert(fullname);
+                    }
                 } else {
-                    store.insert(fullname, signature_from_parameters(parameters));
+                    let signature = signature_from_parameters(parameters);
+                    if body_may_contain_indexed_def(body) {
+                        store.insert(fullname.clone(), signature);
+                        index_module_fast(store, &fullname, body);
+                    } else {
+                        store.insert(fullname, signature);
+                    }
                 }
-                index_module_fast(store, class_name, body);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
