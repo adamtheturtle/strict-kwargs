@@ -40,6 +40,15 @@ pub struct Config {
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
     pub ignore_names: Vec<String>,
+    /// Source roots used for first-party import resolution and module-name
+    /// derivation, relative to the project root when not absolute.
+    #[serde(default)]
+    pub src: Vec<PathBuf>,
+    /// Directories that should be treated as namespace packages even when
+    /// they do not contain `__init__.py`, relative to the project root when
+    /// not absolute.
+    #[serde(default)]
+    pub namespace_packages: Vec<PathBuf>,
     /// Additional path patterns to exclude from project walks, relative to
     /// the project root.
     #[serde(default)]
@@ -147,6 +156,106 @@ impl Config {
     }
 }
 
+/// Resolved source-root configuration for a project.
+#[derive(Debug)]
+pub struct SourceRoots<'a> {
+    default_root: Option<&'a Path>,
+    first_party: Vec<PathBuf>,
+    namespace_packages: Vec<PathBuf>,
+}
+
+impl<'a> SourceRoots<'a> {
+    pub fn from_config(project_root: &'a Path, config: &Config) -> Self {
+        if config.src.is_empty() && config.namespace_packages.is_empty() {
+            return Self {
+                default_root: Some(project_root),
+                first_party: Vec::new(),
+                namespace_packages: Vec::new(),
+            };
+        }
+
+        let mut first_party = Vec::with_capacity(config.src.len() + 1);
+        first_party.push(project_root.to_path_buf());
+        first_party.extend(
+            config
+                .src
+                .iter()
+                .map(|path| resolve_configured_path(project_root, path)),
+        );
+        first_party.sort();
+        first_party.dedup();
+        first_party.sort_by(|left, right| {
+            right
+                .components()
+                .count()
+                .cmp(&left.components().count())
+                .then_with(|| right.cmp(left))
+        });
+
+        let mut namespace_packages: Vec<PathBuf> = config
+            .namespace_packages
+            .iter()
+            .map(|path| resolve_configured_path(project_root, path))
+            .collect();
+        namespace_packages.sort();
+        namespace_packages.dedup();
+
+        Self {
+            default_root: None,
+            first_party,
+            namespace_packages,
+        }
+    }
+
+    pub(crate) fn first_party_for_resolution(&self) -> Vec<PathBuf> {
+        if let Some(root) = self.default_root {
+            vec![root.to_path_buf()]
+        } else {
+            self.first_party.clone()
+        }
+    }
+
+    #[cfg(test)]
+    fn first_party(&self) -> Vec<PathBuf> {
+        self.first_party_for_resolution()
+    }
+
+    pub fn namespace_packages(&self) -> &[PathBuf] {
+        &self.namespace_packages
+    }
+
+    pub fn module_name_for_path(&self, path: &Path) -> String {
+        let relative = if let Some(root) = self.default_root {
+            path.strip_prefix(root).unwrap_or(path)
+        } else {
+            self.first_party
+                .iter()
+                .find_map(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path)
+        }
+        .with_extension("");
+        let mut parts: Vec<String> = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        // ``pkg/__init__.py`` is the module ``pkg``, not ``pkg.__init__``.
+        if parts.last().map(String::as_str) == Some("__init__") {
+            parts.pop();
+        }
+        parts.join(".")
+    }
+}
+
+fn resolve_configured_path(project_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else if path.as_os_str().is_empty() || path == Path::new(".") {
+        project_root.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
+}
+
 fn validate_required_version(required_version: &str, current_version: &str) -> Result<(), String> {
     let required_version = required_version.trim();
     if required_version.is_empty() {
@@ -233,6 +342,8 @@ mod tests {
       [tool.strict_kwargs]
       required_version = "2026.5.19-post.3"
       ignore_names = ["main.func", "builtins.str"]
+      src = ["src", "lib"]
+      namespace_packages = ["src/airflow/providers"]
       extend_exclude = ["generated", "vendor"]
       force_exclude = true
       cache_dir = ".strict-kwargs-cache"
@@ -245,6 +356,17 @@ mod tests {
         assert_eq!(
             config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
+        );
+        assert_eq!(config.src, vec![PathBuf::from("src"), PathBuf::from("lib")]);
+        assert_eq!(
+            config.namespace_packages,
+            vec![PathBuf::from("src/airflow/providers")]
+        );
+        let json = serde_json::to_string(&config).expect("serialize config");
+        assert!(json.contains(r#""src":["src","lib"]"#), "json: {json}");
+        assert!(
+            json.contains(r#""namespace_packages":["src/airflow/providers"]"#),
+            "json: {json}"
         );
         assert_eq!(
             config.extend_exclude,
@@ -280,6 +402,8 @@ mod tests {
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
         assert!(config.ignore_names.is_empty());
+        assert!(config.src.is_empty());
+        assert!(config.namespace_packages.is_empty());
         assert!(config.extend_exclude.is_empty());
         assert!(!config.force_exclude);
         assert!(config.required_version.is_none());
@@ -335,6 +459,8 @@ mod tests {
         for contents in [
             "[tool.strict_kwargs]\nextend_exclude = \"generated\"\n",
             "[tool.strict_kwargs]\nforce_exclude = \"yes\"\n",
+            "[tool.strict_kwargs]\nsrc = \"src\"\n",
+            "[tool.strict_kwargs]\nnamespace_packages = \"pkg\"\n",
         ] {
             let message =
                 Config::from_pyproject_str(contents).expect_err("wrong value type must error");
@@ -386,6 +512,71 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&full).expect("serialize config"),
             serde_json::to_string(&json).expect("serialize config")
+        );
+    }
+
+    #[test]
+    fn source_roots_resolve_relative_paths_and_strip_longest_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            src: vec![PathBuf::from("lib"), PathBuf::from("src")],
+            namespace_packages: vec![PathBuf::from("src/airflow/providers")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+        assert!(format!("{roots:?}").contains("first_party"));
+
+        assert_eq!(
+            roots.first_party(),
+            &[
+                dir.path().join("src"),
+                dir.path().join("lib"),
+                dir.path().to_path_buf(),
+            ]
+        );
+        assert_eq!(
+            roots.namespace_packages(),
+            &[dir.path().join("src/airflow/providers")]
+        );
+        assert_eq!(
+            roots.module_name_for_path(&dir.path().join("src/pkg/mod.py")),
+            "pkg.mod"
+        );
+        assert_eq!(
+            roots.module_name_for_path(&dir.path().join("pkg/mod.py")),
+            "pkg.mod"
+        );
+        assert_eq!(
+            roots.module_name_for_path(&dir.path().join("src/pkg/__init__.py")),
+            "pkg"
+        );
+    }
+
+    #[test]
+    fn source_roots_support_namespace_packages_without_extra_source_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            namespace_packages: vec![PathBuf::from("vendor/pkg")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+
+        assert_eq!(roots.first_party(), &[dir.path().to_path_buf()]);
+        assert_eq!(roots.namespace_packages(), &[dir.path().join("vendor/pkg")]);
+    }
+
+    #[test]
+    fn resolve_configured_path_handles_absolute_root_alias_and_relative_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let absolute = root.join("absolute-src");
+
+        assert_eq!(resolve_configured_path(root, &absolute), absolute);
+        assert_eq!(resolve_configured_path(root, Path::new("")), root);
+        assert_eq!(resolve_configured_path(root, Path::new(".")), root);
+        assert_eq!(
+            resolve_configured_path(root, Path::new("relative-src")),
+            root.join("relative-src")
         );
     }
 

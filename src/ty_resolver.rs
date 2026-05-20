@@ -1079,20 +1079,13 @@ mod tests {
         }
 
         fn dead_child() -> (std::process::Child, ChildStdin) {
-            use std::io::Read;
-            // The shell closes its own stdin (fd 0) before printing 'x', so by
-            // the time read_exact returns the pipe read-end is guaranteed closed
-            // and any write to `stdin` returns BrokenPipe — no process-exit race.
-            let mut child = Command::new("sh")
-                .args(["-c", "exec 0<&-; printf x; sleep 9999"])
+            let mut child = Command::new("true")
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdout(Stdio::null())
                 .spawn()
-                .expect("spawn sh");
-            let stdin = child.stdin.take().expect("sh stdin");
-            let mut stdout = child.stdout.take().expect("sh stdout");
-            let mut buf = [0u8; 1];
-            stdout.read_exact(&mut buf).expect("sh ready signal");
+                .expect("spawn true");
+            let stdin = child.stdin.take().expect("true stdin");
+            child.wait().expect("true exits");
             (child, stdin)
         }
 
