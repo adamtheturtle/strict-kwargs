@@ -706,6 +706,78 @@ fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
 }
 
 #[test]
+fn configured_src_layout_resolves_first_party_imports() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nsrc = [\"src\"]\n",
+    )
+    .expect("write pyproject");
+    for (name, content) in [
+        (
+            "src/pkg/lib.py",
+            "def helper(a: int, b: int) -> int:\n    return a + b\n",
+        ),
+        (
+            "src/app.py",
+            "from pkg.lib import helper\n\nhelper(1, 2)\nhelper(a=1, b=2)\n",
+        ),
+    ] {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, content).expect("write");
+    }
+
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, &[root.join("src/app.py")], &config, None, None).expect("check");
+
+    assert_eq!(diagnostics.len(), 1, "got: {diagnostics:?}");
+    assert_eq!(diagnostics[0].line, 3);
+    assert!(diagnostics[0].message().contains("Too many positional"));
+}
+
+#[test]
+fn configured_namespace_package_without_init_resolves_under_src_root() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nsrc = [\"src\"]\nnamespace_packages = [\"src/acme/plugins\"]\n",
+    )
+    .expect("write pyproject");
+    for (name, content) in [
+        (
+            "src/acme/plugins/service.py",
+            "def run(a: int, b: int) -> None: ...\n",
+        ),
+        (
+            "src/app.py",
+            "import acme.plugins.service as service\n\nservice.run(1, 2)\n",
+        ),
+    ] {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, content).expect("write");
+    }
+
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, &[root.join("src/app.py")], &config, None, None).expect("check");
+
+    assert_eq!(diagnostics.len(), 1, "got: {diagnostics:?}");
+    assert_eq!(diagnostics[0].line, 3);
+    assert!(diagnostics[0].message().contains("Too many positional"));
+}
+
+#[test]
 fn cross_module_from_import() {
     let messages = check_multi(&[
         (
