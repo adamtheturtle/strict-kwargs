@@ -1677,11 +1677,21 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
             }) => {
                 let fullname = format!("{class_name}.{name}");
                 if has_singledispatch_decorator(decorator_list) {
-                    store.excluded.insert(fullname);
+                    if body_may_contain_indexed_def(body) {
+                        store.excluded.insert(fullname.clone());
+                        index_module_fast(store, &fullname, body);
+                    } else {
+                        store.excluded.insert(fullname);
+                    }
                 } else {
-                    store.insert(fullname, signature_from_parameters(parameters));
+                    let signature = signature_from_parameters(parameters);
+                    if body_may_contain_indexed_def(body) {
+                        store.insert(fullname.clone(), signature);
+                        index_module_fast(store, &fullname, body);
+                    } else {
+                        store.insert(fullname, signature);
+                    }
                 }
-                index_module_fast(store, class_name, body);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);

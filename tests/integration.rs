@@ -2220,6 +2220,20 @@ def sibling(check) -> None:
     );
 }
 
+#[test]
+fn method_local_helper_is_not_indexed_as_class_attribute() {
+    assert_ok(
+        r"
+class Owner:
+    def method(self) -> None:
+        def check(value: int) -> None: ...
+
+
+Owner.check(1)
+",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Persistent cache (issue #68)
 // ---------------------------------------------------------------------------
