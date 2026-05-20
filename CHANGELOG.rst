@@ -4,6 +4,10 @@ Changelog
 Next
 ----
 
+2026.5.20
+---------
+
+
 - Add ``[tool.strict_kwargs].src`` and ``namespace_packages`` settings for
   first-party module resolution. ``src`` roots are searched alongside the
   repository root and are used when deriving module names, so ``src/pkg/mod.py``
