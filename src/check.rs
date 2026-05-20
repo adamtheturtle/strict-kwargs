@@ -4751,6 +4751,22 @@ while cond:
     }
 
     #[test]
+    fn imported_callable_boundary_matches_only_imported_name_calls() {
+        with_empty_checker(true, |checker| {
+            checker.define_imported_name_and_module("f", "pkg.f".to_string());
+            with_call_func("f(0)\n", |func| {
+                assert!(checker.call_uses_imported_callable_boundary(func));
+            });
+            with_call_func("g(0)\n", |func| {
+                assert!(!checker.call_uses_imported_callable_boundary(func));
+            });
+            with_call_func("obj.f(0)\n", |func| {
+                assert!(!checker.call_uses_imported_callable_boundary(func));
+            });
+        });
+    }
+
+    #[test]
     fn method_self_binding_resolves_inherited_self_calls_without_ty_fallback() {
         let source = "\
 class Base:
@@ -5013,6 +5029,7 @@ class C:
             true,
         );
         checker.define("Child", "pkg.Child".to_string());
+        checker.define("Unrelated", "pkg.Unrelated".to_string());
 
         with_call_func("obj.method(0)\n", |func| {
             assert!(!checker
@@ -5029,6 +5046,9 @@ class C:
             assert!(checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__init__"));
             assert!(checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__new__"));
             assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Child.__init__"));
+        });
+        with_call_func("Unrelated(0)\n", |func| {
+            assert!(!checker.constructor_call_uses_inherited_boundary(func, "pkg.Base.__init__"));
         });
     }
 
