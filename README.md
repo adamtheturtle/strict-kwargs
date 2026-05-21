@@ -20,8 +20,8 @@ def add(a: int, b: int) -> int:
 
 
 add(a=1, b=2)  # OK
-add(1, 2)  # strict-kwargs reports this; strict-kwargs fix can rewrite it
-add(1, b=2)  # strict-kwargs reports this; strict-kwargs fix can rewrite it
+add(1, 2)  # strict-kwargs reports this; strict-kwargs check --fix can rewrite it
+add(1, b=2)  # strict-kwargs reports this; strict-kwargs check --fix can rewrite it
 ```
 
 ## Why?
@@ -51,14 +51,14 @@ This is tested on Python 3.11+.
 ## Usage
 
 ```shell
-strict-kwargs .                 # check a directory
-strict-kwargs --output-format json .    # emit check diagnostics as JSON
-strict-kwargs --output-format github .  # emit GitHub Actions annotations
-strict-kwargs fix .             # rewrite positional args to keyword args in place
-strict-kwargs fix --diff .      # preview the rewrite, write nothing
-strict-kwargs fix --fix-synthesized-constructors .  # opt into one declined category
-strict-kwargs --python .venv .  # point type resolution at an environment
-strict-kwargs --cache-dir .strict-kwargs-cache .  # enable the diagnostic cache
+strict-kwargs check .                         # check a directory
+strict-kwargs check --output-format json .    # emit check diagnostics as JSON
+strict-kwargs check --output-format github .  # emit GitHub Actions annotations
+strict-kwargs check --fix .                   # rewrite positional args in place
+strict-kwargs check --diff .                  # preview fixes, write nothing
+strict-kwargs check --fix --unsafe-fixes .    # include behavior-changing fixes
+strict-kwargs check --python .venv .          # point type resolution at an environment
+strict-kwargs check --cache-dir .strict-kwargs-cache .  # enable the diagnostic cache
 ```
 
 Exit codes are:
@@ -69,24 +69,24 @@ Exit codes are:
 
 ### Output
 
-- `full`, the default check output, keeps human-readable diagnostics on stderr.
+- `full`, the default check output, writes Ruff-style diagnostics and summaries to stdout.
 - `json` and `github` write diagnostics to stdout so machine consumers can read them without mixing in operational messages.
 - Warnings and operational errors are always written to stderr.
-- `fix --diff` writes the unified diff to stdout and its summary to stderr.
+- `check --diff` writes the unified diff to stdout and its summary to stderr.
 
 ### Fix behavior
 
-`fix` only rewrites calls whose target parameter names are known unambiguously.
+`check --fix` only rewrites calls whose target parameter names are known unambiguously.
 Ambiguous calls are counted as declined.
 
-By default, `fix` rewrites:
+By default, `check --fix` rewrites:
 
 - single-signature calls
 - overloaded calls, when one precise overload arm can be selected and the rewritten argument types are precise enough
 
-Synthesized constructors are the only opt-in category because generated constructor models can differ from runtime behaviour when class construction is customized.
+Synthesized constructors are treated as unsafe fixes because generated constructor models can differ from runtime behaviour when class construction is customized.
 
-- `--fix-synthesized-constructors`: rewrite dataclass and `NamedTuple` constructors whose signatures were synthesized from fields.
+- `--unsafe-fixes`: include dataclass and `NamedTuple` constructor calls whose signatures were synthesized from fields.
 
 ### Python environment
 
@@ -151,7 +151,7 @@ Use `extend_exclude` to skip generated or vendored Python files during directory
 
 - Patterns use `.gitignore`-style matching relative to the project root.
 - By default, exclusions apply to directory traversal only.
-- An explicitly passed file, such as `strict-kwargs generated/api.py`, is still checked.
+- An explicitly passed file, such as `strict-kwargs check generated/api.py`, is still checked.
 - Set `force_exclude = true` to apply exclusions to explicitly passed files too.
   This is useful when pre-commit passes changed files directly.
 - The built-in skips for dot-directories, `venv`, and `__pycache__` remain enabled.
@@ -171,7 +171,7 @@ If none are set, the cache is disabled.
 
 ### Fix defaults
 
-Set `fix_synthesized_constructors = true` to make `strict-kwargs fix` rewrite dataclass and `NamedTuple` constructors without passing `--fix-synthesized-constructors` each time.
+Set `fix_synthesized_constructors = true` to make `strict-kwargs check --fix` include dataclass and `NamedTuple` constructor rewrites without passing `--unsafe-fixes` each time.
 
 To find the name of a function to ignore, set the following configuration:
 
@@ -180,7 +180,7 @@ To find the name of a function to ignore, set the following configuration:
 debug = true
 ```
 
-Then run `strict-kwargs` and look for the debug output.
+Then run `strict-kwargs check` and look for the debug output.
 
 ## Comparison with mypy-strict-kwargs
 
@@ -190,4 +190,4 @@ Use `strict-kwargs` if you:
 
 - type-check with [ty](https://docs.astral.sh/ty/)
 - prefer a standalone linter without plugins
-- want automatic rewrites with `strict-kwargs fix`
+- want automatic rewrites with `strict-kwargs check --fix`

@@ -20,6 +20,9 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// Rule code shown in CLI output.
+    pub const CODE: &'static str = "KW001";
+
     /// Human-readable description of the violation.
     #[must_use]
     pub fn message(&self) -> String {
@@ -29,14 +32,15 @@ impl Diagnostic {
         )
     }
 
-    /// `path:line:column: error: <message>` line for terminal output.
+    /// `path:line:column: KW001 <message>` line for terminal output.
     #[must_use]
     pub fn display_path(&self) -> String {
         format!(
-            "{}:{}:{}: error: {}",
+            "{}:{}:{}: {} {}",
             self.path.display(),
             self.line,
             self.column,
+            Self::CODE,
             self.message()
         )
     }
@@ -92,7 +96,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.display_path(),
-            "pkg/mod.py:7:3: error: \
+            "pkg/mod.py:7:3: KW001 \
              Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
         );
         assert_eq!(

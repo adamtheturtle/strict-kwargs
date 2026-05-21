@@ -17,7 +17,7 @@ mod output_format {
     )]
     #[serde(rename_all = "kebab-case")]
     pub enum OutputFormat {
-        /// Human-oriented `path:line:column: error: ...` lines on stderr.
+        /// Human-oriented `path:line:column: KW001 ...` lines on stdout.
         #[default]
         Full,
         /// A JSON array of structured diagnostics on stdout.
