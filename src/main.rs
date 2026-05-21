@@ -287,11 +287,7 @@ fn success_message(color: bool) -> String {
 
 fn found_summary(count: usize, color: bool) -> String {
     let summary = format!("Found {count} error{}.", if count == 1 { "" } else { "s" });
-    if color {
-        format!("{}", summary.red().bold())
-    } else {
-        summary
-    }
+    styled_summary(summary, color, SummaryStyle::Error)
 }
 
 fn styled_summary(summary: String, color: bool, style: SummaryStyle) -> String {
@@ -387,6 +383,14 @@ fn fix_summary(fixed: usize, remaining: usize, color: bool) -> String {
     }
 }
 
+fn fix_exit_code(remaining: usize) -> ExitCode {
+    if remaining == 0 {
+        ExitCode::from(0)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths);
@@ -423,7 +427,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
         std::fs::write(&fix.path, &fix.fixed)?;
     }
     report_fix_summary(rewritten, remaining)?;
-    Ok(ExitCode::from(0))
+    Ok(fix_exit_code(remaining))
 }
 
 #[cfg(test)]
