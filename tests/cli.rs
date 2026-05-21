@@ -818,7 +818,7 @@ fn fix_reports_declined_when_no_fixes() {
     // the violation it left for `check` (issue #42). Singular wording.
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
     let output = project.run(&["check", "--fix", "main.py"]);
-    assert_eq!(code(&output), 0);
+    assert_eq!(code(&output), 1);
     let err = combined_output(&output);
     assert!(
         err.contains("Found 1 error (0 fixed, 1 remaining)."),
@@ -836,7 +836,7 @@ fn fix_reports_declined_after_writing() {
         &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\nD(3, 4)\n"),
     );
     let output = project.run(&["check", "--fix", "main.py"]);
-    assert_eq!(code(&output), 0);
+    assert_eq!(code(&output), 1);
     let err = combined_output(&output);
     assert!(
         err.contains("Found 3 errors (1 fixed, 2 remaining)."),
