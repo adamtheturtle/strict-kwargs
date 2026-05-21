@@ -15,9 +15,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
+use owo_colors::OwoColorize as _;
 use strict_kwargs::{
     check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    DeclinedFixReasonCount, Diagnostic, FileFix, FixOptIns, OutputFormat,
+    Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
 
 const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
@@ -27,51 +28,18 @@ const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
     name = "strict-kwargs",
     version,
     about = "Enforce using keyword arguments where possible (fast, independent of mypy/ty)",
-    args_conflicts_with_subcommands = true
+    subcommand_required = true,
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
-
-    #[command(flatten)]
-    check: CheckArgs,
+    command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Rewrite positional call arguments to keyword arguments in place.
-    Fix(FixArgs),
-}
-
-#[derive(Debug, ClapArgs)]
-struct CheckArgs {
-    /// Paths to Python files or directories to check.
-    #[arg(default_value = ".")]
-    paths: Vec<PathBuf>,
-
-    /// Project root containing ``pyproject.toml`` (auto-discovered by default).
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-
-    /// Python environment for the `ty` inference fallback: a Python
-    /// interpreter, a virtualenv directory, or a ``sys.prefix`` directory
-    /// (mirrors ``ty check --python``). Forwarded to ``ty server`` so it can
-    /// resolve third-party imports against environments the built-in
-    /// resolver does not discover (Conda, a venv outside the project,
-    /// system site-packages). Unset: ty's own auto-discovery is unchanged.
-    #[arg(long, value_name = "PATH")]
-    python: Option<PathBuf>,
-
-    /// Directory for the persistent on-disk diagnostic cache.  When set,
-    /// resolved results are stored here and reused on future runs where
-    /// the file and its environment are unchanged.  Takes precedence over
-    /// ``[tool.strict_kwargs].cache_dir`` and ``STRICT_KWARGS_CACHE_DIR``.
-    #[arg(long, value_name = "DIR")]
-    cache_dir: Option<PathBuf>,
-
-    /// Diagnostic output format for check results.
-    #[arg(long, value_enum)]
-    output_format: Option<OutputFormat>,
+    /// Run strict-kwargs over the given files or directories.
+    Check(CheckArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -79,8 +47,8 @@ struct CheckArgs {
     clippy::struct_excessive_bools,
     reason = "clap stores independent boolean flags directly"
 )]
-struct FixArgs {
-    /// Paths to Python files or directories to fix.
+struct CheckArgs {
+    /// List of files or directories to check.
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
 
@@ -88,20 +56,27 @@ struct FixArgs {
     #[arg(long)]
     project_root: Option<PathBuf>,
 
-    /// Print the unified diff of what would change instead of writing it.
+    /// Apply fixes to resolve violations.
+    #[arg(long)]
+    fix: bool,
+
+    /// Preview fixes as a unified diff instead of writing files.
     #[arg(long)]
     diff: bool,
 
-    /// Rewrite dataclass and `NamedTuple` constructor calls whose signatures
-    /// were synthesized from class fields.
+    /// Include fixes that may change runtime behavior.
     #[arg(long)]
-    fix_synthesized_constructors: bool,
+    unsafe_fixes: bool,
 
-    /// Python environment for the `ty` inference fallback (see
-    /// ``strict-kwargs --help``). The rewrite stays conservative and never
-    /// edits a `ty`-resolved call, but passing this lets ``fix`` *detect*
-    /// the same violations ``check`` would, so the "not rewritten" count it
-    /// reports — and a following ``strict-kwargs --python`` run — agree.
+    /// Diagnostic output format.
+    #[arg(long, value_enum)]
+    output_format: Option<OutputFormat>,
+
+    /// Directory for the persistent on-disk diagnostic cache.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+
+    /// Python environment for the `ty` inference fallback.
     #[arg(long, value_name = "PATH")]
     python: Option<PathBuf>,
 }
@@ -110,7 +85,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(exit_code) => exit_code,
         Err(error) => {
-            eprintln!("strict-kwargs: {error}");
+            eprintln!("error: {error}");
             ExitCode::from(2)
         }
     }
@@ -130,8 +105,8 @@ fn resolve_python_env(python: Option<PathBuf>) -> Option<PathBuf> {
         return Some(path);
     }
     eprintln!(
-        "strict-kwargs: --python {} does not exist; ignoring it and falling \
-         back to ty's own environment discovery",
+        "warning: --python {} does not exist; ignoring it and falling back to \
+         ty's own environment discovery",
         path.display()
     );
     None
@@ -170,12 +145,14 @@ fn effective_cache_dir(
 fn run() -> Result<ExitCode, CheckError> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Fix(args)) => run_fix(args),
-        None => run_check(cli.check),
+        Command::Check(args) => run_check(args),
     }
 }
 
 fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
+    if args.fix || args.diff {
+        return run_check_fix(args);
+    }
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
     let output_format = args.output_format.unwrap_or(config.output_format);
@@ -198,23 +175,30 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
 
 #[derive(serde::Serialize)]
 struct JsonDiagnostic<'a> {
-    path: String,
-    line: usize,
-    column: usize,
+    code: &'static str,
+    filename: String,
+    location: JsonLocation,
+    message: String,
     callee: &'a str,
-    positional_count: usize,
-    max_positional_count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonLocation {
+    row: usize,
+    column: usize,
 }
 
 impl<'a> From<&'a Diagnostic> for JsonDiagnostic<'a> {
     fn from(diagnostic: &'a Diagnostic) -> Self {
         Self {
-            path: diagnostic.path.display().to_string(),
-            line: diagnostic.line,
-            column: diagnostic.column,
+            code: Diagnostic::CODE,
+            filename: diagnostic.path.display().to_string(),
+            location: JsonLocation {
+                row: diagnostic.line,
+                column: diagnostic.column,
+            },
+            message: diagnostic.message(),
             callee: &diagnostic.callee,
-            positional_count: diagnostic.positional_count,
-            max_positional_count: diagnostic.max_positional,
         }
     }
 }
@@ -225,12 +209,18 @@ fn report_check_diagnostics(
 ) -> Result<(), CheckError> {
     match output_format {
         OutputFormat::Full => {
-            let stderr = std::io::stderr();
-            let mut stderr = BufWriter::new(stderr.lock());
+            let color = stdout_color();
+            let stdout = std::io::stdout();
+            let mut stdout = BufWriter::new(stdout.lock());
             for diagnostic in diagnostics {
-                writeln!(stderr, "{}", diagnostic.display_path())?;
+                writeln!(stdout, "{}", display_diagnostic(diagnostic, color))?;
             }
-            stderr.flush()?;
+            if diagnostics.is_empty() {
+                writeln!(stdout, "{}", success_message(color))?;
+            } else {
+                writeln!(stdout, "{}", found_summary(diagnostics.len(), color))?;
+            }
+            stdout.flush()?;
         }
         OutputFormat::Json => {
             let diagnostics = diagnostics
@@ -259,30 +249,67 @@ fn json_diagnostics(diagnostics: &[JsonDiagnostic<'_>]) -> String {
         .expect("serializing strict-kwargs diagnostics to JSON should be infallible")
 }
 
-/// Report violations `fix` detected but deliberately did not rewrite, so a
-/// following `strict-kwargs` run is no surprise (issue #42). Always to stderr
-/// — stdout is reserved for the `--diff` patch.
-fn report_declined(declined_reasons: &[DeclinedFixReasonCount]) {
-    let declined = declined_reasons
-        .iter()
-        .map(|item| item.count)
-        .sum::<usize>();
-    if declined == 0 {
-        return;
+#[cfg_attr(coverage, coverage(off))]
+fn stdout_color() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn stderr_color() -> bool {
+    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn display_diagnostic(diagnostic: &Diagnostic, color: bool) -> String {
+    if !color {
+        return diagnostic.display_path();
     }
-    eprintln!(
-        "strict-kwargs: {declined} violation{} detected but not rewritten; \
-         run `strict-kwargs` to see {}",
-        if declined == 1 { "" } else { "s" },
-        if declined == 1 { "it" } else { "them" }
+    let location = format!(
+        "{}:{}:{}",
+        diagnostic.path.display(),
+        diagnostic.line,
+        diagnostic.column
     );
-    for item in declined_reasons {
-        eprintln!(
-            "strict-kwargs: declined {}: {}",
-            item.reason.label(),
-            item.count
-        );
+    format!(
+        "{}: {} {}",
+        location.bold(),
+        Diagnostic::CODE.red().bold(),
+        diagnostic.message()
+    )
+}
+
+fn success_message(color: bool) -> String {
+    if color {
+        format!("{}", "All checks passed!".green())
+    } else {
+        "All checks passed!".to_owned()
     }
+}
+
+fn found_summary(count: usize, color: bool) -> String {
+    let summary = format!("Found {count} error{}.", if count == 1 { "" } else { "s" });
+    if color {
+        format!("{}", summary.red().bold())
+    } else {
+        summary
+    }
+}
+
+fn styled_summary(summary: String, color: bool, style: SummaryStyle) -> String {
+    if !color {
+        return summary;
+    }
+    match style {
+        SummaryStyle::Success => format!("{}", summary.green().bold()),
+        SummaryStyle::Warning => format!("{}", summary.yellow().bold()),
+        SummaryStyle::Error => format!("{}", summary.red().bold()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SummaryStyle {
+    Success,
+    Warning,
+    Error,
 }
 
 /// Return `true` when diff output should be colorized.
@@ -291,34 +318,76 @@ fn report_declined(declined_reasons: &[DeclinedFixReasonCount]) {
 /// via the `NO_COLOR` convention (<https://no-color.org/>).
 #[cfg_attr(coverage, coverage(off))]
 fn diff_color() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    stdout_color()
 }
 
-const fn fix_opt_ins_from_args(args: &FixArgs) -> FixOptIns {
+const fn fix_opt_ins_from_args(args: &CheckArgs) -> FixOptIns {
     FixOptIns {
-        synthesized_constructors: args.fix_synthesized_constructors,
+        synthesized_constructors: args.unsafe_fixes,
     }
 }
 
-fn report_enabled_fix_opt_ins(opt_ins: FixOptIns) {
-    if opt_ins.synthesized_constructors {
-        eprintln!(
-            "strict-kwargs: fix opt-in enabled: synthesized constructors may change runtime behavior"
+fn fix_total(fixes: &[FileFix]) -> usize {
+    fixes.iter().map(|fix| fix.count).sum::<usize>()
+}
+
+fn report_diff_summary(fixes: &[FileFix], remaining: usize) {
+    let color = stderr_color();
+    for line in diff_summary_lines(fixes, remaining, color) {
+        eprintln!("{line}");
+    }
+}
+
+fn diff_summary_lines(fixes: &[FileFix], remaining: usize, color: bool) -> Vec<String> {
+    let total = fix_total(fixes);
+    if total == 0 && remaining == 0 {
+        return vec![success_message(color)];
+    }
+    let mut lines = Vec::new();
+    if total > 0 {
+        let summary = format!(
+            "Would fix {total} error{}.",
+            if total == 1 { "" } else { "s" }
         );
+        lines.push(styled_summary(summary, color, SummaryStyle::Warning));
+    }
+    if remaining > 0 {
+        let summary = format!(
+            "{remaining} error{} would remain.",
+            if remaining == 1 { "" } else { "s" }
+        );
+        lines.push(styled_summary(summary, color, SummaryStyle::Error));
+    }
+    lines
+}
+
+fn report_fix_summary(fixed: usize, remaining: usize) -> Result<(), CheckError> {
+    let color = stdout_color();
+    let stdout = std::io::stdout();
+    let mut stdout = BufWriter::new(stdout.lock());
+    writeln!(stdout, "{}", fix_summary(fixed, remaining, color))?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn fix_summary(fixed: usize, remaining: usize, color: bool) -> String {
+    let found = fixed + remaining;
+    if found == 0 {
+        success_message(color)
+    } else {
+        let summary = format!(
+            "Found {found} error{} ({fixed} fixed, {remaining} remaining).",
+            if found == 1 { "" } else { "s" },
+        );
+        if remaining == 0 {
+            styled_summary(summary, color, SummaryStyle::Success)
+        } else {
+            styled_summary(summary, color, SummaryStyle::Error)
+        }
     }
 }
 
-fn report_diff_summary(fixes: &[FileFix]) {
-    let total = fixes.iter().map(|fix| fix.count).sum::<usize>();
-    eprintln!(
-        "strict-kwargs: would fix {total} call{} in {} file{}",
-        if total == 1 { "" } else { "s" },
-        fixes.len(),
-        if fixes.len() == 1 { "" } else { "s" }
-    );
-}
-
-fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
+fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths);
     let config = Config::load(&project_root)?;
@@ -327,7 +396,6 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
             || args_fix_opt_ins.synthesized_constructors,
     };
     let python_env = resolve_python_env(args.python);
-    report_enabled_fix_opt_ins(fix_opt_ins);
     let outcome = fix_paths_with_opt_ins(
         &project_root,
         &args.paths,
@@ -336,11 +404,8 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
         fix_opt_ins,
     )?;
     let fixes = &outcome.files;
-    if fixes.is_empty() {
-        eprintln!("strict-kwargs: no fixes to apply");
-        report_declined(&outcome.declined_reasons);
-        return Ok(ExitCode::from(0));
-    }
+    let rewritten = fix_total(fixes);
+    let remaining = outcome.declined;
 
     if args.diff {
         let color = diff_color();
@@ -350,29 +415,14 @@ fn run_fix(args: FixArgs) -> Result<ExitCode, CheckError> {
                 unified_diff(&fix.path, &fix.original, &fix.fixed, color)
             );
         }
-        report_diff_summary(fixes);
-        report_declined(&outcome.declined_reasons);
+        report_diff_summary(fixes, remaining);
         return Ok(ExitCode::from(0));
     }
 
-    let mut total = 0usize;
     for fix in fixes {
         std::fs::write(&fix.path, &fix.fixed)?;
-        total += fix.count;
-        eprintln!(
-            "strict-kwargs: fixed {} call{} in {}",
-            fix.count,
-            if fix.count == 1 { "" } else { "s" },
-            fix.path.display()
-        );
     }
-    eprintln!(
-        "strict-kwargs: fixed {total} call{} in {} file{}",
-        if total == 1 { "" } else { "s" },
-        fixes.len(),
-        if fixes.len() == 1 { "" } else { "s" }
-    );
-    report_declined(&outcome.declined_reasons);
+    report_fix_summary(rewritten, remaining)?;
     Ok(ExitCode::from(0))
 }
 
@@ -428,5 +478,102 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("no_such_python");
         assert_eq!(resolve_python_env(Some(missing)), None);
+    }
+
+    #[test]
+    fn colored_diagnostic_contains_ansi_escape_sequences() {
+        let diagnostic = Diagnostic {
+            path: PathBuf::from("main.py"),
+            line: 2,
+            column: 1,
+            callee: "\"f\"".to_owned(),
+            positional_count: 1,
+            max_positional: 0,
+        };
+        let rendered = display_diagnostic(&diagnostic, true);
+        assert!(rendered.contains("\u{1b}["));
+        assert!(rendered.contains("KW001"));
+        assert!(rendered.contains("Too many positional"));
+    }
+
+    #[test]
+    fn plain_diagnostic_matches_library_display() {
+        let diagnostic = Diagnostic {
+            path: PathBuf::from("main.py"),
+            line: 2,
+            column: 1,
+            callee: "\"f\"".to_owned(),
+            positional_count: 1,
+            max_positional: 0,
+        };
+        assert_eq!(
+            display_diagnostic(&diagnostic, false),
+            diagnostic.display_path()
+        );
+    }
+
+    #[test]
+    fn success_and_found_summaries_render_plain_and_colored() {
+        assert_eq!(success_message(false), "All checks passed!");
+        assert!(success_message(true).contains("\u{1b}["));
+        assert_eq!(found_summary(1, false), "Found 1 error.");
+        assert_eq!(found_summary(2, false), "Found 2 errors.");
+        let colored = found_summary(2, true);
+        assert!(colored.contains("\u{1b}["));
+        assert!(colored.contains("Found 2 errors."));
+    }
+
+    #[test]
+    fn diff_summary_lines_cover_empty_fixable_and_remaining_cases() {
+        let fix = FileFix {
+            path: PathBuf::from("main.py"),
+            original: "f(1)\n".to_owned(),
+            fixed: "f(a=1)\n".to_owned(),
+            count: 1,
+        };
+        assert_eq!(diff_summary_lines(&[], 0, false), ["All checks passed!"]);
+        assert_eq!(diff_summary_lines(&[], 1, false), ["1 error would remain."]);
+        assert_eq!(
+            diff_summary_lines(std::slice::from_ref(&fix), 0, false),
+            ["Would fix 1 error."]
+        );
+        assert_eq!(
+            diff_summary_lines(&[fix.clone(), fix], 2, false),
+            ["Would fix 2 errors.", "2 errors would remain."]
+        );
+        let colored = diff_summary_lines(&[], 0, true);
+        assert!(colored[0].contains("\u{1b}["));
+        let colored = diff_summary_lines(
+            &[FileFix {
+                path: PathBuf::from("main.py"),
+                original: String::new(),
+                fixed: String::new(),
+                count: 1,
+            }],
+            1,
+            true,
+        );
+        assert_eq!(colored.len(), 2);
+        assert!(colored.iter().all(|line| line.contains("\u{1b}[")));
+    }
+
+    #[test]
+    fn fix_summary_covers_plain_and_colored_outcomes() {
+        assert_eq!(fix_summary(0, 0, false), "All checks passed!");
+        assert_eq!(
+            fix_summary(1, 0, false),
+            "Found 1 error (1 fixed, 0 remaining)."
+        );
+        assert_eq!(
+            fix_summary(1, 2, false),
+            "Found 3 errors (1 fixed, 2 remaining)."
+        );
+        for summary in [
+            fix_summary(0, 0, true),
+            fix_summary(1, 0, true),
+            fix_summary(1, 2, true),
+        ] {
+            assert!(summary.contains("\u{1b}["));
+        }
     }
 }

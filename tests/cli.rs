@@ -158,11 +158,15 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("utf8 stdout")
 }
 
+fn combined_output(output: &Output) -> String {
+    format!("{}{}", stdout(output), stderr(output))
+}
+
 #[test]
 fn check_clean_exits_zero() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     // Explicit path argument.
-    let output = project.run(&["main.py"]);
+    let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(stderr(&output).is_empty());
 }
@@ -172,9 +176,9 @@ fn check_default_path_dot_reports_violation() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     // No path argument => clap's default `.`; also exercises project-root
     // auto-discovery from the first path.
-    let output = project.run(&[]);
+    let output = project.run(&["check"]);
     assert_eq!(code(&output), 1);
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(err.contains("main.py"));
 }
@@ -182,24 +186,27 @@ fn check_default_path_dot_reports_violation() {
 #[test]
 fn check_json_output_writes_structured_diagnostics_to_stdout() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let output = project.run(&["--output-format", "json", "main.py"]);
+    let output = project.run(&["check", "--output-format", "json", "main.py"]);
     assert_eq!(code(&output), 1);
     assert!(stderr(&output).is_empty());
 
     let json: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json output");
     let diagnostic = json.as_array().expect("diagnostic array")[0].clone();
-    assert_eq!(diagnostic["path"], "main.py");
-    assert_eq!(diagnostic["line"], 2);
-    assert_eq!(diagnostic["column"], 1);
+    assert_eq!(diagnostic["code"], "KW001");
+    assert_eq!(diagnostic["filename"], "main.py");
+    assert_eq!(diagnostic["location"]["row"], 2);
+    assert_eq!(diagnostic["location"]["column"], 1);
+    assert_eq!(
+        diagnostic["message"],
+        "Too many positional arguments for \"f\" (got 1, maximum 0)"
+    );
     assert_eq!(diagnostic["callee"], "\"f\"");
-    assert_eq!(diagnostic["positional_count"], 1);
-    assert_eq!(diagnostic["max_positional_count"], 0);
 }
 
 #[test]
 fn check_github_output_writes_annotations_to_stdout() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let output = project.run(&["--output-format", "github", "main.py"]);
+    let output = project.run(&["check", "--output-format", "github", "main.py"]);
     assert_eq!(code(&output), 1);
     assert!(stderr(&output).is_empty());
     assert_eq!(
@@ -219,24 +226,24 @@ fn check_output_format_config_is_overridden_by_cli() {
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
 
-    let configured = project.run(&["main.py"]);
+    let configured = project.run(&["check", "main.py"]);
     assert_eq!(code(&configured), 1);
     assert!(stderr(&configured).is_empty());
     assert!(stdout(&configured).starts_with("[\n  {"));
 
-    let overridden = project.run(&["--output-format", "full", "main.py"]);
+    let overridden = project.run(&["check", "--output-format", "full", "main.py"]);
     assert_eq!(code(&overridden), 1);
-    assert!(stdout(&overridden).is_empty());
-    assert!(stderr(&overridden).contains("main.py:2:1: error:"));
+    assert!(stderr(&overridden).is_empty());
+    assert!(stdout(&overridden).contains("main.py:2:1: KW001"));
 }
 
 #[test]
 fn check_explicit_project_root_flag() {
     let project = Project::new().write("pkg/m.py", "def f(a: int) -> None: ...\nf(1)\n");
     let root = project.root.to_string_lossy().into_owned();
-    let output = project.run(&["--project-root", &root, "pkg/m.py"]);
+    let output = project.run(&["check", "--project-root", &root, "pkg/m.py"]);
     assert_eq!(code(&output), 1);
-    assert!(stderr(&output).contains("Too many positional"));
+    assert!(combined_output(&output).contains("Too many positional"));
 }
 
 #[test]
@@ -247,8 +254,8 @@ fn check_required_version_mismatch_is_fatal_exit_two() {
             "[tool.strict_kwargs]\nrequired_version = \">=9999.0.0\"\n",
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["main.py"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "main.py"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 2, "stderr: {err}");
     assert!(err.contains("required_version"), "stderr: {err}");
     assert!(err.contains("not satisfied"), "stderr: {err}");
@@ -262,7 +269,7 @@ fn check_bare_required_version_minimum_accepts_post_build() {
             "[tool.strict_kwargs]\nrequired_version = \">=2026.5.19\"\n",
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["main.py"]);
+    let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(stderr(&output).is_empty());
 }
@@ -270,10 +277,10 @@ fn check_bare_required_version_minimum_accepts_post_build() {
 #[test]
 fn check_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
-    let output = project.run(&["broken.py"]);
+    let output = project.run(&["check", "broken.py"]);
     assert_eq!(code(&output), 2);
     assert!(
-        stderr(&output).starts_with("strict-kwargs: "),
+        stderr(&output).starts_with("error: "),
         "stderr: {}",
         stderr(&output)
     );
@@ -287,8 +294,8 @@ fn check_directory_skips_parse_incompatible_file_with_warning() {
             "pkg/future_syntax.py",
             "match x:\n    case +1:\n        pass\n",
         );
-    let output = project.run(&["pkg"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "pkg"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 1, "stderr: {err}");
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(err.contains("ok.py"), "stderr: {err}");
@@ -301,10 +308,10 @@ fn check_directory_skips_parse_incompatible_file_with_warning() {
 fn check_explicit_parse_incompatible_file_is_fatal() {
     let project =
         Project::new().write("future_syntax.py", "match x:\n    case +1:\n        pass\n");
-    let output = project.run(&["future_syntax.py"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "future_syntax.py"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 2, "stderr: {err}");
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("Unary '+'"), "stderr: {err}");
 }
 
@@ -327,9 +334,9 @@ fn check_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
     // Pin those exact repro depths.
     for depth in [6000, 10000] {
         let project = Project::new().write("deep.py", &deeply_nested_source(depth));
-        let output = project.run(&["deep.py"]);
+        let output = project.run(&["check", "deep.py"]);
         assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-        let err = stderr(&output);
+        let err = combined_output(&output);
         assert!(err.contains("nesting too deep"), "stderr: {err}");
         assert!(err.contains(&depth.to_string()), "stderr: {err}");
     }
@@ -338,7 +345,7 @@ fn check_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
 #[test]
 fn fix_deeply_nested_file_fails_gracefully_not_with_sigabrt() {
     let project = Project::new().write("deep.py", &deeply_nested_source(6000));
-    let output = project.run(&["fix", "deep.py"]);
+    let output = project.run(&["check", "--fix", "deep.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("nesting too deep"));
 }
@@ -355,7 +362,7 @@ fn deeply_nested_dependency_is_skipped_not_sigabrt() {
     let project = Project::new()
         .write("deep_dep.py", &deeply_nested_source(6000))
         .write("caller.py", "import deep_dep\ndeep_dep.f(1)\n");
-    let output = project.run(&["caller.py"]);
+    let output = project.run(&["check", "caller.py"]);
     // Any graceful exit (0, 1, or 2) is acceptable; exit 134 (SIGABRT) is not.
     assert_ne!(
         code(&output),
@@ -372,9 +379,9 @@ fn check_nesting_at_the_limit_is_handled_on_the_large_stack() {
     // only because the analysis runs on the large dedicated stack, so this
     // pins that the bound is *deterministic* rather than crash-on-some-hosts.
     let project = Project::new().write("deep.py", &deeply_nested_source(1000));
-    let output = project.run(&["deep.py"]);
+    let output = project.run(&["check", "deep.py"]);
     assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
-    assert!(stderr(&output).contains("deep.py"));
+    assert!(combined_output(&output).contains("deep.py"));
 }
 
 /// Issue #53 part 1: one non-UTF-8 file must not abort the whole run (exit 2)
@@ -392,8 +399,8 @@ fn non_utf8_file_is_skipped_with_warning_and_does_not_mask_others() {
     // One stray non-UTF-8 byte, no PEP 263 declaration.
     std::fs::write(project.root.join("pkg/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
 
-    let output = project.run(&["pkg"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "pkg"]);
+    let err = combined_output(&output);
     // Exit 1 (a real violation), not 2 (aborted).
     assert_eq!(code(&output), 1, "stderr: {err}");
     // ok.py's violation is still reported despite the stray sibling.
@@ -424,8 +431,8 @@ fn issue_82_undecodable_file_does_not_abort_directory_run() {
     // Raw non-UTF-8 byte, no PEP 263 declaration — the exact case from #82.
     std::fs::write(project.root.join("dir/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
 
-    let output = project.run(&["--project-root", ".", "dir"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "--project-root", ".", "dir"]);
+    let err = combined_output(&output);
     // Exit 1 (a real violation), not 2 (aborted).
     assert_eq!(code(&output), 1, "stderr: {err}");
     // ok.py:2's violation is still reported despite the stray sibling.
@@ -445,7 +452,7 @@ fn issue_82_undecodable_file_does_not_abort_directory_run() {
 fn lone_non_utf8_file_warns_and_exits_zero() {
     let project = Project::new();
     std::fs::write(project.root.join("bin.py"), b"\x00\x01\xfe\xff").expect("write");
-    let output = project.run(&["bin.py"]);
+    let output = project.run(&["check", "bin.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("warning: skipping"));
 }
@@ -463,8 +470,8 @@ fn pep263_latin1_declaration_is_honored() {
         b"# -*- coding: latin-1 -*-\n# byte: \xe9\ndef f(a: int, b: int) -> None: ...\nf(1, 2)\n",
     )
     .expect("write");
-    let output = project.run(&["legacy.py"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "legacy.py"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 1, "stderr: {err}");
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(!err.contains("valid UTF-8"), "stderr: {err}");
@@ -484,8 +491,8 @@ fn fix_skips_non_utf8_file_and_still_fixes_others() {
     .expect("write ok.py");
     std::fs::write(project.root.join("pkg/legacy.py"), b"x = \"\xe9\"\n").expect("write legacy.py");
 
-    let output = project.run(&["fix", "pkg"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "--fix", "pkg"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 0, "stderr: {err}");
     assert!(err.contains("warning: skipping"), "stderr: {err}");
     assert!(err.contains("legacy.py"), "stderr: {err}");
@@ -510,8 +517,8 @@ fn fix_directory_skips_parse_incompatible_file_and_still_fixes_others() {
             "match x:\n    case +1:\n        pass\n",
         );
 
-    let output = project.run(&["fix", "pkg"]);
-    let err = stderr(&output);
+    let output = project.run(&["check", "--fix", "pkg"]);
+    let err = combined_output(&output);
     assert_eq!(code(&output), 0, "stderr: {err}");
     assert!(err.contains("warning: skipping"), "stderr: {err}");
     assert!(err.contains("future_syntax.py"), "stderr: {err}");
@@ -526,10 +533,10 @@ fn check_nonexistent_path_is_fatal_exit_two() {
     // A mistyped target must not report "clean" (exit 0) in CI; like ruff,
     // it is a hard error (issue #55).
     let project = Project::new();
-    let output = project.run(&["typo_does_not_exist.py"]);
+    let output = project.run(&["check", "typo_does_not_exist.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("no such file or directory"), "stderr: {err}");
     assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
 }
@@ -539,10 +546,10 @@ fn check_nonexistent_dir_is_fatal_exit_two() {
     // A mistyped directory target must not report "clean" (exit 0); like a
     // mistyped file it is a hard error (issue #84).
     let project = Project::new();
-    let output = project.run(&["no_such_dir/"]);
+    let output = project.run(&["check", "no_such_dir/"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("no such file or directory"), "stderr: {err}");
     assert!(err.contains("no_such_dir"), "stderr: {err}");
 }
@@ -551,10 +558,10 @@ fn check_nonexistent_dir_is_fatal_exit_two() {
 fn fix_nonexistent_path_is_fatal_exit_two() {
     // A mistyped target passed to `fix` must not exit 0 silently (issue #84).
     let project = Project::new();
-    let output = project.run(&["fix", "typo_does_not_exist.py"]);
+    let output = project.run(&["check", "--fix", "typo_does_not_exist.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("no such file or directory"), "stderr: {err}");
     assert!(err.contains("typo_does_not_exist.py"), "stderr: {err}");
 }
@@ -564,10 +571,10 @@ fn fix_nonexistent_dir_is_fatal_exit_two() {
     // A mistyped directory target passed to `fix` must not exit 0 silently
     // (issue #84).
     let project = Project::new();
-    let output = project.run(&["fix", "no_such_dir/"]);
+    let output = project.run(&["check", "--fix", "no_such_dir/"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("no such file or directory"), "stderr: {err}");
     assert!(err.contains("no_such_dir"), "stderr: {err}");
 }
@@ -583,10 +590,10 @@ fn check_invalid_config_is_fatal_exit_two() {
             "[tool.strict_kwargs]\nignore_names = \"not-a-list\"\n",
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["main.py"]);
+    let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("pyproject.toml"), "stderr: {err}");
     assert!(
         err.contains("invalid `[tool.strict_kwargs]` table"),
@@ -602,7 +609,7 @@ fn check_uses_cache_dir_from_pyproject_relative_to_project_root() {
             "[tool.strict_kwargs]\ncache_dir = \".strict-kwargs-cache\"\n",
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["main.py"]);
+    let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(
         project.root.join(".strict-kwargs-cache").is_dir(),
@@ -623,7 +630,7 @@ fn check_uses_absolute_cache_dir_from_pyproject_as_is() {
     let project = project
         .write("pyproject.toml", &pyproject)
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["main.py"]);
+    let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(
         cache_dir.is_dir(),
@@ -635,7 +642,7 @@ fn check_uses_absolute_cache_dir_from_pyproject_as_is() {
 fn check_uses_cache_dir_from_environment() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let cache_dir = project.root.join("env-cache");
-    let output = project.run_with_cache_env(&["main.py"], &cache_dir);
+    let output = project.run_with_cache_env(&["check", "main.py"], &cache_dir);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(
         cache_dir.is_dir(),
@@ -653,7 +660,10 @@ fn check_cache_dir_cli_overrides_config_and_environment() {
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     std::fs::write(project.root.join("bad"), b"not a directory").expect("write blocking file");
     let env_cache = project.root.join("env-cache");
-    let output = project.run_with_cache_env(&["--cache-dir", "cli-cache", "main.py"], &env_cache);
+    let output = project.run_with_cache_env(
+        &["check", "--cache-dir", "cli-cache", "main.py"],
+        &env_cache,
+    );
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert!(project.root.join("cli-cache").is_dir());
     assert!(!env_cache.exists(), "CLI cache dir should take precedence");
@@ -669,10 +679,10 @@ fn check_cache_dir_config_overrides_environment() {
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     std::fs::write(project.root.join("bad"), b"not a directory").expect("write blocking file");
     let env_cache = project.root.join("env-cache");
-    let output = project.run_with_cache_env(&["main.py"], &env_cache);
+    let output = project.run_with_cache_env(&["check", "main.py"], &env_cache);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(
         !env_cache.exists(),
         "config cache dir should take precedence"
@@ -689,10 +699,10 @@ fn fix_invalid_config_is_fatal_exit_two() {
             "[tool.strict_kwargs]\nignore_names = \"not-a-list\"\n",
         )
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(err.contains("pyproject.toml"), "stderr: {err}");
     assert!(
         err.contains("invalid `[tool.strict_kwargs]` table"),
@@ -706,9 +716,9 @@ fn check_invalid_python_warns_but_continues() {
     // environment: it is reported, then the run falls back to ty's own
     // discovery (issue #55). The file is clean, so the run still exits 0.
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["--python", "/no/such/python", "main.py"]);
+    let output = project.run(&["check", "--python", "/no/such/python", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(
         err.contains("--python /no/such/python does not exist"),
         "stderr: {err}"
@@ -722,23 +732,24 @@ fn check_invalid_python_warns_but_continues() {
 #[test]
 fn fix_reports_when_nothing_to_fix() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    assert!(stderr(&output).contains("no fixes to apply"));
+    assert!(stderr(&output).is_empty());
+    assert_eq!(stdout(&output), "All checks passed!\n");
 }
 
 #[test]
 fn fix_diff_prints_patch_without_writing() {
     let source = "def f(a: int) -> None: ...\nf(1)\n";
     let project = Project::new().write("main.py", source);
-    let output = project.run(&["fix", "--diff", "main.py"]);
+    let output = project.run(&["check", "--diff", "main.py"]);
     assert_eq!(code(&output), 0);
     let patch = stdout(&output);
     assert!(patch.contains("--- a/"), "patch: {patch}");
     assert!(patch.contains("-f(1)"));
     assert!(patch.contains("+f(a=1)"));
     assert!(
-        stderr(&output).contains("would fix 1 call in 1 file"),
+        stderr(&output).contains("Would fix 1 error."),
         "stderr: {}",
         stderr(&output)
     );
@@ -754,13 +765,10 @@ fn fix_diff_plural_summary() {
             "def f(a: int, b: int) -> None: ...\nf(1, 2)\nf(3, 4)\n",
         )
         .write("b.py", "def g(a: int) -> None: ...\ng(9)\n");
-    let output = project.run(&["fix", "--diff", "a.py", "b.py"]);
+    let output = project.run(&["check", "--diff", "a.py", "b.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    assert!(
-        err.contains("would fix 3 calls in 2 files"),
-        "stderr: {err}"
-    );
+    let err = combined_output(&output);
+    assert!(err.contains("Would fix 3 errors."), "stderr: {err}");
     assert!(project.read("a.py").contains("f(1, 2)"));
     assert!(project.read("b.py").contains("g(9)"));
 }
@@ -768,12 +776,13 @@ fn fix_diff_plural_summary() {
 #[test]
 fn fix_single_call_singular_messages() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    // Singular: "1 call" and "1 file".
-    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
-    assert!(err.contains("fixed 1 call in 1 file"), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(
+        err.contains("Found 1 error (1 fixed, 0 remaining)."),
+        "stderr: {err}"
+    );
     assert_eq!(
         project.read("main.py"),
         "def f(a: int) -> None: ...\nf(a=1)\n"
@@ -788,12 +797,13 @@ fn fix_multiple_calls_and_files_plural_messages() {
             "def f(a: int, b: int) -> None: ...\nf(1, 2)\nf(3, 4)\n",
         )
         .write("b.py", "def g(a: int) -> None: ...\ng(9)\n");
-    let output = project.run(&["fix", "a.py", "b.py"]);
+    let output = project.run(&["check", "--fix", "a.py", "b.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    // Plural per-file ("calls") and plural summary ("calls"/"files").
-    assert!(err.contains("fixed 2 calls in"), "stderr: {err}");
-    assert!(err.contains("calls in 2 files"), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(
+        err.contains("Found 3 errors (3 fixed, 0 remaining)."),
+        "stderr: {err}"
+    );
     assert!(project.read("a.py").contains("f(a=1, b=2)"));
     assert!(project.read("b.py").contains("g(a=9)"));
 }
@@ -807,16 +817,11 @@ fn fix_reports_declined_when_no_fixes() {
     // (issue #29), so there is nothing to write, but it must still announce
     // the violation it left for `check` (issue #42). Singular wording.
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    assert!(err.contains("no fixes to apply"), "stderr: {err}");
+    let err = combined_output(&output);
     assert!(
-        err.contains("1 violation detected but not rewritten") && err.contains("see it"),
-        "stderr: {err}"
-    );
-    assert!(
-        err.contains("declined synthesized constructor: 1"),
+        err.contains("Found 1 error (0 fixed, 1 remaining)."),
         "stderr: {err}"
     );
 }
@@ -830,16 +835,11 @@ fn fix_reports_declined_after_writing() {
         "main.py",
         &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\nD(3, 4)\n"),
     );
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
-    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
+    let err = combined_output(&output);
     assert!(
-        err.contains("2 violations detected but not rewritten") && err.contains("see them"),
-        "stderr: {err}"
-    );
-    assert!(
-        err.contains("declined synthesized constructor: 2"),
+        err.contains("Found 3 errors (1 fixed, 2 remaining)."),
         "stderr: {err}"
     );
     assert!(project.read("main.py").contains("f(a=1, b=2)"));
@@ -853,7 +853,7 @@ fn fix_diff_reports_declined() {
         "main.py",
         &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n"),
     );
-    let output = project.run(&["fix", "--diff", "main.py"]);
+    let output = project.run(&["check", "--diff", "main.py"]);
     assert_eq!(code(&output), 0);
     let patch = stdout(&output);
     assert!(patch.contains("+f(a=1, b=2)"), "patch: {patch}");
@@ -861,28 +861,21 @@ fn fix_diff_reports_declined() {
         !patch.contains("declined synthesized constructor"),
         "patch: {patch}"
     );
-    let err = stderr(&output);
-    assert!(
-        err.contains("1 violation detected but not rewritten") && err.contains("see it"),
-        "stderr: {err}"
-    );
-    assert!(
-        err.contains("declined synthesized constructor: 1"),
-        "stderr: {err}"
-    );
+    let err = combined_output(&output);
+    assert!(err.contains("Would fix 1 error."), "stderr: {err}");
+    assert!(err.contains("1 error would remain."), "stderr: {err}");
 }
 
 #[test]
 fn fix_synthesized_constructors_writes_synthesized_constructor() {
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "--fix-synthesized-constructors", "main.py"]);
+    let output = project.run(&["check", "--fix", "--unsafe-fixes", "main.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(
-        err.contains("fix opt-in enabled: synthesized constructors"),
+        err.contains("Found 1 error (1 fixed, 0 remaining)."),
         "stderr: {err}"
     );
-    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
     assert!(project.read("main.py").contains("D(x=1, y=2)"));
 }
 
@@ -894,21 +887,20 @@ fn fix_synthesized_constructors_can_be_enabled_by_config() {
             "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nfix_synthesized_constructors = true\n",
         )
         .write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(
-        err.contains("fix opt-in enabled: synthesized constructors"),
+        err.contains("Found 1 error (1 fixed, 0 remaining)."),
         "stderr: {err}"
     );
-    assert!(err.contains("fixed 1 call in"), "stderr: {err}");
     assert!(project.read("main.py").contains("D(x=1, y=2)"));
 }
 
 #[test]
 fn fix_diff_synthesized_constructors_previews_synthesized_constructor() {
     let project = Project::new().write("main.py", &format!("{DATACLASS}D(1, 2)\n"));
-    let output = project.run(&["fix", "--diff", "--fix-synthesized-constructors", "main.py"]);
+    let output = project.run(&["check", "--diff", "--unsafe-fixes", "main.py"]);
     assert_eq!(code(&output), 0);
     let patch = stdout(&output);
     assert!(patch.contains("+D(x=1, y=2)"), "patch: {patch}");
@@ -922,10 +914,10 @@ fn fix_accepts_python_flag() {
     // and the flag value is irrelevant to the result — the point is that the
     // argument parses and the rewrite still happens.
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let output = project.run(&["fix", "--python", ".", "main.py"]);
+    let output = project.run(&["check", "--fix", "--python", ".", "main.py"]);
     assert_eq!(code(&output), 0);
     assert!(
-        stderr(&output).contains("fixed 1 call in"),
+        combined_output(&output).contains("1 fixed"),
         "stderr: {}",
         stderr(&output)
     );
@@ -955,7 +947,7 @@ else:
     f(3)
 ";
     let project = Project::new().write("main.py", source);
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert_eq!(
         project.read("main.py"),
@@ -976,9 +968,9 @@ else:
 #[test]
 fn fix_unparsable_file_is_fatal_exit_two() {
     let project = Project::new().write("broken.py", "def f(:\n");
-    let output = project.run(&["fix", "broken.py"]);
+    let output = project.run(&["check", "--fix", "broken.py"]);
     assert_eq!(code(&output), 2);
-    assert!(stderr(&output).starts_with("strict-kwargs: "));
+    assert!(stderr(&output).starts_with("error: "));
 }
 
 #[cfg(unix)]
@@ -994,10 +986,10 @@ fn fix_write_failure_is_fatal_exit_two() {
     perms.set_mode(0o444);
     std::fs::set_permissions(&target, perms).expect("chmod");
 
-    let output = project.run(&["fix", "main.py"]);
+    let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 2);
     assert!(
-        stderr(&output).starts_with("strict-kwargs: "),
+        stderr(&output).starts_with("error: "),
         "stderr: {}",
         stderr(&output)
     );
@@ -1009,10 +1001,10 @@ fn check_without_ty_is_fatal_exit_two() {
     // than silently resolving fewer calls. The probe is up front and
     // content-independent, so even this fully built-in-resolvable file fails.
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run_without_ty(&["main.py"]);
+    let output = project.run_without_ty(&["check", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(
         err.contains("`ty`") && err.contains("required"),
         "stderr: {err}"
@@ -1024,7 +1016,7 @@ fn check_without_ty_is_fatal_exit_two() {
 fn fix_without_ty_is_fatal_exit_two() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let source = project.read("main.py");
-    let output = project.run_without_ty(&["fix", "main.py"]);
+    let output = project.run_without_ty(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
     assert!(
         stderr(&output).contains("required"),
@@ -1086,9 +1078,9 @@ class TestCase:
 #[test]
 fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_INHERITED_METHOD);
-    let output = project.run_with_broken_ty_server(&["main.py"]);
+    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
     assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(!err.contains("ty server"), "stderr: {err}");
 }
@@ -1097,18 +1089,18 @@ fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
 #[test]
 fn check_literal_methods_with_unstartable_ty_server_use_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_LITERAL_METHODS);
-    let output = project.run_with_broken_ty_server(&["main.py"]);
+    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    assert!(!stderr(&output).contains("ty server"));
+    assert!(!combined_output(&output).contains("ty server"));
 }
 
 #[cfg(unix)]
 #[test]
 fn check_method_local_helper_with_unstartable_ty_server_uses_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_METHOD_LOCAL_HELPER);
-    let output = project.run_with_broken_ty_server(&["main.py"]);
+    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
     assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
+    let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(!err.contains("ty server"), "stderr: {err}");
 }
@@ -1119,10 +1111,10 @@ fn check_with_unstartable_ty_server_is_fatal_exit_two() {
     // `ty` is present (the `version` probe passes) but `ty server` will not
     // start, so the run aborts rather than silently degrading.
     let project = Project::new().write("main.py", TY_DEFERRED);
-    let output = project.run_with_broken_ty_server(&["main.py"]);
+    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.starts_with("strict-kwargs: "), "stderr: {err}");
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
     assert!(
         err.contains("ty server") && err.contains("required"),
         "stderr: {err}"
@@ -1134,10 +1126,10 @@ fn check_with_unstartable_ty_server_is_fatal_exit_two() {
 fn fix_with_unstartable_ty_server_is_fatal_exit_two() {
     let project = Project::new().write("main.py", TY_DEFERRED);
     let source = project.read("main.py");
-    let output = project.run_with_broken_ty_server(&["fix", "main.py"]);
+    let output = project.run_with_broken_ty_server(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
     assert!(
-        stderr(&output).contains("ty server"),
+        combined_output(&output).contains("ty server"),
         "stderr: {}",
         stderr(&output)
     );
