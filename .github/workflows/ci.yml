@@ -56,11 +56,7 @@ jobs:
       - name: Install ty (type-inference fallback under test)
         shell: bash
         run: |
-          # Pinned: ty 0.0.42 regressed positional-only resolution of
-          # `sys.stdout.write` on Linux, failing
-          # `ty_positional_only_inferred_receiver_not_flagged`. 0.0.40 is the
-          # last version known to pass; revisit once ty fixes this upstream.
-          uv tool install ty==0.0.40
+          uv tool install ty
           uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH
@@ -114,11 +110,7 @@ jobs:
       - name: Install ty (required backend; probed once per process)
         shell: bash
         run: |
-          # Pinned: ty 0.0.42 regressed positional-only resolution of
-          # `sys.stdout.write` on Linux, failing
-          # `ty_positional_only_inferred_receiver_not_flagged`. 0.0.40 is the
-          # last version known to pass; revisit once ty fixes this upstream.
-          uv tool install ty==0.0.40
+          uv tool install ty
           uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH

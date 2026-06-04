@@ -420,13 +420,43 @@ fn leading_callable_params(s: &str) -> Option<&str> {
     None
 }
 
-/// Parse ty hover text that is a *callable type* (not a `def`/`bound method`
-/// display): `(p) -> r` or `(Overload[(p1) -> r1, (p2) -> r2]) | Any`,
-/// optionally wrapped in a top-level union. Returns one parameter-list string
-/// per overload — `self` is already excluded, as ty renders bound-method
-/// types without it. Crucially this preserves typeshed positional-only `/`
-/// markers, which the goto-definition fallback loses when it lands on runtime
-/// stdlib `.py` source (see issue #14).
+/// Like [`leading_callable_params`], but for an entry whose parameter list is
+/// preceded by a callable's display name — `bound method Owner.name(p) -> r`
+/// or `def name(p) -> r`. ty renders a single *resolved* signature this way
+/// (rather than as an `Overload[…]` callable type) once it narrows an inferred
+/// receiver: as of ty 0.0.42 `sys.stdout.write` hovers as
+/// `(bound method TextIO.write(s: str, /) -> int) | Any`, where 0.0.40 used
+/// `(Overload[(s: Buffer, /) -> int, (s: str, /) -> int]) | Any`. The `(p)`
+/// group still carries the positional-only `/`, so strip the name and read it
+/// directly, avoiding the goto-definition fallback that drops `/` (issue #14).
+///
+/// Ty-wire parsing layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (unit-tested, production-reached only via the
+/// excluded ty glue).
+#[cfg_attr(coverage, coverage(off))]
+fn named_callable_params(s: &str) -> Option<&str> {
+    let rest = s
+        .trim()
+        .strip_prefix("bound method ")
+        .or_else(|| s.trim().strip_prefix("def "))?;
+    // The (possibly dotted) name runs up to the first `(`, with no spaces —
+    // anything else is not a `name(params)` head.
+    let open = rest.find('(')?;
+    let name = rest[..open].trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    leading_callable_params(&rest[open..])
+}
+
+/// Parse ty hover text that is a *callable type* (not a bare `def`/`bound
+/// method` display): `(p) -> r`, `(Overload[(p1) -> r1, (p2) -> r2]) | Any`,
+/// or a single resolved signature rendered as `(bound method Owner.name(p) ->
+/// r) | Any` / `(def name(p) -> r) | Any`, optionally wrapped in a top-level
+/// union. Returns one parameter-list string per overload — `self` is already
+/// excluded, as ty renders bound-method types without it. Crucially this
+/// preserves typeshed positional-only `/` markers, which the goto-definition
+/// fallback loses when it lands on runtime stdlib `.py` source (see issue #14).
 ///
 /// Ty-wire parsing layer; excluded for the reason given on
 /// [`unwrap_enclosing_parens`] (unit-tested, production-reached only via the
@@ -461,7 +491,11 @@ pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
 
     entries
         .into_iter()
-        .filter_map(|e| leading_callable_params(e).map(str::to_string))
+        .filter_map(|e| {
+            leading_callable_params(e)
+                .or_else(|| named_callable_params(e))
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -742,6 +776,27 @@ mod tests {
             ),
             vec!["s: Buffer, /".to_string(), "s: str, /".to_string()],
         );
+    }
+
+    #[test]
+    fn callable_type_overloads_parses_wrapped_bound_method() {
+        // ty 0.0.42 renders `sys.stdout.write` as a single resolved bound
+        // method wrapped in `| Any` (0.0.40 used `Overload[…]`). The
+        // positional-only `/` must still be recovered from the hover so the
+        // call is not flagged — otherwise we fall through to goto-definition,
+        // which drops `/` on the inferred stdlib receiver (issue #14 redux).
+        assert_eq!(
+            parse_callable_type_overloads("(bound method TextIO.write(s: str, /) -> int) | Any"),
+            vec!["s: str, /".to_string()],
+        );
+        // The same wrapping around a free-function `def` display.
+        assert_eq!(
+            parse_callable_type_overloads("(def f(a: int, b: str) -> None) | Any"),
+            vec!["a: int, b: str".to_string()],
+        );
+        // A `def`/`bound method` head with an empty name is not a signature
+        // and yields nothing (no crash).
+        assert!(parse_callable_type_overloads("(def () -> int) | Any").is_empty());
     }
 
     #[test]
