@@ -1036,3 +1036,18 @@ fn does_not_double_insert_for_elif_nested_in_if_body() {
         "def f(x: int) -> bool: ...\n\nif True:\n    if f(x=1):\n        pass\n    elif f(x=2):\n        pass\n",
     );
 }
+
+// A `# noqa` directive suppresses the auto-fix as well as the diagnostic
+// (issue #185): a suppressed call must be left exactly as written.
+#[test]
+fn noqa_call_is_not_rewritten() {
+    assert_unchanged("def func(a: int) -> None: ...\nfunc(1)  # noqa: KW001\n");
+}
+
+#[test]
+fn noqa_suppresses_only_its_own_call_during_fix() {
+    assert_fixed(
+        "def func(a: int) -> None: ...\nfunc(1)\nfunc(2)  # noqa: KW001\n",
+        "def func(a: int) -> None: ...\nfunc(a=1)\nfunc(2)  # noqa: KW001\n",
+    );
+}
