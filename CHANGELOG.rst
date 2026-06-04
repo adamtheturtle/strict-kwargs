@@ -3,6 +3,14 @@ Changelog
 
 .. towncrier release notes start
 
+2026.6.4
+--------
+
+- Add Ruff-style ``# noqa`` suppression for ``KW001``. A ``# noqa`` or
+  ``# noqa: KW001`` comment on the line a diagnostic is reported on suppresses
+  that finding and skips any auto-fix for the call; a directive naming other
+  codes leaves the call reported (issue #185).
+
 2026.5.20
 ---------
 
