@@ -133,6 +133,37 @@ This is useful especially for builtins which can look strange with keyword argum
 
 For example, `str(object=1)` is not idiomatic.
 
+### Suppressing individual findings
+
+Add a Ruff-style `# noqa` comment to the line a diagnostic is reported on (the first line of the offending call) to suppress it:
+
+```python
+func(1, 2, 3)  # noqa: KW001
+```
+
+- `# noqa: KW001` suppresses only `KW001`. A directive naming other codes (for example `# noqa: E501`) leaves the call reported.
+- A bare `# noqa` suppresses every finding on the line, matching Ruff.
+- Suppressed calls are skipped by `--fix` too, so a `# noqa` call is never rewritten.
+
+For a call spanning multiple lines, put the comment on the first line — the line the `path:line:col` output points at:
+
+```python
+func(  # noqa: KW001
+    1,
+    2,
+    3,
+)
+```
+
+#### Using `# noqa` alongside Ruff
+
+If you also run Ruff with `RUF100` (unused `noqa`) enabled, prefer the coded form `# noqa: KW001`: Ruff leaves a directive whose only codes it does not recognise untouched, but it will remove a bare `# noqa` it considers unused. To keep `KW001` from being stripped when it shares a directive with a Ruff code (for example `# noqa: E501, KW001`), declare it as an external code:
+
+```toml
+[tool.ruff.lint]
+external = ["KW001"]
+```
+
 ### Source discovery
 
 Set `src` to source-code directories that should be:

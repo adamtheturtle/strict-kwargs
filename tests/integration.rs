@@ -2518,3 +2518,89 @@ fn cache_dir_pointing_to_file_is_an_error() {
         "expected an error when cache-dir is a regular file"
     );
 }
+
+// `# noqa` suppression for KW001 (issue #185).
+
+#[test]
+fn noqa_bare_suppresses_violation() {
+    assert_ok(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa
+",
+    );
+}
+
+#[test]
+fn noqa_code_suppresses_violation() {
+    assert_ok(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa: KW001
+",
+    );
+}
+
+#[test]
+fn noqa_for_other_code_still_reports() {
+    assert_error(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa: E501
+",
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn noqa_trailing_comment_after_real_comment_text() {
+    // A trailing comment on the violating call line carrying the directive.
+    assert_ok(
+        r"
+def func(a: int) -> None: ...
+func(1)  # keep positional  # noqa: KW001
+",
+    );
+}
+
+#[test]
+fn noqa_only_suppresses_its_own_line() {
+    let messages = check_source(
+        r"
+def func(a: int) -> None: ...
+func(1)
+func(2)  # noqa: KW001
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:3:"), "got: {messages:?}");
+}
+
+#[test]
+fn noqa_on_call_first_line_suppresses_multiline_call() {
+    // The diagnostic points at the call's first line, so a directive there
+    // suppresses it even when the arguments span multiple lines.
+    assert_ok(
+        "
+def func(a: int, b: int) -> None: ...
+func(  # noqa: KW001
+    1,
+    2,
+)
+",
+    );
+}
+
+#[test]
+fn noqa_in_string_does_not_suppress() {
+    assert_error(
+        r##"
+def func(a: int) -> None: ...
+x = "# noqa: KW001"
+func(1)
+"##,
+        4,
+        "Too many positional",
+    );
+}

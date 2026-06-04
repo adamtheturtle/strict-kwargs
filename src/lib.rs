@@ -16,6 +16,7 @@ mod error;
 mod fix;
 mod index;
 mod limits;
+mod noqa;
 mod resolve;
 mod signature;
 mod source;

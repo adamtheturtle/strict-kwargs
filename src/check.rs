@@ -24,6 +24,7 @@ use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
+use crate::noqa::NoqaDirectives;
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
@@ -682,6 +683,10 @@ struct CallChecker<'a> {
     fixed_calls: usize,
     /// Reasons for diagnostics emitted by the built-in pass but not rewritten.
     declined_fix_reasons: Vec<DeclinedFixReason>,
+    /// Line-level `# noqa` directives parsed from this file's comments. A
+    /// `# noqa`/`# noqa: KW001` on a violating call's line suppresses both the
+    /// diagnostic and any auto-fix for that call (issue #185).
+    noqa: NoqaDirectives,
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
@@ -781,6 +786,7 @@ impl<'a> CallChecker<'a> {
             plan_fixes,
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
+            noqa: NoqaDirectives::from_source(source, tokens),
         }
     }
 
@@ -1403,6 +1409,16 @@ impl<'a> CallChecker<'a> {
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
+        // A `# noqa` on the call's line suppresses the diagnostic and any
+        // auto-fix — and lets us skip the ty fallback for that call entirely
+        // (issue #185). The diagnostic position uses the same `call.start()`
+        // line, so the comment lands where the `path:line:col` output points.
+        if self
+            .noqa
+            .suppresses(call.start().to_usize(), Diagnostic::CODE)
+        {
+            return;
+        }
         let local_function = if self.local_function_scope_count == 0 {
             None
         } else {
