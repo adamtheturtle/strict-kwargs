@@ -150,6 +150,14 @@ impl TyResolver {
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = ty_command()
             .arg("server")
+            // Pin ty's working directory to the project root. ty resolves its
+            // environment (which interpreter / `.venv` supplies the stdlib)
+            // partly from the spawning cwd, so inheriting the caller's cwd
+            // would make the same project resolve differently when invoked
+            // from different directories — see #200. Spawning with cwd =
+            // project_root makes results reproducible and was the source of
+            // flakiness for the completeness gate (#192).
+            .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
