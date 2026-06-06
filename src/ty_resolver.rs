@@ -347,6 +347,14 @@ impl TyResolver {
                 return; // disabled mid-open
             }
             remaining.insert(path_to_uri(path));
+            // Drain whatever ty has already published while we keep opening.
+            // Opening every file before reading anything lets ty's responses
+            // (diagnostics for the files opened so far) pile up unboundedly in
+            // the channel — at whole-CPython scale that exhausts memory and the
+            // process is killed. Draining as we go keeps the backlog bounded.
+            while let Ok(msg) = self.incoming.try_recv() {
+                self.absorb(&msg);
+            }
         }
         remaining.retain(|uri| !self.diagnosed.contains(uri));
         if log {
