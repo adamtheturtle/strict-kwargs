@@ -51,6 +51,12 @@ PACKAGES="Lib/asyncio/ Lib/email/ Lib/http/ Lib/importlib/ Lib/multiprocessing/ 
 # regenerating the baseline.
 TY_VERSION="0.0.42"
 
+# ty resolves the stdlib against a discovered Python interpreter; pin one so the
+# result is identical and memory is bounded regardless of the host's own
+# (possibly heavy) Python. Keep in sync with `PYTHON_VERSION` in
+# .github/workflows/ci.yml. Bumping it means regenerating the baseline.
+PYTHON_VERSION="3.13.13"
+
 ROOT="$(git rev-parse --show-toplevel)"
 GOLDEN="${ROOT}/tests/data/cpython_completeness_golden.tsv"
 
@@ -86,17 +92,21 @@ echo "==> Building strict-kwargs (release)"
 TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target}"
 BIN="${TARGET_DIR}/release/strict-kwargs"
 
+echo "==> Installing the pinned interpreter (${PYTHON_VERSION})"
+uv python install "${PYTHON_VERSION}" >/dev/null
+PYTHON="$(uv python find "${PYTHON_VERSION}")"
+
 echo "==> Scanning (one deterministic pass)"
-# `--project-root` is the checkout so this matches how the test invokes
-# `check_paths` (project root = the checkout). `check` exits non-zero when it
-# finds violations; that is expected here.
-"${BIN}" check --project-root "${CHECKOUT}" --output-format json "${CHECKOUT}" \
-  > "${WORK}/scan.json" 2>/dev/null || true
+# `--project-root` is the checkout and `--python` is the pinned interpreter, so
+# this matches exactly how the CI gate invokes the checker. `check` exits
+# non-zero when it finds violations; that is expected here.
+"${BIN}" check --project-root "${CHECKOUT}" --python "${PYTHON}" \
+  --output-format json "${CHECKOUT}" > "${WORK}/scan.json" 2>/dev/null || true
 
 echo "==> Restricting to the chosen packages and writing the baseline"
 CHECKOUT="${CHECKOUT}" GOLDEN="${GOLDEN}" REF="${RESOLVED}" \
   PACKAGES="${PACKAGES}" SCAN="${WORK}/scan.json" \
-  TY_VERSION="${TY_VERSION}" python3 - <<'PY'
+  TY_VERSION="${TY_VERSION}" PYTHON_VERSION="${PYTHON_VERSION}" python3 - <<'PY'
 import json
 import os
 
@@ -104,6 +114,7 @@ checkout = os.environ["CHECKOUT"].rstrip("/") + "/"
 packages = tuple(os.environ["PACKAGES"].split())
 ref = os.environ["REF"]
 ty_version = os.environ["TY_VERSION"]
+python_version = os.environ["PYTHON_VERSION"]
 golden = os.environ["GOLDEN"]
 
 with open(os.environ["SCAN"]) as handle:
@@ -141,7 +152,7 @@ header = [
     "# scripts/regenerate-cpython-golden.sh.",
     "#",
     f"# Pinned CPython ref: {ref}",
-    f"# Generated with ty: {ty_version} (Linux)",
+    f"# Generated with ty: {ty_version}, --python {python_version} (Linux x86_64)",
 ]
 with open(golden, "w") as handle:
     handle.write("\n".join(header) + "\n")

@@ -167,9 +167,9 @@ jobs:
     # merges. The whole tree is scanned (exercising the single-session-at-scale
     # path) even though only the chosen packages are compared.
     runs-on: ubuntu-latest
-    # One deterministic scan; the warm-up full type-check makes it a few
-    # minutes, so allow generous headroom.
-    timeout-minutes: 45
+    # One deterministic scan. The warm-up type-checks the whole tree against the
+    # pinned interpreter, which can take ~20 minutes; allow generous headroom.
+    timeout-minutes: 60
     env:
       # Keep in sync with `CPYTHON_REF` in full-dry-runs.yml and the pinned ref
       # in scripts/regenerate-cpython-golden.sh.
@@ -181,6 +181,12 @@ jobs:
       # with `TY_VERSION` in scripts/regenerate-cpython-golden.sh and the
       # `Generated with ty` line in the golden file.
       TY_VERSION: 0.0.42
+      # ty resolves the stdlib against this pinned interpreter (passed as
+      # `--python`), so the result is identical and memory is bounded
+      # regardless of the runner's own (heavy) preinstalled Python. Keep in
+      # sync with `PYTHON_VERSION` in scripts/regenerate-cpython-golden.sh;
+      # bumping it means regenerating the baseline.
+      PYTHON_VERSION: 3.13.13
 
     steps:
       - uses: actions/checkout@v6
@@ -207,6 +213,13 @@ jobs:
       - name: Verify ty is on PATH
         shell: bash
         run: ty version
+
+      - name: Install the pinned interpreter ty resolves against
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install "$PYTHON_VERSION"
+          echo "STRICT_KWARGS_CPYTHON_PYTHON=$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_ENV"
 
       - name: Clone pinned CPython checkout
         shell: bash
