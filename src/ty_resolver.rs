@@ -12,7 +12,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -30,6 +30,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// The initialize handshake (project discovery) can be slower than steady
 /// state, so allow more headroom.
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Overall budget for the [`TyResolver::warm_up`] pass to receive
+/// `publishDiagnostics` for every opened file. Generous: a full type-check of
+/// a large tree is the dominant cost, but it is bounded so a file ty never
+/// reports on cannot stall the run forever.
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct TyResolver {
     child: Child,
@@ -42,6 +47,10 @@ pub struct TyResolver {
     pending: FxPending,
     /// Once true, all further work is skipped (ty died/hung/misbehaved).
     disabled: bool,
+    /// URIs ty has published diagnostics for, i.e. files it has finished
+    /// type-checking. [`Self::warm_up`] waits for the whole set so later
+    /// queries hit a fully-analyzed, deterministic model.
+    diagnosed: HashSet<String>,
 }
 
 /// Build a [`Command`] for the `ty` executable.
@@ -172,6 +181,7 @@ impl TyResolver {
             opened: HashSet::new(),
             pending: FxPending::new(),
             disabled: false,
+            diagnosed: HashSet::new(),
         }
     }
 
@@ -261,25 +271,83 @@ impl TyResolver {
         loop {
             match self.incoming.recv_timeout(timeout) {
                 Ok(msg) => {
-                    if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
-                        if msg.get("method").is_some() {
-                            // Server→client request: reply empty to unblock ty.
-                            let _ = self.send(&json!({
-                                "jsonrpc": "2.0", "id": msg_id, "result": null
-                            }));
-                        } else if msg_id == id {
-                            return Some(msg.get("result").cloned().unwrap_or(Value::Null));
-                        } else {
-                            self.pending
-                                .insert(msg_id, msg.get("result").cloned().unwrap_or(Value::Null));
-                        }
+                    // The awaited response: return it directly.
+                    if msg.get("method").is_none()
+                        && msg.get("id").and_then(Value::as_i64) == Some(id)
+                    {
+                        return Some(msg.get("result").cloned().unwrap_or(Value::Null));
                     }
-                    // Notifications (no id) are ignored.
+                    // Anything else (server request, other response, or a
+                    // `publishDiagnostics` notification): route it so it is not
+                    // dropped.
+                    self.absorb(&msg);
                 }
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                     self.disabled = true;
                     return None;
                 }
+            }
+        }
+    }
+
+    /// Route one incoming message that is not the response currently awaited:
+    /// answer a server→client request, buffer an out-of-order response by id,
+    /// or record a `publishDiagnostics` notification (so [`Self::warm_up`] can
+    /// tell when ty has type-checked a file).
+    fn absorb(&mut self, msg: &Value) {
+        if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
+            if msg.get("method").is_some() {
+                // Server→client request: reply empty so ty never blocks.
+                let _ = self.send(&json!({ "jsonrpc": "2.0", "id": msg_id, "result": null }));
+            } else {
+                self.pending
+                    .insert(msg_id, msg.get("result").cloned().unwrap_or(Value::Null));
+            }
+        } else if msg.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            if let Some(uri) = msg.pointer("/params/uri").and_then(Value::as_str) {
+                self.diagnosed.insert(uri.to_string());
+            }
+        }
+    }
+
+    /// Open every file and block until ty has published diagnostics for all of
+    /// them — i.e. type-checked the whole project — before any hover/definition
+    /// query. Without this, queries race ty's background indexing and a
+    /// different slice of call sites comes back unresolved on each run
+    /// (non-deterministic false negatives). Bounded by [`WARMUP_TIMEOUT`]; on
+    /// timeout it proceeds with whatever ty has finished (best-effort).
+    ///
+    /// Sources are read here (not by the caller) so a run the built-in
+    /// resolver fully handles — which never calls this — pays no extra I/O.
+    pub fn warm_up(&mut self, files: &[PathBuf]) {
+        if self.disabled {
+            return;
+        }
+        let mut remaining: HashSet<String> = HashSet::new();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue; // unreadable file: ty will not analyze it; skip
+            };
+            if self.ensure_open(path, &text).is_none() {
+                return; // disabled mid-open
+            }
+            remaining.insert(path_to_uri(path));
+        }
+        remaining.retain(|uri| !self.diagnosed.contains(uri));
+
+        let deadline = Instant::now() + WARMUP_TIMEOUT;
+        while !remaining.is_empty() {
+            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+                return; // budget exhausted: proceed best-effort
+            };
+            match self.incoming.recv_timeout(timeout) {
+                Ok(msg) => {
+                    self.absorb(&msg);
+                    remaining.retain(|uri| !self.diagnosed.contains(uri));
+                }
+                Err(_) => return, // timeout/disconnect: proceed best-effort
             }
         }
     }
@@ -1273,6 +1341,61 @@ mod tests {
             assert_eq!(r.ensure_open(path, "print()"), Some(()));
             // Second call sees it already open and returns without resending.
             assert_eq!(r.ensure_open(path, "print()"), Some(()));
+        }
+
+        #[test]
+        fn absorb_records_diagnostics_buffers_responses_and_answers_requests() {
+            let (child, stdin) = alive_child();
+            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+
+            // A `publishDiagnostics` notification marks its file analyzed.
+            r.absorb(&json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": "file:///a/x.py", "diagnostics": [] }
+            }));
+            assert!(r.diagnosed.contains("file:///a/x.py"));
+
+            // A response (id, no method) is buffered by id for a later `take`.
+            r.absorb(&json!({ "jsonrpc": "2.0", "id": 7, "result": "v" }));
+            assert_eq!(r.take(7), Some(Value::from("v")));
+
+            // A server→client request (id + method) is answered, not buffered.
+            r.absorb(&json!({
+                "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration"
+            }));
+            assert!(!r.pending.contains_key(&9));
+        }
+
+        #[test]
+        fn warm_up_waits_for_each_file_to_be_analyzed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let a = dir.path().join("a.py");
+            let b = dir.path().join("b.py");
+            std::fs::write(&a, "x = 1\n").expect("write a");
+            std::fs::write(&b, "y = 2\n").expect("write b");
+
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel::<Value>();
+            // Queue diagnostics for both files (plus an unrelated notification
+            // and a server request) so `warm_up` drains them and returns.
+            for path in [&a, &b] {
+                tx.send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": { "uri": path_to_uri(path) }
+                }))
+                .unwrap();
+            }
+            drop(tx); // once both seen, the loop exits before hitting disconnect
+
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            r.warm_up(&[a.clone(), b.clone()]);
+            assert!(r.diagnosed.contains(&path_to_uri(&a)));
+            assert!(r.diagnosed.contains(&path_to_uri(&b)));
+            // Both files were opened as part of warming up.
+            assert!(r.opened.contains(&a) && r.opened.contains(&b));
         }
     }
 }

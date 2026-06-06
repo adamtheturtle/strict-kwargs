@@ -133,6 +133,7 @@ fn process_scan_outcome_for_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    all_files: &[PathBuf],
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
@@ -153,6 +154,7 @@ fn process_scan_outcome_for_ty(
                     ty,
                     ty_start_attempted,
                     project_root,
+                    all_files,
                     index,
                     python_env,
                     &path,
@@ -258,6 +260,7 @@ fn pipeline_phases(
                 ty,
                 ty_start_attempted,
                 project_root,
+                python_files,
                 index,
                 python_env,
                 ty_file_cache,
@@ -3038,6 +3041,7 @@ fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    all_files: &[PathBuf],
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
@@ -3056,7 +3060,7 @@ fn resolve_file_with_ty(
         // The binary was verified up front (`require_ty_present`), so a
         // failure here is the server not starting — fatal, not a silent
         // downgrade, so results stay deterministic.
-        *ty = Some(start_ty(project_root, python_env)?);
+        *ty = Some(start_ty_warmed(project_root, python_env, all_files)?);
     }
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(
@@ -3088,6 +3092,26 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
+/// Start ty and warm it up: have it type-check every project file before any
+/// query. ty resolves incrementally, so querying a call site before its
+/// dependencies are analyzed yields a different slice of unresolved results
+/// each run; the warm-up forces a complete, stable model so resolution is
+/// deterministic. Called only at the first ty start (on demand), so a run the
+/// built-in resolver fully handles pays nothing.
+///
+/// `ty`-subprocess orchestration like [`start_ty`]; excluded from the coverage
+/// gate for the same reason.
+#[cfg_attr(coverage, coverage(off))]
+fn start_ty_warmed(
+    project_root: &Path,
+    python_env: Option<&Path>,
+    all_files: &[PathBuf],
+) -> Result<TyResolver, CheckError> {
+    let mut ty = start_ty(project_root, python_env)?;
+    ty.warm_up(all_files);
+    Ok(ty)
+}
+
 struct TyFixes<'a> {
     insertions: &'a mut Vec<Insertion>,
     fixed_calls: &'a mut usize,
@@ -3109,6 +3133,7 @@ fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
+    all_files: &[PathBuf],
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
@@ -3121,7 +3146,7 @@ fn resolve_overload_fixes_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        let Ok(started) = start_ty(project_root, python_env) else {
+        let Ok(started) = start_ty_warmed(project_root, python_env, all_files) else {
             record_declined_fixes(
                 &mut fixes,
                 DeclinedFixReason::UnresolvedOverload,
