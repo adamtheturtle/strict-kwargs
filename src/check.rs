@@ -187,7 +187,8 @@ fn process_scan_outcome_for_ty(
 #[cfg_attr(coverage, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 fn pipeline_phases(
-    python_files: &[PathBuf],
+    files_to_scan: &[PathBuf],
+    all_project_files: &[PathBuf],
     explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
     source_roots: &SourceRoots,
@@ -218,7 +219,7 @@ fn pipeline_phases(
             .stack_size(crate::limits::STACK_SIZE)
             .spawn_scoped(scope, || {
                 stream_scan_files(
-                    python_files,
+                    files_to_scan,
                     explicit_files,
                     source_roots,
                     config,
@@ -230,7 +231,7 @@ fn pipeline_phases(
         #[cfg(not(any(target_env = "musl", windows)))]
         let scan_handle = scope.spawn(|| {
             stream_scan_files(
-                python_files,
+                files_to_scan,
                 explicit_files,
                 source_roots,
                 config,
@@ -260,7 +261,7 @@ fn pipeline_phases(
                 ty,
                 ty_start_attempted,
                 project_root,
-                python_files,
+                all_project_files,
                 index,
                 python_env,
                 ty_file_cache,
@@ -381,8 +382,13 @@ fn check_paths_impl(
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
+    // `python_files` (the whole project) is passed separately so the ty warm-up
+    // type-checks every file, not just the cache misses being scanned — a
+    // cached run must still warm up the full project for deterministic
+    // resolution (issue #198).
     pipeline_phases(
         &files_to_scan,
+        &python_files,
         &explicit_files,
         project_root,
         &source_roots,
