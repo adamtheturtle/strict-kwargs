@@ -295,15 +295,30 @@ pub struct HoverSignature {
     pub params: String,
 }
 
-/// Extract a signature from ty hover text. Handles `def name(params) -> ret`
-/// and `bound method Owner.name(params) -> ret`, including multi-line params,
-/// and stops at the `---` docstring separator. Returns `None` for plain
-/// types (`<class 'A'>`, `list[int]`) — the caller falls back to goto-def.
+/// Extract a signature from ty hover text. Handles `def name(params) -> ret`,
+/// `class Name(params)` (a constructor; ty renders the `__init__`/`__new__`
+/// parameters with `self` already omitted), and `bound method Owner.name(params)
+/// -> ret`, including multi-line params, and stops at the `---` docstring
+/// separator. Returns `None` for plain types (`<class 'A'>`, `list[int]`) —
+/// the caller falls back to goto-def.
+///
+/// Parsing the `class Name(...)` shape directly matters because ty's
+/// goto-definition for a re-exported stdlib class resolves into the runtime
+/// `.py` shim and lands on the `from … import …` statement (not the class),
+/// so the goto-def fallback silently drops the diagnostic in environments
+/// where ty resolves against a runtime interpreter rather than its vendored
+/// typeshed stubs (issue #195). The hover carries the constructor signature
+/// consistently regardless of which the environment ty discovers.
 pub fn parse_hover_signature(value: &str) -> Option<HoverSignature> {
     let head = value.split("\n---").next().unwrap_or(value);
     let head = head.trim();
 
     let (name, owner) = if let Some(rest) = head.strip_prefix("def ") {
+        let name = rest.split('(').next()?.trim().to_string();
+        (name, None)
+    } else if let Some(rest) = head.strip_prefix("class ") {
+        // A constructor: ty already omits `self`, so the parameter list maps
+        // to the call site exactly like an unbound `def`.
         let name = rest.split('(').next()?.trim().to_string();
         (name, None)
     } else if let Some(rest) = head.strip_prefix("bound method ") {
@@ -892,6 +907,35 @@ mod tests {
         // outermost `)` (exercises the balance loop's non-terminating arm).
         let nested = parse_hover_signature("def h(a: dict[str, list[int]]) -> None").unwrap();
         assert_eq!(nested.params, "a: dict[str, list[int]]");
+    }
+
+    #[test]
+    fn parse_hover_signature_class_constructor() {
+        // ty renders a constructor hover as `class Name(params)` with `self`
+        // omitted; it parses like an unbound `def` (issue #195).
+        let single = parse_hover_signature("class FileReader(loader: FileLoader)").unwrap();
+        assert_eq!(single.name, "FileReader");
+        assert!(single.owner.is_none());
+        assert_eq!(single.params, "loader: FileLoader");
+
+        // Multi-line constructor hover with a docstring tail, as ty emits for
+        // `BytesGenerator`.
+        let multiline = parse_hover_signature(
+            "class BytesGenerator(\n    \
+             outfp: SupportsWrite[bytes],\n    \
+             *,\n    \
+             policy: Policy[_MessageT]\n\
+             )\n---\nCreate the generator.",
+        )
+        .unwrap();
+        assert_eq!(multiline.name, "BytesGenerator");
+        assert!(multiline.owner.is_none());
+        assert!(multiline.params.contains("outfp: SupportsWrite[bytes]"));
+        assert!(multiline.params.contains("policy: Policy[_MessageT]"));
+
+        // A bare class type display (no constructor parentheses) is not a
+        // signature and still falls back to goto-def.
+        assert!(parse_hover_signature("<class 'C'>").is_none());
     }
 
     #[test]
