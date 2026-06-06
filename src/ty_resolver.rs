@@ -331,6 +331,13 @@ impl TyResolver {
         if self.disabled {
             return;
         }
+        // Optional progress logging (set `STRICT_KWARGS_WARMUP_LOG`) for
+        // diagnosing the warm-up at scale; silent otherwise.
+        let log = std::env::var_os("STRICT_KWARGS_WARMUP_LOG").is_some();
+        let started = Instant::now();
+        if log {
+            eprintln!("[warmup] opening {} files", files.len());
+        }
         let mut remaining: HashSet<String> = HashSet::new();
         for path in files {
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -342,19 +349,54 @@ impl TyResolver {
             remaining.insert(path_to_uri(path));
         }
         remaining.retain(|uri| !self.diagnosed.contains(uri));
+        if log {
+            eprintln!(
+                "[warmup] opened {} files in {}s; awaiting diagnostics for {}",
+                files.len(),
+                started.elapsed().as_secs(),
+                remaining.len(),
+            );
+        }
 
         let deadline = Instant::now() + WARMUP_TIMEOUT;
+        let mut last_log = Instant::now();
         while !remaining.is_empty() {
             let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+                if log {
+                    eprintln!(
+                        "[warmup] TIMED OUT after {}s with {} files un-analyzed",
+                        started.elapsed().as_secs(),
+                        remaining.len(),
+                    );
+                }
                 return; // budget exhausted: proceed best-effort
             };
-            match self.incoming.recv_timeout(timeout) {
-                Ok(msg) => {
-                    self.absorb(&msg);
-                    remaining.retain(|uri| !self.diagnosed.contains(uri));
+            let Ok(msg) = self.incoming.recv_timeout(timeout) else {
+                if log {
+                    eprintln!(
+                        "[warmup] channel closed/timeout at {}s",
+                        started.elapsed().as_secs()
+                    );
                 }
-                Err(_) => return, // timeout/disconnect: proceed best-effort
+                return; // timeout/disconnect: proceed best-effort
+            };
+            self.absorb(&msg);
+            remaining.retain(|uri| !self.diagnosed.contains(uri));
+            if log && last_log.elapsed() >= Duration::from_secs(20) {
+                eprintln!(
+                    "[warmup] {} files still un-analyzed ({}s elapsed)",
+                    remaining.len(),
+                    started.elapsed().as_secs(),
+                );
+                last_log = Instant::now();
             }
+        }
+        if log {
+            eprintln!(
+                "[warmup] all {} files analyzed in {}s",
+                files.len(),
+                started.elapsed().as_secs(),
+            );
         }
     }
 }

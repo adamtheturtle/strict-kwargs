@@ -239,6 +239,8 @@ jobs:
         shell: bash
         env:
           STRICT_KWARGS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+          # Temporary: log warm-up progress to diagnose the scale behaviour.
+          STRICT_KWARGS_WARMUP_LOG: "1"
         # Release build: the baseline was captured release-mode, and the
         # warm-up full type-check would be slow in a debug build.
         run: cargo test --release --locked --test cpython_completeness -- --nocapture
