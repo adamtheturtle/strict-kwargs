@@ -46,6 +46,14 @@ or:
 pip install strict-kwargs
 ```
 
+or, as a Rust crate:
+
+```shell
+cargo install strict-kwargs
+```
+
+`cargo install` installs only the `strict-kwargs` binary; install `ty` separately and keep it on `PATH`.
+
 This is tested on Python 3.11+.
 
 ## Usage

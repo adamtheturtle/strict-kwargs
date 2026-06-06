@@ -45,6 +45,7 @@ release = [ "check-wheel-contents==0.6.3", "towncrier==25.8.0" ]
 
 [tool.maturin]
 bindings = "bin"
+manifest-path = "crates/strict-kwargs/Cargo.toml"
 module-name = "strict_kwargs"
 
 [tool.towncrier]

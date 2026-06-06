@@ -63,7 +63,7 @@ repos:
         # filenames, typos bypasses `_typos.toml`'s `extend-exclude`, so
         # mirror those exclusions here.
         args: []
-        exclude: '^(vendored/|Cargo\.lock$|uv\.lock$)'
+        exclude: '^(crates/strict-kwargs/vendored/typeshed/|Cargo\.lock$|uv\.lock$)'
 
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12

@@ -84,14 +84,14 @@ jobs:
           NEW_TAG: ${{ steps.version.outputs.release }}
         run: |
           pre_commit_rev="${NEW_TAG/-post./.post}"
-          sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" Cargo.toml
+          sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" crates/strict-kwargs/Cargo.toml
           sed -i.bak "s/^version = .*/version = \"${NEW_TAG}\"/" pyproject.toml
           sed -i.bak -E "s/^([[:space:]]*rev:[[:space:]]*).*(# pin to a release tag)$/\1${pre_commit_rev}  \2/" README.md
           if ! grep -Fq "    rev: ${pre_commit_rev}  # pin to a release tag" README.md; then
             echo "Error: README pre-commit hook revision was not updated"
             exit 1
           fi
-          rm -f Cargo.toml.bak pyproject.toml.bak README.md.bak
+          rm -f crates/strict-kwargs/Cargo.toml.bak pyproject.toml.bak README.md.bak
           cargo metadata --format-version 1 >/dev/null
           uv lock
 
@@ -99,7 +99,7 @@ jobs:
         id: commit
         with:
           commit_message: Bump CHANGELOG and version for release
-          file_pattern: CHANGELOG.rst newsfragments Cargo.toml Cargo.lock pyproject.toml uv.lock README.md
+          file_pattern: CHANGELOG.rst newsfragments crates/strict-kwargs/Cargo.toml Cargo.lock pyproject.toml uv.lock README.md
           skip_dirty_check: true
 
       - name: Bump version and push tag
@@ -292,13 +292,96 @@ jobs:
           packages-dir: dist/
           skip-existing: true
 
+  publish-crate-release:
+    name: Publish to crates.io
+    needs: [release, build-wheels]
+    if: ${{ !inputs.publish_only }}
+    runs-on: ubuntu-latest
+
+    environment: release
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          git checkout "$TAG"
+          version="$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "strict-kwargs").version')"
+          if curl --fail --silent --show-error "https://crates.io/api/v1/crates/strict-kwargs/${version}" >/dev/null; then
+            echo "strict-kwargs ${version} is already published on crates.io"
+            exit 0
+          fi
+          cargo publish --locked -p strict-kwargs
+
+  publish-crate-existing-tag:
+    name: Publish to crates.io
+    needs: build-wheels-existing-tag
+    if: ${{ inputs.publish_only }}
+    runs-on: ubuntu-latest
+
+    environment: release
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          git checkout "$TAG"
+          version="$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "strict-kwargs").version')"
+          if curl --fail --silent --show-error "https://crates.io/api/v1/crates/strict-kwargs/${version}" >/dev/null; then
+            echo "strict-kwargs ${version} is already published on crates.io"
+            exit 0
+          fi
+          cargo publish --locked -p strict-kwargs
+
   trigger-mirror:
     name: Trigger strict-kwargs-pre-commit mirror
-    needs: [release, publish-pypi-release, publish-pypi]
+    needs:
+      - release
+      - publish-pypi-release
+      - publish-pypi
+      - publish-crate-release
+      - publish-crate-existing-tag
     if: >-
       always() &&
       (needs.publish-pypi-release.result == 'success' ||
-       needs.publish-pypi.result == 'success')
+       needs.publish-pypi.result == 'success') &&
+      (needs.publish-crate-release.result == 'success' ||
+       needs.publish-crate-existing-tag.result == 'success')
     runs-on: ubuntu-latest
 
     permissions: {}

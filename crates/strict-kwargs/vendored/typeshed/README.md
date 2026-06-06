@@ -38,8 +38,8 @@ The script:
 Then review and commit:
 
 ```bash
-git status --short vendored/typeshed
-git add vendored/typeshed
+git status --short crates/strict-kwargs/vendored/typeshed
+git add crates/strict-kwargs/vendored/typeshed
 git commit -m "Bump vendored typeshed to <short-sha>"
 ```
 
