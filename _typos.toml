@@ -2,10 +2,10 @@
 # https://github.com/crate-ci/typos
 
 [files]
-# `vendored/typeshed/` is a verbatim third-party copy (see
-# `vendored/typeshed/README.md`); never rewrite it. Lockfiles are generated.
+# `crates/strict-kwargs/vendored/typeshed/` is a verbatim third-party copy
+# (see its README); never rewrite it. Lockfiles are generated.
 extend-exclude = [
-  "vendored/",
+  "crates/strict-kwargs/vendored/typeshed/",
   "Cargo.lock",
   "uv.lock",
 ]
