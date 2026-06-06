@@ -374,14 +374,10 @@ jobs:
       - release
       - publish-pypi-release
       - publish-pypi
-      - publish-crate-release
-      - publish-crate-existing-tag
     if: >-
       always() &&
       (needs.publish-pypi-release.result == 'success' ||
-       needs.publish-pypi.result == 'success') &&
-      (needs.publish-crate-release.result == 'success' ||
-       needs.publish-crate-existing-tag.result == 'success')
+       needs.publish-pypi.result == 'success')
     runs-on: ubuntu-latest
 
     permissions: {}
