@@ -37,12 +37,12 @@ fn imported_module_with_syntax_error_is_skipped() {
 }
 
 /// `import x` nested inside a function body binds in the *function*
-/// namespace, not the module's. The built-in resolver only tracks
-/// module-level import bindings as call targets, so a function-local call
-/// through such an import is conservatively left unresolved — no false
-/// positive, no panic — while the submodule is still queued during indexing.
+/// namespace, not the module's, so the built-in resolver (which only tracks
+/// module-level bindings) leaves the call to the `ty` fallback. ty resolves
+/// relative to the project root (see `TyResolver::start`), so it correctly
+/// resolves `svc.run` and flags the keyword-able positional argument.
 #[test]
-fn import_inside_function_is_non_module_scope() {
+fn import_inside_function_is_resolved_by_ty() {
     let project = TestProject::new()
         .dep("svc.py", "def run(a: int) -> None: ...\n")
         .file(
@@ -51,15 +51,16 @@ fn import_inside_function_is_non_module_scope() {
         );
     let messages = project.check_explicit();
     assert!(
-        messages.is_empty(),
-        "function-local import must not resolve to a module-level target; got: {messages:?}"
+        has(&messages, "app.py:3:", "Too many positional"),
+        "ty should resolve the function-local import and flag svc.run(1); got: {messages:?}"
     );
 }
 
-/// Function-local imports nested in `if` / `elif` / `else` branches still bind
-/// in the function namespace, not the module namespace.
+/// Function-local imports nested in `if` / `elif` / `else` branches are each
+/// resolved by the `ty` fallback (project-relative), so every keyword-able
+/// positional call through them is flagged.
 #[test]
-fn import_inside_function_if_is_non_module_scope() {
+fn import_inside_function_if_is_resolved_by_ty() {
     let project = TestProject::new()
         .dep("svc.py", "def run(a: int) -> None: ...\n")
         .dep("api.py", "def call(a: int) -> None: ...\n")
@@ -80,8 +81,16 @@ def driver(flag: bool) -> None:
         );
     let messages = project.check_explicit();
     assert!(
-        messages.is_empty(),
-        "if-nested function-local imports must not resolve as module-level targets; got: {messages:?}"
+        has(&messages, "app.py:5:", "Too many positional"),
+        "if-clause svc.run(1); got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:8:", "Too many positional"),
+        "elif-clause call(1); got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:11:", "Too many positional"),
+        "else-clause renamed.run(1); got: {messages:?}"
     );
 }
 

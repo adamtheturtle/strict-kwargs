@@ -150,6 +150,12 @@ impl TyResolver {
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = ty_command()
             .arg("server")
+            // Run ty in the project root so its environment discovery (which
+            // interpreter / `.venv` it resolves the stdlib against) depends only
+            // on the project, not on the caller's working directory. Otherwise
+            // the same project resolves differently when checked from different
+            // cwds — non-reproducible results, and a flaky completeness gate.
+            .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

@@ -1,0 +1,6 @@
+Add a differential completeness test against a pinned CPython checkout. CI
+scans the whole tree through the single shared ``ty`` session on every push and
+pull request and asserts the diagnostics are a superset of a committed golden
+baseline, so a regression that silently drops real, ty-resolvable violations
+fails the build. Regenerate the baseline with
+``scripts/regenerate-cpython-golden.sh`` (issue #192).

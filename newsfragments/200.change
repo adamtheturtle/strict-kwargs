@@ -1,0 +1,8 @@
+Run ``ty server`` with its working directory set to the project root. ty's
+environment discovery (which interpreter or ``.venv`` it resolves the standard
+library against) previously depended on the directory ``strict-kwargs`` was
+invoked from, so the same project could produce different results when checked
+from different locations. Resolution is now reproducible regardless of the
+caller's working directory; as a result the ``ty`` fallback also resolves some
+project-relative function-local imports it previously missed, flagging those
+keyword-able positional calls (issue #200).

@@ -153,8 +153,85 @@ jobs:
           mode: simulation
           run: cargo codspeed run
 
+  cpython-completeness:
+    # Differential completeness test against a pinned CPython checkout (issue
+    # #192). Asserts the full-tree scan is a SUPERSET of a committed golden
+    # baseline, so a regression that silently drops real, ty-resolvable
+    # violations (the issue #191 single-session failure mode) fails the build.
+    #
+    # This intentionally runs on every push and pull request, not just on a
+    # schedule: the no-false-negatives property is core to the tool, so it
+    # gates merges. The whole-tree scan is what makes the single-session-at-
+    # scale path observable, so the test always scans all of CPython even
+    # though the baseline is drawn from a stable subset.
+    runs-on: ubuntu-latest
+    # The test re-scans the whole tree a few times when ty's run-to-run jitter
+    # drops a baseline entry, so allow headroom over a single ~2-minute scan.
+    timeout-minutes: 45
+    env:
+      # Keep in sync with `CPYTHON_REF` in full-dry-runs.yml and the pinned ref
+      # in scripts/regenerate-cpython-golden.sh.
+      CPYTHON_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
+      # The golden baseline depends on ty's resolution output, so this job pins
+      # ty to the version the baseline was generated with — unlike the other
+      # jobs, which deliberately track the latest ty (issue #189). A ty bump
+      # here must be paired with regenerating the baseline; keep this in sync
+      # with `TY_VERSION` in scripts/regenerate-cpython-golden.sh and the
+      # `Generated with ty` line in the golden file.
+      TY_VERSION: 0.0.42
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cpython-completeness
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install ty (pinned; the baseline is tied to this version)
+        shell: bash
+        run: |
+          uv tool install "ty==$TY_VERSION"
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        shell: bash
+        run: ty version
+
+      - name: Clone pinned CPython checkout
+        shell: bash
+        env:
+          EXTERNAL_DIR: ${{ runner.temp }}/external
+        run: |
+          set -euo pipefail
+          dest="$EXTERNAL_DIR/cpython"
+          mkdir -p "$dest"
+          git -C "$dest" init --quiet
+          git -C "$dest" remote add origin https://github.com/python/cpython.git
+          git -C "$dest" fetch --depth=1 origin "$CPYTHON_REF"
+          git -C "$dest" checkout --detach --quiet FETCH_HEAD
+          git -C "$dest" rev-parse HEAD
+
+      - name: Run the completeness test
+        shell: bash
+        env:
+          STRICT_KWARGS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+        # Release build: the golden baseline is captured from a release-mode
+        # scan, and a slower debug build times out more ty requests (issue
+        # #192 notes the 5s-timeout-driven jitter), which could drop a baseline
+        # entry and fail the superset check spuriously.
+        run: cargo test --release --locked --test cpython_completeness -- --nocapture
+
   completion-ci:
-    needs: build
+    needs: [build, cpython-completeness]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
@@ -162,5 +239,9 @@ jobs:
         run: |-
           if ! ${{ needs.build.result == 'success' }}; then
             echo "One or more matrix jobs failed"
+            exit 1
+          fi
+          if ! ${{ needs.cpython-completeness.result == 'success' }}; then
+            echo "CPython completeness test failed"
             exit 1
           fi
