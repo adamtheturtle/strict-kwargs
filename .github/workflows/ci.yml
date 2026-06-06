@@ -155,18 +155,20 @@ jobs:
 
   cpython-completeness:
     # Differential completeness test against a pinned CPython checkout (issue
-    # #192). Asserts the full-tree scan is a SUPERSET of a committed golden
-    # baseline, so a regression that silently drops real, ty-resolvable
-    # violations (the issue #191 single-session failure mode) fails the build.
+    # #192). Asserts the full-tree scan EXACTLY equals a committed golden
+    # baseline (within stable real-library packages): no fewer violations (a
+    # dropped real one, the issue #191 failure mode) and no more (a spurious
+    # one). Exact equality is possible because the ty fallback is deterministic
+    # (it warms up a full type-check and runs ty in the project root, issue
+    # #198).
     #
     # This intentionally runs on every push and pull request, not just on a
-    # schedule: the no-false-negatives property is core to the tool, so it
-    # gates merges. The whole-tree scan is what makes the single-session-at-
-    # scale path observable, so the test always scans all of CPython even
-    # though the baseline is drawn from a stable subset.
+    # schedule: correctness of the ty fallback is core to the tool, so it gates
+    # merges. The whole tree is scanned (exercising the single-session-at-scale
+    # path) even though only the chosen packages are compared.
     runs-on: ubuntu-latest
-    # The test re-scans the whole tree a few times when ty's run-to-run jitter
-    # drops a baseline entry, so allow headroom over a single ~2-minute scan.
+    # One deterministic scan; the warm-up full type-check makes it a few
+    # minutes, so allow generous headroom.
     timeout-minutes: 45
     env:
       # Keep in sync with `CPYTHON_REF` in full-dry-runs.yml and the pinned ref
@@ -224,10 +226,8 @@ jobs:
         shell: bash
         env:
           STRICT_KWARGS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
-        # Release build: the golden baseline is captured from a release-mode
-        # scan, and a slower debug build times out more ty requests (issue
-        # #192 notes the 5s-timeout-driven jitter), which could drop a baseline
-        # entry and fail the superset check spuriously.
+        # Release build: the baseline was captured release-mode, and the
+        # warm-up full type-check would be slow in a debug build.
         run: cargo test --release --locked --test cpython_completeness -- --nocapture
 
   completion-ci:
