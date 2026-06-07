@@ -14,6 +14,7 @@ use strict_kwargs::{check_paths, Config, Diagnostic};
 
 const SPHINX_REPO: &str = "https://github.com/sphinx-doc/sphinx.git";
 const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
+const TY_VERSION: &str = "0.0.44";
 const EXPECTED_RELATIVE_PATH: &str = "tests/golden/sphinx-completeness.tsv";
 const ALLOWED_EXTRA_RELATIVE_PATH: &str = "tests/golden/sphinx-completeness-allowed-extra.tsv";
 const REGENERATE_ENV: &str = "STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN";
@@ -37,6 +38,7 @@ struct SphinxCheckout {
 #[test]
 #[ignore = "heavy opt-in test: clones/checks pinned Sphinx and starts ty server"]
 fn pinned_sphinx_diagnostics_match_golden_oracle() {
+    assert_ty_version();
     let checkout = pinned_sphinx_checkout();
     let expected = read_diagnostic_set(expected_path());
     let allowed_extra = read_diagnostic_set(allowed_extra_path());
@@ -51,7 +53,10 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
     let missing = expected.difference(&actual_keys).cloned().collect();
     let unstable_expected = expected
         .iter()
-        .filter(|key| actual.get(*key).copied().unwrap_or_default() < runs)
+        .filter(|key| {
+            let observed_runs = actual.get(*key).copied().unwrap_or_default();
+            observed_runs > 0 && observed_runs < runs
+        })
         .cloned()
         .collect();
     let unexpected = actual_keys
@@ -83,6 +88,7 @@ fn regenerate_pinned_sphinx_golden_baseline() {
         return;
     }
 
+    assert_ty_version();
     let checkout = pinned_sphinx_checkout();
     let runs = run_count();
     let observed = collect_observations(&checkout.root, runs);
@@ -167,6 +173,25 @@ fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
         .expect("run git")
 }
 
+fn assert_ty_version() {
+    let output = Command::new("ty")
+        .arg("version")
+        .output()
+        .expect("run ty version");
+    assert!(
+        output.status.success(),
+        "ty version failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("ty version output is utf8");
+    assert!(
+        stdout.split_whitespace().any(|part| part == TY_VERSION),
+        "Sphinx completeness oracle requires ty {TY_VERSION}; got: {}",
+        stdout.trim()
+    );
+}
+
 fn run_count() -> usize {
     std::env::var(RUNS_ENV)
         .ok()
@@ -215,7 +240,7 @@ fn collect_diagnostics(root: &Path) -> BTreeSet<DiagnosticKey> {
     let python_env = std::env::var_os(PYTHON_ENV).map(PathBuf::from);
     check_paths(root, &paths, &config, python_env.as_deref(), None)
         .expect("check pinned Sphinx")
-        .into_iter()
+        .iter()
         .map(|diagnostic| DiagnosticKey::from_diagnostic(root, diagnostic))
         .collect()
 }
@@ -243,6 +268,7 @@ fn format_expected(baseline: &BTreeSet<DiagnosticKey>) -> String {
              # Diagnostics in this file must appear on every observed run.\n\
              # Repository: {SPHINX_REPO}\n\
              # Ref: {SPHINX_REF}\n\
+             # ty: {TY_VERSION}\n\
              # Format: relative-path<TAB>line<TAB>column<TAB>callee\n"
         ),
         baseline,
@@ -258,6 +284,7 @@ fn format_allowed_extra(allowed_extra: &BTreeSet<DiagnosticKey>, runs: usize) ->
              # They document currently unstable resolver output and are allowed as extras.\n\
              # Repository: {SPHINX_REPO}\n\
              # Ref: {SPHINX_REF}\n\
+             # ty: {TY_VERSION}\n\
              # Format: relative-path<TAB>line<TAB>column<TAB>callee\n"
         ),
         allowed_extra,
@@ -333,7 +360,7 @@ fn write_diff_section(
 }
 
 impl DiagnosticKey {
-    fn from_diagnostic(root: &Path, diagnostic: Diagnostic) -> Self {
+    fn from_diagnostic(root: &Path, diagnostic: &Diagnostic) -> Self {
         let relative = diagnostic
             .path
             .strip_prefix(root)
@@ -342,7 +369,7 @@ impl DiagnosticKey {
             path: relative.to_string_lossy().replace('\\', "/"),
             line: diagnostic.line,
             column: diagnostic.column,
-            callee: diagnostic.callee,
+            callee: canonical_callee(&diagnostic.callee),
         }
     }
 
@@ -360,7 +387,7 @@ impl DiagnosticKey {
                 .expect("baseline column")
                 .parse()
                 .expect("baseline column is a usize"),
-            callee: parts.next().expect("baseline callee").to_owned(),
+            callee: canonical_callee(parts.next().expect("baseline callee")),
         }
     }
 
@@ -372,9 +399,22 @@ impl DiagnosticKey {
     }
 }
 
+fn canonical_callee(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let quoted = trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+        .unwrap_or(trimmed);
+    let without_generic = quoted.split_once('[').map_or(quoted, |(callee, _)| callee);
+    let without_owner_marker = without_generic
+        .rsplit_once('@')
+        .map_or(without_generic, |(_, callee)| callee);
+    format!("\"{without_owner_marker}\"")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_stable, collect_unstable, DiagnosticKey, OracleDiff};
+    use super::{canonical_callee, collect_stable, collect_unstable, DiagnosticKey, OracleDiff};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn key(path: &str, line: usize) -> DiagnosticKey {
@@ -408,5 +448,22 @@ mod tests {
         assert!(display.contains("Missing golden diagnostics: 1"));
         assert!(display.contains("Unstable golden diagnostics: 1"));
         assert!(display.contains("Unexpected extra diagnostics: 1"));
+    }
+
+    #[test]
+    fn canonical_callee_ignores_ty_display_owner_and_generic_drift() {
+        assert_eq!(
+            canonical_callee("\"find_files\" of \"BuildEnvironment\""),
+            "\"find_files\""
+        );
+        assert_eq!(canonical_callee("\"setdefault[_T]\""), "\"setdefault\"");
+        assert_eq!(
+            canonical_callee("\"get\" of \"Self@extract_original_messages\""),
+            "\"get\""
+        );
+        assert_eq!(
+            canonical_callee("\"Self@preserve_original_messages\""),
+            "\"preserve_original_messages\""
+        );
     }
 }

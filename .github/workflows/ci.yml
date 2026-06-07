@@ -182,7 +182,7 @@ jobs:
       - name: Install ty (type-inference fallback under test)
         shell: bash
         run: |
-          uv tool install ty
+          uv tool install ty==0.0.44
           uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH

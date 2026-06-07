@@ -14,6 +14,7 @@ The pinned checkout is:
 
 - Repository: `https://github.com/sphinx-doc/sphinx.git`
 - Ref: `cc7c6f435ad37bb12264f8118c8461b230e6830c`
+- `ty`: `0.0.44`
 
 Regenerate it with:
 
@@ -25,7 +26,9 @@ By default the script runs strict-kwargs over the pinned checkout three times,
 with Sphinx installed editable into a temporary virtual environment. It writes
 diagnostics that appeared in every run to `sphinx-completeness.tsv`, and
 diagnostics that appeared in at least one but not every run to
-`sphinx-completeness-allowed-extra.tsv`.
+`sphinx-completeness-allowed-extra.tsv`. The script runs the checker through a
+temporary `ty==0.0.44` wrapper so the oracle does not drift when a newer `ty`
+release changes hover display details.
 
 To reuse an existing checkout, set
 `STRICT_KWARGS_SPHINX_CHECKOUT=/path/to/sphinx`; it must be at the pinned ref
@@ -33,7 +36,9 @@ above. To reuse an existing Python environment, set
 `STRICT_KWARGS_SPHINX_PYTHON_ENV=/path/to/venv`. Otherwise the script creates
 a venv with Python `3.13`, matching scheduled CI; set
 `STRICT_KWARGS_SPHINX_PYTHON` to override the interpreter. To change the number
-of runs, set `STRICT_KWARGS_SPHINX_RUNS`.
+of runs, set `STRICT_KWARGS_SPHINX_RUNS`. To intentionally update the pinned
+`ty` version, set `STRICT_KWARGS_SPHINX_TY_VERSION` while regenerating and
+update the version documented here and in `tests/sphinx_completeness.rs`.
 
 Review regenerated diffs as an oracle change, not as a blind snapshot update:
 
