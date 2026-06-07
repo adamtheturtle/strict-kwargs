@@ -150,11 +150,6 @@ impl TyResolver {
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = ty_command()
             .arg("server")
-            // Run ty in the project root so its environment discovery (which
-            // interpreter / `.venv` it resolves the stdlib against) depends only
-            // on the project, not on the caller's working directory. Otherwise
-            // the same project resolves differently when checked from different
-            // cwds — non-reproducible results, and a flaky completeness gate.
             .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -331,13 +326,6 @@ impl TyResolver {
         if self.disabled {
             return;
         }
-        // Optional progress logging (set `STRICT_KWARGS_WARMUP_LOG`) for
-        // diagnosing the warm-up at scale; silent otherwise.
-        let log = std::env::var_os("STRICT_KWARGS_WARMUP_LOG").is_some();
-        let started = Instant::now();
-        if log {
-            eprintln!("[warmup] opening {} files", files.len());
-        }
         let mut remaining: HashSet<String> = HashSet::new();
         for path in files {
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -347,64 +335,21 @@ impl TyResolver {
                 return; // disabled mid-open
             }
             remaining.insert(path_to_uri(path));
-            // Drain whatever ty has already published while we keep opening.
-            // Opening every file before reading anything lets ty's responses
-            // (diagnostics for the files opened so far) pile up unboundedly in
-            // the channel — at whole-CPython scale that exhausts memory and the
-            // process is killed. Draining as we go keeps the backlog bounded.
-            while let Ok(msg) = self.incoming.try_recv() {
-                self.absorb(&msg);
-            }
         }
         remaining.retain(|uri| !self.diagnosed.contains(uri));
-        if log {
-            eprintln!(
-                "[warmup] opened {} files in {}s; awaiting diagnostics for {}",
-                files.len(),
-                started.elapsed().as_secs(),
-                remaining.len(),
-            );
-        }
 
         let deadline = Instant::now() + WARMUP_TIMEOUT;
-        let mut last_log = Instant::now();
         while !remaining.is_empty() {
             let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-                if log {
-                    eprintln!(
-                        "[warmup] TIMED OUT after {}s with {} files un-analyzed",
-                        started.elapsed().as_secs(),
-                        remaining.len(),
-                    );
-                }
                 return; // budget exhausted: proceed best-effort
             };
-            let Ok(msg) = self.incoming.recv_timeout(timeout) else {
-                if log {
-                    eprintln!(
-                        "[warmup] channel closed/timeout at {}s",
-                        started.elapsed().as_secs()
-                    );
+            match self.incoming.recv_timeout(timeout) {
+                Ok(msg) => {
+                    self.absorb(&msg);
+                    remaining.retain(|uri| !self.diagnosed.contains(uri));
                 }
-                return; // timeout/disconnect: proceed best-effort
-            };
-            self.absorb(&msg);
-            remaining.retain(|uri| !self.diagnosed.contains(uri));
-            if log && last_log.elapsed() >= Duration::from_secs(20) {
-                eprintln!(
-                    "[warmup] {} files still un-analyzed ({}s elapsed)",
-                    remaining.len(),
-                    started.elapsed().as_secs(),
-                );
-                last_log = Instant::now();
+                Err(_) => return, // timeout/disconnect: proceed best-effort
             }
-        }
-        if log {
-            eprintln!(
-                "[warmup] all {} files analyzed in {}s",
-                files.len(),
-                started.elapsed().as_secs(),
-            );
         }
     }
 }
@@ -680,12 +625,9 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
             return;
         }
         if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
-            // `publishDiagnostics` for a large, untyped file (CPython has many
-            // type errors ty reports) can carry thousands of diagnostics —
-            // hundreds of KB per file. We only need the URI (warm-up readiness;
-            // see `absorb`/`warm_up`), never the diagnostic payload, so drop
-            // the heavy `diagnostics` array here, before it piles up unbounded
-            // in the channel and spikes memory at whole-CPython scale.
+            // `publishDiagnostics` can carry thousands of diagnostic entries
+            // per file. Warm-up only needs the URI, so drop the payload before
+            // it queues up in the unbounded reader channel.
             if value.get("method").and_then(Value::as_str)
                 == Some("textDocument/publishDiagnostics")
             {
@@ -1251,6 +1193,34 @@ mod tests {
         let second = rx.recv().unwrap();
         assert_eq!(second["id"], 2);
         // Only two valid frames were forwarded; the garbage one was skipped.
+        assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn read_messages_strips_publish_diagnostics_payloads() {
+        use std::io::Cursor;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///a/x.py",
+                "diagnostics": [
+                    { "message": "large payload", "severity": 1 }
+                ]
+            }
+        })
+        .to_string();
+        read_messages(Cursor::new(frame(&body)), &tx);
+        drop(tx);
+
+        let msg = rx.recv().unwrap();
+        assert_eq!(
+            msg.pointer("/params/uri").and_then(Value::as_str),
+            Some("file:///a/x.py")
+        );
+        assert!(msg.pointer("/params/diagnostics").is_none());
         assert!(rx.recv().is_err());
     }
 
