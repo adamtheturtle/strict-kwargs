@@ -222,7 +222,7 @@ jobs:
           STRICT_KWARGS_SPHINX_RUNS: 1
         run: |
           cargo test --locked --test sphinx_completeness \
-            pinned_sphinx_diagnostics_include_golden_subset -- --ignored --nocapture
+            pinned_sphinx_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:
     needs: build

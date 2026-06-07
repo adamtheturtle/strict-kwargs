@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Regenerate tests/golden/sphinx-completeness.tsv from the pinned Sphinx
-# checkout used by tests/sphinx_completeness.rs.
+# Regenerate the Sphinx completeness oracle files from the pinned checkout
+# used by tests/sphinx_completeness.rs.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -34,7 +34,6 @@ fi
 
 export STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1
 export STRICT_KWARGS_SPHINX_RUNS="${STRICT_KWARGS_SPHINX_RUNS:-3}"
-export STRICT_KWARGS_SPHINX_BASELINE_LIMIT="${STRICT_KWARGS_SPHINX_BASELINE_LIMIT:-5000}"
 
 cargo test --locked --test sphinx_completeness \
   regenerate_pinned_sphinx_golden_baseline -- --ignored --nocapture
