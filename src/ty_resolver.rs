@@ -244,18 +244,16 @@ impl TyResolver {
     }
 
     fn notify(&mut self, method: &str, params: &Value) -> Option<()> {
+        if self.disabled {
+            return None;
+        }
         self.send(&json!({
             "jsonrpc": "2.0", "method": method, "params": params
         }))
     }
 
     fn send(&mut self, msg: &Value) -> Option<()> {
-        let body = serde_json::to_vec(msg).ok()?;
-        let ok = write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())
-            .and_then(|()| self.stdin.write_all(&body))
-            .and_then(|()| self.stdin.flush())
-            .is_ok();
-        if !ok {
+        if write_lsp_message(&mut self.stdin, msg).is_none() {
             self.disabled = true;
             return None;
         }
@@ -352,6 +350,14 @@ impl TyResolver {
             }
         }
     }
+}
+
+fn write_lsp_message(writer: &mut impl Write, msg: &Value) -> Option<()> {
+    let body = serde_json::to_vec(msg).ok()?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())
+        .and_then(|()| writer.write_all(&body))
+        .and_then(|()| writer.flush())
+        .ok()
 }
 
 /// Parse a ty hover `contents.value` into a callable signature description.
@@ -1284,17 +1290,6 @@ mod tests {
             (child, stdin)
         }
 
-        fn dead_child() -> (std::process::Child, ChildStdin) {
-            let mut child = Command::new("true")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .spawn()
-                .expect("spawn true");
-            let stdin = child.stdin.take().expect("true stdin");
-            child.wait().expect("true exits");
-            (child, stdin)
-        }
-
         #[test]
         fn collect_matches_buffers_and_answers_server_requests() {
             let (child, stdin) = alive_child();
@@ -1329,31 +1324,34 @@ mod tests {
             assert_eq!(r.take(1), None);
             // Latched off: subsequent calls short-circuit.
             assert_eq!(r.ask("textDocument/hover", Path::new("/x.py"), 0, 0), None);
+            assert!(r.ensure_open(Path::new("/x.py"), "src").is_none());
+            assert!(r.request("initialize", &json!({})).is_none());
+            assert!(r.notify("x", &json!({})).is_none());
         }
 
         #[test]
-        fn send_failure_latches_disabled_and_short_circuits() {
-            let (child, stdin) = dead_child();
-            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
-            let mut r = TyResolver::from_parts(child, stdin, rx);
+        fn write_lsp_message_handles_success_and_writer_failure() {
+            struct BrokenWriter;
+            impl std::io::Write for BrokenWriter {
+                fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "closed",
+                    ))
+                }
 
-            // `ensure_open` reaches the `didOpen` notify before anything has
-            // disabled the resolver; the write fails there (the `?` error
-            // path) and latches it off.
-            assert!(r.ensure_open(Path::new("/first.py"), "src").is_none());
-            // Subsequent writes also fail.
-            assert!(r
-                .ask("textDocument/hover", Path::new("/x.py"), 1, 2)
-                .is_none());
-            // All further entry points now early-return (no channel wait).
-            assert!(r.ensure_open(Path::new("/x.py"), "src").is_none());
-            assert!(r
-                .ask("textDocument/definition", Path::new("/x.py"), 0, 0)
-                .is_none());
-            // `request`'s own disabled guard (not reached via `ask`, which
-            // short-circuits earlier).
-            assert!(r.request("initialize", &json!({})).is_none());
-            assert!(r.notify("x", &json!({})).is_none());
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let msg = json!({ "jsonrpc": "2.0", "method": "x" });
+            let mut bytes = Vec::new();
+            assert_eq!(write_lsp_message(&mut bytes, &msg), Some(()));
+            assert!(String::from_utf8(bytes)
+                .expect("message is utf8")
+                .starts_with("Content-Length: "));
+            assert_eq!(write_lsp_message(&mut BrokenWriter, &msg), None);
         }
 
         #[test]
