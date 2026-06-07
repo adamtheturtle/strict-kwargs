@@ -153,8 +153,100 @@ jobs:
           mode: simulation
           run: cargo codspeed run
 
+  cpython-completeness:
+    # Differential completeness test against a pinned CPython checkout (issue
+    # #192). Asserts the full-tree scan EXACTLY equals a committed golden
+    # baseline (within stable real-library packages): no fewer violations (a
+    # dropped real one, the issue #191 failure mode) and no more (a spurious
+    # one). Exact equality is possible because the ty fallback is deterministic
+    # (it warms up a full type-check and runs ty in the project root, issue
+    # #198).
+    #
+    # This intentionally runs on every push and pull request, not just on a
+    # schedule: correctness of the ty fallback is core to the tool, so it gates
+    # merges. The whole tree is scanned (exercising the single-session-at-scale
+    # path) even though only the chosen packages are compared.
+    runs-on: ubuntu-latest
+    # One deterministic scan. The warm-up type-checks the whole tree against the
+    # pinned interpreter, which can take ~20 minutes; allow generous headroom.
+    timeout-minutes: 60
+    env:
+      # Keep in sync with `CPYTHON_REF` in full-dry-runs.yml and the pinned ref
+      # in scripts/regenerate-cpython-golden.sh.
+      CPYTHON_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
+      # The golden baseline depends on ty's resolution output, so this job pins
+      # ty to the version the baseline was generated with — unlike the other
+      # jobs, which deliberately track the latest ty (issue #189). A ty bump
+      # here must be paired with regenerating the baseline; keep this in sync
+      # with `TY_VERSION` in scripts/regenerate-cpython-golden.sh and the
+      # `Generated with ty` line in the golden file.
+      TY_VERSION: 0.0.42
+      # ty resolves the stdlib against this pinned interpreter (passed as
+      # `--python`), so the result is identical and memory is bounded
+      # regardless of the runner's own (heavy) preinstalled Python. Keep in
+      # sync with `PYTHON_VERSION` in scripts/regenerate-cpython-golden.sh;
+      # bumping it means regenerating the baseline.
+      PYTHON_VERSION: 3.13.13
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cpython-completeness
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install ty (pinned; the baseline is tied to this version)
+        shell: bash
+        run: |
+          uv tool install "ty==$TY_VERSION"
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        shell: bash
+        run: ty version
+
+      - name: Install the pinned interpreter ty resolves against
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install "$PYTHON_VERSION"
+          echo "STRICT_KWARGS_CPYTHON_PYTHON=$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_ENV"
+
+      - name: Clone pinned CPython checkout
+        shell: bash
+        env:
+          EXTERNAL_DIR: ${{ runner.temp }}/external
+        run: |
+          set -euo pipefail
+          dest="$EXTERNAL_DIR/cpython"
+          mkdir -p "$dest"
+          git -C "$dest" init --quiet
+          git -C "$dest" remote add origin https://github.com/python/cpython.git
+          git -C "$dest" fetch --depth=1 origin "$CPYTHON_REF"
+          git -C "$dest" checkout --detach --quiet FETCH_HEAD
+          git -C "$dest" rev-parse HEAD
+
+      - name: Run the completeness test
+        shell: bash
+        env:
+          STRICT_KWARGS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+          # Temporary: log warm-up progress to diagnose the scale behaviour.
+          STRICT_KWARGS_WARMUP_LOG: "1"
+        # Release build: the baseline was captured release-mode, and the
+        # warm-up full type-check would be slow in a debug build.
+        run: cargo test --release --locked --test cpython_completeness -- --nocapture
+
   completion-ci:
-    needs: build
+    needs: [build, cpython-completeness]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
@@ -162,5 +254,9 @@ jobs:
         run: |-
           if ! ${{ needs.build.result == 'success' }}; then
             echo "One or more matrix jobs failed"
+            exit 1
+          fi
+          if ! ${{ needs.cpython-completeness.result == 'success' }}; then
+            echo "CPython completeness test failed"
             exit 1
           fi

@@ -1,0 +1,7 @@
+Add a differential completeness test against a pinned CPython checkout. CI
+scans the whole tree through the shared ``ty`` session on every push and pull
+request and asserts the diagnostics (within stable real-library packages)
+exactly match a committed golden baseline -- no fewer (a dropped real
+violation) and no more (a spurious one). The exact match is stable because the
+``ty`` fallback is deterministic (issues #198 and #200). Regenerate the
+baseline with ``scripts/regenerate-cpython-golden.sh`` (issue #192).
