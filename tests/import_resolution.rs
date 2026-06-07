@@ -38,11 +38,10 @@ fn imported_module_with_syntax_error_is_skipped() {
 
 /// `import x` nested inside a function body binds in the *function*
 /// namespace, not the module's. The built-in resolver only tracks
-/// module-level import bindings as call targets, so a function-local call
-/// through such an import is conservatively left unresolved — no false
-/// positive, no panic — while the submodule is still queued during indexing.
+/// module-level import bindings, but the `ty` fallback resolves the
+/// function-local import against the project root.
 #[test]
-fn import_inside_function_is_non_module_scope() {
+fn import_inside_function_is_resolved_by_ty_fallback() {
     let project = TestProject::new()
         .dep("svc.py", "def run(a: int) -> None: ...\n")
         .file(
@@ -51,15 +50,16 @@ fn import_inside_function_is_non_module_scope() {
         );
     let messages = project.check_explicit();
     assert!(
-        messages.is_empty(),
-        "function-local import must not resolve to a module-level target; got: {messages:?}"
+        has(&messages, "app.py:3:", "Too many positional"),
+        "function-local import should resolve through ty; got: {messages:?}"
     );
 }
 
 /// Function-local imports nested in `if` / `elif` / `else` branches still bind
-/// in the function namespace, not the module namespace.
+/// in the function namespace, and the `ty` fallback resolves each branch
+/// against the project root.
 #[test]
-fn import_inside_function_if_is_non_module_scope() {
+fn import_inside_function_if_is_resolved_by_ty_fallback() {
     let project = TestProject::new()
         .dep("svc.py", "def run(a: int) -> None: ...\n")
         .dep("api.py", "def call(a: int) -> None: ...\n")
@@ -80,8 +80,16 @@ def driver(flag: bool) -> None:
         );
     let messages = project.check_explicit();
     assert!(
-        messages.is_empty(),
-        "if-nested function-local imports must not resolve as module-level targets; got: {messages:?}"
+        has(&messages, "app.py:5:", "Too many positional"),
+        "if-branch function-local import should resolve through ty; got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:8:", "Too many positional"),
+        "elif-branch function-local import should resolve through ty; got: {messages:?}"
+    );
+    assert!(
+        has(&messages, "app.py:11:", "Too many positional"),
+        "else-branch function-local import should resolve through ty; got: {messages:?}"
     );
 }
 
