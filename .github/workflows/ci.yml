@@ -154,10 +154,9 @@ jobs:
           run: cargo codspeed run
 
   sphinx-completeness:
-    # Heavy opt-in regression coverage for issue #192. This clones and checks
-    # pinned Sphinx, so keep it out of pull requests and normal pushes.
+    # Heavy regression coverage for issue #192. This clones and checks pinned
+    # Sphinx so every CI event catches golden-oracle drift before merge.
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
     steps:
       - uses: actions/checkout@v6
