@@ -17,6 +17,7 @@ const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
 const EXPECTED_RELATIVE_PATH: &str = "tests/golden/sphinx-completeness.tsv";
 const ALLOWED_EXTRA_RELATIVE_PATH: &str = "tests/golden/sphinx-completeness-allowed-extra.tsv";
+const DIFF_DISPLAY_LIMIT: usize = 100;
 const REGENERATE_ENV: &str = "STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN";
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_SPHINX_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_SPHINX_PYTHON_ENV";
@@ -351,11 +352,12 @@ fn write_diff_section(
     }
     writeln!(out, "{title}: {}", diagnostics.len()).expect("write diff section title");
     writeln!(out, "{help}").expect("write diff section help");
-    for diagnostic in diagnostics.iter().take(20) {
+    for diagnostic in diagnostics.iter().take(DIFF_DISPLAY_LIMIT) {
         writeln!(out, "{}", diagnostic.display()).expect("write diff entry");
     }
-    if diagnostics.len() > 20 {
-        writeln!(out, "... {} more", diagnostics.len() - 20).expect("write diff truncation");
+    if diagnostics.len() > DIFF_DISPLAY_LIMIT {
+        writeln!(out, "... {} more", diagnostics.len() - DIFF_DISPLAY_LIMIT)
+            .expect("write diff truncation");
     }
 }
 
