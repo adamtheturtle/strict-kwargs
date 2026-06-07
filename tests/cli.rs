@@ -52,6 +52,15 @@ impl Project {
             .expect("spawn strict-kwargs")
     }
 
+    fn run_from(args: &[&str], cwd: &Path) -> Output {
+        Command::new(BIN)
+            .args(args)
+            .current_dir(cwd)
+            .env_remove(CACHE_DIR_ENV_VAR)
+            .output()
+            .expect("spawn strict-kwargs")
+    }
+
     fn run_with_cache_env(&self, args: &[&str], cache_dir: &Path) -> Output {
         Command::new(BIN)
             .args(args)
@@ -181,6 +190,28 @@ fn check_default_path_dot_reports_violation() {
     let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
     assert!(err.contains("main.py"));
+}
+
+#[test]
+fn check_ty_fallback_uses_project_root_when_caller_cwd_differs() {
+    // Function-local imports are intentionally outside the built-in
+    // resolver's module-scope import index, so this diagnostic depends on
+    // `ty`. Running from another cwd must not make ty lose first-party
+    // project imports.
+    let project = Project::new()
+        .write("svc.py", "def run(a: int) -> None: ...\n")
+        .write(
+            "app.py",
+            "def driver() -> None:\n    import svc\n    svc.run(1)\n",
+        );
+    let outside = tempfile::tempdir().expect("tempdir");
+    let app = project.root.join("app.py");
+    let app = app.to_str().expect("utf8 path");
+    let output = Project::run_from(&["check", app], outside.path());
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    let out = combined_output(&output);
+    assert!(out.contains("Too many positional"), "output: {out}");
+    assert!(out.contains("\"run\""), "output: {out}");
 }
 
 #[test]

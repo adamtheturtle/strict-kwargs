@@ -150,6 +150,7 @@ impl TyResolver {
     pub fn start(project_root: &Path, python_env: Option<&Path>) -> Option<Self> {
         let mut child = ty_command()
             .arg("server")
+            .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
