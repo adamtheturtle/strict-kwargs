@@ -679,7 +679,20 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
         if reader.read_exact(&mut body).is_err() {
             return;
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
+            // `publishDiagnostics` for a large, untyped file (CPython has many
+            // type errors ty reports) can carry thousands of diagnostics —
+            // hundreds of KB per file. We only need the URI (warm-up readiness;
+            // see `absorb`/`warm_up`), never the diagnostic payload, so drop
+            // the heavy `diagnostics` array here, before it piles up unbounded
+            // in the channel and spikes memory at whole-CPython scale.
+            if value.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+            {
+                if let Some(params) = value.get_mut("params").and_then(Value::as_object_mut) {
+                    params.remove("diagnostics");
+                }
+            }
             if tx.send(value).is_err() {
                 return;
             }
