@@ -153,6 +153,77 @@ jobs:
           mode: simulation
           run: cargo codspeed run
 
+  sphinx-completeness:
+    # Heavy opt-in regression coverage for issue #192. This clones and checks
+    # pinned Sphinx, so keep it out of pull requests and normal pushes.
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sphinx-completeness
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install ty (type-inference fallback under test)
+        shell: bash
+        run: |
+          uv tool install ty
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - name: Verify ty is on PATH
+        shell: bash
+        run: ty version
+
+      - name: Clone pinned Sphinx completeness checkout
+        shell: bash
+        env:
+          EXTERNAL_DIR: ${{ runner.temp }}/external
+          SPHINX_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+        run: |
+          set -euo pipefail
+          dest="$EXTERNAL_DIR/sphinx"
+          mkdir -p "$dest"
+          git -C "$dest" init --quiet
+          git -C "$dest" remote add origin https://github.com/sphinx-doc/sphinx.git
+          git -C "$dest" fetch --depth=1 origin "$SPHINX_REF"
+          git -C "$dest" checkout --detach --quiet FETCH_HEAD
+          git -C "$dest" rev-parse HEAD
+
+      - name: Prepare Sphinx Python environment
+        shell: bash
+        env:
+          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
+          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+        run: |
+          set -euo pipefail
+          uv venv --python "$pythonLocation/bin/python" "$SPHINX_VENV"
+          uv pip install --python "$SPHINX_VENV/bin/python" -e "$SPHINX_CHECKOUT"
+
+      - name: Run pinned Sphinx completeness test
+        env:
+          STRICT_KWARGS_SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
+          STRICT_KWARGS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/sphinx-venv
+          STRICT_KWARGS_SPHINX_RUNS: 1
+        run: |
+          cargo test --locked --test sphinx_completeness \
+            pinned_sphinx_diagnostics_include_golden_subset -- --ignored --nocapture
+
   completion-ci:
     needs: build
     runs-on: ubuntu-latest
