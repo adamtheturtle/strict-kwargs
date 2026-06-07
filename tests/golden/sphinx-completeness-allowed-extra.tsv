@@ -1,0 +1,42 @@
+# Pinned Sphinx allowed-extra diagnostic baseline.
+# Entries in this file appeared in at least one, but not all, of 3 observed regeneration runs.
+# They document currently unstable resolver output and are allowed as extras.
+# Repository: https://github.com/sphinx-doc/sphinx.git
+# Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c
+# ty: 0.0.44
+# Format: relative-path<TAB>line<TAB>column<TAB>callee
+sphinx/builders/html/__init__.py	461	41	"Index"
+sphinx/domains/c/__init__.py	524	16	"AliasNode"
+sphinx/domains/c/__init__.py	524	16	"__class__"
+sphinx/domains/cpp/__init__.py	646	16	"AliasNode"
+sphinx/environment/adapters/toctree.py	371	12	"__call__"
+sphinx/environment/adapters/toctree.py	374	18	"__call__"
+sphinx/ext/autodoc/directive.py	165	22	"Documenter"
+sphinx/ext/autosummary/__init__.py	780	27	"__call__"
+sphinx/ext/intersphinx/_resolve.py	465	28	"__call__"
+sphinx/ext/napoleon/docstring.py	510	18	"GoogleDocstring"
+sphinx/ext/napoleon/docstring.py	533	18	"GoogleDocstring"
+sphinx/ext/napoleon/docstring.py	559	21	"GoogleDocstring"
+sphinx/ext/napoleon/docstring.py	1257	17	"NumpyDocstring"
+sphinx/registry.py	209	22	"Domain"
+sphinx/util/docfields.py	118	25	"__call__"
+sphinx/writers/latex.py	595	42	"Index"
+sphinx/writers/texinfo.py	505	42	"Index"
+tests/test_builders/test_build_epub.py	57	16	"EPUBElementTree"
+tests/test_builders/test_build_epub.py	61	17	"EPUBElementTree"
+tests/test_builders/test_build_epub.py	76	19	"EPUBElementTree"
+tests/test_markup/test_markup.py	612	24	"__call__"
+tests/test_markup/test_markup.py	627	24	"__call__"
+tests/test_markup/test_markup.py	640	24	"__call__"
+tests/test_markup/test_markup.py	644	24	"__call__"
+tests/test_markup/test_markup.py	658	24	"__call__"
+tests/test_markup/test_markup.py	672	24	"__call__"
+tests/test_roles.py	19	16	"__call__"
+tests/test_roles.py	34	16	"__call__"
+tests/test_roles.py	51	16	"__call__"
+tests/test_roles.py	57	16	"__call__"
+tests/test_roles.py	63	16	"__call__"
+tests/test_roles.py	79	16	"__call__"
+tests/test_roles.py	85	16	"__call__"
+tests/test_roles.py	91	16	"__call__"
+tests/test_roles.py	107	16	"__call__"

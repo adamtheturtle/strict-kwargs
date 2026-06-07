@@ -154,10 +154,9 @@ jobs:
           run: cargo codspeed run
 
   sphinx-completeness:
-    # Heavy opt-in regression coverage for issue #192. This clones and checks
-    # pinned Sphinx, so keep it out of pull requests and normal pushes.
+    # Heavy regression coverage for issue #192. This clones and checks pinned
+    # Sphinx so every CI event catches golden-oracle drift before merge.
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -183,7 +182,7 @@ jobs:
       - name: Install ty (type-inference fallback under test)
         shell: bash
         run: |
-          uv tool install ty
+          uv tool install ty==0.0.44
           uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH
@@ -222,7 +221,7 @@ jobs:
           STRICT_KWARGS_SPHINX_RUNS: 1
         run: |
           cargo test --locked --test sphinx_completeness \
-            pinned_sphinx_diagnostics_include_golden_subset -- --ignored --nocapture
+            pinned_sphinx_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:
     needs: build

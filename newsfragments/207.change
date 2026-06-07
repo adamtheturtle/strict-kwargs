@@ -1,0 +1,4 @@
+Tighten the ignored pinned Sphinx completeness regression test so scheduled CI
+fails on missing stable diagnostics and on undocumented extra diagnostics, with
+a regenerated full golden oracle and a documented unstable-extra allowance file
+(issue #207).
