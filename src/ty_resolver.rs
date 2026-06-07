@@ -253,7 +253,8 @@ impl TyResolver {
     }
 
     fn send(&mut self, msg: &Value) -> Option<()> {
-        if write_lsp_message(&mut self.stdin, msg).is_none() {
+        let body = serde_json::to_vec(msg).ok()?;
+        if write_lsp_message(&mut self.stdin, &body).is_err() {
             self.disabled = true;
             return None;
         }
@@ -352,12 +353,10 @@ impl TyResolver {
     }
 }
 
-fn write_lsp_message(writer: &mut impl Write, msg: &Value) -> Option<()> {
-    let body = serde_json::to_vec(msg).ok()?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())
-        .and_then(|()| writer.write_all(&body))
-        .and_then(|()| writer.flush())
-        .ok()
+fn write_lsp_message(writer: &mut impl Write, body: &[u8]) -> std::io::Result<()> {
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(body)?;
+    writer.flush()
 }
 
 /// Parse a ty hover `contents.value` into a callable signature description.
@@ -1346,12 +1345,13 @@ mod tests {
             }
 
             let msg = json!({ "jsonrpc": "2.0", "method": "x" });
+            let body = serde_json::to_vec(&msg).expect("message serializes");
             let mut bytes = Vec::new();
-            assert_eq!(write_lsp_message(&mut bytes, &msg), Some(()));
+            assert!(write_lsp_message(&mut bytes, &body).is_ok());
             assert!(String::from_utf8(bytes)
                 .expect("message is utf8")
                 .starts_with("Content-Length: "));
-            assert_eq!(write_lsp_message(&mut BrokenWriter, &msg), None);
+            assert!(write_lsp_message(&mut BrokenWriter, &body).is_err());
         }
 
         #[test]
