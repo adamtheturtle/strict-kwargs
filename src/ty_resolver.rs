@@ -624,7 +624,17 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
         if reader.read_exact(&mut body).is_err() {
             return;
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
+            // `publishDiagnostics` can carry thousands of diagnostic entries
+            // per file. Warm-up only needs the URI, so drop the payload before
+            // it queues up in the unbounded reader channel.
+            if value.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+            {
+                if let Some(params) = value.get_mut("params").and_then(Value::as_object_mut) {
+                    params.remove("diagnostics");
+                }
+            }
             if tx.send(value).is_err() {
                 return;
             }
@@ -1183,6 +1193,34 @@ mod tests {
         let second = rx.recv().unwrap();
         assert_eq!(second["id"], 2);
         // Only two valid frames were forwarded; the garbage one was skipped.
+        assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn read_messages_strips_publish_diagnostics_payloads() {
+        use std::io::Cursor;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///a/x.py",
+                "diagnostics": [
+                    { "message": "large payload", "severity": 1 }
+                ]
+            }
+        })
+        .to_string();
+        read_messages(Cursor::new(frame(&body)), &tx);
+        drop(tx);
+
+        let msg = rx.recv().unwrap();
+        assert_eq!(
+            msg.pointer("/params/uri").and_then(Value::as_str),
+            Some("file:///a/x.py")
+        );
+        assert!(msg.pointer("/params/diagnostics").is_none());
         assert!(rx.recv().is_err());
     }
 
