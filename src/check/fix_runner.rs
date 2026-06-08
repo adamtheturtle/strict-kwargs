@@ -9,9 +9,9 @@ use crate::index::build_index;
 use crate::ty_resolver::TyResolver;
 
 use super::{
-    collect_python_files, explicit_python_files, plan_rewrite_insertions, require_ty_present,
-    resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix,
-    ScanOutcome, TyFixes,
+    collect_python_files, explicit_python_files, load_python_files, plan_rewrite_insertions,
+    require_ty_present, resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack,
+    scan_files_for_fix, LoadedPythonFile, ScanOutcome, TyFixes,
 };
 
 /// Rewrite positional call arguments to keyword arguments for every fixable
@@ -102,13 +102,21 @@ fn fix_paths_impl(
     let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
     let source_roots = SourceRoots::from_config(project_root, config);
-    let index = build_index(project_root, &python_files, &source_roots);
+    let loaded_files = load_python_files(&python_files)?;
+    let index = {
+        let index_files: Vec<_> = loaded_files
+            .iter()
+            .filter_map(LoadedPythonFile::for_index)
+            .collect();
+        build_index(project_root, &index_files, &source_roots)
+    };
+    let loaded_files_to_scan = loaded_files;
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
     // chance to add safe single-signature hover fixes.
     let scans = scan_files_for_fix(
-        &python_files,
+        loaded_files_to_scan,
         &explicit_files,
         &source_roots,
         config,
