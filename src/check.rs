@@ -1474,15 +1474,6 @@ impl<'a> CallChecker<'a> {
             indexed_signatures = signatures;
             indexed_signatures.as_ref()
         } else {
-            // A known class with no indexed constructor and no positional
-            // arguments cannot violate this rule. This keeps expressions like
-            // `Derived().method(1)` from starting `ty` just to resolve the
-            // zero-argument inner construction.
-            if self.index.is_class(&callee_fullname)
-                && positional_argument_count(&call.arguments) == 0
-            {
-                return;
-            }
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.
             // Re-check is_excluded: `get` may have triggered lazy loading
@@ -2204,7 +2195,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         if let Expr::Call(call) = expr {
-            self.check_call(call);
+            if positional_argument_count(&call.arguments) > 0 {
+                self.check_call(call);
+            }
         }
         walk_expr(self, expr);
     }

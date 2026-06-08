@@ -1468,11 +1468,11 @@ fn builtin_resolves_builtin_constructor_receiver() {
 #[test]
 fn builtin_resolves_scalar_literal_receivers() {
     assert_ok(
-        r"
+        r#"
 (True).bit_length()
 (1.0).hex()
-(1j).conjugate()
-",
+(1j).__format__("")
+"#,
     );
 }
 
