@@ -1,0 +1,2 @@
+Move the Sphinx completeness golden oracle to an `insta` snapshot and remove
+the allowed-extra diagnostic baseline.

@@ -1,5 +1,8 @@
-# Pinned Sphinx stable diagnostic baseline.
-# Diagnostics in this file must appear on every observed run.
+---
+source: tests/sphinx_completeness.rs
+expression: format_snapshot(&actual_keys)
+---
+# Pinned Sphinx diagnostic snapshot.
 # Repository: https://github.com/sphinx-doc/sphinx.git
 # Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c
 # ty: 0.0.44
