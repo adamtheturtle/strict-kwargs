@@ -23,6 +23,47 @@ pub struct DefLocation {
     pub character: u32,
 }
 
+/// Per-file line index for converting byte offsets to LSP positions.
+///
+/// Pending ty requests are clustered per file and can number in the
+/// thousands. Building line starts once keeps each conversion bounded to the
+/// current line instead of rescanning the whole source from byte 0.
+pub struct LspLineIndex {
+    line_starts: Vec<usize>,
+}
+
+impl LspLineIndex {
+    pub fn new(source: &str) -> Self {
+        let mut line_starts = vec![0usize];
+        line_starts.extend(
+            source
+                .bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        );
+        Self { line_starts }
+    }
+
+    pub fn position(&self, source: &str, offset: usize) -> (u32, u32) {
+        let line_index = self.line_starts.partition_point(|&start| start <= offset);
+        let zero_based_line = line_index.saturating_sub(1);
+        let line_start = self.line_starts.get(zero_based_line).copied().unwrap_or(0);
+        let mut col_utf16 = 0usize;
+        if let Some(line_suffix) = source.get(line_start..) {
+            for (relative, ch) in line_suffix.char_indices() {
+                if line_start + relative >= offset || ch == '\n' {
+                    break;
+                }
+                col_utf16 += ch.len_utf16();
+            }
+        }
+        (
+            u32::try_from(zero_based_line).unwrap_or(u32::MAX),
+            u32::try_from(col_utf16).unwrap_or(u32::MAX),
+        )
+    }
+}
+
 /// Per-request timeout. ty normally answers in milliseconds; this only
 /// bounds pathological hangs. The first failure latches ty OFF for the rest
 /// of the run, so a slow ty never multiplies into a timeout storm.
@@ -756,21 +797,9 @@ fn percent_decode(s: &str) -> String {
 
 /// Convert a byte offset in `source` to an LSP `(line, character)` position
 /// (0-based line, 0-based UTF-16 code units), as the LSP spec requires.
+#[cfg(test)]
 pub fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
-    let mut line = 0u32;
-    let mut col_utf16 = 0u32;
-    for (idx, ch) in source.char_indices() {
-        if idx >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col_utf16 = 0;
-        } else {
-            col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
-        }
-    }
-    (line, col_utf16)
+    LspLineIndex::new(source).position(source, offset)
 }
 
 /// Convert an LSP `(line, character)` position back to a byte offset.
