@@ -312,6 +312,14 @@ fn parse_version(version: &str, label: &str) -> Result<Version, String> {
     })
 }
 
+fn dot_for_empty(path: PathBuf) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path
+    }
+}
+
 /// Discover project root by walking up from ``start`` looking for ``pyproject.toml``.
 #[must_use]
 pub fn find_project_root(start: &Path) -> PathBuf {
@@ -322,10 +330,10 @@ pub fn find_project_root(start: &Path) -> PathBuf {
     };
     loop {
         if current.join("pyproject.toml").is_file() {
-            return current;
+            return dot_for_empty(current);
         }
         if !current.pop() {
-            return start.to_path_buf();
+            return dot_for_empty(start.to_path_buf());
         }
     }
 }
@@ -841,6 +849,18 @@ mod tests {
         assert_eq!(find_project_root(&file), root);
         // From a directory: same result.
         assert_eq!(find_project_root(&nested), root);
+    }
+
+    #[test]
+    fn find_project_root_for_relative_file_in_current_directory_returns_dot() {
+        assert_eq!(
+            find_project_root(Path::new("src/config.rs")),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            find_project_root(Path::new("pyproject.toml")),
+            PathBuf::from(".")
+        );
     }
 
     #[test]
