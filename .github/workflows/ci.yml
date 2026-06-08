@@ -218,7 +218,7 @@ jobs:
         env:
           STRICT_KWARGS_SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
           STRICT_KWARGS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/sphinx-venv
-          STRICT_KWARGS_SPHINX_RUNS: 1
+          STRICT_KWARGS_SPHINX_RUNS: 3
         run: |
           cargo test --locked --test sphinx_completeness \
             pinned_sphinx_diagnostics_match_golden_oracle -- --ignored --nocapture

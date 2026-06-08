@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Regenerate the Sphinx completeness oracle files from the pinned checkout
+# Regenerate the Sphinx completeness snapshot from the pinned checkout
 # used by tests/sphinx_completeness.rs.
 set -euo pipefail
 
@@ -38,8 +38,9 @@ if [ -z "${STRICT_KWARGS_SPHINX_PYTHON_ENV:-}" ]; then
     -e "$STRICT_KWARGS_SPHINX_CHECKOUT"
 fi
 
-export STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1
 export STRICT_KWARGS_SPHINX_RUNS="${STRICT_KWARGS_SPHINX_RUNS:-3}"
+export STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1
+export INSTA_UPDATE=always
 
 cargo test --locked --test sphinx_completeness \
-  regenerate_pinned_sphinx_golden_baseline -- --ignored --nocapture
+  pinned_sphinx_diagnostics_match_golden_oracle -- --ignored --nocapture
