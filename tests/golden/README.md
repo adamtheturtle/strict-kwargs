@@ -18,6 +18,7 @@ The pinned checkout is:
 
 - Repository: `https://github.com/sphinx-doc/sphinx.git`
 - Ref: `cc7c6f435ad37bb12264f8118c8461b230e6830c`
+- Python dependencies: `tests/golden/sphinx-requirements-constraints.txt`
 - `ty`: `0.0.44`
 
 Regenerate it with:
@@ -31,17 +32,23 @@ with Sphinx installed editable into a temporary virtual environment. It runs
 the checker through a temporary `ty==0.0.44` wrapper so the oracle does not
 drift when a newer `ty` release changes hover display details. The script sets
 `STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1` and `INSTA_UPDATE=always` to
-refresh the committed snapshot directly.
+refresh the committed snapshot directly. The Sphinx virtual environment is
+installed with `tests/golden/sphinx-requirements-constraints.txt` so the oracle
+does not drift when transitive dependencies such as `docutils` or `Jinja2`
+change their public type surface.
 
 To reuse an existing checkout, set
 `STRICT_KWARGS_SPHINX_CHECKOUT=/path/to/sphinx`; it must be at the pinned ref
 above. To reuse an existing Python environment, set
 `STRICT_KWARGS_SPHINX_PYTHON_ENV=/path/to/venv`. Otherwise the script creates
 a venv with Python `3.13`, matching scheduled CI; set
-`STRICT_KWARGS_SPHINX_PYTHON` to override the interpreter. To change the number
-of runs, set `STRICT_KWARGS_SPHINX_RUNS`. To intentionally update the pinned
-`ty` version, set `STRICT_KWARGS_SPHINX_TY_VERSION` while regenerating and
-update the version documented here and in `tests/sphinx_completeness.rs`.
+`STRICT_KWARGS_SPHINX_PYTHON` to override the interpreter. To intentionally
+refresh the third-party dependency surface, update
+`tests/golden/sphinx-requirements-constraints.txt` and regenerate the oracle in
+the same change. To change the number of runs, set `STRICT_KWARGS_SPHINX_RUNS`.
+To intentionally update the pinned `ty` version, set
+`STRICT_KWARGS_SPHINX_TY_VERSION` while regenerating and update the version
+documented here and in `tests/sphinx_completeness.rs`.
 
 Review regenerated diffs as an oracle change, not as a blind snapshot update:
 

@@ -1,0 +1,30 @@
+# Python dependency constraints for the pinned Sphinx completeness oracle.
+#
+# Keep this environment hermetic: the oracle is meant to detect strict-kwargs
+# resolver changes, not drift in docutils/Jinja/etc. hover displays.
+#
+# Repository: https://github.com/sphinx-doc/sphinx.git
+# Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c
+# Python: 3.13
+# ty: 0.0.44
+alabaster==1.0.0
+Babel==2.18.0
+certifi==2026.5.20
+charset-normalizer==3.4.7
+docutils==0.22.4
+idna==3.18
+imagesize==2.0.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+packaging==26.2
+Pygments==2.20.0
+requests==2.34.2
+roman-numerals==4.1.0
+snowballstemmer==3.1.1
+sphinxcontrib-applehelp==2.0.0
+sphinxcontrib-devhelp==2.0.0
+sphinxcontrib-htmlhelp==2.1.0
+sphinxcontrib-jsmath==1.0.1
+sphinxcontrib-qthelp==2.0.0
+sphinxcontrib-serializinghtml==2.0.0
+urllib3==2.7.0

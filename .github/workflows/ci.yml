@@ -212,7 +212,9 @@ jobs:
         run: |
           set -euo pipefail
           uv venv --python "$pythonLocation/bin/python" "$SPHINX_VENV"
-          uv pip install --python "$SPHINX_VENV/bin/python" -e "$SPHINX_CHECKOUT"
+          uv pip install --python "$SPHINX_VENV/bin/python" \
+            --constraint tests/golden/sphinx-requirements-constraints.txt \
+            -e "$SPHINX_CHECKOUT"
 
       - name: Run pinned Sphinx completeness test
         env:

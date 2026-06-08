@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 SPHINX_REF="cc7c6f435ad37bb12264f8118c8461b230e6830c"
 SPHINX_PYTHON="${STRICT_KWARGS_SPHINX_PYTHON:-3.13}"
 SPHINX_TY_VERSION="${STRICT_KWARGS_SPHINX_TY_VERSION:-0.0.44}"
+SPHINX_CONSTRAINTS="${STRICT_KWARGS_SPHINX_CONSTRAINTS:-tests/golden/sphinx-requirements-constraints.txt}"
 temp_dir="$(mktemp -d)"
 trap 'rm -rf "$temp_dir"' EXIT
 
@@ -35,6 +36,7 @@ if [ -z "${STRICT_KWARGS_SPHINX_PYTHON_ENV:-}" ]; then
   export STRICT_KWARGS_SPHINX_PYTHON_ENV="$temp_dir/sphinx-venv"
   uv venv --python "$SPHINX_PYTHON" "$STRICT_KWARGS_SPHINX_PYTHON_ENV"
   uv pip install --python "$STRICT_KWARGS_SPHINX_PYTHON_ENV/bin/python" \
+    --constraint "$SPHINX_CONSTRAINTS" \
     -e "$STRICT_KWARGS_SPHINX_CHECKOUT"
 fi
 
