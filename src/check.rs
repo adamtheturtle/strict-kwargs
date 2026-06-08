@@ -1506,13 +1506,16 @@ impl<'a> CallChecker<'a> {
         let receiver_is_explicit =
             self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
         let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
-        let receiver_is_explicit_for_fix = receiver_is_explicit
-            || (self.plan_fixes
-                && self.is_explicit_dunder_receiver_call(
+        let receiver_is_explicit_for_fix = if self.plan_fixes {
+            receiver_is_explicit
+                || self.is_explicit_dunder_receiver_call(
                     &call.func,
                     &callee_fullname,
                     first_param_name,
-                ));
+                )
+        } else {
+            receiver_is_explicit
+        };
         let effective_storage;
         let effective: &[Signature] = if receiver_is_explicit || receiver_is_implicit {
             effective_storage = signatures
