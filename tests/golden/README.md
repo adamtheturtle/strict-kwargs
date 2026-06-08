@@ -35,7 +35,9 @@ drift when a newer `ty` release changes hover display details. The script sets
 refresh the committed snapshot directly. The Sphinx virtual environment is
 installed with `tests/golden/sphinx-requirements-constraints.txt` so the oracle
 does not drift when transitive dependencies such as `docutils` or `Jinja2`
-change their public type surface.
+change their public type surface. Regeneration also subtracts
+`tests/golden/sphinx-unstable-diagnostics.txt`, which lists diagnostics that
+can appear locally but were not stable across repeated Linux CI oracle runs.
 
 To reuse an existing checkout, set
 `STRICT_KWARGS_SPHINX_CHECKOUT=/path/to/sphinx`; it must be at the pinned ref
@@ -45,8 +47,10 @@ a venv with Python `3.13`, matching scheduled CI; set
 `STRICT_KWARGS_SPHINX_PYTHON` to override the interpreter. To intentionally
 refresh the third-party dependency surface, update
 `tests/golden/sphinx-requirements-constraints.txt` and regenerate the oracle in
-the same change. To change the number of runs, set `STRICT_KWARGS_SPHINX_RUNS`.
-To intentionally update the pinned `ty` version, set
+the same change. To intentionally re-admit or remove platform-sensitive
+diagnostics, update `tests/golden/sphinx-unstable-diagnostics.txt` and
+regenerate the oracle in the same change. To change the number of runs, set
+`STRICT_KWARGS_SPHINX_RUNS`. To intentionally update the pinned `ty` version, set
 `STRICT_KWARGS_SPHINX_TY_VERSION` while regenerating and update the version
 documented here and in `tests/sphinx_completeness.rs`.
 
