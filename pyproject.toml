@@ -13,14 +13,14 @@ authors = [
 ]
 requires-python = ">=3.11"
 # `ty` is the required type-inference backend.
-# Floor, not a pin: `0.0.23` is the version the LSP/hover integration was
+# Floor, not a pin: `0.0.44` is the version the LSP/hover integration was
 # verified against, so it is the minimum; newer `ty` is allowed. ty is
 # pre-1.0, so a future release could change the hover/LSP surface — hover
 # parsing is best-effort and fails closed (a miss, never a wrong
 # diagnostic), so a drift degrades coverage rather than correctness.
 # `uv tool install strict-kwargs` does not put a dependency's entry point on
 # PATH, so the binary locates this `ty` next to itself (see `ty_command`).
-dependencies = [ "ty>=0.0.23" ]
+dependencies = [ "ty>=0.0.44" ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
