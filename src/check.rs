@@ -690,6 +690,9 @@ struct CallChecker<'a> {
     /// Calls the built-in resolver couldn't resolve, deferred for a single
     /// pipelined batch of ty queries per file.
     ty_pending: Vec<PendingTy>,
+    /// Set mirror of `ty_pending` so large files can suppress duplicate ty
+    /// requests without a linear scan for every unresolved call.
+    ty_pending_seen: FxHashSet<PendingTy>,
     /// Built-in-resolved overload violations that are diagnostics already,
     /// but may be safe to rewrite if ty's hover selects one concrete arm.
     ty_overload_fix_pending: Vec<PendingTyOverloadFix>,
@@ -710,7 +713,7 @@ struct CallChecker<'a> {
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct PendingTy {
     /// Start of the callee identifier (where we hover / goto-definition).
     callee_offset: usize,
@@ -802,6 +805,7 @@ impl<'a> CallChecker<'a> {
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
+            ty_pending_seen: FxHashSet::default(),
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
             plan_fixes,
@@ -1753,7 +1757,7 @@ impl<'a> CallChecker<'a> {
         let Some(pending) = self.pending_ty_for_call(call) else {
             return;
         };
-        if !self.ty_pending.contains(&pending) {
+        if self.ty_pending_seen.insert(pending) {
             self.ty_pending.push(pending);
         }
     }
@@ -2435,6 +2439,7 @@ fn format_callee_display(fullname: &str) -> String {
 }
 
 /// Whether byte `offset` falls within an identifier's range.
+#[cfg(test)]
 fn ident_hit(ident: &ast::Identifier, offset: usize) -> bool {
     let range = ident.range();
     offset >= range.start().to_usize() && offset < range.end().to_usize()
@@ -2507,6 +2512,7 @@ fn collect_defs<'a>(
 /// overload signatures (most-permissive overload wins downstream).
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(test)]
 fn resolve_def_at(stmts: &[Stmt], offset: usize) -> Option<(String, Vec<Signature>)> {
     let mut funcs: Vec<FnEntry> = Vec::new();
     let mut classes: Vec<&StmtClassDef> = Vec::new();
@@ -2548,6 +2554,132 @@ fn resolve_def_at(stmts: &[Stmt], offset: usize) -> Option<(String, Vec<Signatur
         }
     }
     None
+}
+
+// ty-fallback data for `DefFileIndex`; the impl below is coverage-excluded
+// with the surrounding ty fallback orchestration, while behaviour is verified
+// by deterministic unit tests.
+#[derive(Clone)]
+struct DefFunction {
+    class: Option<String>,
+    name: String,
+    name_start: usize,
+    name_end: usize,
+    signature: Signature,
+}
+
+#[derive(Clone)]
+struct DefClass {
+    name: String,
+    name_start: usize,
+    name_end: usize,
+    init_signatures: Vec<Signature>,
+    new_signatures: Vec<Signature>,
+}
+
+#[derive(Clone)]
+struct DefFileIndex {
+    funcs: Vec<DefFunction>,
+    classes: Vec<DefClass>,
+}
+
+#[cfg_attr(coverage, coverage(off))]
+impl DefFileIndex {
+    fn from_stmts(stmts: &[Stmt]) -> Self {
+        let mut funcs: Vec<FnEntry> = Vec::new();
+        let mut classes: Vec<&StmtClassDef> = Vec::new();
+        collect_defs(stmts, None, &mut funcs, &mut classes);
+
+        let funcs = funcs
+            .into_iter()
+            .map(|(class, function)| {
+                let range = function.name.range();
+                DefFunction {
+                    class,
+                    name: function.name.to_string(),
+                    name_start: range.start().to_usize(),
+                    name_end: range.end().to_usize(),
+                    signature: signature_from_parameters(&function.parameters),
+                }
+            })
+            .collect();
+        let classes = classes
+            .into_iter()
+            .map(|class| {
+                let range = class.name.range();
+                DefClass {
+                    name: class.name.to_string(),
+                    name_start: range.start().to_usize(),
+                    name_end: range.end().to_usize(),
+                    init_signatures: class_constructor_signatures(class, "__init__"),
+                    new_signatures: class_constructor_signatures(class, "__new__"),
+                }
+            })
+            .collect();
+        Self { funcs, classes }
+    }
+
+    fn from_source(source: &str) -> Option<Self> {
+        let parsed = parse_module_guarded(source).ok()?;
+        Some(Self::from_stmts(parsed.suite()))
+    }
+
+    fn resolve_at(&self, offset: usize) -> Option<(String, Vec<Signature>)> {
+        if let Some(target) = self
+            .funcs
+            .iter()
+            .find(|function| offset >= function.name_start && offset < function.name_end)
+        {
+            let overloads = self
+                .funcs
+                .iter()
+                .filter(|function| function.class == target.class && function.name == target.name)
+                .map(|function| function.signature.clone())
+                .collect();
+            let fullname = match target.class.as_deref() {
+                Some(class) if target.name == "__init__" || target.name == "__new__" => {
+                    format!("ty.{class}.__init__")
+                }
+                Some(class) => format!("ty.{class}.{}", target.name),
+                None => format!("ty.{}", target.name),
+            };
+            return Some((fullname, overloads));
+        }
+
+        if let Some(class) = self
+            .classes
+            .iter()
+            .find(|class| offset >= class.name_start && offset < class.name_end)
+        {
+            if !class.init_signatures.is_empty() {
+                return Some((
+                    format!("ty.{}.__init__", class.name),
+                    class.init_signatures.clone(),
+                ));
+            }
+            if !class.new_signatures.is_empty() {
+                return Some((
+                    format!("ty.{}.__init__", class.name),
+                    class.new_signatures.clone(),
+                ));
+            }
+        }
+        None
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn class_constructor_signatures(class: &StmtClassDef, ctor: &str) -> Vec<Signature> {
+    class
+        .body
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::FunctionDef(function) if function.name.as_str() == ctor => {
+                Some(signature_from_parameters(&function.parameters))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The identifier starting at byte `offset` in `source` (the callee name, for
@@ -2774,6 +2906,13 @@ struct DefCacheKey {
 }
 
 type DefCache = FxHashMap<DefCacheKey, Option<(String, Vec<Signature>)>>;
+type DefFileCache = FxHashMap<PathBuf, Option<DefFileIndex>>;
+
+#[derive(Default)]
+struct TyDefCaches {
+    locations: DefCache,
+    files: DefFileCache,
+}
 
 #[cfg_attr(coverage, coverage(off))]
 fn resolve_def_location_cached(
@@ -2781,31 +2920,42 @@ fn resolve_def_location_cached(
     current_source: &str,
     loc: &crate::ty_resolver::DefLocation,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
-    def_cache: &mut DefCache,
+    def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
     let key = DefCacheKey {
         path: loc.path.clone(),
         line: loc.line,
         character: loc.character,
     };
-    if let Some(cached) = def_cache.get(&key) {
+    if let Some(cached) = def_caches.locations.get(&key) {
         return cached.clone();
     }
 
     let resolved = (|| {
-        let target = if same_path(&loc.path, current_path) {
-            current_source
+        let (target_path, target) = if same_path(&loc.path, current_path) {
+            (current_path, current_source)
         } else {
             if !file_cache.contains_key(&loc.path) {
                 file_cache.insert(loc.path.clone(), std::fs::read_to_string(&loc.path).ok());
             }
-            file_cache.get(&loc.path).and_then(Option::as_deref)?
+            (
+                loc.path.as_path(),
+                file_cache.get(&loc.path).and_then(Option::as_deref)?,
+            )
         };
-        let parsed = parse_module_guarded(target).ok()?;
         let off = lsp_to_byte_offset(target, loc.line, loc.character)?;
-        resolve_def_at(parsed.suite(), off)
+        if !def_caches.files.contains_key(target_path) {
+            def_caches
+                .files
+                .insert(target_path.to_path_buf(), DefFileIndex::from_source(target));
+        }
+        def_caches
+            .files
+            .get(target_path)
+            .and_then(Option::as_ref)?
+            .resolve_at(off)
     })();
-    def_cache.insert(key, resolved.clone());
+    def_caches.locations.insert(key, resolved.clone());
     resolved
 }
 
@@ -2818,12 +2968,12 @@ fn resolve_ty_definition_for_pending(
     lsp_index: &LspLineIndex,
     pending: &PendingTy,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
-    def_cache: &mut DefCache,
+    def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
     let (line, ch) = lsp_index.position(source, pending.callee_offset);
     let id = ty.ask("textDocument/definition", path, line, ch)?;
     let loc = ty.take(id).as_ref().and_then(location_from_value)?;
-    resolve_def_location_cached(path, source, &loc, file_cache, def_cache)
+    resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -3465,7 +3615,7 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// [`parse_hover_signature`], [`signature_from_param_text`],
 /// [`parse_callable_type_overloads`], [`strip_unbound_receiver`],
 /// [`identifier_at`], `byte_offset_to_lsp`, [`lsp_to_byte_offset`],
-/// [`location_from_value`], [`resolve_def_at`] and
+/// [`location_from_value`], [`DefFileIndex::resolve_at`] and
 /// [`emit_if_violation_with_signature_fullname`].
 #[cfg_attr(coverage, coverage(off))]
 #[allow(
@@ -3489,7 +3639,7 @@ fn resolve_pending_with_ty(
     ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
-    let mut def_cache = DefCache::default();
+    let mut def_caches = TyDefCaches::default();
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3547,7 +3697,7 @@ fn resolve_pending_with_ty(
                         &lsp_index,
                         p,
                         file_cache,
-                        &mut def_cache,
+                        &mut def_caches,
                     ) {
                         ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                     }
@@ -3627,7 +3777,7 @@ fn resolve_pending_with_ty(
                     &lsp_index,
                     p,
                     file_cache,
-                    &mut def_cache,
+                    &mut def_caches,
                 ) {
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
@@ -3689,7 +3839,7 @@ fn resolve_pending_with_ty(
             // have crashed the old unguarded call. A too-deep or unparsable
             // target is silently skipped, same fail-closed behaviour as before.
             if let Some((fullname, sigs)) =
-                resolve_def_location_cached(path, source, &loc, file_cache, &mut def_cache)
+                resolve_def_location_cached(path, source, &loc, file_cache, &mut def_caches)
             {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
@@ -4188,7 +4338,7 @@ class C:
 
     use super::{
         collect_defs, format_callee_display, identifier_at, resolve_def_at,
-        signature_from_param_text,
+        signature_from_param_text, DefFileIndex,
     };
     use ruff_python_ast::{StmtClassDef, StmtFunctionDef};
     use ruff_python_parser::parse_module;
@@ -4276,7 +4426,12 @@ while cond:
     fn resolve_at(src: &str, needle: &str) -> Option<(String, usize)> {
         let parsed = parse_module(src).expect("parse");
         let offset = src.find(needle).expect("needle");
-        resolve_def_at(parsed.suite(), offset).map(|(name, sigs)| (name, sigs.len()))
+        let legacy = resolve_def_at(parsed.suite(), offset).map(|(name, sigs)| (name, sigs.len()));
+        let cached = DefFileIndex::from_stmts(parsed.suite())
+            .resolve_at(offset)
+            .map(|(name, sigs)| (name, sigs.len()));
+        assert_eq!(cached, legacy);
+        cached
     }
 
     #[test]
