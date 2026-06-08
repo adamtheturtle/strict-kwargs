@@ -131,7 +131,7 @@ struct FileEntry {
 }
 
 /// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
-/// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty resolver
+/// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty work queue
 /// ([`ScanOutcome::Scanned`]).
 ///
 /// This is the gated business-logic counterpart to [`pipeline_phases`], which
@@ -141,17 +141,13 @@ fn process_scan_outcome_for_ty(
     i: usize,
     path: PathBuf,
     outcome: ScanOutcome,
-    config: &Config,
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
-    all_files: &[PathBuf],
-    index: &DefinitionIndex,
     python_env: Option<&Path>,
-    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
-    ty_def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+    ty_work: &mut Vec<PendingTyWork>,
 ) -> Result<(), CheckError> {
     match outcome {
         ScanOutcome::Skipped(reason) => {
@@ -161,29 +157,22 @@ fn process_scan_outcome_for_ty(
             skip_warnings.push((i, path, reason));
         }
         ScanOutcome::Scanned(scan) => {
-            let pending_source = if scan.pending.is_empty() {
-                None
-            } else {
-                Some(retained_source_for_pending_scan(scan.source.as_deref())?)
-            };
             diagnostics.extend(scan.diagnostics);
-            if let Some(source) = pending_source {
-                resolve_file_with_ty(
+            if !scan.pending.is_empty() {
+                let source = retained_source_for_pending_scan(scan.source.as_deref())?.to_owned();
+                start_ty_and_open_pending_file(
                     ty,
                     ty_start_attempted,
                     project_root,
-                    all_files,
-                    index,
                     python_env,
                     &path,
-                    source,
-                    &scan.pending,
-                    config,
-                    ty_file_cache,
-                    ty_def_caches,
-                    diagnostics,
-                    None,
+                    &source,
                 )?;
+                ty_work.push(PendingTyWork {
+                    path,
+                    source,
+                    pending: scan.pending,
+                });
             }
         }
     }
@@ -199,12 +188,37 @@ fn retained_source_for_pending_scan(source: Option<&str>) -> Result<&str, CheckE
     })
 }
 
+/// Start ty if needed and open `path` so ty can begin analysis while the scan
+/// stream continues. This is ty-subprocess orchestration; the queueing decision
+/// is covered by `process_scan_outcome_for_ty` unit tests.
+#[cfg_attr(coverage, coverage(off))]
+fn start_ty_and_open_pending_file(
+    ty: &mut Option<TyResolver>,
+    ty_start_attempted: &mut bool,
+    project_root: &Path,
+    python_env: Option<&Path>,
+    path: &Path,
+    source: &str,
+) -> Result<(), CheckError> {
+    if !*ty_start_attempted {
+        *ty_start_attempted = true;
+        *ty = Some(start_ty_for_fallback(project_root, python_env)?);
+    }
+    if let Some(ty) = ty.as_mut() {
+        let _ = ty.ensure_open(path, source);
+    }
+    Ok(())
+}
+
 /// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
-/// Phase 1 workers to the serial Phase 2 ty consumer as each file's built-in
-/// pass finishes, overlapping the remaining Phase 1 work with early Phase 2
-/// ty round-trips. The final sort in [`check_paths_impl`] keeps output
-/// deterministic regardless of arrival order; the lazy ty-server start is
-/// preserved (only the first file with pending calls triggers it).
+/// Phase 1 workers to the serial Phase 2 coordinator as each file's built-in
+/// pass finishes. Files that need ty fallback are opened in the ty server
+/// immediately, then their hover/definition requests are run after the scan
+/// stream drains. That lets ty analyze later files while Phase 1 is still
+/// finishing instead of blocking the coordinator on early-file round-trips.
+/// The final sort in [`check_paths_impl`] keeps output deterministic
+/// regardless of arrival order; the lazy ty-server start is preserved (only
+/// the first file with pending calls triggers it).
 ///
 /// Excluded from the coverage gate for the same reason as
 /// [`stream_scan_files`]: what is excluded here is only the threading
@@ -233,6 +247,7 @@ fn pipeline_phases(
 ) -> Result<(), CheckError> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
+    let mut ty_work: Vec<PendingTyWork> = Vec::new();
 
     let scan_result = std::thread::scope(|scope| -> Result<(), CheckError> {
         // Phase 1 (parallel, background): the built-in pass over every file.
@@ -289,17 +304,13 @@ fn pipeline_phases(
                 i,
                 path,
                 outcome,
-                config,
                 ty,
                 ty_start_attempted,
                 project_root,
-                all_project_files,
-                index,
                 python_env,
-                ty_file_cache,
-                ty_def_caches,
                 diagnostics,
                 skip_warnings,
+                &mut ty_work,
             ) {
                 consumer_err = Some(e);
             }
@@ -313,6 +324,24 @@ fn pipeline_phases(
     scan_result?;
     if let Some(e) = consumer_err {
         return Err(e);
+    }
+    for work in ty_work {
+        resolve_file_with_ty(
+            ty,
+            ty_start_attempted,
+            project_root,
+            all_project_files,
+            index,
+            python_env,
+            &work.path,
+            &work.source,
+            &work.pending,
+            config,
+            ty_file_cache,
+            ty_def_caches,
+            diagnostics,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -417,9 +446,9 @@ fn check_paths_impl(
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
-    // Files that need ty fallback wait for their own publishDiagnostics event
-    // before querying; files fully handled by the built-in resolver do not
-    // force ty work.
+    // Files that need ty fallback are opened as their scan results arrive, then
+    // wait for their own publishDiagnostics event before querying. Files fully
+    // handled by the built-in resolver do not force ty work.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -590,6 +619,12 @@ struct FileScan {
     fixes: Vec<Insertion>,
     fixed_calls: usize,
     declined_fix_reasons: Vec<DeclinedFixReason>,
+}
+
+struct PendingTyWork {
+    path: PathBuf,
+    source: String,
+    pending: Vec<PendingTy>,
 }
 
 /// Apply `insertions` to `source` and validate that the result remains valid
@@ -3928,14 +3963,13 @@ mod tests {
         plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyDefCaches,
-        TyFixAst, TyFixes,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyFixAst,
+        TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
-    use rustc_hash::FxHashMap;
     use std::path::Path;
 
     #[test]
@@ -4748,14 +4782,11 @@ while cond:
 
     #[test]
     fn ty_pending_scan_without_retained_source_is_reported() {
-        let config = Config::default();
         let mut ty = None;
         let mut ty_start_attempted = false;
-        let index = DefinitionIndex::for_test();
-        let mut ty_file_cache = FxHashMap::default();
-        let mut ty_def_caches = TyDefCaches::default();
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
+        let mut ty_work = Vec::new();
         let error = process_scan_outcome_for_ty(
             0,
             PathBuf::from("test.py"),
@@ -4773,17 +4804,13 @@ while cond:
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &config,
             &mut ty,
             &mut ty_start_attempted,
             Path::new("."),
-            &[],
-            &index,
             None,
-            &mut ty_file_cache,
-            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
+            &mut ty_work,
         )
         .expect_err("missing retained source should be reported");
 
@@ -4792,18 +4819,51 @@ while cond:
             .contains("scan with ty pending did not retain source"));
         assert!(diagnostics.is_empty());
         assert!(skip_warnings.is_empty());
+        assert!(ty_work.is_empty());
+    }
+
+    #[test]
+    fn skipped_scan_outcome_is_recorded_without_ty_work() {
+        let mut ty = None;
+        let mut ty_start_attempted = false;
+        let mut diagnostics = Vec::new();
+        let mut skip_warnings = Vec::new();
+        let mut ty_work = Vec::new();
+
+        process_scan_outcome_for_ty(
+            7,
+            PathBuf::from("skipped.py"),
+            ScanOutcome::Skipped("unsupported encoding".to_string()),
+            &mut ty,
+            &mut ty_start_attempted,
+            Path::new("."),
+            None,
+            &mut diagnostics,
+            &mut skip_warnings,
+            &mut ty_work,
+        )
+        .expect("skipped scan records a warning");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            skip_warnings,
+            vec![(
+                7,
+                PathBuf::from("skipped.py"),
+                "unsupported encoding".to_string()
+            )]
+        );
+        assert!(ty_work.is_empty());
+        assert!(!ty_start_attempted);
     }
 
     #[test]
     fn ty_scan_source_retention_is_only_required_for_pending_queries() {
-        let config = Config::default();
         let mut ty = None;
         let mut ty_start_attempted = true;
-        let index = DefinitionIndex::for_test();
-        let mut ty_file_cache = FxHashMap::default();
-        let mut ty_def_caches = TyDefCaches::default();
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
+        let mut ty_work = Vec::new();
 
         process_scan_outcome_for_ty(
             0,
@@ -4817,17 +4877,13 @@ while cond:
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &config,
             &mut ty,
             &mut ty_start_attempted,
             Path::new("."),
-            &[],
-            &index,
             None,
-            &mut ty_file_cache,
-            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
+            &mut ty_work,
         )
         .expect("empty pending scan does not need retained source");
 
@@ -4848,22 +4904,22 @@ while cond:
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &config,
             &mut ty,
             &mut ty_start_attempted,
             Path::new("."),
-            &[],
-            &index,
             None,
-            &mut ty_file_cache,
-            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
+            &mut ty_work,
         )
         .expect("pending scan with retained source is valid");
 
         assert!(diagnostics.is_empty());
         assert!(skip_warnings.is_empty());
+        assert_eq!(ty_work.len(), 1);
+        assert_eq!(ty_work[0].path, PathBuf::from("pending.py"));
+        assert_eq!(ty_work[0].source, "f(1)\n");
+        assert_eq!(ty_work[0].pending.len(), 1);
     }
 
     #[test]
