@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use ruff_python_ast::{self as ast};
-use ruff_python_ast::{Expr, Stmt};
-use ruff_python_parser::parse_module;
+use ruff_python_ast::{Expr, ModModule, Stmt};
+use ruff_python_parser::{parse_module, Parsed};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
@@ -153,6 +153,17 @@ pub struct DefinitionIndex {
     resolver: Option<ModuleResolver>,
     inner: Mutex<Inner>,
     module_ready: Condvar,
+}
+
+/// Source and parsed AST for a first-party file that was successfully indexed.
+///
+/// The check/fix scan phase can reuse this instead of reading and parsing the
+/// same file again. Files that cannot be decoded or parsed are intentionally
+/// absent so the scan phase preserves its existing user-facing skip/error
+/// behavior.
+pub struct IndexedFile {
+    pub source: String,
+    pub parsed: Parsed<ModModule>,
 }
 
 struct ModuleIndexClaim<'a> {
@@ -816,12 +827,13 @@ struct Collected {
     class_bases: FxHashMap<String, Vec<String>>,
 }
 
-pub fn build_index(
+pub fn build_index_with_sources(
     project_root: &Path,
     python_files: &[PathBuf],
     source_roots: &SourceRoots,
-) -> DefinitionIndex {
+) -> (DefinitionIndex, FxHashMap<PathBuf, IndexedFile>) {
     let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots));
+    let mut indexed_files = FxHashMap::default();
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
     // eagerly (small, and the bare-name fallback hits it constantly); this is
@@ -851,9 +863,10 @@ pub fn build_index(
         };
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
+        indexed_files.insert(path.clone(), IndexedFile { source, parsed });
     }
 
-    index
+    (index, indexed_files)
 }
 
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,

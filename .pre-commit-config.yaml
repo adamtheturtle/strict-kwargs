@@ -28,6 +28,7 @@ repos:
     hooks:
       - id: check-added-large-files
         stages: [pre-commit]
+        exclude: ^tests/snapshots/.*\.snap$
       - id: check-case-conflict
         stages: [pre-commit]
       - id: check-executables-have-shebangs

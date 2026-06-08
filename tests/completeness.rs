@@ -17,9 +17,10 @@ const DEFAULT_REPOSITORY_NAME: &str = "sphinx";
 const DEFAULT_REPOSITORY_URL: &str = "https://github.com/sphinx-doc/sphinx.git";
 const DEFAULT_REPOSITORY_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
-const SNAPSHOT_RELATIVE_PATH: &str =
+const LINUX_SNAPSHOT_RELATIVE_PATH: &str =
     "tests/snapshots/completeness__pinned_repository_diagnostics.snap";
-const UNSTABLE_RELATIVE_PATH: &str = "tests/golden/completeness-unstable-diagnostics.txt";
+const MACOS_SNAPSHOT_RELATIVE_PATH: &str =
+    "tests/snapshots/completeness__pinned_repository_diagnostics_macos.snap";
 const REGENERATE_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN";
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_COMPLETENESS_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_COMPLETENESS_PYTHON_ENV";
@@ -63,19 +64,14 @@ fn pinned_repository_diagnostics_match_golden_oracle() {
     );
 
     if std::env::var_os(REGENERATE_ENV).is_some() {
-        let unstable = read_plain_diagnostics(golden_path(UNSTABLE_RELATIVE_PATH));
-        let snapshot_keys = actual_keys
-            .difference(&unstable)
-            .cloned()
-            .collect::<BTreeSet<_>>();
         assert_snapshot!(
-            "pinned_repository_diagnostics",
-            format_snapshot(&repository, &snapshot_keys)
+            platform_snapshot_name(),
+            format_snapshot(&repository, &actual_keys)
         );
         return;
     }
 
-    let expected = read_snapshot_diagnostics(golden_path(SNAPSHOT_RELATIVE_PATH));
+    let expected = read_snapshot_diagnostics(golden_path(platform_snapshot_relative_path()));
     let missing = expected
         .difference(&actual_keys)
         .cloned()
@@ -85,6 +81,22 @@ fn pinned_repository_diagnostics_match_golden_oracle() {
         "pinned repository diagnostics are missing required snapshot entries:\n{}",
         format_diagnostic_set("", &missing)
     );
+}
+
+const fn platform_snapshot_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "pinned_repository_diagnostics_macos"
+    } else {
+        "pinned_repository_diagnostics"
+    }
+}
+
+const fn platform_snapshot_relative_path() -> &'static str {
+    if cfg!(target_os = "macos") {
+        MACOS_SNAPSHOT_RELATIVE_PATH
+    } else {
+        LINUX_SNAPSHOT_RELATIVE_PATH
+    }
 }
 
 fn pinned_repository() -> PinnedRepository {
@@ -234,11 +246,6 @@ fn read_snapshot_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
             .skip_while(|line| *line != "---")
             .skip(1),
     )
-}
-
-fn read_plain_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
-    let raw = std::fs::read_to_string(path).expect("read completeness diagnostic list");
-    parse_diagnostic_lines(raw.lines())
 }
 
 fn parse_diagnostic_lines<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeSet<DiagnosticKey> {

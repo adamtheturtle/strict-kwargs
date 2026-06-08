@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 use crate::config::{Config, SourceRoots};
 use crate::error::CheckError;
 use crate::fix::{declined_fix_reason_counts, FileFix, FixOptIns, FixOutcome};
-use crate::index::build_index;
+use crate::index::build_index_with_sources;
 use crate::ty_resolver::TyResolver;
 
 use super::{
@@ -102,7 +102,8 @@ fn fix_paths_impl(
     let python_files = collect_python_files(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths);
     let source_roots = SourceRoots::from_config(project_root, config);
-    let index = build_index(project_root, &python_files, &source_roots);
+    let (index, indexed_files) =
+        build_index_with_sources(project_root, &python_files, &source_roots);
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
@@ -113,6 +114,7 @@ fn fix_paths_impl(
         &source_roots,
         config,
         &index,
+        &indexed_files,
         fix_opt_ins,
     )?;
 
@@ -141,6 +143,11 @@ fn fix_paths_impl(
         };
         diagnostics.extend(scan.diagnostics);
         declined_fix_reasons.extend(scan.declined_fix_reasons);
+        let Some(source) = scan.source else {
+            return Err(CheckError::Io(std::io::Error::other(
+                "internal error: fix scan did not retain source",
+            )));
+        };
         let mut insertions = scan.fixes;
         let mut fixed_calls = scan.fixed_calls;
         // The ty fallback adds diagnostics, and for a single concrete named
@@ -155,7 +162,7 @@ fn fix_paths_impl(
             &index,
             python_env,
             &path,
-            &scan.source,
+            &source,
             &scan.pending,
             config,
             &mut ty_file_cache,
@@ -174,7 +181,7 @@ fn fix_paths_impl(
             &index,
             python_env,
             &path,
-            &scan.source,
+            &source,
             &scan.overload_fix_pending,
             Some(TyFixes {
                 insertions: &mut insertions,
@@ -182,11 +189,11 @@ fn fix_paths_impl(
                 declined_fix_reasons: &mut declined_fix_reasons,
             }),
         );
-        if let Some(fixed) = plan_rewrite_insertions(&path, &scan.source, &insertions)? {
+        if let Some(fixed) = plan_rewrite_insertions(&path, &source, &insertions)? {
             fixed_total += fixed_calls;
             results.push(FileFix {
                 path,
-                original: scan.source,
+                original: source,
                 fixed,
                 count: fixed_calls,
             });

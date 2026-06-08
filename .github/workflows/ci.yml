@@ -156,7 +156,11 @@ jobs:
   completeness:
     # Heavy regression coverage for issue #192. This clones and checks a pinned
     # external repository so every CI event catches golden-oracle drift before merge.
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v6
@@ -169,7 +173,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: completeness
+          shared-key: completeness-${{ matrix.platform }}
 
       - name: Install Python
         uses: actions/setup-python@v6
