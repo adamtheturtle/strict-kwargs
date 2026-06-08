@@ -11,7 +11,7 @@ use crate::ty_resolver::TyResolver;
 use super::{
     collect_python_files, explicit_python_files, plan_rewrite_insertions, require_ty_present,
     resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix,
-    ScanOutcome, TyFixes,
+    ScanOutcome, TyDefCaches, TyFixes,
 };
 
 /// Rewrite positional call arguments to keyword arguments for every fixable
@@ -121,6 +121,7 @@ fn fix_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
+    let mut ty_def_caches = TyDefCaches::default();
     // Every violation the checker would report, across all files (built-in
     // and ty-resolved). Used for the declined count; ty may also append safe
     // hover-derived insertions to the built-in rewrite plan.
@@ -166,6 +167,7 @@ fn fix_paths_impl(
             &scan.pending,
             config,
             &mut ty_file_cache,
+            &mut ty_def_caches,
             &mut diagnostics,
             Some(TyFixes {
                 insertions: &mut insertions,

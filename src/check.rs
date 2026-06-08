@@ -149,6 +149,7 @@ fn process_scan_outcome_for_ty(
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    ty_def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<(usize, PathBuf, String)>,
 ) -> Result<(), CheckError> {
@@ -179,6 +180,7 @@ fn process_scan_outcome_for_ty(
                     &scan.pending,
                     config,
                     ty_file_cache,
+                    ty_def_caches,
                     diagnostics,
                     None,
                 )?;
@@ -225,6 +227,7 @@ fn pipeline_phases(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    ty_def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<(usize, PathBuf, String)>,
 ) -> Result<(), CheckError> {
@@ -294,6 +297,7 @@ fn pipeline_phases(
                 index,
                 python_env,
                 ty_file_cache,
+                ty_def_caches,
                 diagnostics,
                 skip_warnings,
             ) {
@@ -407,6 +411,7 @@ fn check_paths_impl(
     let mut ty: Option<TyResolver> = None;
     let mut ty_start_attempted = false;
     let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
+    let mut ty_def_caches = TyDefCaches::default();
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
@@ -428,6 +433,7 @@ fn check_paths_impl(
         &mut ty,
         &mut ty_start_attempted,
         &mut ty_file_cache,
+        &mut ty_def_caches,
         &mut diagnostics,
         &mut skip_warnings,
     )?;
@@ -3308,6 +3314,7 @@ fn resolve_file_with_ty(
     pending: &[PendingTy],
     config: &Config,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    ty_def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     fixes: Option<TyFixes<'_>>,
 ) -> Result<(), CheckError> {
@@ -3330,6 +3337,7 @@ fn resolve_file_with_ty(
             pending,
             config,
             ty_file_cache,
+            ty_def_caches,
             diagnostics,
             fixes,
         );
@@ -3671,6 +3679,7 @@ fn resolve_pending_with_ty(
     pending: &[PendingTy],
     config: &Config,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     mut fixes: Option<TyFixes<'_>>,
 ) {
@@ -3680,7 +3689,6 @@ fn resolve_pending_with_ty(
     ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
-    let mut def_caches = TyDefCaches::default();
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3732,13 +3740,7 @@ fn resolve_pending_with_ty(
                 let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                     if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                        ty,
-                        path,
-                        source,
-                        &lsp_index,
-                        p,
-                        file_cache,
-                        &mut def_caches,
+                        ty, path, source, &lsp_index, p, file_cache, def_caches,
                     ) {
                         ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                     }
@@ -3812,13 +3814,7 @@ fn resolve_pending_with_ty(
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                    ty,
-                    path,
-                    source,
-                    &lsp_index,
-                    p,
-                    file_cache,
-                    &mut def_caches,
+                    ty, path, source, &lsp_index, p, file_cache, def_caches,
                 ) {
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
@@ -3880,7 +3876,7 @@ fn resolve_pending_with_ty(
             // have crashed the old unguarded call. A too-deep or unparsable
             // target is silently skipped, same fail-closed behaviour as before.
             if let Some((fullname, sigs)) =
-                resolve_def_location_cached(path, source, &loc, file_cache, &mut def_caches)
+                resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
             {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
@@ -3932,8 +3928,8 @@ mod tests {
         plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyFixAst,
-        TyFixes,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyDefCaches,
+        TyFixAst, TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -4757,6 +4753,7 @@ while cond:
         let mut ty_start_attempted = false;
         let index = DefinitionIndex::for_test();
         let mut ty_file_cache = FxHashMap::default();
+        let mut ty_def_caches = TyDefCaches::default();
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let error = process_scan_outcome_for_ty(
@@ -4784,6 +4781,7 @@ while cond:
             &index,
             None,
             &mut ty_file_cache,
+            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
         )
@@ -4803,6 +4801,7 @@ while cond:
         let mut ty_start_attempted = true;
         let index = DefinitionIndex::for_test();
         let mut ty_file_cache = FxHashMap::default();
+        let mut ty_def_caches = TyDefCaches::default();
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
 
@@ -4826,6 +4825,7 @@ while cond:
             &index,
             None,
             &mut ty_file_cache,
+            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
         )
@@ -4856,6 +4856,7 @@ while cond:
             &index,
             None,
             &mut ty_file_cache,
+            &mut ty_def_caches,
             &mut diagnostics,
             &mut skip_warnings,
         )
