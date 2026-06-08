@@ -4,7 +4,7 @@ requires = [ "maturin>=1.8,<2" ]
 
 [project]
 name = "strict-kwargs"
-version = "2026.6.4"
+version = "2026.6.8"
 description = "Enforce using keyword arguments where possible."
 readme = "README.md"
 license = { text = "MIT" }

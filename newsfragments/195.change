@@ -1,8 +1,0 @@
-Parse ty's ``class Name(...)`` constructor hover directly when resolving a call
-through the ``ty`` fallback, instead of falling back to goto-definition. ty's
-goto-definition for a re-exported standard-library class resolves into the
-runtime ``.py`` shim and lands on the ``from ... import ...`` statement rather
-than the class, so depending on which Python environment ty discovered the old
-path could silently drop the violation. The hover carries the constructor
-signature consistently, so these calls are now reported regardless of the
-environment (issue #195).

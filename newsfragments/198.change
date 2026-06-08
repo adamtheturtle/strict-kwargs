@@ -1,8 +1,0 @@
-Make the ``ty`` inference fallback deterministic. Before querying call sites,
-``strict-kwargs`` now warms ``ty`` up by having it type-check the whole project,
-so hover/definition results no longer race ty's background indexing. This makes
-results reproducible run-to-run and removes a class of false positives on
-positional-only standard-library calls (e.g. ``str.split``, ``int.to_bytes``,
-``Path.glob``) that the previous racing resolution flagged spuriously. The
-warm-up runs only when the ``ty`` fallback is actually needed, so runs the
-built-in resolver fully handles are unaffected (issue #198).

@@ -3,6 +3,40 @@ Changelog
 
 .. towncrier release notes start
 
+2026.6.8
+--------
+
+- Add an ignored completeness regression test that checks a pinned external
+  repository against a committed conservative golden diagnostic subset, plus
+  scheduled CI coverage and a documented baseline regeneration script (issue
+  #192).
+
+- Parse ty's ``class Name(...)`` constructor hover directly when resolving a call
+  through the ``ty`` fallback, instead of falling back to goto-definition. ty's
+  goto-definition for a re-exported standard-library class resolves into the
+  runtime ``.py`` shim and lands on the ``from ... import ...`` statement rather
+  than the class, so depending on which Python environment ty discovered the old
+  path could silently drop the violation. The hover carries the constructor
+  signature consistently, so these calls are now reported regardless of the
+  environment (issue #195).
+
+- Make the ``ty`` inference fallback deterministic. Before querying call sites,
+  ``strict-kwargs`` now warms ``ty`` up by having it type-check the whole project,
+  so hover/definition results no longer race ty's background indexing. This makes
+  results reproducible run-to-run and removes a class of false positives on
+  positional-only standard-library calls (e.g. ``str.split``, ``int.to_bytes``,
+  ``Path.glob``) that the previous racing resolution flagged spuriously. The
+  warm-up runs only when the ``ty`` fallback is actually needed, so runs the
+  built-in resolver fully handles are unaffected (issue #198).
+
+- Tighten the ignored pinned-repository completeness regression test so scheduled
+  CI fails on missing stable diagnostics and on undocumented extra diagnostics,
+  with a regenerated full golden oracle and a documented unstable-extra allowance
+  file (issue #207).
+
+- Move the completeness golden oracle to an `insta` snapshot and remove the
+  allowed-extra diagnostic baseline.
+
 2026.6.4
 --------
 
