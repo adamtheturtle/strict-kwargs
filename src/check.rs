@@ -3433,7 +3433,8 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// [`parse_hover_signature`], [`signature_from_param_text`],
 /// [`parse_callable_type_overloads`], [`strip_unbound_receiver`],
 /// [`identifier_at`], [`byte_offset_to_lsp`], [`lsp_to_byte_offset`],
-/// [`location_from_value`], [`resolve_def_at`] and [`emit_if_violation`].
+/// [`location_from_value`], [`resolve_def_at`] and
+/// [`emit_if_violation_with_signature_fullname`].
 #[cfg_attr(coverage, coverage(off))]
 #[allow(
     clippy::too_many_arguments,
