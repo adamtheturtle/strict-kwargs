@@ -49,19 +49,30 @@ pub fn positional_argument_count(arguments: &ast::Arguments) -> usize {
         .count()
 }
 
-pub fn line_column(source: &str, offset: ruff_text_size::TextSize) -> (usize, usize) {
+pub fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    starts.extend(
+        source
+            .char_indices()
+            .filter_map(|(index, ch)| (ch == '\n').then_some(index + 1)),
+    );
+    starts
+}
+
+pub fn line_column_from_starts(
+    line_starts: &[usize],
+    offset: ruff_text_size::TextSize,
+) -> (usize, usize) {
     let offset = offset.to_usize();
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    for (index, ch) in source.char_indices() {
-        if index >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            line_start = index + 1;
-        }
-    }
+    let line = line_starts.partition_point(|&start| start <= offset);
+    let line_start = line_starts
+        .get(line.saturating_sub(1))
+        .copied()
+        .unwrap_or(0);
     let column = offset.saturating_sub(line_start) + 1;
-    (line, column)
+    (line.max(1), column)
+}
+
+pub fn line_column(source: &str, offset: ruff_text_size::TextSize) -> (usize, usize) {
+    line_column_from_starts(&line_starts(source), offset)
 }
