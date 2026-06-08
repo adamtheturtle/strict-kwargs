@@ -31,8 +31,8 @@ use crate::noqa::NoqaDirectives;
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
-    byte_offset_to_lsp, location_from_value, lsp_to_byte_offset, parse_callable_type_overloads,
-    parse_hover_signature, same_path, ty_binary_present, TyResolver,
+    location_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
+    same_path, ty_binary_present, LspLineIndex, TyResolver,
 };
 
 mod file_selection;
@@ -2762,29 +2762,64 @@ fn ty_fallback_ignore_may_need_definition(config: &Config, fullname: &str) -> bo
         .any(|name| name.rsplit('.').next() == Some(rest))
 }
 
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct DefCacheKey {
+    path: PathBuf,
+    line: u32,
+    character: u32,
+}
+
+type DefCache = FxHashMap<DefCacheKey, Option<(String, Vec<Signature>)>>;
+
+#[cfg_attr(coverage, coverage(off))]
+fn resolve_def_location_cached(
+    current_path: &Path,
+    current_source: &str,
+    loc: &crate::ty_resolver::DefLocation,
+    file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    def_cache: &mut DefCache,
+) -> Option<(String, Vec<Signature>)> {
+    let key = DefCacheKey {
+        path: loc.path.clone(),
+        line: loc.line,
+        character: loc.character,
+    };
+    if let Some(cached) = def_cache.get(&key) {
+        return cached.clone();
+    }
+
+    let resolved = (|| {
+        let target = if same_path(&loc.path, current_path) {
+            current_source
+        } else {
+            if !file_cache.contains_key(&loc.path) {
+                file_cache.insert(loc.path.clone(), std::fs::read_to_string(&loc.path).ok());
+            }
+            file_cache.get(&loc.path).and_then(Option::as_deref)?
+        };
+        let parsed = parse_module_guarded(target).ok()?;
+        let off = lsp_to_byte_offset(target, loc.line, loc.character)?;
+        resolve_def_at(parsed.suite(), off)
+    })();
+    def_cache.insert(key, resolved.clone());
+    resolved
+}
+
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
 fn resolve_ty_definition_for_pending(
     ty: &mut TyResolver,
     path: &Path,
     source: &str,
+    lsp_index: &LspLineIndex,
     pending: &PendingTy,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    def_cache: &mut DefCache,
 ) -> Option<(String, Vec<Signature>)> {
-    let (line, ch) = byte_offset_to_lsp(source, pending.callee_offset);
+    let (line, ch) = lsp_index.position(source, pending.callee_offset);
     let id = ty.ask("textDocument/definition", path, line, ch)?;
     let loc = ty.take(id).as_ref().and_then(location_from_value)?;
-    let target = if same_path(&loc.path, path) {
-        Some(source.to_string())
-    } else {
-        file_cache
-            .entry(loc.path.clone())
-            .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
-            .clone()
-    }?;
-    let parsed = parse_module_guarded(&target).ok()?;
-    let off = lsp_to_byte_offset(&target, loc.line, loc.character)?;
-    resolve_def_at(parsed.suite(), off)
+    resolve_def_location_cached(path, source, &loc, file_cache, def_cache)
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -3203,12 +3238,13 @@ fn resolve_overload_fixes_with_ty(
         suite: parsed.suite(),
         tokens: parsed.tokens(),
     });
+    let lsp_index = LspLineIndex::new(source);
 
     for chunk in pending.chunks(TY_MAX_IN_FLIGHT) {
         let hover_ids: Vec<Option<i64>> = chunk
             .iter()
             .map(|p| {
-                let (line, ch) = byte_offset_to_lsp(source, p.pending.callee_offset);
+                let (line, ch) = lsp_index.position(source, p.pending.callee_offset);
                 ty.ask("textDocument/hover", path, line, ch)
             })
             .collect();
@@ -3448,6 +3484,8 @@ fn resolve_pending_with_ty(
         return;
     }
     let source_line_starts = line_starts(source);
+    let lsp_index = LspLineIndex::new(source);
+    let mut def_cache = DefCache::default();
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3460,7 +3498,7 @@ fn resolve_pending_with_ty(
         let chunk_end = pending.len().min(chunk_start + TY_MAX_IN_FLIGHT);
         let hover_ids: Vec<(usize, Option<i64>)> = (chunk_start..chunk_end)
             .map(|i| {
-                let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
+                let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
                 (i, ty.ask("textDocument/hover", path, line, ch))
             })
             .collect();
@@ -3498,9 +3536,15 @@ fn resolve_pending_with_ty(
                 let receiver_already_omitted = sig.owner.is_some();
                 let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
-                    if let Some((def_fullname, _)) =
-                        resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
-                    {
+                    if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
+                        ty,
+                        path,
+                        source,
+                        &lsp_index,
+                        p,
+                        file_cache,
+                        &mut def_cache,
+                    ) {
                         ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                     }
                 }
@@ -3572,9 +3616,15 @@ fn resolve_pending_with_ty(
             let fullname = format!("ty.{name}");
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
-                if let Some((def_fullname, _)) =
-                    resolve_ty_definition_for_pending(ty, path, source, p, file_cache)
-                {
+                if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
+                    ty,
+                    path,
+                    source,
+                    &lsp_index,
+                    p,
+                    file_cache,
+                    &mut def_cache,
+                ) {
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
             }
@@ -3616,7 +3666,7 @@ fn resolve_pending_with_ty(
         let def_ids: Vec<(usize, Option<i64>)> = chunk
             .iter()
             .map(|&i| {
-                let (line, ch) = byte_offset_to_lsp(source, pending[i].callee_offset);
+                let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
                 (i, ty.ask("textDocument/definition", path, line, ch))
             })
             .collect();
@@ -3628,15 +3678,6 @@ fn resolve_pending_with_ty(
             else {
                 continue;
             };
-            let target = if same_path(&loc.path, path) {
-                Some(source.to_string())
-            } else {
-                file_cache
-                    .entry(loc.path.clone())
-                    .or_insert_with(|| std::fs::read_to_string(&loc.path).ok())
-                    .clone()
-            };
-            let Some(target) = target else { continue };
             // A `ty` goto-definition target is a dependency/stub. Use the guarded
             // parser so a deeply-nested target is rejected gracefully rather than
             // crashing the analysis thread (issue #83 follow-up to #54). The
@@ -3644,13 +3685,9 @@ fn resolve_pending_with_ty(
             // only genuinely deep ones pay the tokeniser scan — and those would
             // have crashed the old unguarded call. A too-deep or unparsable
             // target is silently skipped, same fail-closed behaviour as before.
-            let Ok(parsed) = parse_module_guarded(&target) else {
-                continue;
-            };
-            let Some(off) = lsp_to_byte_offset(&target, loc.line, loc.character) else {
-                continue;
-            };
-            if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
+            if let Some((fullname, sigs)) =
+                resolve_def_location_cached(path, source, &loc, file_cache, &mut def_cache)
+            {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
                     &fullname,
