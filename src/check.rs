@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
 use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
+use ruff_python_ast::ModModule;
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{AnyNodeRef, ExprRef, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_ast::{Expr, Number};
-use ruff_python_parser::parse_module;
+use ruff_python_parser::{parse_module, ParseError, Parsed};
 use ruff_text_size::Ranged;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -25,6 +26,7 @@ use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
     build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
+    PythonFileForIndex,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -121,6 +123,95 @@ struct FileEntry {
     cache_hit: Option<Vec<Diagnostic>>,
 }
 
+enum LoadedPythonFile {
+    Parsed {
+        path: PathBuf,
+        source: String,
+        parsed: Parsed<ModModule>,
+    },
+    Skipped {
+        path: PathBuf,
+        reason: String,
+    },
+    ParseError {
+        path: PathBuf,
+        error: LoadedParseError,
+    },
+}
+
+enum LoadedParseError {
+    Parse(ParseError),
+    TooDeeplyNested { depth: usize, limit: usize },
+}
+
+impl LoadedParseError {
+    fn into_check_error(self) -> CheckError {
+        match self {
+            Self::Parse(error) => CheckError::Parse(error),
+            Self::TooDeeplyNested { depth, limit } => CheckError::TooDeeplyNested { depth, limit },
+        }
+    }
+}
+
+impl LoadedPythonFile {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Parsed { path, .. }
+            | Self::Skipped { path, .. }
+            | Self::ParseError { path, .. } => path,
+        }
+    }
+
+    fn for_index(&self) -> Option<PythonFileForIndex<'_>> {
+        match self {
+            Self::Parsed { path, parsed, .. } => Some(PythonFileForIndex { path, parsed }),
+            Self::Skipped { .. } | Self::ParseError { .. } => None,
+        }
+    }
+}
+
+/// Parallel file loading is exercised by check/fix integration tests. It is
+/// excluded from the 100% coverage gate because `parse_module_guarded`'s
+/// defensive catch-all error arm is not constructible through its public
+/// parser/depth-limit behavior.
+#[cfg_attr(coverage, coverage(off))]
+fn load_python_files(python_files: &[PathBuf]) -> Result<Vec<LoadedPythonFile>, CheckError> {
+    with_large_stack_pool(|| {
+        python_files
+            .par_iter()
+            .map(|path| {
+                let source = match read_python_source(path)? {
+                    Source::Decoded(source) => source,
+                    Source::Undecodable(reason) => {
+                        return Ok(LoadedPythonFile::Skipped {
+                            path: path.clone(),
+                            reason,
+                        });
+                    }
+                };
+                match parse_module_guarded(&source) {
+                    Ok(parsed) => Ok(LoadedPythonFile::Parsed {
+                        path: path.clone(),
+                        source,
+                        parsed,
+                    }),
+                    Err(CheckError::Parse(error)) => Ok(LoadedPythonFile::ParseError {
+                        path: path.clone(),
+                        error: LoadedParseError::Parse(error),
+                    }),
+                    Err(CheckError::TooDeeplyNested { depth, limit }) => {
+                        Ok(LoadedPythonFile::ParseError {
+                            path: path.clone(),
+                            error: LoadedParseError::TooDeeplyNested { depth, limit },
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .collect()
+    })
+}
+
 /// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
 /// either the skip-warning list ([`ScanOutcome::Skipped`]) or the ty resolver
 /// ([`ScanOutcome::Scanned`]).
@@ -190,7 +281,7 @@ fn process_scan_outcome_for_ty(
 #[cfg_attr(coverage, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 fn pipeline_phases(
-    files_to_scan: &[PathBuf],
+    files_to_scan: Vec<LoadedPythonFile>,
     all_project_files: &[PathBuf],
     explicit_files: &FxHashSet<PathBuf>,
     project_root: &Path,
@@ -220,7 +311,7 @@ fn pipeline_phases(
         #[cfg(any(target_env = "musl", windows))]
         let scan_handle = std::thread::Builder::new()
             .stack_size(crate::limits::STACK_SIZE)
-            .spawn_scoped(scope, || {
+            .spawn_scoped(scope, move || {
                 stream_scan_files(
                     files_to_scan,
                     explicit_files,
@@ -232,7 +323,7 @@ fn pipeline_phases(
             })
             .map_err(CheckError::Io)?;
         #[cfg(not(any(target_env = "musl", windows)))]
-        let scan_handle = scope.spawn(|| {
+        let scan_handle = scope.spawn(move || {
             stream_scan_files(
                 files_to_scan,
                 explicit_files,
@@ -363,7 +454,19 @@ fn check_paths_impl(
         return Ok(diagnostics);
     }
 
-    let index = build_index(project_root, &python_files, &source_roots);
+    let loaded_files = load_python_files(&python_files)?;
+    let files_to_scan_set: FxHashSet<PathBuf> = files_to_scan.iter().cloned().collect();
+    let index = {
+        let index_files: Vec<_> = loaded_files
+            .iter()
+            .filter_map(LoadedPythonFile::for_index)
+            .collect();
+        build_index(project_root, &index_files, &source_roots)
+    };
+    let loaded_files_to_scan: Vec<_> = loaded_files
+        .into_iter()
+        .filter(|file| files_to_scan_set.contains(file.path()))
+        .collect();
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -390,7 +493,7 @@ fn check_paths_impl(
     // cached run must still warm up the full project for deterministic
     // resolution (issue #198).
     pipeline_phases(
-        &files_to_scan,
+        loaded_files_to_scan,
         &python_files,
         &explicit_files,
         project_root,
@@ -466,32 +569,36 @@ fn check_paths_impl(
 /// nesting has the same large stack the serial path gets (issue #54 + #46).
 fn scan_file(
     source_roots: &SourceRoots,
-    path: &Path,
+    file: LoadedPythonFile,
     config: &Config,
     index: &DefinitionIndex,
     fix_opt_ins: FixOptIns,
     plan_fixes: bool,
     skip_parse_errors: bool,
 ) -> Result<ScanOutcome, CheckError> {
-    let source = match read_python_source(path)? {
-        Source::Decoded(source) => source,
-        Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
-    };
-    let parsed = match parse_module_guarded(&source) {
-        Ok(parsed) => parsed,
-        Err(CheckError::Parse(error)) if skip_parse_errors => {
-            return Ok(ScanOutcome::Skipped(format!("could not parse: {error}")));
+    let (path, source, parsed) = match file {
+        LoadedPythonFile::Parsed {
+            path,
+            source,
+            parsed,
+        } => (path, source, parsed),
+        LoadedPythonFile::Skipped { reason, .. } => return Ok(ScanOutcome::Skipped(reason)),
+        LoadedPythonFile::ParseError { error, .. } if skip_parse_errors => {
+            return Ok(ScanOutcome::Skipped(format!(
+                "could not parse: {}",
+                error.into_check_error()
+            )));
         }
-        Err(error) => return Err(error),
+        LoadedPythonFile::ParseError { error, .. } => return Err(error.into_check_error()),
     };
-    let module_name = module_name_for_path(source_roots, path);
+    let module_name = module_name_for_path(source_roots, &path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
     let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls, declined_fix_reasons) = {
         let mut checker = CallChecker::new(
-            path.to_path_buf(),
+            path.clone(),
             module_name,
-            is_package_init(path),
+            is_package_init(&path),
             &source,
             parsed.tokens(),
             index,
@@ -594,7 +701,7 @@ fn validate_fixed_python(path: &Path, fixed: &str) -> Result<(), CheckError> {
 /// deterministically reachable.
 #[cfg_attr(coverage, coverage(off))]
 fn stream_scan_files(
-    python_files: &[PathBuf],
+    python_files: Vec<LoadedPythonFile>,
     explicit_files: &FxHashSet<PathBuf>,
     source_roots: &SourceRoots,
     config: &Config,
@@ -603,21 +710,22 @@ fn stream_scan_files(
 ) -> Result<(), CheckError> {
     with_large_stack_pool(move || {
         python_files
-            .par_iter()
+            .into_par_iter()
             .enumerate()
-            .for_each_with(tx, |tx, (i, path)| {
+            .for_each_with(tx, |tx, (i, file)| {
+                let path = file.path().to_path_buf();
                 let result = scan_file(
                     source_roots,
-                    path,
+                    file,
                     config,
                     index,
                     FixOptIns::default(),
                     false,
-                    !explicit_files.contains(path),
+                    !explicit_files.contains(&path),
                 );
                 // Ignore send errors: the consumer has exited early (e.g. a
                 // ty error was already recorded).
-                let _ = tx.send((i, path.clone(), result));
+                let _ = tx.send((i, path, result));
             });
         Ok(())
     })
@@ -629,27 +737,28 @@ fn stream_scan_files(
 /// parallel-pool orchestration.
 #[cfg_attr(coverage, coverage(off))]
 fn scan_files_for_fix(
-    python_files: &[PathBuf],
+    python_files: Vec<LoadedPythonFile>,
     explicit_files: &FxHashSet<PathBuf>,
     source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
     fix_opt_ins: FixOptIns,
 ) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
-    with_large_stack_pool(|| {
+    with_large_stack_pool(move || {
         python_files
-            .par_iter()
-            .map(|path| {
+            .into_par_iter()
+            .map(|file| {
+                let path = file.path().to_path_buf();
                 let outcome = scan_file(
                     source_roots,
-                    path,
+                    file,
                     config,
                     index,
                     fix_opt_ins,
                     true,
-                    !explicit_files.contains(path),
+                    !explicit_files.contains(&path),
                 )?;
-                Ok((path.clone(), outcome))
+                Ok((path, outcome))
             })
             .collect()
     })
@@ -3775,6 +3884,98 @@ mod tests {
         .expect("forced selection");
         assert!(forced.is_excluded(&generated, false, true));
         assert!(forced.is_excluded(&hidden, false, true));
+    }
+
+    #[test]
+    fn loaded_python_file_variants_cover_index_and_scan_paths() {
+        let path = PathBuf::from("bad.py");
+        let parsed = parse_module("def f(a): pass\nf(1)\n").expect("parse source");
+        let loaded = super::LoadedPythonFile::Parsed {
+            path: PathBuf::from("good.py"),
+            source: "def f(a): pass\nf(1)\n".to_string(),
+            parsed,
+        };
+        let index_file = loaded.for_index().expect("parsed files are indexable");
+        assert_eq!(index_file.path, Path::new("good.py"));
+
+        assert!(super::LoadedPythonFile::Skipped {
+            path: path.clone(),
+            reason: "not utf8".to_string(),
+        }
+        .for_index()
+        .is_none());
+        assert!(super::LoadedPythonFile::ParseError {
+            path: path.clone(),
+            error: super::LoadedParseError::TooDeeplyNested {
+                depth: 11,
+                limit: 10
+            },
+        }
+        .for_index()
+        .is_none());
+
+        let config = Config::default();
+        let source_roots = crate::config::SourceRoots::from_config(Path::new("."), &config);
+        let index = DefinitionIndex::for_test();
+        let skipped = super::scan_file(
+            &source_roots,
+            super::LoadedPythonFile::Skipped {
+                path: path.clone(),
+                reason: "not utf8".to_string(),
+            },
+            &config,
+            &index,
+            FixOptIns::default(),
+            false,
+            false,
+        )
+        .expect("skipped files are not errors");
+        assert!(matches!(skipped, super::ScanOutcome::Skipped(reason) if reason == "not utf8"));
+
+        let skipped_parse = super::scan_file(
+            &source_roots,
+            super::LoadedPythonFile::ParseError {
+                path: path.clone(),
+                error: super::LoadedParseError::TooDeeplyNested {
+                    depth: 11,
+                    limit: 10,
+                },
+            },
+            &config,
+            &index,
+            FixOptIns::default(),
+            false,
+            true,
+        )
+        .expect("implicit parse errors are skipped");
+        let super::ScanOutcome::Skipped(reason) = skipped_parse else {
+            panic!("expected skipped parse error");
+        };
+        assert!(reason
+            .starts_with("could not parse: expression nesting too deep (11 levels, limit 10)"));
+
+        let fatal_parse = super::scan_file(
+            &source_roots,
+            super::LoadedPythonFile::ParseError {
+                path,
+                error: super::LoadedParseError::TooDeeplyNested {
+                    depth: 11,
+                    limit: 10,
+                },
+            },
+            &config,
+            &index,
+            FixOptIns::default(),
+            false,
+            false,
+        );
+        assert!(matches!(
+            fatal_parse,
+            Err(CheckError::TooDeeplyNested {
+                depth: 11,
+                limit: 10
+            })
+        ));
     }
 
     #[test]

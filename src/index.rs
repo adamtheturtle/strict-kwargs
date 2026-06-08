@@ -1,11 +1,13 @@
 //! Index of callable definitions discovered in the project.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
+use ruff_python_ast::ModModule;
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
+use ruff_python_parser::Parsed;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
@@ -14,7 +16,6 @@ use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
 use crate::signature::Signature;
-use crate::source::read_python_source_lossy;
 
 mod data_model;
 
@@ -816,9 +817,14 @@ struct Collected {
     class_bases: FxHashMap<String, Vec<String>>,
 }
 
+pub struct PythonFileForIndex<'a> {
+    pub path: &'a Path,
+    pub parsed: &'a Parsed<ModModule>,
+}
+
 pub fn build_index(
     project_root: &Path,
-    python_files: &[PathBuf],
+    python_files: &[PythonFileForIndex<'_>],
     source_roots: &SourceRoots,
 ) -> DefinitionIndex {
     let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots));
@@ -835,21 +841,15 @@ pub fn build_index(
     // on demand by `get`, so a heavy third-party import closure
     // (numpy/torch/scipy) is never eagerly walked (issue #39).
     'files: for path in python_files {
-        // A file that cannot be decoded (non-UTF-8 with no usable PEP 263
-        // declaration) is skipped here silently; the check/fix loop reads the
-        // same set and emits the single user-facing warning (issue #53). Its
-        // definitions just don't get indexed — same as if it were absent.
-        let Some(source) = read_python_source_lossy(path) else {
-            continue;
-        };
-        let Ok(parsed) = parse_module_guarded(&source) else {
-            continue;
-        };
-        let module_name = module_name_for_path(source_roots, path);
+        let module_name = module_name_for_path(source_roots, path.path);
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue 'files;
         };
-        index.index_source(&module_name, is_package_init(path), parsed.suite());
+        index.index_source(
+            &module_name,
+            is_package_init(path.path),
+            path.parsed.suite(),
+        );
         drop(claim);
     }
 
