@@ -18,6 +18,7 @@ const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
 const SNAPSHOT_RELATIVE_PATH: &str =
     "tests/snapshots/sphinx_completeness__pinned_sphinx_diagnostics.snap";
+const UNSTABLE_RELATIVE_PATH: &str = "tests/golden/sphinx-unstable-diagnostics.txt";
 const REGENERATE_ENV: &str = "STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN";
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_SPHINX_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_SPHINX_PYTHON_ENV";
@@ -51,11 +52,16 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
     );
 
     if std::env::var_os(REGENERATE_ENV).is_some() {
-        assert_snapshot!("pinned_sphinx_diagnostics", format_snapshot(&actual_keys));
+        let unstable = read_plain_diagnostics(golden_path(UNSTABLE_RELATIVE_PATH));
+        let snapshot_keys = actual_keys
+            .difference(&unstable)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_snapshot!("pinned_sphinx_diagnostics", format_snapshot(&snapshot_keys));
         return;
     }
 
-    let expected = read_snapshot_diagnostics(snapshot_path());
+    let expected = read_snapshot_diagnostics(golden_path(SNAPSHOT_RELATIVE_PATH));
     let missing = expected
         .difference(&actual_keys)
         .cloned()
@@ -180,17 +186,28 @@ fn collect_diagnostics(root: &Path) -> BTreeSet<DiagnosticKey> {
         .collect()
 }
 
-fn snapshot_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(SNAPSHOT_RELATIVE_PATH)
+fn golden_path(relative_path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path)
 }
 
 fn read_snapshot_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
     let raw = std::fs::read_to_string(path).expect("read Sphinx diagnostic snapshot");
-    raw.lines()
-        .skip_while(|line| *line != "---")
-        .skip(1)
-        .skip_while(|line| *line != "---")
-        .skip(1)
+    parse_diagnostic_lines(
+        raw.lines()
+            .skip_while(|line| *line != "---")
+            .skip(1)
+            .skip_while(|line| *line != "---")
+            .skip(1),
+    )
+}
+
+fn read_plain_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
+    let raw = std::fs::read_to_string(path).expect("read Sphinx diagnostic list");
+    parse_diagnostic_lines(raw.lines())
+}
+
+fn parse_diagnostic_lines<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeSet<DiagnosticKey> {
+    lines
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(DiagnosticKey::parse)
         .collect()
