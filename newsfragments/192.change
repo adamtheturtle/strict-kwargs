@@ -1,4 +1,4 @@
-Add an ignored Sphinx completeness regression test that checks a pinned
-checkout against a committed conservative golden diagnostic subset, plus
-scheduled CI coverage and a documented baseline regeneration script
-(issue #192).
+Add an ignored completeness regression test that checks a pinned external
+repository against a committed conservative golden diagnostic subset, plus
+scheduled CI coverage and a documented baseline regeneration script (issue
+#192).

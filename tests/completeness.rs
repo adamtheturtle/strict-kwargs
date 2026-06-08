@@ -1,4 +1,4 @@
-//! Opt-in differential completeness test against a pinned `Sphinx` checkout.
+//! Opt-in differential completeness test against a pinned external repository.
 
 // `expect`/`unwrap` are idiomatic in tests: a failed fixture *should* abort the
 // test with a clear message. This is an integration-test crate, so clippy's
@@ -13,16 +13,20 @@ use std::process::Command;
 use insta::assert_snapshot;
 use strict_kwargs::{check_paths, Config, Diagnostic};
 
-const SPHINX_REPO: &str = "https://github.com/sphinx-doc/sphinx.git";
-const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
+const DEFAULT_REPOSITORY_NAME: &str = "sphinx";
+const DEFAULT_REPOSITORY_URL: &str = "https://github.com/sphinx-doc/sphinx.git";
+const DEFAULT_REPOSITORY_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
 const SNAPSHOT_RELATIVE_PATH: &str =
-    "tests/snapshots/sphinx_completeness__pinned_sphinx_diagnostics.snap";
-const UNSTABLE_RELATIVE_PATH: &str = "tests/golden/sphinx-unstable-diagnostics.txt";
-const REGENERATE_ENV: &str = "STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN";
-const CHECKOUT_ENV: &str = "STRICT_KWARGS_SPHINX_CHECKOUT";
-const PYTHON_ENV: &str = "STRICT_KWARGS_SPHINX_PYTHON_ENV";
-const RUNS_ENV: &str = "STRICT_KWARGS_SPHINX_RUNS";
+    "tests/snapshots/completeness__pinned_repository_diagnostics.snap";
+const UNSTABLE_RELATIVE_PATH: &str = "tests/golden/completeness-unstable-diagnostics.txt";
+const REGENERATE_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN";
+const CHECKOUT_ENV: &str = "STRICT_KWARGS_COMPLETENESS_CHECKOUT";
+const PYTHON_ENV: &str = "STRICT_KWARGS_COMPLETENESS_PYTHON_ENV";
+const RUNS_ENV: &str = "STRICT_KWARGS_COMPLETENESS_RUNS";
+const REPOSITORY_NAME_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_NAME";
+const REPOSITORY_REF_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_REF";
+const REPOSITORY_URL_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_URL";
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct DiagnosticKey {
@@ -32,23 +36,30 @@ struct DiagnosticKey {
     callee: String,
 }
 
-struct SphinxCheckout {
+struct PinnedRepository {
+    name: String,
+    url: String,
+    reference: String,
+}
+
+struct Checkout {
     _temp: Option<tempfile::TempDir>,
     root: PathBuf,
 }
 
 #[test]
-#[ignore = "heavy opt-in test: clones/checks pinned Sphinx and starts ty server"]
-fn pinned_sphinx_diagnostics_match_golden_oracle() {
+#[ignore = "heavy opt-in test: clones/checks a pinned external repository and starts ty server"]
+fn pinned_repository_diagnostics_match_golden_oracle() {
     assert_ty_version();
-    let checkout = pinned_sphinx_checkout();
+    let repository = pinned_repository();
+    let checkout = pinned_checkout(&repository);
 
     let runs = run_count();
     let actual = collect_observations(&checkout.root, runs);
     let actual_keys = collect_stable(&actual, runs);
     assert!(
         !actual_keys.is_empty(),
-        "pinned Sphinx diagnostics snapshot must not be empty"
+        "pinned repository diagnostics snapshot must not be empty"
     );
 
     if std::env::var_os(REGENERATE_ENV).is_some() {
@@ -57,7 +68,10 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
             .difference(&unstable)
             .cloned()
             .collect::<BTreeSet<_>>();
-        assert_snapshot!("pinned_sphinx_diagnostics", format_snapshot(&snapshot_keys));
+        assert_snapshot!(
+            "pinned_repository_diagnostics",
+            format_snapshot(&repository, &snapshot_keys)
+        );
         return;
     }
 
@@ -68,41 +82,62 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
         .collect::<BTreeSet<_>>();
     assert!(
         missing.is_empty(),
-        "pinned Sphinx diagnostics are missing required snapshot entries:\n{}",
+        "pinned repository diagnostics are missing required snapshot entries:\n{}",
         format_diagnostic_set("", &missing)
     );
 }
 
-fn pinned_sphinx_checkout() -> SphinxCheckout {
+fn pinned_repository() -> PinnedRepository {
+    PinnedRepository {
+        name: std::env::var(REPOSITORY_NAME_ENV)
+            .unwrap_or_else(|_| DEFAULT_REPOSITORY_NAME.to_owned()),
+        url: std::env::var(REPOSITORY_URL_ENV)
+            .unwrap_or_else(|_| DEFAULT_REPOSITORY_URL.to_owned()),
+        reference: std::env::var(REPOSITORY_REF_ENV)
+            .unwrap_or_else(|_| DEFAULT_REPOSITORY_REF.to_owned()),
+    }
+}
+
+fn pinned_checkout(repository: &PinnedRepository) -> Checkout {
     if let Some(root) = std::env::var_os(CHECKOUT_ENV).map(PathBuf::from) {
-        assert_pinned_ref(&root);
-        return SphinxCheckout { _temp: None, root };
+        assert_pinned_ref(&root, repository);
+        return Checkout { _temp: None, root };
     }
 
     let temp = tempfile::Builder::new()
-        .prefix("strictkw-sphinx-")
+        .prefix("strictkw-completeness-")
         .tempdir()
-        .expect("create Sphinx tempdir");
-    let root = temp.path().join("sphinx");
-    std::fs::create_dir(&root).expect("create Sphinx checkout directory");
+        .expect("create completeness test tempdir");
+    let root = temp.path().join(&repository.name);
+    std::fs::create_dir(&root).expect("create completeness checkout directory");
     git(&root, &["init", "--quiet"]);
-    git(&root, &["remote", "add", "origin", SPHINX_REPO]);
-    git(&root, &["fetch", "--depth=1", "origin", SPHINX_REF]);
+    git(&root, &["remote", "add", "origin", repository.url.as_str()]);
+    git(
+        &root,
+        &[
+            "fetch",
+            "--depth=1",
+            "origin",
+            repository.reference.as_str(),
+        ],
+    );
     git(&root, &["checkout", "--detach", "--quiet", "FETCH_HEAD"]);
-    assert_pinned_ref(&root);
-    SphinxCheckout {
+    assert_pinned_ref(&root, repository);
+    Checkout {
         _temp: Some(temp),
         root,
     }
 }
 
-fn assert_pinned_ref(root: &Path) {
+fn assert_pinned_ref(root: &Path, repository: &PinnedRepository) {
     let output = git_output(root, &["rev-parse", "HEAD"]);
     let actual = String::from_utf8(output.stdout).expect("git rev-parse output is utf8");
     assert_eq!(
         actual.trim(),
-        SPHINX_REF,
-        "{CHECKOUT_ENV} must point at sphinx-doc/sphinx {SPHINX_REF}"
+        repository.reference,
+        "{CHECKOUT_ENV} must point at {} {}",
+        repository.url,
+        repository.reference
     );
 }
 
@@ -139,7 +174,7 @@ fn assert_ty_version() {
     let stdout = String::from_utf8(output.stdout).expect("ty version output is utf8");
     assert!(
         stdout.split_whitespace().any(|part| part == TY_VERSION),
-        "Sphinx completeness oracle requires ty {TY_VERSION}; got: {}",
+        "completeness oracle requires ty {TY_VERSION}; got: {}",
         stdout.trim()
     );
 }
@@ -149,7 +184,7 @@ fn run_count() -> usize {
         .ok()
         .map_or(1, |raw| {
             raw.parse::<usize>()
-                .expect("STRICT_KWARGS_SPHINX_RUNS is a usize")
+                .expect("STRICT_KWARGS_COMPLETENESS_RUNS is a usize")
         })
         .max(1)
 }
@@ -176,11 +211,11 @@ fn collect_stable(
 }
 
 fn collect_diagnostics(root: &Path) -> BTreeSet<DiagnosticKey> {
-    let config = Config::load(root).expect("load Sphinx config");
+    let config = Config::load(root).expect("load pinned repository config");
     let paths = [root.to_path_buf()];
     let python_env = std::env::var_os(PYTHON_ENV).map(PathBuf::from);
     check_paths(root, &paths, &config, python_env.as_deref(), None)
-        .expect("check pinned Sphinx")
+        .expect("check pinned repository")
         .iter()
         .map(|diagnostic| DiagnosticKey::from_diagnostic(root, diagnostic))
         .collect()
@@ -191,7 +226,7 @@ fn golden_path(relative_path: &str) -> PathBuf {
 }
 
 fn read_snapshot_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
-    let raw = std::fs::read_to_string(path).expect("read Sphinx diagnostic snapshot");
+    let raw = std::fs::read_to_string(path).expect("read completeness diagnostic snapshot");
     parse_diagnostic_lines(
         raw.lines()
             .skip_while(|line| *line != "---")
@@ -202,7 +237,7 @@ fn read_snapshot_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
 }
 
 fn read_plain_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
-    let raw = std::fs::read_to_string(path).expect("read Sphinx diagnostic list");
+    let raw = std::fs::read_to_string(path).expect("read completeness diagnostic list");
     parse_diagnostic_lines(raw.lines())
 }
 
@@ -213,14 +248,15 @@ fn parse_diagnostic_lines<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeSet<
         .collect()
 }
 
-fn format_snapshot(baseline: &BTreeSet<DiagnosticKey>) -> String {
+fn format_snapshot(repository: &PinnedRepository, baseline: &BTreeSet<DiagnosticKey>) -> String {
     format_diagnostic_set(
         &format!(
-            "# Pinned Sphinx diagnostic snapshot.\n\
-             # Repository: {SPHINX_REPO}\n\
-             # Ref: {SPHINX_REF}\n\
+            "# Pinned repository diagnostic snapshot.\n\
+             # Repository: {}\n\
+             # Ref: {}\n\
              # ty: {TY_VERSION}\n\
-             # Format: relative-path<TAB>line<TAB>column<TAB>callee\n"
+             # Format: relative-path<TAB>line<TAB>column<TAB>callee\n",
+            repository.url, repository.reference
         ),
         baseline,
     )

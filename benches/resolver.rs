@@ -147,7 +147,7 @@ const WHOLE_PROJECT_MODS_PER_PKG: usize = 25;
 const WHOLE_PROJECT_FUNCS_PER_MOD: usize = 5;
 /// Packages in the larger generated whole-project benchmark. This is intended
 /// to provide a PR-visible `CodSpeed` signal at a scale closer to real projects
-/// without pulling in network checkout / install overhead from Sphinx or `CPython`.
+/// without pulling in network checkout / install overhead from large external repos.
 const LARGE_PROJECT_PKGS: usize = 10;
 /// Independent modules per package in the large generated benchmark.
 const LARGE_PROJECT_MODS_PER_PKG: usize = 50;
@@ -450,7 +450,7 @@ fn whole_project() -> usize {
 }
 
 /// Larger end-to-end directory run. This is the generated-project analogue of
-/// the scheduled Sphinx/CPython dry runs: big enough to expose scaling changes,
+/// the scheduled full-checkout dry runs: big enough to expose scaling changes,
 /// but deterministic and cheap enough to report through `CodSpeed` on PRs.
 #[divan::bench]
 fn large_project() -> usize {

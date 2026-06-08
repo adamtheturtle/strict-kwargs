@@ -1,7 +1,7 @@
-# Python dependency constraints for the pinned Sphinx completeness oracle.
+# Python dependency constraints for the pinned completeness oracle.
 #
 # Keep this environment hermetic: the oracle is meant to detect strict-kwargs
-# resolver changes, not drift in docutils/Jinja/etc. hover displays.
+# resolver changes, not drift in dependency hover displays.
 #
 # Repository: https://github.com/sphinx-doc/sphinx.git
 # Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c

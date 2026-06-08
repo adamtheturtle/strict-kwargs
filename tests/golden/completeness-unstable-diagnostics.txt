@@ -1,5 +1,5 @@
 # Diagnostics that were stable on a local macOS regeneration but not stable
-# across repeated Linux CI runs of the pinned Sphinx oracle.
+# across repeated Linux CI runs of the pinned completeness oracle.
 #
 # Keep these out of regenerated snapshots unless they become stable in CI.
 sphinx/builders/_epub_base.py	432	23	"open"
