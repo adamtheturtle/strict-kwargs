@@ -14,7 +14,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use ruff_text_size::TextSize;
 
-use crate::ast_util::{line_column, positional_argument_count, signature_from_parameters};
+use crate::ast_util::{
+    line_column, line_column_from_starts, line_starts, positional_argument_count,
+    signature_from_parameters,
+};
 use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
 use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
@@ -659,6 +662,10 @@ struct CallChecker<'a> {
     /// the anchor for its own relative imports.
     is_package: bool,
     source: &'a str,
+    /// Lazily-built line-start table for diagnostic positions. Sphinx-sized
+    /// runs can emit thousands of diagnostics; rescanning the whole file for
+    /// each one made line/column formatting quadratic in file size.
+    line_starts: Option<Vec<usize>>,
     /// Lexer tokens for `source`, used to recover the parenthesized span of a
     /// call argument so the `name=` prefix lands *before* any redundant outer
     /// parentheses (issue #41) rather than inside them.
@@ -779,6 +786,7 @@ impl<'a> CallChecker<'a> {
             module_name,
             is_package,
             source,
+            line_starts: None,
             tokens,
             index,
             config,
@@ -808,6 +816,13 @@ impl<'a> CallChecker<'a> {
             reason = "scope stack invariant: always non-empty"
         )]
         self.scopes.last_mut().expect("scope stack non-empty")
+    }
+
+    fn diagnostic_position(&mut self, offset: TextSize) -> (usize, usize) {
+        let line_starts = self
+            .line_starts
+            .get_or_insert_with(|| line_starts(self.source));
+        line_column_from_starts(line_starts, offset)
     }
 
     fn push_scope(&mut self) {
@@ -1503,10 +1518,15 @@ impl<'a> CallChecker<'a> {
                 &callee_fullname,
                 first_param_name,
             );
-        let effective: Vec<Signature> = if receiver_is_explicit || receiver_is_implicit {
-            signatures.iter().map(without_leading_self).collect()
+        let effective_storage;
+        let effective: &[Signature] = if receiver_is_explicit || receiver_is_implicit {
+            effective_storage = signatures
+                .iter()
+                .map(without_leading_self)
+                .collect::<Vec<_>>();
+            &effective_storage
         } else {
-            signatures.to_vec()
+            signatures
         };
         let effective_count = if receiver_is_explicit {
             positional_count.saturating_sub(1)
@@ -1528,7 +1548,7 @@ impl<'a> CallChecker<'a> {
             })
             .max()
             .unwrap_or(0);
-        let (line, column) = line_column(self.source, call.start());
+        let (line, column) = self.diagnostic_position(call.start());
         self.diagnostics.push(Diagnostic {
             path: self.path.clone(),
             line,
@@ -2775,6 +2795,7 @@ fn resolve_ty_definition_for_pending(
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
+#[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 #[allow(
     clippy::too_many_arguments,
@@ -2800,6 +2821,7 @@ fn emit_if_violation(
         call_start,
         path,
         diagnostics,
+        None,
     )
 }
 
@@ -2818,11 +2840,16 @@ fn emit_if_violation_with_signature_fullname(
     call_start: usize,
     path: &Path,
     diagnostics: &mut Vec<Diagnostic>,
+    line_starts: Option<&[usize]>,
 ) -> Option<usize> {
     let max_positional =
         violation_max_positional(signature_fullname, signatures, positional_count, ignored)?;
     let offset = u32::try_from(call_start).unwrap_or(u32::MAX);
-    let (line, column) = line_column(source, TextSize::new(offset));
+    let offset = TextSize::new(offset);
+    let (line, column) = line_starts.map_or_else(
+        || line_column(source, offset),
+        |starts| line_column_from_starts(starts, offset),
+    );
     diagnostics.push(Diagnostic {
         path: path.to_path_buf(),
         line,
@@ -3426,6 +3453,7 @@ fn resolve_pending_with_ty(
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
     }
+    let source_line_starts = line_starts(source);
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3494,6 +3522,7 @@ fn resolve_pending_with_ty(
                     p.call_start,
                     path,
                     diagnostics,
+                    Some(&source_line_starts),
                 ) {
                     let fix_signature = if receiver_is_explicit {
                         &signature
@@ -3555,7 +3584,8 @@ fn resolve_pending_with_ty(
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
             }
-            if let Some(max_positional) = emit_if_violation(
+            if let Some(max_positional) = emit_if_violation_with_signature_fullname(
+                &fullname,
                 &fullname,
                 &overloads,
                 p.positional_count,
@@ -3564,6 +3594,7 @@ fn resolve_pending_with_ty(
                 p.call_start,
                 path,
                 diagnostics,
+                Some(&source_line_starts),
             ) {
                 if let [signature] = overloads.as_slice() {
                     record_ty_fix(
@@ -3627,7 +3658,8 @@ fn resolve_pending_with_ty(
             };
             if let Some((fullname, sigs)) = resolve_def_at(parsed.suite(), off) {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
-                let max_positional = emit_if_violation(
+                let max_positional = emit_if_violation_with_signature_fullname(
+                    &fullname,
                     &fullname,
                     &sigs,
                     pending[i].positional_count,
@@ -3636,6 +3668,7 @@ fn resolve_pending_with_ty(
                     pending[i].call_start,
                     path,
                     diagnostics,
+                    Some(&source_line_starts),
                 );
                 if let Some(max_positional) = max_positional {
                     let mut attempted_fix = false;
