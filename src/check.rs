@@ -205,7 +205,9 @@ fn start_ty_and_open_pending_file(
         *ty = Some(start_ty_for_fallback(project_root, python_env)?);
     }
     if let Some(ty) = ty.as_mut() {
+        ty.drain_pending();
         let _ = ty.ensure_open(path, source);
+        ty.drain_pending();
     }
     Ok(())
 }

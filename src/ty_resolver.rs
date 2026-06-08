@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -243,6 +243,26 @@ impl TyResolver {
         )?;
         self.opened.insert(key);
         Some(())
+    }
+
+    /// Drain any server messages that are already available without blocking.
+    ///
+    /// This keeps speculative `didOpen` batching from leaving ty's server→client
+    /// requests unanswered while the caller is still scanning files.
+    pub fn drain_pending(&mut self) {
+        if self.disabled {
+            return;
+        }
+        loop {
+            match self.incoming.try_recv() {
+                Ok(msg) => self.absorb(&msg),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.disabled = true;
+                    return;
+                }
+            }
+        }
     }
 
     /// Wait until ty has published diagnostics for `path`, which means the
@@ -1385,6 +1405,32 @@ mod tests {
             assert_eq!(r.ensure_open(path, "print()"), Some(()));
             // Second call sees it already open and returns without resending.
             assert_eq!(r.ensure_open(path, "print()"), Some(()));
+        }
+
+        #[test]
+        fn drain_pending_absorbs_available_messages_without_waiting() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+
+            tx.send(json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": "file:///a/x.py", "diagnostics": [] }
+            }))
+            .unwrap();
+            tx.send(json!({ "jsonrpc": "2.0", "id": 7, "result": "v" }))
+                .unwrap();
+            tx.send(json!({
+                "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration"
+            }))
+            .unwrap();
+
+            r.drain_pending();
+
+            assert!(r.diagnosed.contains("file:///a/x.py"));
+            assert_eq!(r.take(7), Some(Value::from("v")));
+            assert!(!r.pending.contains_key(&9));
         }
 
         #[test]
