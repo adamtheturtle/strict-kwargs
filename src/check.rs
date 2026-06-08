@@ -1119,13 +1119,12 @@ impl<'a> CallChecker<'a> {
     }
 
     fn class_from_annotation(&self, annotation: &str) -> Option<String> {
+        const DYNAMIC_ANNOTATIONS: &[&str] =
+            &["Any", "typing.Any", "object", "builtins.object", "Unknown"];
         let annotation = annotation.trim().trim_matches(['"', '\'']);
         if annotation.is_empty()
             || annotation.contains('|')
-            || matches!(
-                annotation,
-                "Any" | "typing.Any" | "object" | "builtins.object" | "Unknown"
-            )
+            || DYNAMIC_ANNOTATIONS.contains(&annotation)
         {
             return None;
         }
@@ -4838,7 +4837,15 @@ while cond:
     #[test]
     fn class_from_annotation_covers_invalid_builtin_and_dotted_shapes() {
         with_empty_checker(false, |checker| {
-            for annotation in ["", "A | B", "Any", "typing.Any", "object", "Unknown"] {
+            for annotation in [
+                "",
+                "A | B",
+                "Any",
+                "typing.Any",
+                "object",
+                "builtins.object",
+                "Unknown",
+            ] {
                 assert_eq!(checker.class_from_annotation(annotation), None);
             }
 
@@ -4913,6 +4920,41 @@ while cond:
                 assert!(checker.call_uses_opaque_receiver_boundary(func));
             });
         });
+    }
+
+    #[test]
+    fn constructor_result_call_resolves_dunder_call_without_ty_fallback() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.__call__".to_string(), sig(&["self", "a", "b"]));
+
+        let source = r"
+class C:
+    def __call__(self, a, b): ...
+
+C()(1, 2)
+";
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn unresolved_call_expression_and_subscript_callees_do_not_flag() {
+        let index = DefinitionIndex::for_test();
+
+        let source = r"
+def make():
+    return 1
+
+registry = {}
+make()(1, 2)
+registry['k'](1, 2)
+";
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 0);
     }
 
     #[test]

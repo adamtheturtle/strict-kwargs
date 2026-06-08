@@ -669,6 +669,22 @@ fn check_multi(files: &[(&str, &str)]) -> Vec<String> {
 }
 
 #[test]
+fn annotated_dotted_receiver_resolves_without_ty_fallback() {
+    let messages = check_multi(&[
+        (
+            "main.py",
+            "import lib\n\n\ndef use(renderer: lib.Renderer) -> None:\n    renderer.render(1)\n",
+        ),
+        (
+            "lib.py",
+            "class Renderer:\n    def render(self, value): ...\n",
+        ),
+    ]);
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains("Too many positional"));
+}
+
+#[test]
 fn configured_src_layout_resolves_first_party_imports() {
     let temp = tempfile::Builder::new()
         .prefix("strictkw")
