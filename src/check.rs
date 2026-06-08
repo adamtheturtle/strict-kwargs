@@ -1443,10 +1443,6 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let positional_count = positional_argument_count(&call.arguments);
-        if positional_count == 0 {
-            return;
-        }
         let local_function = if self.local_function_scope_count == 0 {
             None
         } else {
@@ -1493,6 +1489,7 @@ impl<'a> CallChecker<'a> {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
         let ignored = callee_is_ignored(self.config, &callee_fullname);
+        let positional_count = positional_argument_count(&call.arguments);
         // Issue #27: an unbound instance-method call through the class object
         // (`K.m(K(), 1)`) passes the receiver explicitly. It binds to `self`
         // and is never keyword-passable, so — like the typeshed/ty path's
@@ -1506,16 +1503,12 @@ impl<'a> CallChecker<'a> {
         let receiver_is_explicit =
             self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
         let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
-        let receiver_is_explicit_for_fix = if self.plan_fixes {
-            receiver_is_explicit
-                || self.is_explicit_dunder_receiver_call(
-                    &call.func,
-                    &callee_fullname,
-                    first_param_name,
-                )
-        } else {
-            receiver_is_explicit
-        };
+        let receiver_is_explicit_for_fix = receiver_is_explicit
+            || self.is_explicit_dunder_receiver_call(
+                &call.func,
+                &callee_fullname,
+                first_param_name,
+            );
         let effective_storage;
         let effective: &[Signature] = if receiver_is_explicit || receiver_is_implicit {
             effective_storage = signatures
@@ -2202,7 +2195,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         if let Expr::Call(call) = expr {
-            self.check_call(call);
+            if positional_argument_count(&call.arguments) > 0 {
+                self.check_call(call);
+            }
         }
         walk_expr(self, expr);
     }
@@ -4505,17 +4500,6 @@ while cond:
             with_call_func("obj.f(0)\n", |func| {
                 assert!(!checker.call_uses_imported_callable_boundary(func));
             });
-        });
-    }
-
-    #[test]
-    fn zero_positional_calls_return_before_resolution_or_ty_fallback() {
-        with_empty_checker(false, |checker| {
-            with_call("missing()\n", |call| {
-                checker.check_call(call);
-            });
-            assert!(checker.diagnostics.is_empty());
-            assert!(checker.ty_pending.is_empty());
         });
     }
 
