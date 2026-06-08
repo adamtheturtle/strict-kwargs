@@ -47,6 +47,11 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 /// Keep the ty LSP pipes bounded: large files can have thousands of fallback
 /// requests, and sending all of them before draining responses can deadlock.
 const TY_MAX_IN_FLIGHT: usize = 16;
+/// Per-file ty analysis wait used before fallback queries. The full-project
+/// warm-up was deterministic but expensive on Sphinx-sized trees; waiting for
+/// just the files that actually need ty keeps query results stable without
+/// forcing ty to publish diagnostics for files the built-in resolver handled.
+const TY_FILE_DIAGNOSTICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
 enum IfBranchTraversal {
@@ -385,10 +390,9 @@ fn check_paths_impl(
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
-    // `python_files` (the whole project) is passed separately so the ty warm-up
-    // type-checks every file, not just the cache misses being scanned — a
-    // cached run must still warm up the full project for deterministic
-    // resolution (issue #198).
+    // Files that need ty fallback wait for their own publishDiagnostics event
+    // before querying; files fully handled by the built-in resolver do not
+    // force ty work.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -3121,7 +3125,7 @@ fn resolve_file_with_ty(
         // The binary was verified up front (`require_ty_present`), so a
         // failure here is the server not starting — fatal, not a silent
         // downgrade, so results stay deterministic.
-        *ty = Some(start_ty_warmed(project_root, python_env, all_files)?);
+        *ty = Some(start_ty_for_fallback(project_root, python_env, all_files)?);
     }
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(
@@ -3153,23 +3157,21 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
-/// Start ty and warm it up: have it type-check every project file before any
-/// query. ty resolves incrementally, so querying a call site before its
-/// dependencies are analyzed yields a different slice of unresolved results
-/// each run; the warm-up forces a complete, stable model so resolution is
-/// deterministic. Called only at the first ty start (on demand), so a run the
-/// built-in resolver fully handles pays nothing.
+/// Start ty for fallback queries. Query sites call
+/// [`TyResolver::wait_until_diagnosed`] on the current file before asking for
+/// hover/definition, which avoids the old full-project warm-up cost while
+/// keeping file-local query results stable.
 ///
 /// `ty`-subprocess orchestration like [`start_ty`]; excluded from the coverage
 /// gate for the same reason.
 #[cfg_attr(coverage, coverage(off))]
-fn start_ty_warmed(
+fn start_ty_for_fallback(
     project_root: &Path,
     python_env: Option<&Path>,
     all_files: &[PathBuf],
 ) -> Result<TyResolver, CheckError> {
     let mut ty = start_ty(project_root, python_env)?;
-    ty.warm_up(all_files);
+    ty.open_files(all_files);
     Ok(ty)
 }
 
@@ -3207,7 +3209,7 @@ fn resolve_overload_fixes_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        let Ok(started) = start_ty_warmed(project_root, python_env, all_files) else {
+        let Ok(started) = start_ty_for_fallback(project_root, python_env, all_files) else {
             record_declined_fixes(
                 &mut fixes,
                 DeclinedFixReason::UnresolvedOverload,
@@ -3233,6 +3235,7 @@ fn resolve_overload_fixes_with_ty(
         );
         return;
     }
+    ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3483,6 +3486,7 @@ fn resolve_pending_with_ty(
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
     }
+    ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
     let mut def_cache = DefCache::default();
@@ -3659,7 +3663,6 @@ fn resolve_pending_with_ty(
             }
         }
     }
-
     // Phase B: pipeline goto-definition for hover misses (constructors) in
     // bounded batches too.
     for chunk in needs_def.chunks(TY_MAX_IN_FLIGHT) {

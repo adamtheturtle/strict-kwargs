@@ -71,12 +71,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// The initialize handshake (project discovery) can be slower than steady
 /// state, so allow more headroom.
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Overall budget for the [`TyResolver::warm_up`] pass to receive
-/// `publishDiagnostics` for every opened file. Generous: a full type-check of
-/// a large tree is the dominant cost, but it is bounded so a file ty never
-/// reports on cannot stall the run forever.
-const WARMUP_TIMEOUT: Duration = Duration::from_secs(600);
-
 pub struct TyResolver {
     child: Child,
     stdin: ChildStdin,
@@ -89,8 +83,8 @@ pub struct TyResolver {
     /// Once true, all further work is skipped (ty died/hung/misbehaved).
     disabled: bool,
     /// URIs ty has published diagnostics for, i.e. files it has finished
-    /// type-checking. [`Self::warm_up`] waits for the whole set so later
-    /// queries hit a fully-analyzed, deterministic model.
+    /// type-checking. Fallback queries wait for their current file to appear
+    /// here before asking hover/definition.
     diagnosed: HashSet<String>,
 }
 
@@ -251,6 +245,44 @@ impl TyResolver {
         Some(())
     }
 
+    /// Wait until ty has published diagnostics for `path`, which means the
+    /// file has reached a type-checked state suitable for stable hover and
+    /// definition queries. Timeouts are best-effort: callers still query and
+    /// fail closed if ty has not caught up.
+    pub fn wait_until_diagnosed(&mut self, path: &Path, timeout: Duration) {
+        if self.disabled {
+            return;
+        }
+        let uri = path_to_uri(path);
+        if self.diagnosed.contains(&uri) {
+            return;
+        }
+        let deadline = Instant::now() + timeout;
+        while !self.diagnosed.contains(&uri) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            match self.incoming.recv_timeout(remaining) {
+                Ok(msg) => self.absorb(&msg),
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Open a set of files without waiting for diagnostics. This gives ty the
+    /// same project visibility as full warm-up while allowing callers to wait
+    /// only for files that need fallback queries.
+    pub fn open_files(&mut self, files: &[PathBuf]) {
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if self.ensure_open(path, &text).is_none() {
+                return;
+            }
+        }
+    }
+
     /// Fire a positional request (`textDocument/hover` or `.../definition`)
     /// without waiting, returning its id for a later [`Self::take`]. This is
     /// what enables pipelining: send all, then collect all.
@@ -333,7 +365,7 @@ impl TyResolver {
 
     /// Route one incoming message that is not the response currently awaited:
     /// answer a server→client request, buffer an out-of-order response by id,
-    /// or record a `publishDiagnostics` notification (so [`Self::warm_up`] can
+    /// or record a `publishDiagnostics` notification (so fallback queries can
     /// tell when ty has type-checked a file).
     fn absorb(&mut self, msg: &Value) {
         if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
@@ -349,46 +381,6 @@ impl TyResolver {
         {
             if let Some(uri) = msg.pointer("/params/uri").and_then(Value::as_str) {
                 self.diagnosed.insert(uri.to_string());
-            }
-        }
-    }
-
-    /// Open every file and block until ty has published diagnostics for all of
-    /// them — i.e. type-checked the whole project — before any hover/definition
-    /// query. Without this, queries race ty's background indexing and a
-    /// different slice of call sites comes back unresolved on each run
-    /// (non-deterministic false negatives). Bounded by [`WARMUP_TIMEOUT`]; on
-    /// timeout it proceeds with whatever ty has finished (best-effort).
-    ///
-    /// Sources are read here (not by the caller) so a run the built-in
-    /// resolver fully handles — which never calls this — pays no extra I/O.
-    pub fn warm_up(&mut self, files: &[PathBuf]) {
-        if self.disabled {
-            return;
-        }
-        let mut remaining: HashSet<String> = HashSet::new();
-        for path in files {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                continue; // unreadable file: ty will not analyze it; skip
-            };
-            if self.ensure_open(path, &text).is_none() {
-                return; // disabled mid-open
-            }
-            remaining.insert(path_to_uri(path));
-        }
-        remaining.retain(|uri| !self.diagnosed.contains(uri));
-
-        let deadline = Instant::now() + WARMUP_TIMEOUT;
-        while !remaining.is_empty() {
-            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-                return; // budget exhausted: proceed best-effort
-            };
-            match self.incoming.recv_timeout(timeout) {
-                Ok(msg) => {
-                    self.absorb(&msg);
-                    remaining.retain(|uri| !self.diagnosed.contains(uri));
-                }
-                Err(_) => return, // timeout/disconnect: proceed best-effort
             }
         }
     }
@@ -1435,7 +1427,7 @@ mod tests {
         }
 
         #[test]
-        fn warm_up_waits_for_each_file_to_be_analyzed() {
+        fn open_files_then_wait_until_diagnosed_tracks_analysis() {
             let dir = tempfile::tempdir().expect("tempdir");
             let a = dir.path().join("a.py");
             let b = dir.path().join("b.py");
@@ -1444,24 +1436,20 @@ mod tests {
 
             let (child, stdin) = alive_child();
             let (tx, rx) = std::sync::mpsc::channel::<Value>();
-            // Queue diagnostics for both files (plus an unrelated notification
-            // and a server request) so `warm_up` drains them and returns.
-            for path in [&a, &b] {
-                tx.send(json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/publishDiagnostics",
-                    "params": { "uri": path_to_uri(path) }
-                }))
-                .unwrap();
-            }
-            drop(tx); // once both seen, the loop exits before hitting disconnect
 
             let mut r = TyResolver::from_parts(child, stdin, rx);
-            r.warm_up(&[a.clone(), b.clone()]);
-            assert!(r.diagnosed.contains(&path_to_uri(&a)));
-            assert!(r.diagnosed.contains(&path_to_uri(&b)));
-            // Both files were opened as part of warming up.
+            r.open_files(&[a.clone(), b.clone()]);
             assert!(r.opened.contains(&a) && r.opened.contains(&b));
+
+            tx.send(json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": path_to_uri(&a) }
+            }))
+            .unwrap();
+            r.wait_until_diagnosed(&a, Duration::from_secs(1));
+            assert!(r.diagnosed.contains(&path_to_uri(&a)));
+            assert!(!r.diagnosed.contains(&path_to_uri(&b)));
         }
     }
 }
