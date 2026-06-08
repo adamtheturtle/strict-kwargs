@@ -1443,6 +1443,10 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
+        let positional_count = positional_argument_count(&call.arguments);
+        if positional_count == 0 {
+            return;
+        }
         let local_function = if self.local_function_scope_count == 0 {
             None
         } else {
@@ -1474,15 +1478,6 @@ impl<'a> CallChecker<'a> {
             indexed_signatures = signatures;
             indexed_signatures.as_ref()
         } else {
-            // A known class with no indexed constructor and no positional
-            // arguments cannot violate this rule. This keeps expressions like
-            // `Derived().method(1)` from starting `ty` just to resolve the
-            // zero-argument inner construction.
-            if self.index.is_class(&callee_fullname)
-                && positional_argument_count(&call.arguments) == 0
-            {
-                return;
-            }
             // Resolved to a name the index does not know (e.g. a module
             // attribute bound to a non-callable): defer to the ty fallback.
             // Re-check is_excluded: `get` may have triggered lazy loading
@@ -1498,7 +1493,6 @@ impl<'a> CallChecker<'a> {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
         let ignored = callee_is_ignored(self.config, &callee_fullname);
-        let positional_count = positional_argument_count(&call.arguments);
         // Issue #27: an unbound instance-method call through the class object
         // (`K.m(K(), 1)`) passes the receiver explicitly. It binds to `self`
         // and is never keyword-passable, so — like the typeshed/ty path's
@@ -1513,11 +1507,12 @@ impl<'a> CallChecker<'a> {
             self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
         let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
         let receiver_is_explicit_for_fix = receiver_is_explicit
-            || self.is_explicit_dunder_receiver_call(
-                &call.func,
-                &callee_fullname,
-                first_param_name,
-            );
+            || (self.plan_fixes
+                && self.is_explicit_dunder_receiver_call(
+                    &call.func,
+                    &callee_fullname,
+                    first_param_name,
+                ));
         let effective_storage;
         let effective: &[Signature] = if receiver_is_explicit || receiver_is_implicit {
             effective_storage = signatures
