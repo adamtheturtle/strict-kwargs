@@ -47,7 +47,9 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 
 /// Keep the ty LSP pipes bounded: large files can have thousands of fallback
 /// requests, and sending all of them before draining responses can deadlock.
-const TY_MAX_IN_FLIGHT: usize = 16;
+/// The Sphinx snapshot benchmark benefits from a wider window than 16 because
+/// ty can keep answering while strict-kwargs drains out-of-order responses.
+const TY_MAX_IN_FLIGHT: usize = 128;
 /// Per-file ty analysis wait used before fallback queries. The full-project
 /// warm-up was deterministic but expensive on large repository trees; waiting for
 /// just the files that actually need ty keeps query results stable without
@@ -334,6 +336,7 @@ fn pipeline_phases(
             project_root,
             all_project_files,
             index,
+            indexed_files,
             python_env,
             &work.path,
             &work.source,
@@ -3081,6 +3084,7 @@ fn resolve_def_location_cached(
     current_path: &Path,
     current_source: &str,
     loc: &crate::ty_resolver::DefLocation,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
@@ -3107,9 +3111,13 @@ fn resolve_def_location_cached(
         };
         let off = lsp_to_byte_offset(target, loc.line, loc.character)?;
         if !def_caches.files.contains_key(target_path) {
+            let def_index = indexed_files
+                .get(target_path)
+                .map(|indexed| DefFileIndex::from_stmts(indexed.parsed.suite()))
+                .or_else(|| DefFileIndex::from_source(target));
             def_caches
                 .files
-                .insert(target_path.to_path_buf(), DefFileIndex::from_source(target));
+                .insert(target_path.to_path_buf(), def_index);
         }
         def_caches
             .files
@@ -3123,19 +3131,24 @@ fn resolve_def_location_cached(
 
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ty definition resolution threads explicit per-run caches through fallback glue"
+)]
 fn resolve_ty_definition_for_pending(
     ty: &mut TyResolver,
     path: &Path,
     source: &str,
     lsp_index: &LspLineIndex,
     pending: &PendingTy,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
     let (line, ch) = lsp_index.position(source, pending.callee_offset);
     let id = ty.ask("textDocument/definition", path, line, ch)?;
     let loc = ty.take(id).as_ref().and_then(location_from_value)?;
-    resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
+    resolve_def_location_cached(path, source, &loc, indexed_files, file_cache, def_caches)
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -3420,6 +3433,7 @@ fn resolve_file_with_ty(
     project_root: &Path,
     _all_files: &[PathBuf],
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -3448,6 +3462,7 @@ fn resolve_file_with_ty(
             source,
             pending,
             config,
+            indexed_files,
             ty_file_cache,
             ty_def_caches,
             diagnostics,
@@ -3790,6 +3805,7 @@ fn resolve_pending_with_ty(
     source: &str,
     pending: &[PendingTy],
     config: &Config,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
@@ -3852,7 +3868,14 @@ fn resolve_pending_with_ty(
                 let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                     if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                        ty, path, source, &lsp_index, p, file_cache, def_caches,
+                        ty,
+                        path,
+                        source,
+                        &lsp_index,
+                        p,
+                        indexed_files,
+                        file_cache,
+                        def_caches,
                     ) {
                         ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                     }
@@ -3926,7 +3949,14 @@ fn resolve_pending_with_ty(
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                    ty, path, source, &lsp_index, p, file_cache, def_caches,
+                    ty,
+                    path,
+                    source,
+                    &lsp_index,
+                    p,
+                    indexed_files,
+                    file_cache,
+                    def_caches,
                 ) {
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
@@ -3987,9 +4017,14 @@ fn resolve_pending_with_ty(
             // only genuinely deep ones pay the tokeniser scan — and those would
             // have crashed the old unguarded call. A too-deep or unparsable
             // target is silently skipped, same fail-closed behaviour as before.
-            if let Some((fullname, sigs)) =
-                resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
-            {
+            if let Some((fullname, sigs)) = resolve_def_location_cached(
+                path,
+                source,
+                &loc,
+                indexed_files,
+                file_cache,
+                def_caches,
+            ) {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
                     &fullname,

@@ -161,6 +161,7 @@ fn fix_paths_impl(
             project_root,
             &python_files,
             &index,
+            &indexed_files,
             python_env,
             &path,
             &source,
