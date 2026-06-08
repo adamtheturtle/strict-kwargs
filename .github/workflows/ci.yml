@@ -153,9 +153,9 @@ jobs:
           mode: simulation
           run: cargo codspeed run
 
-  sphinx-completeness:
-    # Heavy regression coverage for issue #192. This clones and checks pinned
-    # Sphinx so every CI event catches golden-oracle drift before merge.
+  completeness:
+    # Heavy regression coverage for issue #192. This clones and checks a pinned
+    # external repository so every CI event catches golden-oracle drift before merge.
     runs-on: ubuntu-latest
 
     steps:
@@ -169,7 +169,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: sphinx-completeness
+          shared-key: completeness
 
       - name: Install Python
         uses: actions/setup-python@v6
@@ -189,41 +189,45 @@ jobs:
         shell: bash
         run: ty version
 
-      - name: Clone pinned Sphinx completeness checkout
+      - name: Clone pinned completeness repository
         shell: bash
         env:
           EXTERNAL_DIR: ${{ runner.temp }}/external
-          SPHINX_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+          COMPLETENESS_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+          COMPLETENESS_REPOSITORY_URL: https://github.com/sphinx-doc/sphinx.git
         run: |
           set -euo pipefail
-          dest="$EXTERNAL_DIR/sphinx"
+          dest="$EXTERNAL_DIR/pinned-repository"
           mkdir -p "$dest"
           git -C "$dest" init --quiet
-          git -C "$dest" remote add origin https://github.com/sphinx-doc/sphinx.git
-          git -C "$dest" fetch --depth=1 origin "$SPHINX_REF"
+          git -C "$dest" remote add origin "$COMPLETENESS_REPOSITORY_URL"
+          git -C "$dest" fetch --depth=1 origin "$COMPLETENESS_REPOSITORY_REF"
           git -C "$dest" checkout --detach --quiet FETCH_HEAD
           git -C "$dest" rev-parse HEAD
 
-      - name: Prepare Sphinx Python environment
+      - name: Prepare completeness Python environment
         shell: bash
         env:
-          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
-          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+          COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
+          COMPLETENESS_VENV: ${{ runner.temp }}/completeness-venv
         run: |
           set -euo pipefail
-          uv venv --python "$pythonLocation/bin/python" "$SPHINX_VENV"
-          uv pip install --python "$SPHINX_VENV/bin/python" \
-            --constraint tests/golden/sphinx-requirements-constraints.txt \
-            -e "$SPHINX_CHECKOUT"
+          uv venv --python "$pythonLocation/bin/python" "$COMPLETENESS_VENV"
+          uv pip install --python "$COMPLETENESS_VENV/bin/python" \
+            --constraint tests/golden/completeness-requirements-constraints.txt \
+            -e "$COMPLETENESS_CHECKOUT"
 
-      - name: Run pinned Sphinx completeness test
+      - name: Run pinned repository completeness test
         env:
-          STRICT_KWARGS_SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
-          STRICT_KWARGS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/sphinx-venv
-          STRICT_KWARGS_SPHINX_RUNS: 3
+          STRICT_KWARGS_COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
+          STRICT_KWARGS_COMPLETENESS_PYTHON_ENV: ${{ runner.temp }}/completeness-venv
+          STRICT_KWARGS_COMPLETENESS_REPOSITORY_NAME: pinned-repository
+          STRICT_KWARGS_COMPLETENESS_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+          STRICT_KWARGS_COMPLETENESS_REPOSITORY_URL: https://github.com/sphinx-doc/sphinx.git
+          STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
-          cargo test --locked --test sphinx_completeness \
-            pinned_sphinx_diagnostics_match_golden_oracle -- --ignored --nocapture
+          cargo test --locked --test completeness \
+            pinned_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:
     needs: build

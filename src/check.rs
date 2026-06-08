@@ -48,7 +48,7 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 /// requests, and sending all of them before draining responses can deadlock.
 const TY_MAX_IN_FLIGHT: usize = 16;
 /// Per-file ty analysis wait used before fallback queries. The full-project
-/// warm-up was deterministic but expensive on Sphinx-sized trees; waiting for
+/// warm-up was deterministic but expensive on large repository trees; waiting for
 /// just the files that actually need ty keeps query results stable without
 /// forcing ty to publish diagnostics for files the built-in resolver handled.
 const TY_FILE_DIAGNOSTICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -666,7 +666,7 @@ struct CallChecker<'a> {
     /// the anchor for its own relative imports.
     is_package: bool,
     source: &'a str,
-    /// Lazily-built line-start table for diagnostic positions. Sphinx-sized
+    /// Lazily-built line-start table for diagnostic positions. Large-repository
     /// runs can emit thousands of diagnostics; rescanning the whole file for
     /// each one made line/column formatting quadratic in file size.
     line_starts: Option<Vec<usize>>,

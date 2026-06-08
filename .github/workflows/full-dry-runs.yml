@@ -18,11 +18,12 @@ concurrency:
 
 env:
   CPYTHON_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
-  SPHINX_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+  PINNED_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
+  PINNED_REPOSITORY_URL: https://github.com/sphinx-doc/sphinx.git
 
 jobs:
   full-dry-runs:
-    name: Sphinx and CPython dry runs
+    name: Pinned repository and CPython dry runs
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -79,26 +80,26 @@ jobs:
             git -C "$dest" rev-parse HEAD
           }
 
-          clone_pinned sphinx https://github.com/sphinx-doc/sphinx.git "$SPHINX_REF"
+          clone_pinned pinned-repository "$PINNED_REPOSITORY_URL" "$PINNED_REPOSITORY_REF"
           clone_pinned cpython https://github.com/python/cpython.git "$CPYTHON_REF"
 
-      - name: Prepare Sphinx Python environment
+      - name: Prepare pinned repository Python environment
         shell: bash
         env:
-          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
-          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+          PINNED_REPOSITORY_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
+          PINNED_REPOSITORY_VENV: ${{ runner.temp }}/pinned-repository-venv
         run: |
           set -euo pipefail
-          uv venv --python "$pythonLocation/bin/python" "$SPHINX_VENV"
-          uv pip install --python "$SPHINX_VENV/bin/python" -e "$SPHINX_CHECKOUT"
+          uv venv --python "$pythonLocation/bin/python" "$PINNED_REPOSITORY_VENV"
+          uv pip install --python "$PINNED_REPOSITORY_VENV/bin/python" -e "$PINNED_REPOSITORY_CHECKOUT"
 
       - name: Run full-tree dry runs
         shell: bash
         env:
           CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
           LOG_DIR: ${{ github.workspace }}/full-dry-run-logs
-          SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
-          SPHINX_VENV: ${{ runner.temp }}/sphinx-venv
+          PINNED_REPOSITORY_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
+          PINNED_REPOSITORY_VENV: ${{ runner.temp }}/pinned-repository-venv
         run: |
           set -euo pipefail
 
@@ -227,7 +228,7 @@ jobs:
           }
 
           overall=0
-          run_dry_run sphinx "$SPHINX_CHECKOUT" "$SPHINX_VENV" || overall=1
+          run_dry_run pinned-repository "$PINNED_REPOSITORY_CHECKOUT" "$PINNED_REPOSITORY_VENV" || overall=1
           run_dry_run cpython "$CPYTHON_CHECKOUT" || overall=1
           exit "$overall"
 
