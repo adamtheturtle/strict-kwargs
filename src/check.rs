@@ -4836,6 +4836,86 @@ while cond:
     }
 
     #[test]
+    fn class_from_annotation_covers_invalid_builtin_and_dotted_shapes() {
+        with_empty_checker(false, |checker| {
+            for annotation in ["", "A | B", "Any", "typing.Any", "object", "Unknown"] {
+                assert_eq!(checker.class_from_annotation(annotation), None);
+            }
+
+            assert_eq!(
+                checker.class_from_annotation("list[int]").as_deref(),
+                Some("builtins.list")
+            );
+            assert_eq!(
+                checker.class_from_annotation("builtins.str").as_deref(),
+                Some("builtins.str")
+            );
+
+            checker.define("Alias", "pkg.Real".to_string());
+            assert_eq!(
+                checker.class_from_annotation("Alias.Inner").as_deref(),
+                Some("pkg.Real.Inner")
+            );
+
+            checker.define_module("mod", "pkg.mod".to_string());
+            assert_eq!(
+                checker.class_from_annotation("mod.Type").as_deref(),
+                Some("pkg.mod.Type")
+            );
+            assert_eq!(
+                checker.class_from_annotation("external.Type").as_deref(),
+                Some("external.Type")
+            );
+
+            checker.define("Local", "pkg.Local".to_string());
+            assert_eq!(
+                checker.class_from_annotation("'Local'").as_deref(),
+                Some("pkg.Local")
+            );
+            assert_eq!(
+                checker.class_from_annotation("Missing").as_deref(),
+                Some("test.Missing")
+            );
+        });
+    }
+
+    #[test]
+    fn opaque_receiver_fix_boundary_covers_call_shapes_and_annotations() {
+        with_empty_checker(false, |checker| {
+            with_call_func("f(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+            with_call_func("factory().m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker.mark_param_opaque("receiver");
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker
+                .current_scope()
+                .annotations
+                .insert("receiver".to_string(), "list".to_string());
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker
+                .current_scope()
+                .annotations
+                .insert("receiver".to_string(), "Renderer".to_string());
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(checker.call_uses_opaque_receiver_boundary(func));
+            });
+        });
+    }
+
+    #[test]
     fn if_branch_dispatcher_visits_every_traversal_mode() {
         let index = DefinitionIndex::for_test();
         let config = Config::default();
