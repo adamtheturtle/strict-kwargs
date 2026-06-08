@@ -269,20 +269,6 @@ impl TyResolver {
         }
     }
 
-    /// Open a set of files without waiting for diagnostics. This gives ty the
-    /// same project visibility as full warm-up while allowing callers to wait
-    /// only for files that need fallback queries.
-    pub fn open_files(&mut self, files: &[PathBuf]) {
-        for path in files {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            if self.ensure_open(path, &text).is_none() {
-                return;
-            }
-        }
-    }
-
     /// Fire a positional request (`textDocument/hover` or `.../definition`)
     /// without waiting, returning its id for a later [`Self::take`]. This is
     /// what enables pipelining: send all, then collect all.
@@ -1424,32 +1410,6 @@ mod tests {
                 "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration"
             }));
             assert!(!r.pending.contains_key(&9));
-        }
-
-        #[test]
-        fn open_files_then_wait_until_diagnosed_tracks_analysis() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let a = dir.path().join("a.py");
-            let b = dir.path().join("b.py");
-            std::fs::write(&a, "x = 1\n").expect("write a");
-            std::fs::write(&b, "y = 2\n").expect("write b");
-
-            let (child, stdin) = alive_child();
-            let (tx, rx) = std::sync::mpsc::channel::<Value>();
-
-            let mut r = TyResolver::from_parts(child, stdin, rx);
-            r.open_files(&[a.clone(), b.clone()]);
-            assert!(r.opened.contains(&a) && r.opened.contains(&b));
-
-            tx.send(json!({
-                "jsonrpc": "2.0",
-                "method": "textDocument/publishDiagnostics",
-                "params": { "uri": path_to_uri(&a) }
-            }))
-            .unwrap();
-            r.wait_until_diagnosed(&a, Duration::from_secs(1));
-            assert!(r.diagnosed.contains(&path_to_uri(&a)));
-            assert!(!r.diagnosed.contains(&path_to_uri(&b)));
         }
     }
 }

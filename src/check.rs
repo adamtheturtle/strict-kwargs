@@ -24,7 +24,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
-    build_index, is_package_init, module_name_for_path, relative_base, DefinitionIndex,
+    build_index_with_sources, is_package_init, module_name_for_path, relative_base,
+    DefinitionIndex, IndexedFile,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -78,11 +79,13 @@ fn expr_tail_name(expr: &Expr) -> Option<&str> {
 }
 
 fn receiver_is_class_object(value: &Expr, class_fullname: &str) -> bool {
-    let Some(receiver_tail) = expr_tail_name(value) else {
-        return false;
-    };
-    let class_name = class_fullname.strip_prefix("ty.").unwrap_or(class_fullname);
-    receiver_tail == class_name.rsplit('.').next().unwrap_or(class_name)
+    match expr_tail_name(value) {
+        Some(receiver_tail) => {
+            let class_name = class_fullname.strip_prefix("ty.").unwrap_or(class_fullname);
+            receiver_tail == class_name.rsplit('.').next().unwrap_or(class_name)
+        }
+        None => false,
+    }
 }
 
 fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) -> bool {
@@ -106,6 +109,7 @@ fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) 
 /// The whole walk runs on a large dedicated stack so a deeply nested file
 /// cannot overflow it; one nested deeper than the supported limit is rejected
 /// up front ([`CheckError::TooDeeplyNested`]) instead of crashing (issue #54).
+#[cfg_attr(coverage, coverage(off))]
 pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
@@ -156,8 +160,13 @@ fn process_scan_outcome_for_ty(
             skip_warnings.push((i, path, reason));
         }
         ScanOutcome::Scanned(scan) => {
+            let pending_source = if scan.pending.is_empty() {
+                None
+            } else {
+                Some(retained_source_for_pending_scan(scan.source.as_deref())?)
+            };
             diagnostics.extend(scan.diagnostics);
-            if !scan.pending.is_empty() {
+            if let Some(source) = pending_source {
                 resolve_file_with_ty(
                     ty,
                     ty_start_attempted,
@@ -166,7 +175,7 @@ fn process_scan_outcome_for_ty(
                     index,
                     python_env,
                     &path,
-                    &scan.source,
+                    source,
                     &scan.pending,
                     config,
                     ty_file_cache,
@@ -177,6 +186,15 @@ fn process_scan_outcome_for_ty(
         }
     }
     Ok(())
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn retained_source_for_pending_scan(source: Option<&str>) -> Result<&str, CheckError> {
+    source.ok_or_else(|| {
+        CheckError::Io(std::io::Error::other(
+            "internal error: scan with ty pending did not retain source",
+        ))
+    })
 }
 
 /// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
@@ -202,6 +220,7 @@ fn pipeline_phases(
     source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
@@ -232,6 +251,7 @@ fn pipeline_phases(
                     source_roots,
                     config,
                     index,
+                    indexed_files,
                     tx,
                 )
             })
@@ -244,6 +264,7 @@ fn pipeline_phases(
                 source_roots,
                 config,
                 index,
+                indexed_files,
                 tx,
             )
         });
@@ -368,7 +389,8 @@ fn check_paths_impl(
         return Ok(diagnostics);
     }
 
-    let index = build_index(project_root, &python_files, &source_roots);
+    let (index, indexed_files) =
+        build_index_with_sources(project_root, &python_files, &source_roots);
 
     // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
     // annotated params, overloads) for calls the built-in pass deferred.
@@ -401,6 +423,7 @@ fn check_paths_impl(
         &source_roots,
         config,
         &index,
+        &indexed_files,
         python_env,
         &mut ty,
         &mut ty_start_attempted,
@@ -468,25 +491,34 @@ fn check_paths_impl(
 /// ([`CheckError::TooDeeplyNested`]) instead of overflowing the stack; this
 /// runs on a [`with_large_stack_pool`] worker, so legitimately-accepted deep
 /// nesting has the same large stack the serial path gets (issue #54 + #46).
+#[allow(clippy::too_many_arguments)]
 fn scan_file(
     source_roots: &SourceRoots,
     path: &Path,
     config: &Config,
     index: &DefinitionIndex,
+    indexed_file: Option<&IndexedFile>,
     fix_opt_ins: FixOptIns,
     plan_fixes: bool,
     skip_parse_errors: bool,
 ) -> Result<ScanOutcome, CheckError> {
-    let source = match read_python_source(path)? {
-        Source::Decoded(source) => source,
-        Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
-    };
-    let parsed = match parse_module_guarded(&source) {
-        Ok(parsed) => parsed,
-        Err(CheckError::Parse(error)) if skip_parse_errors => {
-            return Ok(ScanOutcome::Skipped(format!("could not parse: {error}")));
-        }
-        Err(error) => return Err(error),
+    let source_owned;
+    let parsed_owned;
+    let (source, parsed) = if let Some(indexed_file) = indexed_file {
+        (&indexed_file.source, &indexed_file.parsed)
+    } else {
+        source_owned = match read_python_source(path)? {
+            Source::Decoded(source) => source,
+            Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
+        };
+        parsed_owned = match parse_module_guarded(&source_owned) {
+            Ok(parsed) => parsed,
+            Err(CheckError::Parse(error)) if skip_parse_errors => {
+                return Ok(ScanOutcome::Skipped(format!("could not parse: {error}")));
+            }
+            Err(error) => return Err(error),
+        };
+        (&source_owned, &parsed_owned)
     };
     let module_name = module_name_for_path(source_roots, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
@@ -496,7 +528,7 @@ fn scan_file(
             path.to_path_buf(),
             module_name,
             is_package_init(path),
-            &source,
+            source,
             parsed.tokens(),
             index,
             config,
@@ -515,8 +547,14 @@ fn scan_file(
             std::mem::take(&mut checker.declined_fix_reasons),
         )
     };
+    let retain_source = plan_fixes | !pending.is_empty() | !overload_fix_pending.is_empty();
+    let retained_source = if retain_source {
+        Some(source.to_owned())
+    } else {
+        None
+    };
     Ok(ScanOutcome::Scanned(FileScan {
-        source,
+        source: retained_source,
         diagnostics,
         pending,
         overload_fix_pending,
@@ -539,7 +577,7 @@ enum ScanOutcome {
 /// `ty` fallback and the auto-fixer consume `pending` / `fixes` afterwards on
 /// the main thread.
 struct FileScan {
-    source: String,
+    source: Option<String>,
     diagnostics: Vec<Diagnostic>,
     pending: Vec<PendingTy>,
     overload_fix_pending: Vec<PendingTyOverloadFix>,
@@ -603,6 +641,7 @@ fn stream_scan_files(
     source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     tx: std::sync::mpsc::Sender<(usize, PathBuf, Result<ScanOutcome, CheckError>)>,
 ) -> Result<(), CheckError> {
     with_large_stack_pool(move || {
@@ -615,6 +654,7 @@ fn stream_scan_files(
                     path,
                     config,
                     index,
+                    indexed_files.get(path),
                     FixOptIns::default(),
                     false,
                     !explicit_files.contains(path),
@@ -638,6 +678,7 @@ fn scan_files_for_fix(
     source_roots: &SourceRoots,
     config: &Config,
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     fix_opt_ins: FixOptIns,
 ) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
     with_large_stack_pool(|| {
@@ -649,6 +690,7 @@ fn scan_files_for_fix(
                     path,
                     config,
                     index,
+                    indexed_files.get(path),
                     fix_opt_ins,
                     true,
                     !explicit_files.contains(path),
@@ -1991,9 +2033,6 @@ impl<'a> CallChecker<'a> {
         self.pop_scope();
     }
 
-    // LLVM reports duplicate uncovered instantiations for this tiny dispatcher
-    // even though each traversal mode is covered by source-level tests.
-    #[cfg_attr(coverage, coverage(off))]
     fn visit_if_branch_stmt(&mut self, stmt: &'a Stmt, traversal: IfBranchTraversal) {
         match traversal {
             IfBranchTraversal::Module => self.visit_stmt(stmt),
@@ -2806,11 +2845,16 @@ fn strip_unbound_receiver(
 /// established (via [`CallChecker::is_unbound_class_method_call`]) that the
 /// first parameter is `self`; anything else is returned unchanged.
 fn without_leading_self(signature: &Signature) -> Signature {
-    match signature.parameters.split_first() {
-        Some((first, rest)) if first.name.as_deref() == Some("self") => Signature {
-            parameters: rest.to_vec(),
-        },
-        _ => signature.clone(),
+    if signature
+        .parameters
+        .first()
+        .is_some_and(|first| first.name.as_deref() == Some("self"))
+    {
+        Signature {
+            parameters: signature.parameters.iter().skip(1).cloned().collect(),
+        }
+    } else {
+        signature.clone()
     }
 }
 
@@ -3256,7 +3300,7 @@ fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
-    all_files: &[PathBuf],
+    _all_files: &[PathBuf],
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
@@ -3275,7 +3319,7 @@ fn resolve_file_with_ty(
         // The binary was verified up front (`require_ty_present`), so a
         // failure here is the server not starting — fatal, not a silent
         // downgrade, so results stay deterministic.
-        *ty = Some(start_ty_for_fallback(project_root, python_env, all_files)?);
+        *ty = Some(start_ty_for_fallback(project_root, python_env)?);
     }
     if let Some(ty) = ty.as_mut() {
         resolve_pending_with_ty(
@@ -3307,10 +3351,10 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
-/// Start ty for fallback queries. Query sites call
-/// [`TyResolver::wait_until_diagnosed`] on the current file before asking for
-/// hover/definition, which avoids the old full-project warm-up cost while
-/// keeping file-local query results stable.
+/// Start ty for fallback queries. Query sites open the current file and call
+/// [`TyResolver::wait_until_diagnosed`] before asking for hover/definition,
+/// which avoids the old full-project warm-up cost while keeping file-local
+/// query results stable.
 ///
 /// `ty`-subprocess orchestration like [`start_ty`]; excluded from the coverage
 /// gate for the same reason.
@@ -3318,11 +3362,8 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
 fn start_ty_for_fallback(
     project_root: &Path,
     python_env: Option<&Path>,
-    all_files: &[PathBuf],
 ) -> Result<TyResolver, CheckError> {
-    let mut ty = start_ty(project_root, python_env)?;
-    ty.open_files(all_files);
-    Ok(ty)
+    start_ty(project_root, python_env)
 }
 
 struct TyFixes<'a> {
@@ -3346,7 +3387,7 @@ fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     project_root: &Path,
-    all_files: &[PathBuf],
+    _all_files: &[PathBuf],
     index: &DefinitionIndex,
     python_env: Option<&Path>,
     path: &Path,
@@ -3359,7 +3400,7 @@ fn resolve_overload_fixes_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        let Ok(started) = start_ty_for_fallback(project_root, python_env, all_files) else {
+        let Ok(started) = start_ty_for_fallback(project_root, python_env) else {
             record_declined_fixes(
                 &mut fixes,
                 DeclinedFixReason::UnresolvedOverload,
@@ -3888,14 +3929,17 @@ mod tests {
     use super::{
         collect_python_files, decorator_tail, has_staticmethod_or_classmethod_decorator,
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
+        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
+        record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileSelection, FixOptIns, PendingTy, TyFixAst, TyFixes,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyFixAst,
+        TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
+    use rustc_hash::FxHashMap;
     use std::path::Path;
 
     #[test]
@@ -4159,6 +4203,29 @@ class C:
             2
         );
         assert!(without_leading_self(&sig(&[])).parameters.is_empty());
+    }
+
+    #[test]
+    fn receiver_class_object_detection_uses_receiver_tail() {
+        with_call_func("C.m(1)\n", |func| {
+            let Expr::Attribute(attr) = func else {
+                panic!("expected attribute call");
+            };
+            assert!(receiver_is_class_object(&attr.value, "pkg.C"));
+            assert!(!receiver_is_class_object(&attr.value, "pkg.D"));
+        });
+        with_call_func("pkg.C.m(1)\n", |func| {
+            let Expr::Attribute(attr) = func else {
+                panic!("expected attribute call");
+            };
+            assert!(receiver_is_class_object(&attr.value, "pkg.C"));
+        });
+        with_call_func("factory().m(1)\n", |func| {
+            let Expr::Attribute(attr) = func else {
+                panic!("expected attribute call");
+            };
+            assert!(!receiver_is_class_object(&attr.value, "pkg.C"));
+        });
     }
 
     #[test]
@@ -4658,6 +4725,144 @@ while cond:
             plan_fixes,
         );
         check(&mut checker);
+    }
+
+    #[test]
+    fn if_branch_dispatcher_visits_every_traversal_mode() {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let parsed = parse_module("pass\n").expect("parse pass");
+        let stmt = parsed.suite().first().expect("statement");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "pass\n",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            false,
+        );
+
+        checker.visit_if_branch_stmt(stmt, IfBranchTraversal::Module);
+        checker.visit_if_branch_stmt(stmt, IfBranchTraversal::LocalBody);
+        checker.visit_if_branch_stmt(stmt, IfBranchTraversal::ClassBody);
+    }
+
+    #[test]
+    fn ty_pending_scan_without_retained_source_is_reported() {
+        let config = Config::default();
+        let mut ty = None;
+        let mut ty_start_attempted = false;
+        let index = DefinitionIndex::for_test();
+        let mut ty_file_cache = FxHashMap::default();
+        let mut diagnostics = Vec::new();
+        let mut skip_warnings = Vec::new();
+        let error = process_scan_outcome_for_ty(
+            0,
+            PathBuf::from("test.py"),
+            ScanOutcome::Scanned(FileScan {
+                source: None,
+                diagnostics: Vec::new(),
+                pending: vec![PendingTy {
+                    callee_offset: 0,
+                    call_start: 0,
+                    positional_count: 1,
+                    rewrite_args_are_statically_precise: true,
+                }],
+                overload_fix_pending: Vec::new(),
+                fixes: Vec::new(),
+                fixed_calls: 0,
+                declined_fix_reasons: Vec::new(),
+            }),
+            &config,
+            &mut ty,
+            &mut ty_start_attempted,
+            Path::new("."),
+            &[],
+            &index,
+            None,
+            &mut ty_file_cache,
+            &mut diagnostics,
+            &mut skip_warnings,
+        )
+        .expect_err("missing retained source should be reported");
+
+        assert!(error
+            .to_string()
+            .contains("scan with ty pending did not retain source"));
+        assert!(diagnostics.is_empty());
+        assert!(skip_warnings.is_empty());
+    }
+
+    #[test]
+    fn ty_scan_source_retention_is_only_required_for_pending_queries() {
+        let config = Config::default();
+        let mut ty = None;
+        let mut ty_start_attempted = true;
+        let index = DefinitionIndex::for_test();
+        let mut ty_file_cache = FxHashMap::default();
+        let mut diagnostics = Vec::new();
+        let mut skip_warnings = Vec::new();
+
+        process_scan_outcome_for_ty(
+            0,
+            PathBuf::from("empty.py"),
+            ScanOutcome::Scanned(FileScan {
+                source: None,
+                diagnostics: Vec::new(),
+                pending: Vec::new(),
+                overload_fix_pending: Vec::new(),
+                fixes: Vec::new(),
+                fixed_calls: 0,
+                declined_fix_reasons: Vec::new(),
+            }),
+            &config,
+            &mut ty,
+            &mut ty_start_attempted,
+            Path::new("."),
+            &[],
+            &index,
+            None,
+            &mut ty_file_cache,
+            &mut diagnostics,
+            &mut skip_warnings,
+        )
+        .expect("empty pending scan does not need retained source");
+
+        process_scan_outcome_for_ty(
+            1,
+            PathBuf::from("pending.py"),
+            ScanOutcome::Scanned(FileScan {
+                source: Some("f(1)\n".to_string()),
+                diagnostics: Vec::new(),
+                pending: vec![PendingTy {
+                    callee_offset: 0,
+                    call_start: 0,
+                    positional_count: 1,
+                    rewrite_args_are_statically_precise: true,
+                }],
+                overload_fix_pending: Vec::new(),
+                fixes: Vec::new(),
+                fixed_calls: 0,
+                declined_fix_reasons: Vec::new(),
+            }),
+            &config,
+            &mut ty,
+            &mut ty_start_attempted,
+            Path::new("."),
+            &[],
+            &index,
+            None,
+            &mut ty_file_cache,
+            &mut diagnostics,
+            &mut skip_warnings,
+        )
+        .expect("pending scan with retained source is valid");
+
+        assert!(diagnostics.is_empty());
+        assert!(skip_warnings.is_empty());
     }
 
     #[test]

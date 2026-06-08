@@ -3,17 +3,18 @@
 ## Completeness
 
 The ignored completeness test in `tests/completeness.rs` stores its expected
-diagnostics as an `insta` snapshot:
+diagnostics as platform-specific `insta` snapshots:
 
 ```text
-tests/snapshots/completeness__pinned_repository_diagnostics.snap
+tests/snapshots/completeness__pinned_repository_diagnostics.snap        # Linux
+tests/snapshots/completeness__pinned_repository_diagnostics_macos.snap  # macOS
 ```
 
-The snapshot is a canonicalized TSV-style required diagnostic list. Every
-diagnostic in the snapshot must be observed on every run; there is no
-allowed-extra baseline. Extra diagnostics are not documented separately because
-the pinned-repository oracle still has platform- and environment-specific
-resolver drift.
+Each snapshot is a canonicalized TSV-style required diagnostic list. Every
+diagnostic in the current platform's snapshot must be observed on every run;
+there is no allowed-extra baseline. Extra diagnostics are not documented
+separately because the pinned-repository oracle still has platform- and
+environment-specific resolver drift.
 
 The current pinned repository is:
 
@@ -33,14 +34,10 @@ with that repository installed editable into a temporary virtual environment.
 It runs the checker through a temporary `ty==0.0.44` wrapper so the oracle does
 not drift when a newer `ty` release changes hover display details. The script
 sets `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and
-`INSTA_UPDATE=always` to refresh the committed snapshot directly. The virtual
-environment is installed with
+`INSTA_UPDATE=always` to refresh the committed snapshot for the current
+platform directly. The virtual environment is installed with
 `tests/golden/completeness-requirements-constraints.txt` so the oracle does not
 drift when transitive dependencies change their public type surface.
-Regeneration also subtracts
-`tests/golden/completeness-unstable-diagnostics.txt`, which lists diagnostics
-that can appear locally but were not stable across repeated Linux CI oracle
-runs.
 
 To reuse an existing checkout, set
 `STRICT_KWARGS_COMPLETENESS_CHECKOUT=/path/to/checkout`; it must be at the
@@ -51,16 +48,15 @@ creates a venv with Python `3.13`, matching scheduled CI; set
 intentionally refresh the third-party dependency surface, update
 `tests/golden/completeness-requirements-constraints.txt` and regenerate the
 oracle in the same change. To intentionally re-admit or remove
-platform-sensitive diagnostics, update
-`tests/golden/completeness-unstable-diagnostics.txt` and regenerate the oracle
-in the same change. To change the number of runs, set
+platform-sensitive diagnostics, regenerate the affected platform snapshot in
+the same change. To change the number of runs, set
 `STRICT_KWARGS_COMPLETENESS_RUNS`. To intentionally update the pinned `ty`
 version, set `STRICT_KWARGS_COMPLETENESS_TY_VERSION` while regenerating and
 update the version documented here and in `tests/completeness.rs`.
 
 To intentionally swap the pinned repository, update the repository defaults in
 `tests/completeness.rs`, CI, this README, the dependency constraints, the
-unstable-diagnostic list, and the regenerated snapshot together.
+platform snapshots together.
 
 Review regenerated diffs as an oracle change, not as a blind snapshot update:
 
