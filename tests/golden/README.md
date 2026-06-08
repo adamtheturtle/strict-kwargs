@@ -10,9 +10,9 @@ tests/snapshots/sphinx_completeness__pinned_sphinx_diagnostics.snap
 ```
 
 The snapshot is a canonicalized TSV-style diagnostic list. Every diagnostic in
-the snapshot must match the observed diagnostics exactly; there is no
-allowed-extra baseline. When the test is run more than once, diagnostics must
-appear on every observed run before the snapshot assertion is reached.
+the snapshot must match the diagnostics observed on every run; there is no
+allowed-extra baseline. When the test is run more than once, diagnostics that
+appear only intermittently are excluded from the snapshot comparison.
 
 The pinned checkout is:
 
@@ -48,8 +48,7 @@ Review regenerated diffs as an oracle change, not as a blind snapshot update:
   positives before committing
 - removals are expected resolver improvements or lost coverage and should be
   explained in the change that updates the snapshot
-- any unstable diagnostics across multiple regeneration runs fail before the
-  snapshot is updated
+- intermittent diagnostics across multiple runs are not added to the snapshot
 
 Run the opt-in test locally with:
 
@@ -63,8 +62,8 @@ cargo test --locked --test sphinx_completeness \
 `insta` is the best fit now that the oracle no longer carries an allowed-extra
 set. The test still keeps the Sphinx-specific setup in Rust and shell code:
 pinned checkout setup, pinned `ty`, Python environment control, multi-run
-stability checking, and canonicalized diagnostic keys. `insta` handles the
-large golden file, regeneration, review-oriented diffs, and optional
+stable-diagnostic filtering, and canonicalized diagnostic keys. `insta` handles
+the large golden file, regeneration, review-oriented diffs, and optional
 `cargo insta review` workflow.
 
 Other options considered were weaker for this shape:

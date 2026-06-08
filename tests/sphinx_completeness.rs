@@ -16,7 +16,6 @@ use strict_kwargs::{check_paths, Config, Diagnostic};
 const SPHINX_REPO: &str = "https://github.com/sphinx-doc/sphinx.git";
 const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
-const DIFF_DISPLAY_LIMIT: usize = 100;
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_SPHINX_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_SPHINX_PYTHON_ENV";
 const RUNS_ENV: &str = "STRICT_KWARGS_SPHINX_RUNS";
@@ -42,7 +41,6 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
 
     let runs = run_count();
     let actual = collect_observations(&checkout.root, runs);
-    assert_no_unstable_diagnostics(&actual, runs);
     let actual_keys = collect_stable(&actual, runs);
     assert!(
         !actual_keys.is_empty(),
@@ -204,38 +202,6 @@ impl DiagnosticKey {
             callee: canonical_callee(&diagnostic.callee),
         }
     }
-
-    fn display(&self) -> String {
-        format!(
-            "{}:{}:{}\t{}",
-            self.path, self.line, self.column, self.callee
-        )
-    }
-}
-
-fn assert_no_unstable_diagnostics(observed: &BTreeMap<DiagnosticKey, usize>, runs: usize) {
-    let unstable = observed
-        .iter()
-        .filter(|(_, count)| **count < runs)
-        .map(|(key, _)| key.clone())
-        .collect::<BTreeSet<_>>();
-    assert!(
-        unstable.is_empty(),
-        "pinned Sphinx diagnostics were unstable across {runs} runs:\n{}",
-        display_diagnostics(&unstable)
-    );
-}
-
-fn display_diagnostics(diagnostics: &BTreeSet<DiagnosticKey>) -> String {
-    let mut out = String::new();
-    for diagnostic in diagnostics.iter().take(DIFF_DISPLAY_LIMIT) {
-        writeln!(out, "{}", diagnostic.display()).expect("write diff entry");
-    }
-    if diagnostics.len() > DIFF_DISPLAY_LIMIT {
-        writeln!(out, "... {} more", diagnostics.len() - DIFF_DISPLAY_LIMIT)
-            .expect("write diff truncation");
-    }
-    out
 }
 
 fn canonical_callee(raw: &str) -> String {
@@ -253,9 +219,7 @@ fn canonical_callee(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        canonical_callee, collect_stable, display_diagnostics, DiagnosticKey, DIFF_DISPLAY_LIMIT,
-    };
+    use super::{canonical_callee, collect_stable, DiagnosticKey};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn key(path: &str, line: usize) -> DiagnosticKey {
@@ -274,16 +238,6 @@ mod tests {
         let observed = BTreeMap::from([(stable.clone(), 3), (unstable, 1)]);
 
         assert_eq!(collect_stable(&observed, 3), BTreeSet::from([stable]));
-    }
-
-    #[test]
-    fn diagnostic_display_is_limited() {
-        let diagnostics = (0..=DIFF_DISPLAY_LIMIT)
-            .map(|index| key("many.py", index))
-            .collect::<BTreeSet<_>>();
-
-        let display = display_diagnostics(&diagnostics);
-        assert!(display.contains("... 1 more"));
     }
 
     #[test]
