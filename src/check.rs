@@ -4506,6 +4506,17 @@ while cond:
     }
 
     #[test]
+    fn zero_positional_calls_return_before_resolution_or_ty_fallback() {
+        with_empty_checker(false, |checker| {
+            with_call("missing()\n", |call| {
+                checker.check_call(call);
+            });
+            assert!(checker.diagnostics.is_empty());
+            assert!(checker.ty_pending.is_empty());
+        });
+    }
+
+    #[test]
     fn method_self_binding_resolves_inherited_self_calls_without_ty_fallback() {
         let source = "\
 class Base:
