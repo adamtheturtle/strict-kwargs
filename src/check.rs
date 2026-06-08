@@ -1118,6 +1118,44 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn class_from_annotation(&self, annotation: &str) -> Option<String> {
+        let annotation = annotation.trim().trim_matches(['"', '\'']);
+        if annotation.is_empty()
+            || annotation.contains('|')
+            || matches!(
+                annotation,
+                "Any" | "typing.Any" | "object" | "builtins.object" | "Unknown"
+            )
+        {
+            return None;
+        }
+        let class_name = annotation
+            .split_once('[')
+            .map_or(annotation, |(head, _)| head);
+        let class_name = class_name.strip_prefix("builtins.").unwrap_or(class_name);
+        if annotation_is_builtin_receiver_type(class_name) {
+            return Some(format!("builtins.{class_name}"));
+        }
+
+        Some(if let Some((head, rest)) = class_name.split_once('.') {
+            if let Some(local) = self.resolve_local(head) {
+                format!("{local}.{rest}")
+            } else if let Some(module_path) = self.resolve_module(head) {
+                format!("{module_path}.{rest}")
+            } else {
+                class_name.to_string()
+            }
+        } else {
+            self.resolve_local(class_name)
+                .unwrap_or_else(|| format!("{}.{}", self.module_name, class_name))
+        })
+    }
+
+    fn class_from_name_annotation(&self, name: &str) -> Option<String> {
+        self.resolve_annotation(name)
+            .and_then(|annotation| self.class_from_annotation(annotation))
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -1421,7 +1459,9 @@ impl<'a> CallChecker<'a> {
             return true;
         }
         if let Expr::Name(base) = &**value {
-            return self.binding_is_instance(base.id.as_str());
+            let base_name = base.id.as_str();
+            return self.binding_is_instance(base_name)
+                || self.class_from_name_annotation(base_name).is_some();
         }
         false
     }
@@ -1682,6 +1722,11 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
+        if self.call_uses_opaque_receiver_boundary(&call.func) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         if self.call_may_dispatch_to_override_with_different_parameter_names(
             &call.func,
             callee_fullname,
@@ -1771,6 +1816,16 @@ impl<'a> CallChecker<'a> {
 
     fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
         matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+    }
+
+    fn call_uses_opaque_receiver_boundary(&self, func: &Expr) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+            return false;
+        };
+        let Expr::Name(name) = &**value else {
+            return false;
+        };
+        !self.opaque_attribute_receiver_is_safe_for_fix(name.id.as_str())
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -2013,10 +2068,17 @@ impl<'a> CallChecker<'a> {
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
                     if self.is_opaque_local(base_name) {
-                        return None;
+                        return self
+                            .class_from_name_annotation(base_name)
+                            .map(|class_fullname| {
+                                self.resolve_instance_method(&class_fullname, attr_name)
+                            });
                     }
                     // Local bindings (incl. a locally redefined class) take
                     // precedence over a stale ``import`` module binding.
+                    if let Some(class_fullname) = self.class_from_name_annotation(base_name) {
+                        return Some(self.resolve_instance_method(&class_fullname, attr_name));
+                    }
                     let candidate = if let Some(local) = self.resolve_local(base_name) {
                         format!("{local}.{attr_name}")
                     } else if let Some(module_path) = self.resolve_module(base_name) {
@@ -2259,6 +2321,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
@@ -2267,6 +2330,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.value_is_bound_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias {
@@ -2274,6 +2338,18 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => {
+                walk_stmt(self, stmt);
+                if let Expr::Name(name) = &**target {
+                    self.mark_opaque_local(name.id.as_str());
+                    self.define_annotation(name.id.as_str(), annotation);
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
@@ -5064,6 +5140,44 @@ class C:
 ";
         let mut index = DefinitionIndex::for_test();
         index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn annotated_parameter_receiver_resolves_without_ty_fallback() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+def check(value: C) -> None:
+    value.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+        index.insert("main.C.__init__".to_string(), sig(&["self"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn annotated_assignment_receiver_resolves_without_ty_fallback() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+value: C
+value.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+        index.insert("main.C.__init__".to_string(), sig(&["self"]));
 
         let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
 
