@@ -39,6 +39,7 @@ if [ -z "${STRICT_KWARGS_SPHINX_PYTHON_ENV:-}" ]; then
 fi
 
 export STRICT_KWARGS_SPHINX_RUNS="${STRICT_KWARGS_SPHINX_RUNS:-3}"
+export STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1
 export INSTA_UPDATE=always
 
 cargo test --locked --test sphinx_completeness \

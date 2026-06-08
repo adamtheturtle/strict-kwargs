@@ -9,10 +9,10 @@ its expected diagnostics as an `insta` snapshot:
 tests/snapshots/sphinx_completeness__pinned_sphinx_diagnostics.snap
 ```
 
-The snapshot is a canonicalized TSV-style diagnostic list. Every diagnostic in
-the snapshot must match the diagnostics observed on every run; there is no
-allowed-extra baseline. When the test is run more than once, diagnostics that
-appear only intermittently are excluded from the snapshot comparison.
+The snapshot is a canonicalized TSV-style required diagnostic list. Every
+diagnostic in the snapshot must be observed on every run; there is no
+allowed-extra baseline. Extra diagnostics are not documented separately because
+the Sphinx oracle still has platform- and environment-specific resolver drift.
 
 The pinned checkout is:
 
@@ -30,7 +30,8 @@ By default the script runs strict-kwargs over the pinned checkout three times,
 with Sphinx installed editable into a temporary virtual environment. It runs
 the checker through a temporary `ty==0.0.44` wrapper so the oracle does not
 drift when a newer `ty` release changes hover display details. The script sets
-`INSTA_UPDATE=always` and refreshes the committed snapshot directly.
+`STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN=1` and `INSTA_UPDATE=always` to
+refresh the committed snapshot directly.
 
 To reuse an existing checkout, set
 `STRICT_KWARGS_SPHINX_CHECKOUT=/path/to/sphinx`; it must be at the pinned ref
@@ -48,7 +49,8 @@ Review regenerated diffs as an oracle change, not as a blind snapshot update:
   positives before committing
 - removals are expected resolver improvements or lost coverage and should be
   explained in the change that updates the snapshot
-- intermittent diagnostics across multiple runs are not added to the snapshot
+- local-only or platform-specific diagnostics should not be added unless they
+  are stable in CI too
 
 Run the opt-in test locally with:
 
@@ -62,9 +64,9 @@ cargo test --locked --test sphinx_completeness \
 `insta` is the best fit now that the oracle no longer carries an allowed-extra
 set. The test still keeps the Sphinx-specific setup in Rust and shell code:
 pinned checkout setup, pinned `ty`, Python environment control, multi-run
-stable-diagnostic filtering, and canonicalized diagnostic keys. `insta` handles
-the large golden file, regeneration, review-oriented diffs, and optional
-`cargo insta review` workflow.
+stable-diagnostic filtering, required-baseline checking, and canonicalized
+diagnostic keys. `insta` handles the large golden file, regeneration,
+review-oriented diffs, and optional `cargo insta review` workflow.
 
 Other options considered were weaker for this shape:
 

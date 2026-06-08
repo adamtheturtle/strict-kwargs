@@ -16,6 +16,9 @@ use strict_kwargs::{check_paths, Config, Diagnostic};
 const SPHINX_REPO: &str = "https://github.com/sphinx-doc/sphinx.git";
 const SPHINX_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
+const SNAPSHOT_RELATIVE_PATH: &str =
+    "tests/snapshots/sphinx_completeness__pinned_sphinx_diagnostics.snap";
+const REGENERATE_ENV: &str = "STRICT_KWARGS_REGENERATE_SPHINX_GOLDEN";
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_SPHINX_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_SPHINX_PYTHON_ENV";
 const RUNS_ENV: &str = "STRICT_KWARGS_SPHINX_RUNS";
@@ -47,7 +50,21 @@ fn pinned_sphinx_diagnostics_match_golden_oracle() {
         "pinned Sphinx diagnostics snapshot must not be empty"
     );
 
-    assert_snapshot!("pinned_sphinx_diagnostics", format_snapshot(&actual_keys));
+    if std::env::var_os(REGENERATE_ENV).is_some() {
+        assert_snapshot!("pinned_sphinx_diagnostics", format_snapshot(&actual_keys));
+        return;
+    }
+
+    let expected = read_snapshot_diagnostics(snapshot_path());
+    let missing = expected
+        .difference(&actual_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        missing.is_empty(),
+        "pinned Sphinx diagnostics are missing required snapshot entries:\n{}",
+        format_diagnostic_set("", &missing)
+    );
 }
 
 fn pinned_sphinx_checkout() -> SphinxCheckout {
@@ -163,6 +180,22 @@ fn collect_diagnostics(root: &Path) -> BTreeSet<DiagnosticKey> {
         .collect()
 }
 
+fn snapshot_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(SNAPSHOT_RELATIVE_PATH)
+}
+
+fn read_snapshot_diagnostics(path: PathBuf) -> BTreeSet<DiagnosticKey> {
+    let raw = std::fs::read_to_string(path).expect("read Sphinx diagnostic snapshot");
+    raw.lines()
+        .skip_while(|line| *line != "---")
+        .skip(1)
+        .skip_while(|line| *line != "---")
+        .skip(1)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(DiagnosticKey::parse)
+        .collect()
+}
+
 fn format_snapshot(baseline: &BTreeSet<DiagnosticKey>) -> String {
     format_diagnostic_set(
         &format!(
@@ -200,6 +233,24 @@ impl DiagnosticKey {
             line: diagnostic.line,
             column: diagnostic.column,
             callee: canonical_callee(&diagnostic.callee),
+        }
+    }
+
+    fn parse(line: &str) -> Self {
+        let mut parts = line.splitn(4, '\t');
+        Self {
+            path: parts.next().expect("snapshot path").to_owned(),
+            line: parts
+                .next()
+                .expect("snapshot line")
+                .parse()
+                .expect("snapshot line is a usize"),
+            column: parts
+                .next()
+                .expect("snapshot column")
+                .parse()
+                .expect("snapshot column is a usize"),
+            callee: canonical_callee(parts.next().expect("snapshot callee")),
         }
     }
 }
