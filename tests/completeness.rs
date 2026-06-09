@@ -13,14 +13,15 @@ use std::process::Command;
 use insta::assert_snapshot;
 use strict_kwargs::{check_paths, Config, Diagnostic};
 
-const DEFAULT_REPOSITORY_NAME: &str = "sphinx";
-const DEFAULT_REPOSITORY_URL: &str = "https://github.com/sphinx-doc/sphinx.git";
-const DEFAULT_REPOSITORY_REF: &str = "cc7c6f435ad37bb12264f8118c8461b230e6830c";
 const TY_VERSION: &str = "0.0.44";
-const LINUX_SNAPSHOT_RELATIVE_PATH: &str =
+const SPHINX_LINUX_SNAPSHOT_RELATIVE_PATH: &str =
     "tests/snapshots/completeness__pinned_repository_diagnostics.snap";
-const MACOS_SNAPSHOT_RELATIVE_PATH: &str =
+const SPHINX_MACOS_SNAPSHOT_RELATIVE_PATH: &str =
     "tests/snapshots/completeness__pinned_repository_diagnostics_macos.snap";
+const CPYTHON_LINUX_SNAPSHOT_RELATIVE_PATH: &str =
+    "tests/snapshots/completeness__cpython_repository_diagnostics.snap";
+const CPYTHON_MACOS_SNAPSHOT_RELATIVE_PATH: &str =
+    "tests/snapshots/completeness__cpython_repository_diagnostics_macos.snap";
 const REGENERATE_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN";
 const CHECKOUT_ENV: &str = "STRICT_KWARGS_COMPLETENESS_CHECKOUT";
 const PYTHON_ENV: &str = "STRICT_KWARGS_COMPLETENESS_PYTHON_ENV";
@@ -28,6 +29,43 @@ const RUNS_ENV: &str = "STRICT_KWARGS_COMPLETENESS_RUNS";
 const REPOSITORY_NAME_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_NAME";
 const REPOSITORY_REF_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_REF";
 const REPOSITORY_URL_ENV: &str = "STRICT_KWARGS_COMPLETENESS_REPOSITORY_URL";
+
+#[derive(Clone, Copy)]
+struct RepositoryCase {
+    id: &'static str,
+    default_name: &'static str,
+    default_url: &'static str,
+    default_ref: &'static str,
+    linux_snapshot_name: &'static str,
+    linux_snapshot_relative_path: &'static str,
+    macos_snapshot_name: &'static str,
+    macos_snapshot_relative_path: &'static str,
+    allow_legacy_env: bool,
+}
+
+const SPHINX: RepositoryCase = RepositoryCase {
+    id: "sphinx",
+    default_name: "sphinx",
+    default_url: "https://github.com/sphinx-doc/sphinx.git",
+    default_ref: "cc7c6f435ad37bb12264f8118c8461b230e6830c",
+    linux_snapshot_name: "pinned_repository_diagnostics",
+    linux_snapshot_relative_path: SPHINX_LINUX_SNAPSHOT_RELATIVE_PATH,
+    macos_snapshot_name: "pinned_repository_diagnostics_macos",
+    macos_snapshot_relative_path: SPHINX_MACOS_SNAPSHOT_RELATIVE_PATH,
+    allow_legacy_env: true,
+};
+
+const CPYTHON: RepositoryCase = RepositoryCase {
+    id: "cpython",
+    default_name: "cpython",
+    default_url: "https://github.com/python/cpython.git",
+    default_ref: "8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a",
+    linux_snapshot_name: "cpython_repository_diagnostics",
+    linux_snapshot_relative_path: CPYTHON_LINUX_SNAPSHOT_RELATIVE_PATH,
+    macos_snapshot_name: "cpython_repository_diagnostics_macos",
+    macos_snapshot_relative_path: CPYTHON_MACOS_SNAPSHOT_RELATIVE_PATH,
+    allow_legacy_env: false,
+};
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct DiagnosticKey {
@@ -38,6 +76,7 @@ struct DiagnosticKey {
 }
 
 struct PinnedRepository {
+    case: RepositoryCase,
     name: String,
     url: String,
     reference: String,
@@ -51,67 +90,112 @@ struct Checkout {
 #[test]
 #[ignore = "heavy opt-in test: clones/checks a pinned external repository and starts ty server"]
 fn pinned_repository_diagnostics_match_golden_oracle() {
+    run_repository_case(SPHINX);
+}
+
+#[test]
+#[ignore = "heavy opt-in test: clones/checks CPython and starts ty server"]
+fn cpython_repository_diagnostics_match_golden_oracle() {
+    run_repository_case(CPYTHON);
+}
+
+fn run_repository_case(case: RepositoryCase) {
     assert_ty_version();
-    let repository = pinned_repository();
+    let repository = pinned_repository(case);
     let checkout = pinned_checkout(&repository);
 
     let runs = run_count();
-    let actual = collect_observations(&checkout.root, runs);
+    let actual = collect_observations(&checkout.root, &repository, runs);
     let actual_keys = collect_stable(&actual, runs);
     assert!(
         !actual_keys.is_empty(),
-        "pinned repository diagnostics snapshot must not be empty"
+        "{} diagnostics snapshot must not be empty",
+        repository.name
     );
 
     if std::env::var_os(REGENERATE_ENV).is_some() {
         assert_snapshot!(
-            platform_snapshot_name(),
+            platform_snapshot_name(repository.case),
             format_snapshot(&repository, &actual_keys)
         );
         return;
     }
 
-    let expected = read_snapshot_diagnostics(golden_path(platform_snapshot_relative_path()));
+    let expected = read_snapshot_diagnostics(golden_path(platform_snapshot_relative_path(
+        repository.case,
+    )));
     let missing = expected
         .difference(&actual_keys)
         .cloned()
         .collect::<BTreeSet<_>>();
     assert!(
         missing.is_empty(),
-        "pinned repository diagnostics are missing required snapshot entries:\n{}",
+        "{} diagnostics are missing required snapshot entries:\n{}",
+        repository.name,
         format_diagnostic_set("", &missing)
     );
 }
 
-const fn platform_snapshot_name() -> &'static str {
+const fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
     if cfg!(target_os = "macos") {
-        "pinned_repository_diagnostics_macos"
+        case.macos_snapshot_name
     } else {
-        "pinned_repository_diagnostics"
+        case.linux_snapshot_name
     }
 }
 
-const fn platform_snapshot_relative_path() -> &'static str {
+const fn platform_snapshot_relative_path(case: RepositoryCase) -> &'static str {
     if cfg!(target_os = "macos") {
-        MACOS_SNAPSHOT_RELATIVE_PATH
+        case.macos_snapshot_relative_path
     } else {
-        LINUX_SNAPSHOT_RELATIVE_PATH
+        case.linux_snapshot_relative_path
     }
 }
 
-fn pinned_repository() -> PinnedRepository {
+fn pinned_repository(case: RepositoryCase) -> PinnedRepository {
     PinnedRepository {
-        name: std::env::var(REPOSITORY_NAME_ENV)
-            .unwrap_or_else(|_| DEFAULT_REPOSITORY_NAME.to_owned()),
-        url: std::env::var(REPOSITORY_URL_ENV)
-            .unwrap_or_else(|_| DEFAULT_REPOSITORY_URL.to_owned()),
-        reference: std::env::var(REPOSITORY_REF_ENV)
-            .unwrap_or_else(|_| DEFAULT_REPOSITORY_REF.to_owned()),
+        case,
+        name: repository_env(case, "REPOSITORY_NAME", REPOSITORY_NAME_ENV)
+            .unwrap_or_else(|| case.default_name.to_owned()),
+        url: repository_env(case, "REPOSITORY_URL", REPOSITORY_URL_ENV)
+            .unwrap_or_else(|| case.default_url.to_owned()),
+        reference: repository_env(case, "REPOSITORY_REF", REPOSITORY_REF_ENV)
+            .unwrap_or_else(|| case.default_ref.to_owned()),
     }
+}
+
+fn repository_env(case: RepositoryCase, suffix: &str, legacy: &str) -> Option<String> {
+    std::env::var(case_env_name(case, suffix)).ok().or_else(|| {
+        case.allow_legacy_env
+            .then(|| std::env::var(legacy).ok())
+            .flatten()
+    })
+}
+
+fn repository_env_os(
+    case: RepositoryCase,
+    suffix: &str,
+    legacy: &str,
+) -> Option<std::ffi::OsString> {
+    std::env::var_os(case_env_name(case, suffix)).or_else(|| {
+        case.allow_legacy_env
+            .then(|| std::env::var_os(legacy))
+            .flatten()
+    })
+}
+
+fn case_env_name(case: RepositoryCase, suffix: &str) -> String {
+    format!(
+        "STRICT_KWARGS_COMPLETENESS_{}_{}",
+        case.id.to_ascii_uppercase(),
+        suffix
+    )
 }
 
 fn pinned_checkout(repository: &PinnedRepository) -> Checkout {
-    if let Some(root) = std::env::var_os(CHECKOUT_ENV).map(PathBuf::from) {
+    if let Some(root) =
+        repository_env_os(repository.case, "CHECKOUT", CHECKOUT_ENV).map(PathBuf::from)
+    {
         assert_pinned_ref(&root, repository);
         return Checkout { _temp: None, root };
     }
@@ -147,7 +231,8 @@ fn assert_pinned_ref(root: &Path, repository: &PinnedRepository) {
     assert_eq!(
         actual.trim(),
         repository.reference,
-        "{CHECKOUT_ENV} must point at {} {}",
+        "checkout for {} must point at {} {}",
+        repository.name,
         repository.url,
         repository.reference
     );
@@ -201,10 +286,14 @@ fn run_count() -> usize {
         .max(1)
 }
 
-fn collect_observations(root: &Path, runs: usize) -> BTreeMap<DiagnosticKey, usize> {
+fn collect_observations(
+    root: &Path,
+    repository: &PinnedRepository,
+    runs: usize,
+) -> BTreeMap<DiagnosticKey, usize> {
     let mut observed = BTreeMap::new();
     for _ in 0..runs {
-        for key in collect_diagnostics(root) {
+        for key in collect_diagnostics(root, repository) {
             *observed.entry(key).or_default() += 1;
         }
     }
@@ -222,10 +311,11 @@ fn collect_stable(
         .collect()
 }
 
-fn collect_diagnostics(root: &Path) -> BTreeSet<DiagnosticKey> {
+fn collect_diagnostics(root: &Path, repository: &PinnedRepository) -> BTreeSet<DiagnosticKey> {
     let config = Config::load(root).expect("load pinned repository config");
     let paths = [root.to_path_buf()];
-    let python_env = std::env::var_os(PYTHON_ENV).map(PathBuf::from);
+    let python_env =
+        repository_env_os(repository.case, "PYTHON_ENV", PYTHON_ENV).map(PathBuf::from);
     check_paths(root, &paths, &config, python_env.as_deref(), None)
         .expect("check pinned repository")
         .iter()

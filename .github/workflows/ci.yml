@@ -193,26 +193,36 @@ jobs:
         shell: bash
         run: ty version
 
-      - name: Clone pinned completeness repository
+      - name: Clone pinned completeness repositories
         shell: bash
         env:
           EXTERNAL_DIR: ${{ runner.temp }}/external
-          COMPLETENESS_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
-          COMPLETENESS_REPOSITORY_URL: https://github.com/sphinx-doc/sphinx.git
+          CPYTHON_REPOSITORY_REF: 8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a
+          SPHINX_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
         run: |
           set -euo pipefail
-          dest="$EXTERNAL_DIR/pinned-repository"
-          mkdir -p "$dest"
-          git -C "$dest" init --quiet
-          git -C "$dest" remote add origin "$COMPLETENESS_REPOSITORY_URL"
-          git -C "$dest" fetch --depth=1 origin "$COMPLETENESS_REPOSITORY_REF"
-          git -C "$dest" checkout --detach --quiet FETCH_HEAD
-          git -C "$dest" rev-parse HEAD
+
+          clone_pinned() {
+            local name="$1"
+            local url="$2"
+            local ref="$3"
+            local dest="$EXTERNAL_DIR/$name"
+
+            mkdir -p "$dest"
+            git -C "$dest" init --quiet
+            git -C "$dest" remote add origin "$url"
+            git -C "$dest" fetch --depth=1 origin "$ref"
+            git -C "$dest" checkout --detach --quiet FETCH_HEAD
+            git -C "$dest" rev-parse HEAD
+          }
+
+          clone_pinned sphinx https://github.com/sphinx-doc/sphinx.git "$SPHINX_REPOSITORY_REF"
+          clone_pinned cpython https://github.com/python/cpython.git "$CPYTHON_REPOSITORY_REF"
 
       - name: Prepare completeness Python environment
         shell: bash
         env:
-          COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
+          COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/sphinx
           COMPLETENESS_VENV: ${{ runner.temp }}/completeness-venv
         run: |
           set -euo pipefail
@@ -223,15 +233,20 @@ jobs:
 
       - name: Run pinned repository completeness test
         env:
-          STRICT_KWARGS_COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/pinned-repository
-          STRICT_KWARGS_COMPLETENESS_PYTHON_ENV: ${{ runner.temp }}/completeness-venv
-          STRICT_KWARGS_COMPLETENESS_REPOSITORY_NAME: pinned-repository
-          STRICT_KWARGS_COMPLETENESS_REPOSITORY_REF: cc7c6f435ad37bb12264f8118c8461b230e6830c
-          STRICT_KWARGS_COMPLETENESS_REPOSITORY_URL: https://github.com/sphinx-doc/sphinx.git
+          STRICT_KWARGS_COMPLETENESS_SPHINX_CHECKOUT: ${{ runner.temp }}/external/sphinx
+          STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
           cargo test --locked --test completeness \
             pinned_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
+
+      - name: Run CPython completeness test
+        env:
+          STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+          STRICT_KWARGS_COMPLETENESS_RUNS: 3
+        run: |
+          cargo test --locked --test completeness \
+            cpython_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:
     needs: build

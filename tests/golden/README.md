@@ -8,6 +8,8 @@ diagnostics as platform-specific `insta` snapshots:
 ```text
 tests/snapshots/completeness__pinned_repository_diagnostics.snap        # Linux
 tests/snapshots/completeness__pinned_repository_diagnostics_macos.snap  # macOS
+tests/snapshots/completeness__cpython_repository_diagnostics.snap       # Linux
+tests/snapshots/completeness__cpython_repository_diagnostics_macos.snap # macOS
 ```
 
 Each snapshot is a canonicalized TSV-style required diagnostic list. Every
@@ -16,36 +18,43 @@ there is no allowed-extra baseline. Extra diagnostics are not documented
 separately because the pinned-repository oracle still has platform- and
 environment-specific resolver drift.
 
-The current pinned repository is:
+The current pinned repositories are:
 
-- Repository: `https://github.com/sphinx-doc/sphinx.git`
-- Ref: `cc7c6f435ad37bb12264f8118c8461b230e6830c`
-- Python dependencies: `tests/golden/completeness-requirements-constraints.txt`
+- Sphinx repository: `https://github.com/sphinx-doc/sphinx.git`
+- Sphinx ref: `cc7c6f435ad37bb12264f8118c8461b230e6830c`
+- Sphinx Python dependencies:
+  `tests/golden/completeness-requirements-constraints.txt`
+- CPython repository: `https://github.com/python/cpython.git`
+- CPython ref: `8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a`
 - `ty`: `0.0.44`
 
-Regenerate it with:
+Regenerate a snapshot with:
 
 ```shell
-scripts/regenerate-completeness-golden.sh
+scripts/regenerate-completeness-golden.sh sphinx
+scripts/regenerate-completeness-golden.sh cpython
 ```
 
 By default the script runs strict-kwargs over the pinned checkout three times,
-with that repository installed editable into a temporary virtual environment.
-It runs the checker through a temporary `ty==0.0.44` wrapper so the oracle does
-not drift when a newer `ty` release changes hover display details. The script
-sets `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and
-`INSTA_UPDATE=always` to refresh the committed snapshot for the current
-platform directly. The virtual environment is installed with
+with Sphinx installed editable into a temporary virtual environment. CPython is
+checked directly from its checkout because it does not need an editable install
+for first-party resolution. The script runs the checker through a temporary
+`ty==0.0.44` wrapper so the oracle does not drift when a newer `ty` release
+changes hover display details. The script sets
+`STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to
+refresh the committed snapshot for the current platform directly. The Sphinx
+virtual environment is installed with
 `tests/golden/completeness-requirements-constraints.txt` so the oracle does not
 drift when transitive dependencies change their public type surface.
 
 To reuse an existing checkout, set
-`STRICT_KWARGS_COMPLETENESS_CHECKOUT=/path/to/checkout`; it must be at the
-pinned ref above. To reuse an existing Python environment, set
-`STRICT_KWARGS_COMPLETENESS_PYTHON_ENV=/path/to/venv`. Otherwise the script
-creates a venv with Python `3.13`, matching scheduled CI; set
+`STRICT_KWARGS_COMPLETENESS_SPHINX_CHECKOUT=/path/to/sphinx` or
+`STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT=/path/to/cpython`; it must be at
+the pinned ref above. To reuse an existing Sphinx Python environment, set
+`STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV=/path/to/venv`. Otherwise the
+script creates a venv with Python `3.13`, matching scheduled CI; set
 `STRICT_KWARGS_COMPLETENESS_PYTHON` to override the interpreter. To
-intentionally refresh the third-party dependency surface, update
+intentionally refresh the Sphinx third-party dependency surface, update
 `tests/golden/completeness-requirements-constraints.txt` and regenerate the
 oracle in the same change. To intentionally re-admit or remove
 platform-sensitive diagnostics, regenerate the affected platform snapshot in
@@ -54,8 +63,8 @@ the same change. To change the number of runs, set
 version, set `STRICT_KWARGS_COMPLETENESS_TY_VERSION` while regenerating and
 update the version documented here and in `tests/completeness.rs`.
 
-To intentionally swap the pinned repository, update the repository defaults in
-`tests/completeness.rs`, CI, this README, the dependency constraints, the
+To intentionally swap or repin a repository, update the repository defaults in
+`tests/completeness.rs`, CI, this README, any dependency constraints, and the
 platform snapshots together.
 
 Review regenerated diffs as an oracle change, not as a blind snapshot update:
@@ -72,6 +81,8 @@ Run the opt-in test locally with:
 ```shell
 cargo test --locked --test completeness \
   pinned_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
+cargo test --locked --test completeness \
+  cpython_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 ```
 
 ## Snapshot tooling decision
