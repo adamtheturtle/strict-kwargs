@@ -664,13 +664,6 @@ pub fn location_from_value(result: &Value) -> Option<DefLocation> {
     })
 }
 
-/// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
-/// drive paths the leading slash LSP servers expect
-/// (`C:\a` -> `file:///C:/a`), so paths round-trip with what ty returns.
-///
-/// Ty-wire layer; excluded for the reason given on
-/// [`unwrap_enclosing_parens`] (the POSIX/Windows arms are unit-tested but
-/// only one is taken on a given host).
 /// Like [`path_to_uri`], but absolutizes a relative path against the current
 /// directory first. Everything sent *to* ty goes through this: ty resolves
 /// files and answers queries by absolute URI, so a relative CLI path
@@ -685,6 +678,13 @@ fn absolute_uri(path: &Path) -> String {
     path_to_uri(&absolute)
 }
 
+/// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
+/// drive paths the leading slash LSP servers expect
+/// (`C:\a` -> `file:///C:/a`), so paths round-trip with what ty returns.
+///
+/// Ty-wire layer; excluded for the reason given on
+/// [`unwrap_enclosing_parens`] (the POSIX/Windows arms are unit-tested but
+/// only one is taken on a given host).
 #[cfg_attr(coverage, coverage(off))]
 fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
@@ -1158,8 +1158,16 @@ mod tests {
 
     #[test]
     fn initialize_params_with_and_without_python_env() {
-        let plain = initialize_params(Path::new("/proj"), None);
-        assert_eq!(plain["rootUri"], "file:///proj");
+        // The root URI goes through `absolute_uri`, so each platform must
+        // supply its own canonical absolute form: `/proj` is drive-relative
+        // on Windows and would be resolved against the runner's current
+        // drive (`file:///D:/proj`), making a shared literal flaky.
+        #[cfg(windows)]
+        let (root, expected_uri) = (r"C:\proj", "file:///C:/proj");
+        #[cfg(not(windows))]
+        let (root, expected_uri) = ("/proj", "file:///proj");
+        let plain = initialize_params(Path::new(root), None);
+        assert_eq!(plain["rootUri"], expected_uri);
         assert!(plain.get("initializationOptions").is_none());
 
         // An empty path makes `std::path::absolute` error, exercising the
