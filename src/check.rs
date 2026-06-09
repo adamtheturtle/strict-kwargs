@@ -47,7 +47,9 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 
 /// Keep the ty LSP pipes bounded: large files can have thousands of fallback
 /// requests, and sending all of them before draining responses can deadlock.
-const TY_MAX_IN_FLIGHT: usize = 16;
+/// The Sphinx snapshot benchmark benefits from a wider window than 16 because
+/// ty can keep answering while strict-kwargs drains out-of-order responses.
+const TY_MAX_IN_FLIGHT: usize = 128;
 /// Per-file ty analysis wait used before fallback queries. The full-project
 /// warm-up was deterministic but expensive on large repository trees; waiting for
 /// just the files that actually need ty keeps query results stable without
@@ -334,6 +336,7 @@ fn pipeline_phases(
             project_root,
             all_project_files,
             index,
+            indexed_files,
             python_env,
             &work.path,
             &work.source,
@@ -1118,6 +1121,43 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn class_from_annotation(&self, annotation: &str) -> Option<String> {
+        const DYNAMIC_ANNOTATIONS: &[&str] =
+            &["Any", "typing.Any", "object", "builtins.object", "Unknown"];
+        let annotation = annotation.trim().trim_matches(['"', '\'']);
+        if annotation.is_empty()
+            || annotation.contains('|')
+            || DYNAMIC_ANNOTATIONS.contains(&annotation)
+        {
+            return None;
+        }
+        let class_name = annotation
+            .split_once('[')
+            .map_or(annotation, |(head, _)| head);
+        let class_name = class_name.strip_prefix("builtins.").unwrap_or(class_name);
+        if annotation_is_builtin_receiver_type(class_name) {
+            return Some(format!("builtins.{class_name}"));
+        }
+
+        Some(if let Some((head, rest)) = class_name.split_once('.') {
+            if let Some(local) = self.resolve_local(head) {
+                format!("{local}.{rest}")
+            } else if let Some(module_path) = self.resolve_module(head) {
+                format!("{module_path}.{rest}")
+            } else {
+                class_name.to_string()
+            }
+        } else {
+            self.resolve_local(class_name)
+                .unwrap_or_else(|| format!("{}.{}", self.module_name, class_name))
+        })
+    }
+
+    fn class_from_name_annotation(&self, name: &str) -> Option<String> {
+        self.resolve_annotation(name)
+            .and_then(|annotation| self.class_from_annotation(annotation))
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -1421,7 +1461,9 @@ impl<'a> CallChecker<'a> {
             return true;
         }
         if let Expr::Name(base) = &**value {
-            return self.binding_is_instance(base.id.as_str());
+            let base_name = base.id.as_str();
+            return self.binding_is_instance(base_name)
+                || self.class_from_name_annotation(base_name).is_some();
         }
         false
     }
@@ -1682,6 +1724,11 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
+        if self.call_uses_opaque_receiver_boundary(&call.func) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         if self.call_may_dispatch_to_override_with_different_parameter_names(
             &call.func,
             callee_fullname,
@@ -1771,6 +1818,16 @@ impl<'a> CallChecker<'a> {
 
     fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
         matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+    }
+
+    fn call_uses_opaque_receiver_boundary(&self, func: &Expr) -> bool {
+        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+            return false;
+        };
+        let Expr::Name(name) = &**value else {
+            return false;
+        };
+        !self.opaque_attribute_receiver_is_safe_for_fix(name.id.as_str())
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -2013,10 +2070,17 @@ impl<'a> CallChecker<'a> {
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
                     if self.is_opaque_local(base_name) {
-                        return None;
+                        return self
+                            .class_from_name_annotation(base_name)
+                            .map(|class_fullname| {
+                                self.resolve_instance_method(&class_fullname, attr_name)
+                            });
                     }
                     // Local bindings (incl. a locally redefined class) take
                     // precedence over a stale ``import`` module binding.
+                    if let Some(class_fullname) = self.class_from_name_annotation(base_name) {
+                        return Some(self.resolve_instance_method(&class_fullname, attr_name));
+                    }
                     let candidate = if let Some(local) = self.resolve_local(base_name) {
                         format!("{local}.{attr_name}")
                     } else if let Some(module_path) = self.resolve_module(base_name) {
@@ -2259,6 +2323,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
@@ -2267,6 +2332,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.value_is_bound_callable_attribute_alias(value);
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias {
@@ -2274,6 +2340,18 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => {
+                walk_stmt(self, stmt);
+                if let Expr::Name(name) = &**target {
+                    self.mark_opaque_local(name.id.as_str());
+                    self.define_annotation(name.id.as_str(), annotation);
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
@@ -3006,6 +3084,7 @@ fn resolve_def_location_cached(
     current_path: &Path,
     current_source: &str,
     loc: &crate::ty_resolver::DefLocation,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
@@ -3032,9 +3111,13 @@ fn resolve_def_location_cached(
         };
         let off = lsp_to_byte_offset(target, loc.line, loc.character)?;
         if !def_caches.files.contains_key(target_path) {
+            let def_index = indexed_files
+                .get(target_path)
+                .map(|indexed| DefFileIndex::from_stmts(indexed.parsed.suite()))
+                .or_else(|| DefFileIndex::from_source(target));
             def_caches
                 .files
-                .insert(target_path.to_path_buf(), DefFileIndex::from_source(target));
+                .insert(target_path.to_path_buf(), def_index);
         }
         def_caches
             .files
@@ -3048,19 +3131,24 @@ fn resolve_def_location_cached(
 
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ty definition resolution threads explicit per-run caches through fallback glue"
+)]
 fn resolve_ty_definition_for_pending(
     ty: &mut TyResolver,
     path: &Path,
     source: &str,
     lsp_index: &LspLineIndex,
     pending: &PendingTy,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
     let (line, ch) = lsp_index.position(source, pending.callee_offset);
     let id = ty.ask("textDocument/definition", path, line, ch)?;
     let loc = ty.take(id).as_ref().and_then(location_from_value)?;
-    resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
+    resolve_def_location_cached(path, source, &loc, indexed_files, file_cache, def_caches)
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -3345,6 +3433,7 @@ fn resolve_file_with_ty(
     project_root: &Path,
     _all_files: &[PathBuf],
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -3373,6 +3462,7 @@ fn resolve_file_with_ty(
             source,
             pending,
             config,
+            indexed_files,
             ty_file_cache,
             ty_def_caches,
             diagnostics,
@@ -3715,6 +3805,7 @@ fn resolve_pending_with_ty(
     source: &str,
     pending: &[PendingTy],
     config: &Config,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
@@ -3777,7 +3868,14 @@ fn resolve_pending_with_ty(
                 let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                     if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                        ty, path, source, &lsp_index, p, file_cache, def_caches,
+                        ty,
+                        path,
+                        source,
+                        &lsp_index,
+                        p,
+                        indexed_files,
+                        file_cache,
+                        def_caches,
                     ) {
                         ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                     }
@@ -3851,7 +3949,14 @@ fn resolve_pending_with_ty(
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                    ty, path, source, &lsp_index, p, file_cache, def_caches,
+                    ty,
+                    path,
+                    source,
+                    &lsp_index,
+                    p,
+                    indexed_files,
+                    file_cache,
+                    def_caches,
                 ) {
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
@@ -3912,9 +4017,14 @@ fn resolve_pending_with_ty(
             // only genuinely deep ones pay the tokeniser scan — and those would
             // have crashed the old unguarded call. A too-deep or unparsable
             // target is silently skipped, same fail-closed behaviour as before.
-            if let Some((fullname, sigs)) =
-                resolve_def_location_cached(path, source, &loc, file_cache, def_caches)
-            {
+            if let Some((fullname, sigs)) = resolve_def_location_cached(
+                path,
+                source,
+                &loc,
+                indexed_files,
+                file_cache,
+                def_caches,
+            ) {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
                     &fullname,
@@ -4760,6 +4870,129 @@ while cond:
     }
 
     #[test]
+    fn class_from_annotation_covers_invalid_builtin_and_dotted_shapes() {
+        with_empty_checker(false, |checker| {
+            for annotation in [
+                "",
+                "A | B",
+                "Any",
+                "typing.Any",
+                "object",
+                "builtins.object",
+                "Unknown",
+            ] {
+                assert_eq!(checker.class_from_annotation(annotation), None);
+            }
+
+            assert_eq!(
+                checker.class_from_annotation("list[int]").as_deref(),
+                Some("builtins.list")
+            );
+            assert_eq!(
+                checker.class_from_annotation("builtins.str").as_deref(),
+                Some("builtins.str")
+            );
+
+            checker.define("Alias", "pkg.Real".to_string());
+            assert_eq!(
+                checker.class_from_annotation("Alias.Inner").as_deref(),
+                Some("pkg.Real.Inner")
+            );
+
+            checker.define_module("mod", "pkg.mod".to_string());
+            assert_eq!(
+                checker.class_from_annotation("mod.Type").as_deref(),
+                Some("pkg.mod.Type")
+            );
+            assert_eq!(
+                checker.class_from_annotation("external.Type").as_deref(),
+                Some("external.Type")
+            );
+
+            checker.define("Local", "pkg.Local".to_string());
+            assert_eq!(
+                checker.class_from_annotation("'Local'").as_deref(),
+                Some("pkg.Local")
+            );
+            assert_eq!(
+                checker.class_from_annotation("Missing").as_deref(),
+                Some("test.Missing")
+            );
+        });
+    }
+
+    #[test]
+    fn opaque_receiver_fix_boundary_covers_call_shapes_and_annotations() {
+        with_empty_checker(false, |checker| {
+            with_call_func("f(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+            with_call_func("factory().m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker.mark_param_opaque("receiver");
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker
+                .current_scope()
+                .annotations
+                .insert("receiver".to_string(), "list".to_string());
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(!checker.call_uses_opaque_receiver_boundary(func));
+            });
+
+            checker
+                .current_scope()
+                .annotations
+                .insert("receiver".to_string(), "Renderer".to_string());
+            with_call_func("receiver.m(1)\n", |func| {
+                assert!(checker.call_uses_opaque_receiver_boundary(func));
+            });
+        });
+    }
+
+    #[test]
+    fn constructor_result_call_resolves_dunder_call_without_ty_fallback() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.__call__".to_string(), sig(&["self", "a", "b"]));
+
+        let source = r"
+class C:
+    def __call__(self, a, b): ...
+
+C()(1, 2)
+";
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn unresolved_call_expression_and_subscript_callees_do_not_flag() {
+        let index = DefinitionIndex::for_test();
+
+        let source = r"
+def make():
+    return 1
+
+registry = {}
+make()(1, 2)
+registry['k'](1, 2)
+";
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+        assert_eq!(diagnostics, 0);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
     fn if_branch_dispatcher_visits_every_traversal_mode() {
         let index = DefinitionIndex::for_test();
         let config = Config::default();
@@ -5064,6 +5297,44 @@ class C:
 ";
         let mut index = DefinitionIndex::for_test();
         index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn annotated_parameter_receiver_resolves_without_ty_fallback() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+def check(value: C) -> None:
+    value.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+        index.insert("main.C.__init__".to_string(), sig(&["self"]));
+
+        let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
+
+        assert_eq!(diagnostics, 1);
+        assert_eq!(ty_pending, 0);
+    }
+
+    #[test]
+    fn annotated_assignment_receiver_resolves_without_ty_fallback() {
+        let source = "\
+class C:
+    def method(self, a: int) -> None: ...
+
+value: C
+value.method(1)
+";
+        let mut index = DefinitionIndex::for_test();
+        index.insert("main.C.method".to_string(), sig(&["self", "a"]));
+        index.insert("main.C.__init__".to_string(), sig(&["self"]));
 
         let (diagnostics, ty_pending) = run_checker_with_index(source, &index);
 
