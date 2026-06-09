@@ -1,0 +1,18 @@
+Speed up the ``ty`` inference fallback dramatically on large projects and
+make its results reproducible. The LSP client now advertises
+pull-diagnostics support, so ``ty`` no longer eagerly type-checks (and
+pushes diagnostics for) every file the fallback opens — hover and definition
+answers are computed on demand instead. The full CPython completeness run
+drops from ~42 minutes to ~42 seconds. Requests sent to ``ty`` also always
+carry absolute ``file://`` URIs now: a relative CLI path (``strict-kwargs
+check .``) previously produced relative URIs whose diagnostics wait could
+never match ``ty``'s absolute ones, stalling for a 15-second timeout per
+file. Fallback results are also deterministic now: files are opened in
+sorted order and queries are issued one at a time, because ``ty`` answers
+multi-location definition requests differently depending on its internal
+thread scheduling when several requests are in flight. Calls whose hover
+previously got dropped under ``ty``'s diagnostics load fell through to the
+goto-definition path (which cannot evaluate ``sys.version_info``-gated
+typeshed signatures); they are now consistently resolved from the
+version-aware hover, and the completeness snapshots were regenerated to
+match the (more accurate, and substantially larger) stable result set.
