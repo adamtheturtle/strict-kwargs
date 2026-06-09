@@ -11,8 +11,8 @@ use std::collections::HashSet;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -82,10 +82,6 @@ pub struct TyResolver {
     pending: FxPending,
     /// Once true, all further work is skipped (ty died/hung/misbehaved).
     disabled: bool,
-    /// URIs ty has published diagnostics for, i.e. files it has finished
-    /// type-checking. Fallback queries wait for their current file to appear
-    /// here before asking hover/definition.
-    diagnosed: HashSet<String>,
 }
 
 /// Build a [`Command`] for the `ty` executable.
@@ -143,8 +139,18 @@ type FxPending = std::collections::HashMap<i64, Value>;
 fn initialize_params(project_root: &Path, python_env: Option<&Path>) -> Value {
     let mut params = json!({
         "processId": std::process::id(),
-        "rootUri": path_to_uri(project_root),
-        "capabilities": {},
+        "rootUri": absolute_uri(project_root),
+        // Advertise pull-diagnostics support so ty does not eagerly
+        // type-check (and push `publishDiagnostics` for) every opened file.
+        // This run only ever issues hover/definition requests, which ty
+        // computes on demand; skipping the per-file diagnostics pass is the
+        // difference between minutes and seconds on a large project where
+        // most files have at least one call deferred to the ty fallback.
+        "capabilities": {
+            "textDocument": {
+                "diagnostic": {},
+            },
+        },
     });
     if let Some(python) = python_env {
         let abs = std::path::absolute(python).unwrap_or_else(|_| python.to_path_buf());
@@ -217,7 +223,6 @@ impl TyResolver {
             opened: HashSet::new(),
             pending: FxPending::new(),
             disabled: false,
-            diagnosed: HashSet::new(),
         }
     }
 
@@ -234,7 +239,7 @@ impl TyResolver {
             "textDocument/didOpen",
             &json!({
                 "textDocument": {
-                    "uri": path_to_uri(path),
+                    "uri": absolute_uri(path),
                     "languageId": "python",
                     "version": 1,
                     "text": text,
@@ -243,50 +248,6 @@ impl TyResolver {
         )?;
         self.opened.insert(key);
         Some(())
-    }
-
-    /// Drain any server messages that are already available without blocking.
-    ///
-    /// This keeps speculative `didOpen` batching from leaving ty's server→client
-    /// requests unanswered while the caller is still scanning files.
-    pub fn drain_pending(&mut self) {
-        if self.disabled {
-            return;
-        }
-        loop {
-            match self.incoming.try_recv() {
-                Ok(msg) => self.absorb(&msg),
-                Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => {
-                    self.disabled = true;
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Wait until ty has published diagnostics for `path`, which means the
-    /// file has reached a type-checked state suitable for stable hover and
-    /// definition queries. Timeouts are best-effort: callers still query and
-    /// fail closed if ty has not caught up.
-    pub fn wait_until_diagnosed(&mut self, path: &Path, timeout: Duration) {
-        if self.disabled {
-            return;
-        }
-        let uri = path_to_uri(path);
-        if self.diagnosed.contains(&uri) {
-            return;
-        }
-        let deadline = Instant::now() + timeout;
-        while !self.diagnosed.contains(&uri) {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return;
-            };
-            match self.incoming.recv_timeout(remaining) {
-                Ok(msg) => self.absorb(&msg),
-                Err(_) => return,
-            }
-        }
     }
 
     /// Fire a positional request (`textDocument/hover` or `.../definition`)
@@ -299,7 +260,7 @@ impl TyResolver {
         self.request(
             method,
             &json!({
-                "textDocument": { "uri": path_to_uri(path) },
+                "textDocument": { "uri": absolute_uri(path) },
                 "position": { "line": line, "character": character },
             }),
         )
@@ -370,9 +331,8 @@ impl TyResolver {
     }
 
     /// Route one incoming message that is not the response currently awaited:
-    /// answer a server→client request, buffer an out-of-order response by id,
-    /// or record a `publishDiagnostics` notification (so fallback queries can
-    /// tell when ty has type-checked a file).
+    /// answer a server→client request, or buffer an out-of-order response by
+    /// id. Notifications carry no id and are dropped.
     fn absorb(&mut self, msg: &Value) {
         if let Some(msg_id) = msg.get("id").and_then(Value::as_i64) {
             if msg.get("method").is_some() {
@@ -381,12 +341,6 @@ impl TyResolver {
             } else {
                 self.pending
                     .insert(msg_id, msg.get("result").cloned().unwrap_or(Value::Null));
-            }
-        } else if msg.get("method").and_then(Value::as_str)
-            == Some("textDocument/publishDiagnostics")
-        {
-            if let Some(uri) = msg.pointer("/params/uri").and_then(Value::as_str) {
-                self.diagnosed.insert(uri.to_string());
             }
         }
     }
@@ -670,8 +624,10 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
         }
         if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
             // `publishDiagnostics` can carry thousands of diagnostic entries
-            // per file. Warm-up only needs the URI, so drop the payload before
-            // it queues up in the unbounded reader channel.
+            // per file. The client advertises pull diagnostics so ty should
+            // not push any, but if one arrives anyway nothing here needs the
+            // payload — drop it before it queues up in the unbounded reader
+            // channel.
             if value.get("method").and_then(Value::as_str)
                 == Some("textDocument/publishDiagnostics")
             {
@@ -706,6 +662,20 @@ pub fn location_from_value(result: &Value) -> Option<DefLocation> {
         line: u32::try_from(start.get("line").and_then(Value::as_u64)?).ok()?,
         character: u32::try_from(start.get("character").and_then(Value::as_u64)?).ok()?,
     })
+}
+
+/// Like [`path_to_uri`], but absolutizes a relative path against the current
+/// directory first. Everything sent *to* ty goes through this: ty resolves
+/// files and answers queries by absolute URI, so a relative CLI path
+/// (`check .`) must not leak into the wire format. Resolution against the
+/// process CWD matches how the same relative path is read from disk.
+///
+/// Host-specific glue like [`path_to_uri`] (the absolutized form depends on
+/// the CWD); the pure URI encoding underneath is unit-tested directly.
+#[cfg_attr(coverage, coverage(off))]
+fn absolute_uri(path: &Path) -> String {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    path_to_uri(&absolute)
 }
 
 /// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
@@ -1188,8 +1158,16 @@ mod tests {
 
     #[test]
     fn initialize_params_with_and_without_python_env() {
-        let plain = initialize_params(Path::new("/proj"), None);
-        assert_eq!(plain["rootUri"], "file:///proj");
+        // The root URI goes through `absolute_uri`, so each platform must
+        // supply its own canonical absolute form: `/proj` is drive-relative
+        // on Windows and would be resolved against the runner's current
+        // drive (`file:///D:/proj`), making a shared literal flaky.
+        #[cfg(windows)]
+        let (root, expected_uri) = (r"C:\proj", "file:///C:/proj");
+        #[cfg(not(windows))]
+        let (root, expected_uri) = ("/proj", "file:///proj");
+        let plain = initialize_params(Path::new(root), None);
+        assert_eq!(plain["rootUri"], expected_uri);
         assert!(plain.get("initializationOptions").is_none());
 
         // An empty path makes `std::path::absolute` error, exercising the
@@ -1408,44 +1386,17 @@ mod tests {
         }
 
         #[test]
-        fn drain_pending_absorbs_available_messages_without_waiting() {
-            let (child, stdin) = alive_child();
-            let (tx, rx) = std::sync::mpsc::channel();
-            let mut r = TyResolver::from_parts(child, stdin, rx);
-
-            tx.send(json!({
-                "jsonrpc": "2.0",
-                "method": "textDocument/publishDiagnostics",
-                "params": { "uri": "file:///a/x.py", "diagnostics": [] }
-            }))
-            .unwrap();
-            tx.send(json!({ "jsonrpc": "2.0", "id": 7, "result": "v" }))
-                .unwrap();
-            tx.send(json!({
-                "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration"
-            }))
-            .unwrap();
-
-            r.drain_pending();
-
-            assert!(r.diagnosed.contains("file:///a/x.py"));
-            assert_eq!(r.take(7), Some(Value::from("v")));
-            assert!(!r.pending.contains_key(&9));
-        }
-
-        #[test]
-        fn absorb_records_diagnostics_buffers_responses_and_answers_requests() {
+        fn absorb_buffers_responses_and_answers_requests() {
             let (child, stdin) = alive_child();
             let (_tx, rx) = std::sync::mpsc::channel::<Value>();
             let mut r = TyResolver::from_parts(child, stdin, rx);
 
-            // A `publishDiagnostics` notification marks its file analyzed.
+            // A notification (no id) is ignored without crashing.
             r.absorb(&json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/publishDiagnostics",
                 "params": { "uri": "file:///a/x.py", "diagnostics": [] }
             }));
-            assert!(r.diagnosed.contains("file:///a/x.py"));
 
             // A response (id, no method) is buffered by id for a later `take`.
             r.absorb(&json!({ "jsonrpc": "2.0", "id": 7, "result": "v" }));

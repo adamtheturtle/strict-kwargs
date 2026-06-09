@@ -224,12 +224,19 @@ jobs:
         env:
           COMPLETENESS_CHECKOUT: ${{ runner.temp }}/external/sphinx
           COMPLETENESS_VENV: ${{ runner.temp }}/completeness-venv
+          CPYTHON_COMPLETENESS_VENV: ${{ runner.temp }}/cpython-completeness-venv
         run: |
           set -euo pipefail
           uv venv --python "$pythonLocation/bin/python" "$COMPLETENESS_VENV"
           uv pip install --python "$COMPLETENESS_VENV/bin/python" \
             --constraint tests/golden/completeness-requirements-constraints.txt \
             -e "$COMPLETENESS_CHECKOUT"
+          # The CPython case gets an *empty* venv: without an explicit
+          # environment ty discovers whatever interpreter the host exposes
+          # (runner Pythons differ from contributor machines, which may carry
+          # third-party site-packages), and the resolved diagnostics drift.
+          # An empty pinned-version venv makes resolution hermetic.
+          uv venv --python "$pythonLocation/bin/python" "$CPYTHON_COMPLETENESS_VENV"
 
       - name: Run pinned repository completeness test
         env:
@@ -243,6 +250,7 @@ jobs:
       - name: Run CPython completeness test
         env:
           STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
+          STRICT_KWARGS_COMPLETENESS_CPYTHON_PYTHON_ENV: ${{ runner.temp }}/cpython-completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
           cargo test --locked --test completeness \

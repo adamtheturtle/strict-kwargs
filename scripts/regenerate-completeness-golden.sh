@@ -20,13 +20,20 @@ case "$CASE" in
     REPOSITORY_REF="${STRICT_KWARGS_COMPLETENESS_SPHINX_REPOSITORY_REF:-${STRICT_KWARGS_COMPLETENESS_REPOSITORY_REF:-cc7c6f435ad37bb12264f8118c8461b230e6830c}}"
     TEST_NAME="pinned_repository_diagnostics_match_golden_oracle"
     NEEDS_PYTHON_ENV=1
+    INSTALLS_CHECKOUT=1
     ;;
   cpython)
     REPOSITORY_NAME="${STRICT_KWARGS_COMPLETENESS_CPYTHON_REPOSITORY_NAME:-cpython}"
     REPOSITORY_URL="${STRICT_KWARGS_COMPLETENESS_CPYTHON_REPOSITORY_URL:-https://github.com/python/cpython.git}"
     REPOSITORY_REF="${STRICT_KWARGS_COMPLETENESS_CPYTHON_REPOSITORY_REF:-8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a}"
     TEST_NAME="cpython_repository_diagnostics_match_golden_oracle"
-    NEEDS_PYTHON_ENV=0
+    # An *empty* pinned-version venv (no editable install): without an
+    # explicit environment ty discovers whatever interpreter the host
+    # exposes, and any third-party site-packages on the regenerating
+    # machine would leak environment-dependent entries into the snapshot
+    # that CI runners can never reproduce.
+    NEEDS_PYTHON_ENV=1
+    INSTALLS_CHECKOUT=0
     ;;
   *)
     printf 'error: unknown completeness case %q (expected sphinx or cpython)\n' "$CASE" >&2
@@ -72,9 +79,11 @@ fi
 if [ "$NEEDS_PYTHON_ENV" -eq 1 ] && [ -z "${!python_env_var:-}" ]; then
   export "$python_env_var=$temp_dir/completeness-venv"
   uv venv --python "$COMPLETENESS_PYTHON" "${!python_env_var}"
-  uv pip install --python "${!python_env_var}/bin/python" \
-    --constraint "$COMPLETENESS_CONSTRAINTS" \
-    -e "${!checkout_var}"
+  if [ "$INSTALLS_CHECKOUT" -eq 1 ]; then
+    uv pip install --python "${!python_env_var}/bin/python" \
+      --constraint "$COMPLETENESS_CONSTRAINTS" \
+      -e "${!checkout_var}"
+  fi
 fi
 
 export STRICT_KWARGS_COMPLETENESS_RUNS="${STRICT_KWARGS_COMPLETENESS_RUNS:-3}"

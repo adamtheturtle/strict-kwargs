@@ -45,16 +45,16 @@ use file_selection::{collect_python_files, explicit_python_files};
 use file_selection::{is_ignored_path, FileSelection};
 pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 
-/// Keep the ty LSP pipes bounded: large files can have thousands of fallback
-/// requests, and sending all of them before draining responses can deadlock.
-/// The Sphinx snapshot benchmark benefits from a wider window than 16 because
-/// ty can keep answering while strict-kwargs drains out-of-order responses.
-const TY_MAX_IN_FLIGHT: usize = 128;
-/// Per-file ty analysis wait used before fallback queries. The full-project
-/// warm-up was deterministic but expensive on large repository trees; waiting for
-/// just the files that actually need ty keeps query results stable without
-/// forcing ty to publish diagnostics for files the built-in resolver handled.
-const TY_FILE_DIAGNOSTICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Maximum fallback requests in flight at once. This must stay at 1: `ty
+/// server` handles concurrent requests on a thread pool, and its answers for
+/// multi-location symbols (re-exported classes, instance `__call__`) depend
+/// on which thread populates its inference caches first — two runs feeding
+/// byte-identical request streams returned different definitions whenever
+/// more than one request was outstanding. Serial round-trips are the only
+/// schedule-independent mode, and they cost nothing where it matters: the
+/// `CPython` completeness run is bound by ty's per-query inference, not by
+/// pipe round-trips (41.6s serial vs 44s with a 128-wide window).
+const TY_MAX_IN_FLIGHT: usize = 1;
 
 #[derive(Clone, Copy)]
 enum IfBranchTraversal {
@@ -138,15 +138,10 @@ struct FileEntry {
 ///
 /// This is the gated business-logic counterpart to [`pipeline_phases`], which
 /// handles the non-deterministic threading orchestration that cannot be covered.
-#[allow(clippy::too_many_arguments)]
 fn process_scan_outcome_for_ty(
     i: usize,
     path: PathBuf,
     outcome: ScanOutcome,
-    ty: &mut Option<TyResolver>,
-    ty_start_attempted: &mut bool,
-    project_root: &Path,
-    python_env: Option<&Path>,
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<(usize, PathBuf, String)>,
     ty_work: &mut Vec<PendingTyWork>,
@@ -162,14 +157,6 @@ fn process_scan_outcome_for_ty(
             diagnostics.extend(scan.diagnostics);
             if !scan.pending.is_empty() {
                 let source = retained_source_for_pending_scan(scan.source.as_deref())?.to_owned();
-                start_ty_and_open_pending_file(
-                    ty,
-                    ty_start_attempted,
-                    project_root,
-                    python_env,
-                    &path,
-                    &source,
-                )?;
                 ty_work.push(PendingTyWork {
                     path,
                     source,
@@ -190,36 +177,15 @@ fn retained_source_for_pending_scan(source: Option<&str>) -> Result<&str, CheckE
     })
 }
 
-/// Start ty if needed and open `path` so ty can begin analysis while the scan
-/// stream continues. This is ty-subprocess orchestration; the queueing decision
-/// is covered by `process_scan_outcome_for_ty` unit tests.
-#[cfg_attr(coverage, coverage(off))]
-fn start_ty_and_open_pending_file(
-    ty: &mut Option<TyResolver>,
-    ty_start_attempted: &mut bool,
-    project_root: &Path,
-    python_env: Option<&Path>,
-    path: &Path,
-    source: &str,
-) -> Result<(), CheckError> {
-    if !*ty_start_attempted {
-        *ty_start_attempted = true;
-        *ty = Some(start_ty_for_fallback(project_root, python_env)?);
-    }
-    if let Some(ty) = ty.as_mut() {
-        ty.drain_pending();
-        let _ = ty.ensure_open(path, source);
-        ty.drain_pending();
-    }
-    Ok(())
-}
-
 /// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
 /// Phase 1 workers to the serial Phase 2 coordinator as each file's built-in
-/// pass finishes. Files that need ty fallback are opened in the ty server
-/// immediately, then their hover/definition requests are run after the scan
-/// stream drains. That lets ty analyze later files while Phase 1 is still
-/// finishing instead of blocking the coordinator on early-file round-trips.
+/// pass finishes. Files that need ty fallback are queued, then opened and
+/// queried in sorted-path order after the scan stream drains. ty computes
+/// answers on demand (the client advertises pull diagnostics, so didOpen
+/// itself triggers no per-file type-check pass) — but its answers for
+/// multi-location symbols can depend on the order files were opened, so the
+/// nondeterministic scan arrival order must not leak into didOpen order or
+/// runs would flicker on those calls.
 /// The final sort in [`check_paths_impl`] keeps output deterministic
 /// regardless of arrival order; the lazy ty-server start is preserved (only
 /// the first file with pending calls triggers it).
@@ -308,10 +274,6 @@ fn pipeline_phases(
                 i,
                 path,
                 outcome,
-                ty,
-                ty_start_attempted,
-                project_root,
-                python_env,
                 diagnostics,
                 skip_warnings,
                 &mut ty_work,
@@ -329,6 +291,11 @@ fn pipeline_phases(
     if let Some(e) = consumer_err {
         return Err(e);
     }
+    // Scan results arrive in nondeterministic worker order. ty's answers for
+    // multi-location symbols depend on the order files were opened, so sort
+    // the queue before any didOpen reaches ty — every run then opens and
+    // queries files identically and the fallback results are reproducible.
+    ty_work.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     for work in ty_work {
         resolve_file_with_ty(
             ty,
@@ -451,9 +418,11 @@ fn check_paths_impl(
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
     // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
-    // Files that need ty fallback are opened as their scan results arrive, then
-    // wait for their own publishDiagnostics event before querying. Files fully
-    // handled by the built-in resolver do not force ty work.
+    // Files that need ty fallback are queued as their scan results arrive,
+    // then opened and queried in sorted-path order after the scan stream
+    // drains; ty computes hover/definition answers on demand (pull
+    // diagnostics keep didOpen itself cheap). Files fully handled by the
+    // built-in resolver do not force ty work.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -3501,10 +3470,10 @@ fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
-/// Start ty for fallback queries. Query sites open the current file and call
-/// [`TyResolver::wait_until_diagnosed`] before asking for hover/definition,
-/// which avoids the old full-project warm-up cost while keeping file-local
-/// query results stable.
+/// Start ty for fallback queries. Query sites open the current file before
+/// asking for hover/definition; the client advertises pull diagnostics, so
+/// ty computes nothing for an opened file until a query demands it and
+/// there is no per-file warm-up cost to wait out.
 ///
 /// `ty`-subprocess orchestration like [`start_ty`]; excluded from the coverage
 /// gate for the same reason.
@@ -3576,7 +3545,6 @@ fn resolve_overload_fixes_with_ty(
         );
         return;
     }
-    ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
@@ -3829,7 +3797,6 @@ fn resolve_pending_with_ty(
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
     }
-    ty.wait_until_diagnosed(path, TY_FILE_DIAGNOSTICS_TIMEOUT);
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
@@ -5036,8 +5003,6 @@ registry['k'](1, 2)
 
     #[test]
     fn ty_pending_scan_without_retained_source_is_reported() {
-        let mut ty = None;
-        let mut ty_start_attempted = false;
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
@@ -5058,10 +5023,6 @@ registry['k'](1, 2)
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &mut ty,
-            &mut ty_start_attempted,
-            Path::new("."),
-            None,
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
@@ -5078,8 +5039,6 @@ registry['k'](1, 2)
 
     #[test]
     fn skipped_scan_outcome_is_recorded_without_ty_work() {
-        let mut ty = None;
-        let mut ty_start_attempted = false;
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
@@ -5088,10 +5047,6 @@ registry['k'](1, 2)
             7,
             PathBuf::from("skipped.py"),
             ScanOutcome::Skipped("unsupported encoding".to_string()),
-            &mut ty,
-            &mut ty_start_attempted,
-            Path::new("."),
-            None,
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
@@ -5108,13 +5063,10 @@ registry['k'](1, 2)
             )]
         );
         assert!(ty_work.is_empty());
-        assert!(!ty_start_attempted);
     }
 
     #[test]
     fn ty_scan_source_retention_is_only_required_for_pending_queries() {
-        let mut ty = None;
-        let mut ty_start_attempted = true;
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
@@ -5131,10 +5083,6 @@ registry['k'](1, 2)
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &mut ty,
-            &mut ty_start_attempted,
-            Path::new("."),
-            None,
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
@@ -5158,10 +5106,6 @@ registry['k'](1, 2)
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
             }),
-            &mut ty,
-            &mut ty_start_attempted,
-            Path::new("."),
-            None,
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
