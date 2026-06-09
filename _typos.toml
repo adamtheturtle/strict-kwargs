@@ -14,3 +14,11 @@ extend-exclude = [
 # `ot` is a parameter name in a Python descriptor test fixture
 # (`def __get__(self, o, ot=None)`), not a misspelling.
 ot = "ot"
+# CPython completeness snapshots intentionally preserve upstream identifiers.
+arange = "arange"
+asend = "asend"
+browseable = "browseable"
+postions = "postions"
+rto = "rto"
+spawnve = "spawnve"
+verifiy = "verifiy"
