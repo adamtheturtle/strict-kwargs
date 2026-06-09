@@ -3072,11 +3072,26 @@ struct DefCacheKey {
 
 type DefCache = FxHashMap<DefCacheKey, Option<(String, Vec<Signature>)>>;
 type DefFileCache = FxHashMap<PathBuf, Option<DefFileIndex>>;
+type ParamSignatureCache = FxHashMap<String, Option<Signature>>;
 
 #[derive(Default)]
 struct TyDefCaches {
     locations: DefCache,
     files: DefFileCache,
+    param_signatures: ParamSignatureCache,
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn signature_from_param_text_cached(
+    params: &str,
+    cache: &mut ParamSignatureCache,
+) -> Option<Signature> {
+    if let Some(cached) = cache.get(params) {
+        return cached.clone();
+    }
+    let parsed = signature_from_param_text(params);
+    cache.insert(params.to_string(), parsed.clone());
+    parsed
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -3847,7 +3862,9 @@ fn resolve_pending_with_ty(
 
             // `def …`/`bound method …` display: a single, named signature.
             if let Some(sig) = parse_hover_signature(&raw) {
-                let Some(signature) = signature_from_param_text(&sig.params) else {
+                let Some(signature) =
+                    signature_from_param_text_cached(&sig.params, &mut def_caches.param_signatures)
+                else {
                     continue;
                 };
                 let (effective_signature, positional_count, receiver_is_explicit) =
@@ -3938,7 +3955,9 @@ fn resolve_pending_with_ty(
             // signatures drop `/` and yield false positives (issue #14).
             let overloads: Vec<Signature> = parse_callable_type_overloads(&raw)
                 .iter()
-                .filter_map(|params| signature_from_param_text(params))
+                .filter_map(|params| {
+                    signature_from_param_text_cached(params, &mut def_caches.param_signatures)
+                })
                 .collect();
             if overloads.is_empty() {
                 needs_def.push(i);
