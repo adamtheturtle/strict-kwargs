@@ -1,0 +1,22 @@
+Run the ``ty`` inference fallback on four parallel ``ty server`` shards when
+more than one file needs it, making whole-project runs ~3.5x faster on large
+repositories (CPython: ~45s to ~13s; Sphinx: ~6.6s to ~1.9s). Files are
+partitioned deterministically (greedy least-loaded over the sorted file list,
+with a fixed shard count that never depends on the host's core count) and
+each shard keeps the serial one-request-in-flight discipline, so every run on
+every machine replays identical request streams per server. Each shard also
+replays the full sorted ``didOpen`` history (cheap under pull diagnostics),
+keeping per-query answers aligned with the previous single-server pass.
+
+The goto-definition fallback now tries every location ``ty`` returns, in
+order, instead of only the first: the relative order of a multi-location
+answer (re-exports, a class plus a local binding) depends on the answering
+server's open/query history, and the leading entry is often a local binding
+the definition parser cannot use. Trying each location makes the outcome
+independent of that ordering and recovers definitions a first-entry-only
+read silently dropped — roughly 200 new true positives on the CPython
+completeness oracle (``mock.patch.dict``, ``inspect.signature``, ``ctypes``
+constructors) and a handful on Sphinx, with no entries lost; one CPython
+call site is now attributed to the resolved class constructor instead of
+``object.__class__``. The completeness snapshots were regenerated for these
+additions.

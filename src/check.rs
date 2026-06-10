@@ -32,7 +32,7 @@ use crate::noqa::NoqaDirectives;
 use crate::signature::{ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
-    location_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
+    locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
     same_path, ty_binary_present, LspLineIndex, TyResolver,
 };
 
@@ -296,26 +296,186 @@ fn pipeline_phases(
     // the queue before any didOpen reaches ty — every run then opens and
     // queries files identically and the fallback results are reproducible.
     ty_work.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    for work in ty_work {
-        resolve_file_with_ty(
-            ty,
-            ty_start_attempted,
+    if ty_work.len() > 1 {
+        resolve_ty_work_sharded(
+            &ty_work,
             project_root,
             all_project_files,
             index,
             indexed_files,
             python_env,
-            &work.path,
-            &work.source,
-            &work.pending,
             config,
-            ty_file_cache,
-            ty_def_caches,
             diagnostics,
-            None,
         )?;
+    } else {
+        for work in ty_work {
+            resolve_file_with_ty(
+                ty,
+                ty_start_attempted,
+                project_root,
+                all_project_files,
+                index,
+                indexed_files,
+                python_env,
+                &work.path,
+                &work.source,
+                &work.pending,
+                config,
+                ty_file_cache,
+                ty_def_caches,
+                diagnostics,
+                None,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// Fixed shard count for the parallel ty fallback. This must be a constant —
+/// never derived from the host's core count — because the shard a file lands
+/// in determines which `ty server` answers its queries, and ty's answers for
+/// multi-location symbols depend on which files that server saw earlier. A
+/// machine-dependent shard count would make diagnostics differ across
+/// machines. Four shards: measured sweet spot — each extra server pays a
+/// fixed project-indexing cost on start, so a wider fan-out stops paying for
+/// itself (issue #46 measurements), while four still hides most of ty's
+/// serial per-query inference time on large projects.
+const TY_SHARD_COUNT: usize = 4;
+
+/// Deterministically partition `ty_work` into [`TY_SHARD_COUNT`] shards,
+/// then resolve each shard on its own thread with its own `ty server`,
+/// keeping the serial one-request-in-flight discipline *within* each server
+/// (see [`TY_MAX_IN_FLIGHT`]). Each server's request stream is then a pure
+/// function of the (sorted, greedily partitioned) work list, so every run —
+/// on any machine — replays identical streams and gets identical answers.
+///
+/// Diagnostics are reassembled in the original sorted-work order so the
+/// output matches what a serial pass over the same shards would emit.
+///
+/// `ty`-subprocess orchestration (thread fan-out + lazy server starts) whose
+/// timing/failure branches are environment-specific; excluded from the
+/// coverage gate like the rest of the ty fallback glue. The deterministic
+/// partitioning logic is factored into [`partition_ty_work`] and unit-tested.
+/// One shard's outcome: each owned work item's index in the sorted work list
+/// paired with the diagnostics its ty queries produced.
+type TyShardResult = Result<Vec<(usize, Vec<Diagnostic>)>, CheckError>;
+
+#[cfg_attr(coverage, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_ty_work_sharded(
+    ty_work: &[PendingTyWork],
+    project_root: &Path,
+    all_project_files: &[PathBuf],
+    index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
+    python_env: Option<&Path>,
+    config: &Config,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(), CheckError> {
+    let shards = partition_ty_work(ty_work, TY_SHARD_COUNT);
+    let mut slots: Vec<Option<Vec<Diagnostic>>> = vec![None; ty_work.len()];
+    let results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
+        let mut handles = Vec::new();
+        for shard in shards {
+            let handle = std::thread::Builder::new()
+                .stack_size(crate::limits::STACK_SIZE)
+                .spawn_scoped(scope, move || {
+                    let mut ty: Option<TyResolver> = None;
+                    let mut ty_start_attempted = false;
+                    let mut file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
+                    let mut def_caches = TyDefCaches::default();
+                    let mut out: Vec<(usize, Vec<Diagnostic>)> = Vec::new();
+                    let mut shard_iter = shard.into_iter().peekable();
+                    for (work_index, work) in ty_work.iter().enumerate() {
+                        let mine = shard_iter.peek() == Some(&work_index);
+                        if mine {
+                            shard_iter.next();
+                            let mut file_diagnostics = Vec::new();
+                            resolve_file_with_ty(
+                                &mut ty,
+                                &mut ty_start_attempted,
+                                project_root,
+                                all_project_files,
+                                index,
+                                indexed_files,
+                                python_env,
+                                &work.path,
+                                &work.source,
+                                &work.pending,
+                                config,
+                                &mut file_cache,
+                                &mut def_caches,
+                                &mut file_diagnostics,
+                                None,
+                            )?;
+                            out.push((work_index, file_diagnostics));
+                        } else {
+                            // Replay the serial pass's open history: ty's
+                            // answers for multi-location symbols depend on
+                            // which files were opened before the query, so
+                            // every shard opens *every* file in sorted
+                            // order (cheap under pull diagnostics — ty
+                            // computes nothing for an open it is never
+                            // queried about) and only queries its own.
+                            // Each server then sees the exact open-set the
+                            // single-server pass had at the same point and
+                            // returns the same answers.
+                            if !ty_start_attempted {
+                                ty_start_attempted = true;
+                                ty = Some(start_ty_for_fallback(project_root, python_env)?);
+                            }
+                            if let Some(ty) = ty.as_mut() {
+                                let _ = ty.ensure_open(&work.path, &work.source);
+                            }
+                        }
+                    }
+                    Ok(out)
+                })
+                .map_err(CheckError::Io)?;
+            handles.push(handle);
+        }
+        Ok(handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect())
+    })?;
+    for result in results {
+        for (work_index, file_diagnostics) in result? {
+            slots[work_index] = Some(file_diagnostics);
+        }
+    }
+    for slot in slots.into_iter().flatten() {
+        diagnostics.extend(slot);
+    }
+    Ok(())
+}
+
+/// Greedily split sorted ty work across `shard_count` shards, assigning each
+/// file (in sorted-path order) to the shard with the fewest pending calls so
+/// far (ties: lowest shard index). Pending-call count is the best static
+/// proxy for a file's ty cost, and the greedy rule is a pure function of the
+/// sorted work list, so the partition — and therefore each ty server's
+/// request stream — is reproducible everywhere. Each shard preserves the
+/// sorted order of its files. Returned items carry their index in the
+/// original sorted work list so per-file diagnostics can be reassembled in
+/// order.
+fn partition_ty_work(ty_work: &[PendingTyWork], shard_count: usize) -> Vec<Vec<usize>> {
+    let shard_count = shard_count.min(ty_work.len()).max(1);
+    let mut shards: Vec<Vec<usize>> = (0..shard_count).map(|_| Vec::new()).collect();
+    let mut loads = vec![0usize; shard_count];
+    for (work_index, work) in ty_work.iter().enumerate() {
+        let lightest = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map_or(0, |(shard, _)| shard);
+        loads[lightest] += work.pending.len().max(1);
+        shards[lightest].push(work_index);
+    }
+    shards
 }
 
 fn check_paths_impl(
@@ -3131,8 +3291,37 @@ fn resolve_ty_definition_for_pending(
 ) -> Option<(String, Vec<Signature>)> {
     let (line, ch) = lsp_index.position(source, pending.callee_offset);
     let id = ty.ask("textDocument/definition", path, line, ch)?;
-    let loc = ty.take(id).as_ref().and_then(location_from_value)?;
-    resolve_def_location_cached(path, source, &loc, indexed_files, file_cache, def_caches)
+    let response = ty.take(id)?;
+    resolve_first_def_location(
+        path,
+        source,
+        &response,
+        indexed_files,
+        file_cache,
+        def_caches,
+    )
+}
+
+/// Resolve a `textDocument/definition` response to the first usable
+/// definition, trying ty's locations in order. ty's relative ordering of a
+/// multi-location answer depends on the answering server's open/query
+/// history, and the leading entry is often a local binding the definition
+/// parser cannot use — trying each location keeps the result independent of
+/// that ordering whenever exactly one location resolves, and recovers
+/// definitions a first-entry-only read would lose.
+// ty-fallback helper; excluded (see `collect_defs`).
+#[cfg_attr(coverage, coverage(off))]
+fn resolve_first_def_location(
+    path: &Path,
+    source: &str,
+    response: &serde_json::Value,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
+    file_cache: &mut FxHashMap<PathBuf, Option<String>>,
+    def_caches: &mut TyDefCaches,
+) -> Option<(String, Vec<Signature>)> {
+    locations_from_value(response).iter().find_map(|loc| {
+        resolve_def_location_cached(path, source, loc, indexed_files, file_cache, def_caches)
+    })
 }
 
 // ty-fallback helper; excluded (see `collect_defs`).
@@ -3774,7 +3963,7 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// [`parse_hover_signature`], [`signature_from_param_text`],
 /// [`parse_callable_type_overloads`], [`strip_unbound_receiver`],
 /// [`identifier_at`], `byte_offset_to_lsp`, [`lsp_to_byte_offset`],
-/// [`location_from_value`], [`DefFileIndex::resolve_at`] and
+/// [`locations_from_value`], [`DefFileIndex::resolve_at`] and
 /// [`emit_if_violation_with_signature_fullname`].
 #[cfg_attr(coverage, coverage(off))]
 #[allow(
@@ -3989,28 +4178,26 @@ fn resolve_pending_with_ty(
             })
             .collect();
         for (i, id) in def_ids {
-            let Some(loc) = id
-                .and_then(|id| ty.take(id))
-                .as_ref()
-                .and_then(location_from_value)
-            else {
-                continue;
-            };
-            // A `ty` goto-definition target is a dependency/stub. Use the guarded
-            // parser so a deeply-nested target is rejected gracefully rather than
-            // crashing the analysis thread (issue #83 follow-up to #54). The
-            // two-stage pre-filter keeps typical stubs cheap (byte count only);
-            // only genuinely deep ones pay the tokeniser scan — and those would
-            // have crashed the old unguarded call. A too-deep or unparsable
-            // target is silently skipped, same fail-closed behaviour as before.
-            if let Some((fullname, sigs)) = resolve_def_location_cached(
-                path,
-                source,
-                &loc,
-                indexed_files,
-                file_cache,
-                def_caches,
-            ) {
+            let raw_def = id.and_then(|id| ty.take(id));
+            // A `ty` goto-definition target is a dependency/stub. Each
+            // location goes through the guarded parser so a deeply-nested
+            // target is rejected gracefully rather than crashing the
+            // analysis thread (issue #83 follow-up to #54). The two-stage
+            // pre-filter keeps typical stubs cheap (byte count only); only
+            // genuinely deep ones pay the tokeniser scan — and those would
+            // have crashed the old unguarded call. A response whose every
+            // location is too deep or unparsable is silently skipped, same
+            // fail-closed behaviour as before.
+            if let Some((fullname, sigs)) = raw_def.as_ref().and_then(|response| {
+                resolve_first_def_location(
+                    path,
+                    source,
+                    response,
+                    indexed_files,
+                    file_cache,
+                    def_caches,
+                )
+            }) {
                 let ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 let max_positional = emit_if_violation_with_signature_fullname(
                     &fullname,
@@ -4058,17 +4245,58 @@ mod tests {
     use super::{
         collect_python_files, decorator_tail, has_staticmethod_or_classmethod_decorator,
         is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
-        record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
+        partition_ty_work, plan_rewrite_insertions, process_scan_outcome_for_ty,
+        receiver_is_class_object, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, ScanOutcome, TyFixAst,
-        TyFixes,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, PendingTyWork,
+        ScanOutcome, TyFixAst, TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
     use std::path::Path;
+
+    fn ty_work(path: &str, pending_calls: usize) -> PendingTyWork {
+        PendingTyWork {
+            path: Path::new(path).to_path_buf(),
+            source: String::new(),
+            pending: (0..pending_calls)
+                .map(|_| PendingTy {
+                    callee_offset: 0,
+                    call_start: 0,
+                    positional_count: 1,
+                    rewrite_args_are_statically_precise: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn partition_ty_work_balances_pending_calls_deterministically() {
+        // Greedy least-loaded assignment in sorted order: the heavy first
+        // file fills shard 0, the next files go to the emptier shards (ties
+        // break toward the lowest shard index), and each shard preserves the
+        // sorted order of its files via their original work-list indices.
+        let work = vec![
+            ty_work("a.py", 10),
+            ty_work("b.py", 1),
+            ty_work("c.py", 1),
+            ty_work("d.py", 1),
+        ];
+        let shards = partition_ty_work(&work, 2);
+        assert_eq!(shards, vec![vec![0], vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn partition_ty_work_caps_shards_at_work_len_and_floors_empty_pending() {
+        // Fewer files than shards: one shard per file, none empty. A file
+        // with no pending calls still counts as load 1 so it cannot make its
+        // shard look free forever.
+        let work = vec![ty_work("a.py", 0), ty_work("b.py", 0)];
+        let shards = partition_ty_work(&work, 4);
+        assert_eq!(shards, vec![vec![0], vec![1]]);
+    }
 
     #[test]
     fn ignored_path_rejects_dot_venv_and_pycache_components() {
