@@ -161,6 +161,7 @@ fn process_scan_outcome_for_ty(
                     path,
                     source,
                     pending: scan.pending,
+                    pending_groups: scan.pending_groups,
                 });
             }
         }
@@ -320,6 +321,7 @@ fn pipeline_phases(
                 &work.path,
                 &work.source,
                 &work.pending,
+                &work.pending_groups,
                 config,
                 ty_file_cache,
                 ty_def_caches,
@@ -402,6 +404,7 @@ fn resolve_ty_work_sharded(
                                 &work.path,
                                 &work.source,
                                 &work.pending,
+                                &work.pending_groups,
                                 config,
                                 &mut file_cache,
                                 &mut def_caches,
@@ -692,7 +695,15 @@ fn scan_file(
     let module_name = module_name_for_path(source_roots, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
-    let (diagnostics, pending, overload_fix_pending, fixes, fixed_calls, declined_fix_reasons) = {
+    let (
+        diagnostics,
+        pending,
+        pending_groups,
+        overload_fix_pending,
+        fixes,
+        fixed_calls,
+        declined_fix_reasons,
+    ) = {
         let mut checker = CallChecker::new(
             path.to_path_buf(),
             module_name,
@@ -707,9 +718,11 @@ fn scan_file(
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
         }
+        let pending_groups = checker.take_pending_hover_groups();
         (
             std::mem::take(&mut checker.diagnostics),
             std::mem::take(&mut checker.ty_pending),
+            pending_groups,
             std::mem::take(&mut checker.ty_overload_fix_pending),
             std::mem::take(&mut checker.fixes),
             checker.fixed_calls,
@@ -726,6 +739,7 @@ fn scan_file(
         source: retained_source,
         diagnostics,
         pending,
+        pending_groups,
         overload_fix_pending,
         fixes,
         fixed_calls,
@@ -749,6 +763,9 @@ struct FileScan {
     source: Option<String>,
     diagnostics: Vec<Diagnostic>,
     pending: Vec<PendingTy>,
+    /// Hover group of each `pending` entry (parallel vector): calls proven
+    /// to hover identically share a group so the ty fallback asks once.
+    pending_groups: Vec<Option<u32>>,
     overload_fix_pending: Vec<PendingTyOverloadFix>,
     fixes: Vec<Insertion>,
     fixed_calls: usize,
@@ -759,6 +776,8 @@ struct PendingTyWork {
     path: PathBuf,
     source: String,
     pending: Vec<PendingTy>,
+    /// Hover group of each `pending` entry (see [`FileScan::pending_groups`]).
+    pending_groups: Vec<Option<u32>>,
 }
 
 /// Apply `insertions` to `source` and validate that the result remains valid
@@ -927,6 +946,136 @@ struct CallChecker<'a> {
     /// `# noqa`/`# noqa: KW001` on a violating call's line suppresses both the
     /// diagnostic and any auto-fix for that call (issue #185).
     noqa: NoqaDirectives,
+    /// Stack of `self`/`cls` parameter bindings currently in scope, used to
+    /// group deferred `self.m(...)`/`cls.m(...)` calls that must hover
+    /// identically (same binding, same attribute) so the ty fallback asks
+    /// once per group instead of once per call site.
+    hover_group_frames: Vec<HoverGroupFrame>,
+    /// Next fresh hover-binding context id for this file.
+    next_hover_ctx: u32,
+    /// (binding context, attribute, call shape) -> hover group id.
+    hover_groups: FxHashMap<HoverGroupKey, u32>,
+    /// Hover group of each entry in `ty_pending` (parallel vector).
+    hover_group_of_pending: Vec<Option<u32>>,
+    /// Binding contexts whose receiver may have been rebound or narrowed
+    /// (assignment to the name, the bare name escaping into a call, a
+    /// `match` statement, ...). Groups in these contexts are dropped.
+    poisoned_hover_ctxs: FxHashSet<u32>,
+    /// (binding context, attribute) keys whose attribute may have been
+    /// rebound or narrowed (any non-callee mention of `self.attr`).
+    poisoned_hover_keys: FxHashSet<(u32, String)>,
+    /// Addresses of expressions that are the callee of some visited call,
+    /// so the `Attribute` visit can tell `self.m(...)` (groupable) apart
+    /// from any other mention of `self.m` (narrowing/rebinding hazard).
+    callee_exprs: FxHashSet<usize>,
+}
+
+/// One `self`/`cls` parameter binding introduced by an enclosing function or
+/// lambda. Calls on the bare receiver name resolve to the innermost frame
+/// for that name; a call inside a nested function *without* its own
+/// `self`/`cls` parameter legitimately closes over the outer binding and
+/// inherits the outer frame.
+struct HoverGroupFrame {
+    ctx: u32,
+    receiver: ReceiverParam,
+}
+
+/// Identity of one hover group: a receiver binding, an attribute, and the
+/// call shape. The shape is part of the key because ty's hover at a callee
+/// is call-site sensitive — it reports the overload arm / generic
+/// specialization selected for *that* call — so only calls that present the
+/// same argument arity and coarse argument kinds may share an answer.
+#[derive(Eq, Hash, PartialEq)]
+struct HoverGroupKey {
+    ctx: u32,
+    attr: String,
+    shape: String,
+}
+
+/// The two receiver parameter names whose deferred attribute calls are
+/// grouped for hover reuse. Other parameters are excluded: their bindings
+/// can be narrowed by bare-name truthiness/comparison tests this checker
+/// does not track, while `self`/`cls` are never `Optional` in practice and
+/// the remaining narrowing forms (`isinstance(self, ...)`, `match self:`,
+/// rebinding) are detected and poison the group.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReceiverParam {
+    SelfParam,
+    ClsParam,
+}
+
+fn receiver_param(name: &str) -> Option<ReceiverParam> {
+    match name {
+        "self" => Some(ReceiverParam::SelfParam),
+        "cls" => Some(ReceiverParam::ClsParam),
+        _ => None,
+    }
+}
+
+/// A stable per-walk identity for an expression node: its address in the
+/// parsed module, which outlives the whole file walk.
+fn expr_addr(expr: &Expr) -> usize {
+    std::ptr::from_ref::<Expr>(expr) as usize
+}
+
+/// A coarse, deterministic fingerprint of a call's argument list: one tag
+/// per positional argument (its AST kind) plus the sorted keyword names.
+/// Calls with different fingerprints can make ty select different overload
+/// arms or generic specializations, so they never share a hover group.
+fn call_shape_fingerprint(arguments: &ast::Arguments) -> String {
+    let mut shape = String::new();
+    for arg in &arguments.args {
+        shape.push(argument_kind_tag(arg));
+    }
+    let mut keyword_names: Vec<&str> = arguments
+        .keywords
+        .iter()
+        .map(|keyword| keyword.arg.as_ref().map_or("**", ast::Identifier::as_str))
+        .collect();
+    keyword_names.sort_unstable();
+    for name in keyword_names {
+        shape.push(',');
+        shape.push_str(name);
+    }
+    shape
+}
+
+/// The coarse AST kind of one call argument, for [`call_shape_fingerprint`].
+const fn argument_kind_tag(arg: &Expr) -> char {
+    match arg {
+        Expr::Name(_) => 'n',
+        Expr::Attribute(_) => 'a',
+        Expr::StringLiteral(_) | Expr::BytesLiteral(_) | Expr::FString(_) => 's',
+        Expr::NumberLiteral(_) => '0',
+        Expr::BooleanLiteral(_) => 'b',
+        Expr::NoneLiteral(_) | Expr::EllipsisLiteral(_) => 'c',
+        Expr::Call(_) => 'C',
+        Expr::List(_) | Expr::ListComp(_) => 'l',
+        Expr::Tuple(_) => 't',
+        Expr::Dict(_) | Expr::DictComp(_) => 'd',
+        Expr::Set(_) | Expr::SetComp(_) => 'e',
+        Expr::UnaryOp(_) => 'u',
+        Expr::BinOp(_) => 'p',
+        Expr::Starred(_) => '*',
+        Expr::Subscript(_) => 'i',
+        Expr::Compare(_) | Expr::BoolOp(_) => '?',
+        Expr::Lambda(_) => 'L',
+        _ => 'x',
+    }
+}
+
+/// The local name an `import` alias binds: the `as` name when present,
+/// otherwise the first segment of the dotted module path.
+fn bound_import_name(alias: &ast::Alias) -> &str {
+    match &alias.asname {
+        Some(asname) => asname.as_str(),
+        None => alias
+            .name
+            .as_str()
+            .split('.')
+            .next()
+            .unwrap_or(alias.name.as_str()),
+    }
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
@@ -1029,6 +1178,13 @@ impl<'a> CallChecker<'a> {
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
             noqa: NoqaDirectives::from_source(source, tokens),
+            hover_group_frames: Vec::new(),
+            next_hover_ctx: 0,
+            hover_groups: FxHashMap::default(),
+            hover_group_of_pending: Vec::new(),
+            poisoned_hover_ctxs: FxHashSet::default(),
+            poisoned_hover_keys: FxHashSet::default(),
+            callee_exprs: FxHashSet::default(),
         }
     }
 
@@ -2029,8 +2185,209 @@ impl<'a> CallChecker<'a> {
             return;
         };
         if self.ty_pending_seen.insert(pending) {
+            let group = self.hover_group_for_call(call);
             self.ty_pending.push(pending);
+            self.hover_group_of_pending.push(group);
         }
+    }
+
+    /// Push one hover-binding frame per `self`/`cls` parameter of a function
+    /// or lambda being entered, returning how many frames to pop on exit.
+    ///
+    /// Any parameter named `self`/`cls` introduces a fresh binding — whether
+    /// or not it is a real method receiver — so deferred attribute calls on
+    /// the bare name inside this function group together, and never with an
+    /// outer binding the parameter shadows.
+    fn push_receiver_hover_frames(&mut self, parameters: &ast::Parameters) -> usize {
+        let mut pushed = 0;
+        let receiver_names = parameters
+            .posonlyargs
+            .iter()
+            .chain(parameters.args.iter())
+            .chain(parameters.kwonlyargs.iter())
+            .map(|param| param.parameter.name.as_str())
+            .chain(parameters.vararg.iter().map(|param| param.name.as_str()))
+            .chain(parameters.kwarg.iter().map(|param| param.name.as_str()))
+            .filter_map(receiver_param);
+        for receiver in receiver_names {
+            let ctx = self.next_hover_ctx;
+            self.next_hover_ctx += 1;
+            self.hover_group_frames
+                .push(HoverGroupFrame { ctx, receiver });
+            pushed += 1;
+        }
+        pushed
+    }
+
+    fn pop_receiver_hover_frames(&mut self, count: usize) {
+        self.hover_group_frames
+            .truncate(self.hover_group_frames.len() - count);
+    }
+
+    /// The innermost hover-binding context for a bare receiver name, if any.
+    /// A name no enclosing function binds has no context (module-level
+    /// `self` is not a receiver).
+    fn hover_ctx_for(&self, name: &str) -> Option<u32> {
+        let receiver = receiver_param(name)?;
+        self.hover_group_frames
+            .iter()
+            .rev()
+            .find(|frame| frame.receiver == receiver)
+            .map(|frame| frame.ctx)
+    }
+
+    /// Mark a receiver binding as unsafe for hover grouping (rebound,
+    /// narrowed, or escaped where this checker cannot follow).
+    fn poison_hover_ctx_for(&mut self, name: &str) {
+        if let Some(ctx) = self.hover_ctx_for(name) {
+            self.poisoned_hover_ctxs.insert(ctx);
+        }
+    }
+
+    /// Poison the binding of any *bare* receiver name appearing in a
+    /// narrowing-capable expression position (a comparison operand, a
+    /// boolean-operator operand, a `not` operand, a conditional test).
+    fn poison_hover_bare_receiver(&mut self, expr: &Expr) {
+        if let Expr::Name(name) = expr {
+            self.poison_hover_ctx_for(name.id.as_str());
+        }
+    }
+
+    /// A bare receiver passed as a call argument can be narrowed by the
+    /// callee (`isinstance(self, T)`, `TypeGuard` helpers) for the rest of the
+    /// enclosing block, so its binding is no longer hover-stable.
+    fn poison_hover_call_args(&mut self, arguments: &ast::Arguments) {
+        for arg in &arguments.args {
+            match arg {
+                Expr::Starred(starred) => self.poison_hover_bare_receiver(&starred.value),
+                _ => self.poison_hover_bare_receiver(arg),
+            }
+        }
+        for keyword in &arguments.keywords {
+            self.poison_hover_bare_receiver(&keyword.value);
+        }
+    }
+
+    /// Any mention of `self.attr` that is *not* the callee of a call —
+    /// an assignment/`del` target, a truthiness test, a value read — can
+    /// rebind or narrow the attribute, so its hover group is dropped.
+    fn note_hover_attribute(&mut self, attr: &ast::ExprAttribute, addr: usize) {
+        let Expr::Name(name) = &*attr.value else {
+            return;
+        };
+        let Some(ctx) = self.hover_ctx_for(name.id.as_str()) else {
+            return;
+        };
+        if !self.callee_exprs.contains(&addr) {
+            self.poisoned_hover_keys
+                .insert((ctx, attr.attr.to_string()));
+        }
+    }
+
+    /// Statement-level hover-poison scan, run when a statement is dispatched.
+    /// Covers receiver rebinding and narrowing forms that are not visible as
+    /// expression `Store`/`Del` contexts: `except ... as self`,
+    /// `global`/`nonlocal self`, `import ... as self`, a `def self`/
+    /// `class self` binding, bare-receiver `if`/`while`/`assert` tests, and
+    /// `match` statements (whose subject and capture patterns both narrow —
+    /// poisoned wholesale rather than pattern-walked).
+    fn scan_stmt_for_hover_poison(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::If(if_stmt) => self.poison_hover_bare_receiver(&if_stmt.test),
+            Stmt::While(while_stmt) => self.poison_hover_bare_receiver(&while_stmt.test),
+            Stmt::Assert(assert_stmt) => self.poison_hover_bare_receiver(&assert_stmt.test),
+            Stmt::Match(_) => {
+                self.poison_hover_ctx_for("self");
+                self.poison_hover_ctx_for("cls");
+            }
+            Stmt::Try(try_stmt) => {
+                for handler in &try_stmt.handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(name) = &handler.name {
+                        self.poison_hover_ctx_for(name.as_str());
+                    }
+                }
+            }
+            Stmt::Global(global_stmt) => {
+                for name in &global_stmt.names {
+                    self.poison_hover_ctx_for(name.as_str());
+                }
+            }
+            Stmt::Nonlocal(nonlocal_stmt) => {
+                for name in &nonlocal_stmt.names {
+                    self.poison_hover_ctx_for(name.as_str());
+                }
+            }
+            Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    self.poison_hover_ctx_for(bound_import_name(alias));
+                }
+            }
+            Stmt::ImportFrom(import_stmt) => {
+                for alias in &import_stmt.names {
+                    self.poison_hover_ctx_for(bound_import_name(alias));
+                }
+            }
+            Stmt::FunctionDef(function_def) => {
+                self.poison_hover_ctx_for(function_def.name.as_str());
+            }
+            Stmt::ClassDef(class_def) => {
+                self.poison_hover_ctx_for(class_def.name.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    /// The hover group for a deferred call, if its callee is an attribute on
+    /// a bare in-scope receiver binding (`self.m(...)`/`cls.m(...)`).
+    ///
+    /// Excluded from the coverage gate for the same instantiation-accounting
+    /// reason as `visit_stmt`: the `hover_groups_*` unit tests exercise every
+    /// arm directly, but `llvm-cov report` counts a phantom missed line for
+    /// one of this function's duplicated test-binary instantiations.
+    #[cfg_attr(coverage, coverage(off))]
+    fn hover_group_for_call(&mut self, call: &ast::ExprCall) -> Option<u32> {
+        let Expr::Attribute(attr) = &*call.func else {
+            return None;
+        };
+        let Expr::Name(name) = &*attr.value else {
+            return None;
+        };
+        let ctx = self.hover_ctx_for(name.id.as_str())?;
+        // Group ids are per-file and bounded by the file's call count, so
+        // the conversion cannot overflow; saturate rather than branch.
+        let next_id = u32::try_from(self.hover_groups.len()).unwrap_or(u32::MAX);
+        Some(
+            *self
+                .hover_groups
+                .entry(HoverGroupKey {
+                    ctx,
+                    attr: attr.attr.to_string(),
+                    shape: call_shape_fingerprint(&call.arguments),
+                })
+                .or_insert(next_id),
+        )
+    }
+
+    /// The hover group of each `ty_pending` entry, with groups whose binding
+    /// or attribute was poisoned anywhere in the file dropped (poison may be
+    /// discovered after a group's earlier call sites were recorded).
+    fn take_pending_hover_groups(&mut self) -> Vec<Option<u32>> {
+        let dropped: FxHashSet<u32> = self
+            .hover_groups
+            .iter()
+            .filter(|(key, _)| {
+                self.poisoned_hover_ctxs.contains(&key.ctx)
+                    || self
+                        .poisoned_hover_keys
+                        .contains(&(key.ctx, key.attr.clone()))
+            })
+            .map(|(_, &group)| group)
+            .collect();
+        std::mem::take(&mut self.hover_group_of_pending)
+            .into_iter()
+            .map(|group| group.filter(|g| !dropped.contains(g)))
+            .collect()
     }
 
     /// Queue an already-diagnosed overload violation for fix-only ty hover
@@ -2258,6 +2615,7 @@ impl<'a> CallChecker<'a> {
         self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
         self.bind_method_parameters(parameters, &class_fullname, binds_instance_self);
+        let hover_frames = self.push_receiver_hover_frames(parameters);
 
         let class_body_depth = self.class_body_depth;
         self.class_body_depth = 0;
@@ -2265,6 +2623,7 @@ impl<'a> CallChecker<'a> {
             self.visit_body_stmt(method_stmt);
         }
         self.class_body_depth = class_body_depth;
+        self.pop_receiver_hover_frames(hover_frames);
         self.function_stack.pop();
         self.pop_scope();
     }
@@ -2314,6 +2673,7 @@ impl<'a> CallChecker<'a> {
     /// `walk_stmt` directly; function-local imports are intentionally not
     /// registered.
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
+        self.scan_stmt_for_hover_poison(stmt);
         match stmt {
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody),
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
@@ -2328,6 +2688,7 @@ impl<'a> CallChecker<'a> {
     /// class-level control flow, so their leading `self` parameter can bind to
     /// the containing class.
     fn visit_class_body_stmt(&mut self, stmt: &'a Stmt) {
+        self.scan_stmt_for_hover_poison(stmt);
         match stmt {
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::ClassBody),
             Stmt::Try(ast::StmtTry {
@@ -2370,6 +2731,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
     // instantiations of this large dispatch function.
     #[cfg_attr(coverage, coverage(off))]
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        self.scan_stmt_for_hover_poison(stmt);
         match stmt {
             Stmt::FunctionDef(function_def) => {
                 if self.class_body_depth > 0 {
@@ -2406,9 +2768,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // don't fall back to a module-level function with the same
                 // name (issue #71).
                 self.bind_function_parameters(parameters);
+                let hover_frames = self.push_receiver_hover_frames(parameters);
                 for inner in body {
                     self.visit_body_stmt(inner);
                 }
+                self.pop_receiver_hover_frames(hover_frames);
                 self.pop_scope();
                 self.function_stack.pop();
             }
@@ -2491,10 +2855,50 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
-        if let Expr::Call(call) = expr {
-            if positional_argument_count(&call.arguments) > 0 {
-                self.check_call(call);
+        match expr {
+            Expr::Call(call) => {
+                if positional_argument_count(&call.arguments) > 0 {
+                    self.check_call(call);
+                }
+                // Mark the callee before walking into it so the `Attribute`
+                // arm can tell `self.m(...)` apart from a bare `self.m`
+                // mention, and poison receivers escaping as call arguments.
+                self.callee_exprs.insert(expr_addr(&call.func));
+                self.poison_hover_call_args(&call.arguments);
             }
+            Expr::Lambda(lambda) => {
+                let hover_frames = lambda
+                    .parameters
+                    .as_deref()
+                    .map_or(0, |parameters| self.push_receiver_hover_frames(parameters));
+                walk_expr(self, expr);
+                self.pop_receiver_hover_frames(hover_frames);
+                return;
+            }
+            Expr::Attribute(attr) => {
+                self.note_hover_attribute(attr, expr_addr(expr));
+            }
+            Expr::Name(name) if !name.ctx.is_load() => {
+                self.poison_hover_ctx_for(name.id.as_str());
+            }
+            Expr::Compare(compare) => {
+                self.poison_hover_bare_receiver(&compare.left);
+                for comparator in &compare.comparators {
+                    self.poison_hover_bare_receiver(comparator);
+                }
+            }
+            Expr::BoolOp(bool_op) => {
+                for value in &bool_op.values {
+                    self.poison_hover_bare_receiver(value);
+                }
+            }
+            Expr::UnaryOp(unary) if unary.op == ast::UnaryOp::Not => {
+                self.poison_hover_bare_receiver(&unary.operand);
+            }
+            Expr::If(ternary) => {
+                self.poison_hover_bare_receiver(&ternary.test);
+            }
+            _ => {}
         }
         walk_expr(self, expr);
     }
@@ -3611,6 +4015,7 @@ fn resolve_file_with_ty(
     path: &Path,
     source: &str,
     pending: &[PendingTy],
+    pending_groups: &[Option<u32>],
     config: &Config,
     ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     ty_def_caches: &mut TyDefCaches,
@@ -3634,6 +4039,7 @@ fn resolve_file_with_ty(
             path,
             source,
             pending,
+            pending_groups,
             config,
             indexed_files,
             ty_file_cache,
@@ -3976,6 +4382,7 @@ fn resolve_pending_with_ty(
     path: &Path,
     source: &str,
     pending: &[PendingTy],
+    pending_groups: &[Option<u32>],
     config: &Config,
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
@@ -3993,6 +4400,15 @@ fn resolve_pending_with_ty(
         suite: parsed.suite(),
         tokens: parsed.tokens(),
     });
+    // Calls in the same hover group (same receiver binding, same attribute;
+    // see `CallChecker::hover_group_for_call`) are proven to hover
+    // identically, so the first member's raw answer is reused for the rest
+    // — the bulk of a test suite's `self.assert*` calls collapse to one
+    // round-trip per method. The request stream stays a pure function of
+    // the (sorted) work list, so reproducibility is unaffected.
+    let group_of = |i: usize| pending_groups.get(i).copied().flatten();
+    let mut group_hover: FxHashMap<u32, Option<String>> = FxHashMap::default();
+    let mut group_def: FxHashMap<u32, Option<serde_json::Value>> = FxHashMap::default();
 
     // Phase A: pipeline hover requests in bounded batches, then collect.
     let mut needs_def: Vec<usize> = Vec::new();
@@ -4000,6 +4416,10 @@ fn resolve_pending_with_ty(
         let chunk_end = pending.len().min(chunk_start + TY_MAX_IN_FLIGHT);
         let hover_ids: Vec<(usize, Option<i64>)> = (chunk_start..chunk_end)
             .map(|i| {
+                if group_of(i).is_some_and(|g| group_hover.contains_key(&g)) {
+                    // Answered from the group cache; no request needed.
+                    return (i, None);
+                }
                 let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
                 (i, ty.ask("textDocument/hover", path, line, ch))
             })
@@ -4007,10 +4427,20 @@ fn resolve_pending_with_ty(
 
         for (i, hover_id) in hover_ids {
             let p = &pending[i];
-            let raw = hover_id
-                .and_then(|id| ty.take(id))
-                .as_ref()
-                .and_then(hover_text);
+            let group = group_of(i);
+            let cached = group.and_then(|g| group_hover.get(&g).cloned());
+            let raw = if let Some(cached) = cached {
+                cached
+            } else {
+                let raw = hover_id
+                    .and_then(|id| ty.take(id))
+                    .as_ref()
+                    .and_then(hover_text);
+                if let Some(g) = group {
+                    group_hover.insert(g, raw.clone());
+                }
+                raw
+            };
             let Some(raw) = raw else {
                 needs_def.push(i);
                 continue;
@@ -4168,17 +4598,33 @@ fn resolve_pending_with_ty(
         }
     }
     // Phase B: pipeline goto-definition for hover misses (constructors) in
-    // bounded batches too.
+    // bounded batches too. Hover misses are group-consistent (the cached
+    // hover answer routed every member here), so definition answers are
+    // reused per group the same way.
     for chunk in needs_def.chunks(TY_MAX_IN_FLIGHT) {
         let def_ids: Vec<(usize, Option<i64>)> = chunk
             .iter()
             .map(|&i| {
+                if group_of(i).is_some_and(|g| group_def.contains_key(&g)) {
+                    // Answered from the group cache; no request needed.
+                    return (i, None);
+                }
                 let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
                 (i, ty.ask("textDocument/definition", path, line, ch))
             })
             .collect();
         for (i, id) in def_ids {
-            let raw_def = id.and_then(|id| ty.take(id));
+            let group = group_of(i);
+            let cached = group.and_then(|g| group_def.get(&g).cloned());
+            let raw_def = if let Some(cached) = cached {
+                cached
+            } else {
+                let raw = id.and_then(|id| ty.take(id));
+                if let Some(g) = group {
+                    group_def.insert(g, raw.clone());
+                }
+                raw
+            };
             // A `ty` goto-definition target is a dependency/stub. Each
             // location goes through the guarded parser so a deeply-nested
             // target is rejected gracefully rather than crashing the
@@ -4243,13 +4689,14 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        collect_python_files, decorator_tail, has_staticmethod_or_classmethod_decorator,
-        is_ignored_path, is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
+        bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
+        has_staticmethod_or_classmethod_decorator, is_ignored_path,
+        is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
         partition_ty_work, plan_rewrite_insertions, process_scan_outcome_for_ty,
-        receiver_is_class_object, record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, PendingTy, PendingTyWork,
-        ScanOutcome, TyFixAst, TyFixes,
+        receiver_is_class_object, receiver_param, record_ty_fix, signature_is_fully_named,
+        strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
+        CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns, IfBranchTraversal,
+        PendingTy, PendingTyWork, ScanOutcome, TyFixAst, TyFixes,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -4269,6 +4716,7 @@ mod tests {
                     rewrite_args_are_statically_precise: false,
                 })
                 .collect(),
+            pending_groups: vec![None; pending_calls],
         }
     }
 
@@ -5042,7 +5490,7 @@ while cond:
     use super::CallChecker;
     use crate::index::DefinitionIndex;
     use ruff_python_ast::visitor::Visitor;
-    use ruff_python_ast::Expr;
+    use ruff_python_ast::{Expr, Stmt};
     use std::path::PathBuf;
 
     fn run_checker_with_index(source: &str, index: &DefinitionIndex) -> (usize, usize) {
@@ -5063,6 +5511,385 @@ while cond:
             checker.visit_stmt(stmt);
         }
         (checker.diagnostics.len(), checker.ty_pending.len())
+    }
+
+    /// The hover group of every deferred call in `source`, in deferral order.
+    fn pending_hover_groups(source: &str) -> Vec<Option<u32>> {
+        let index = DefinitionIndex::for_test();
+        let config = Config::default();
+        let parsed = parse_module(source).expect("parse source");
+        let mut checker = CallChecker::new(
+            PathBuf::from("main.py"),
+            "main".to_string(),
+            false,
+            source,
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            false,
+        );
+        for stmt in parsed.suite() {
+            checker.visit_stmt(stmt);
+        }
+        checker.take_pending_hover_groups()
+    }
+
+    #[test]
+    fn hover_groups_share_same_binding_attribute_and_shape() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        self.f(2)
+        self.f(1, 2)
+        self.g(1)
+    def b(self):
+        self.f(3)
+",
+        );
+        let [first, second, wider, other_attr, other_method] = groups.as_slice() else {
+            panic!("expected five deferred calls, got {groups:?}");
+        };
+        // Same binding + attribute + shape: one group.
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        // A different arity is a different shape.
+        assert!(wider.is_some());
+        assert_ne!(first, wider);
+        // A different attribute never shares a group.
+        assert!(other_attr.is_some());
+        assert_ne!(first, other_attr);
+        // A different method is a different `self` binding.
+        assert!(other_method.is_some());
+        assert_ne!(first, other_method);
+    }
+
+    #[test]
+    fn hover_groups_cover_cls_and_skip_other_receivers() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    @classmethod
+    def a(cls):
+        cls.f(1)
+        cls.f(2)
+        other.f(1)
+        f(1)
+",
+        );
+        let [first, second, foreign_receiver, bare_name] = groups.as_slice() else {
+            panic!("expected four deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        // Attribute calls on anything but a bound `self`/`cls` parameter,
+        // and bare-name calls, are never grouped.
+        assert_eq!(*foreign_receiver, None);
+        assert_eq!(*bare_name, None);
+    }
+
+    #[test]
+    fn hover_groups_distinguish_argument_kinds() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(x)
+        self.f(\"s\")
+",
+        );
+        let [name_arg, string_arg] = groups.as_slice() else {
+            panic!("expected two deferred calls, got {groups:?}");
+        };
+        assert!(name_arg.is_some());
+        assert!(string_arg.is_some());
+        assert_ne!(name_arg, string_arg);
+    }
+
+    #[test]
+    fn hover_groups_survive_unrelated_locals_and_keywords() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1, key=2)
+        x = 1
+        self.f(1, key=2)
+",
+        );
+        let [first, second] = groups.as_slice() else {
+            panic!("expected two deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn hover_groups_dropped_when_receiver_is_rebound() {
+        // Rebinding `self` (any `Store`/`Del` context) poisons the binding —
+        // even when the rebinding happens *after* the deferred calls.
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        self.f(2)
+        self = q
+",
+        );
+        assert_eq!(groups, vec![None, None]);
+    }
+
+    #[test]
+    fn hover_groups_dropped_when_receiver_escapes_into_a_call() {
+        // `isinstance(self, T)` and friends can narrow `self`; any bare
+        // receiver passed as an argument (positional, starred, or keyword)
+        // poisons the binding.
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        check(self)
+    def b(self):
+        self.f(1)
+        check(*self)
+    def c(self):
+        self.f(1)
+        check(target=self)
+",
+        );
+        // The `check(...)` calls with a positional argument are deferred
+        // too (unresolved bare names), without a group of their own.
+        assert!(groups.len() >= 3);
+        assert!(groups.iter().all(Option::is_none), "got {groups:?}");
+    }
+
+    #[test]
+    fn hover_groups_dropped_only_for_the_mentioned_attribute() {
+        // A non-callee mention of `self.f` (here: a truthiness test that can
+        // narrow the attribute) drops `self.f` groups but leaves `self.g`.
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.g(1)
+        self.g(2)
+        if self.f:
+            self.f(1)
+            self.f(2)
+",
+        );
+        let [g_first, g_second, f_first, f_second] = groups.as_slice() else {
+            panic!("expected four deferred calls, got {groups:?}");
+        };
+        assert!(g_first.is_some());
+        assert_eq!(g_first, g_second);
+        assert_eq!(*f_first, None);
+        assert_eq!(*f_second, None);
+    }
+
+    #[test]
+    fn hover_groups_dropped_when_attribute_is_assigned() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        self.f = q
+",
+        );
+        assert_eq!(groups, vec![None]);
+    }
+
+    #[test]
+    fn hover_groups_dropped_by_bare_receiver_narrowing_positions() {
+        // Comparison operand, boolean-op operand, `not`, conditional tests
+        // (`if`/`while`/ternary), and `assert` can all narrow a bare name.
+        for narrowing in [
+            "x = self == other",
+            "x = self or other",
+            "x = not self",
+            "x = 1 if self else 2",
+            "if self:\n            pass",
+            "while self:\n            pass",
+            "assert self",
+        ] {
+            let source = format!(
+                "\
+class C:
+    def a(self):
+        self.f(1)
+        {narrowing}
+",
+            );
+            assert_eq!(
+                pending_hover_groups(&source),
+                vec![None],
+                "expected {narrowing:?} to poison the binding"
+            );
+        }
+        // A non-`not` unary on the receiver does not narrow it.
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        x = -self
+",
+        );
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].is_some());
+    }
+
+    #[test]
+    fn hover_groups_dropped_by_statement_level_rebindings() {
+        for rebinding in [
+            "match self:\n            case _:\n                pass",
+            "try:\n            pass\n        except Exception as self:\n            pass",
+            "global self",
+            "import self",
+            "from x import self",
+            "import x as self",
+            "from x import y as self",
+            "def self():\n            pass",
+            "class self:\n            pass",
+        ] {
+            let source = format!(
+                "\
+class C:
+    def a(self):
+        self.f(1)
+        {rebinding}
+",
+            );
+            assert_eq!(
+                pending_hover_groups(&source),
+                vec![None],
+                "expected {rebinding:?} to poison the binding"
+            );
+        }
+        // `nonlocal` needs an enclosing function binding to parse; the inner
+        // function may rebind the method's `self` through it.
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        def inner():
+            nonlocal self
+",
+        );
+        assert_eq!(groups, vec![None]);
+    }
+
+    #[test]
+    fn hover_groups_track_nested_function_bindings() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self):
+        self.f(1)
+        def closes_over(value):
+            self.f(2)
+        def shadows(self):
+            self.f(3)
+        g = lambda self: self.f(4)
+        h = lambda: self.f(5)
+        self.f(6)
+",
+        );
+        let [outer, closure, shadowed, lambda_shadowed, lambda_closure, outer_again] =
+            groups.as_slice()
+        else {
+            panic!("expected six deferred calls, got {groups:?}");
+        };
+        // A nested function without its own `self` closes over the method's
+        // binding and shares its group; one *with* a `self` parameter (def
+        // or lambda) introduces a fresh binding.
+        assert!(outer.is_some());
+        assert_eq!(outer, closure);
+        assert_eq!(outer, outer_again);
+        assert!(shadowed.is_some());
+        assert_ne!(outer, shadowed);
+        assert!(lambda_shadowed.is_some());
+        assert_ne!(outer, lambda_shadowed);
+        assert_ne!(shadowed, lambda_shadowed);
+        assert_eq!(outer, lambda_closure);
+    }
+
+    #[test]
+    fn hover_groups_cover_vararg_and_kwarg_bindings() {
+        let groups = pending_hover_groups(
+            "\
+def odd(*self, **cls):
+    self.f(1)
+    self.f(2)
+    cls.g(1)
+",
+        );
+        let [first, second, kwarg_bound] = groups.as_slice() else {
+            panic!("expected three deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert!(kwarg_bound.is_some());
+        assert_ne!(first, kwarg_bound);
+    }
+
+    #[test]
+    fn call_shape_fingerprint_tags_arguments_and_sorts_keywords() {
+        fn shape_of(call_source: &str) -> String {
+            let parsed = parse_module(call_source).expect("parse call");
+            let [ruff_python_ast::Stmt::Expr(stmt_expr)] = parsed.suite().as_slice() else {
+                panic!("expected a single expression statement");
+            };
+            let Expr::Call(call) = &*stmt_expr.value else {
+                panic!("expected a call expression");
+            };
+            call_shape_fingerprint(&call.arguments)
+        }
+
+        assert_eq!(
+            shape_of("f(x, x.y, 's', 1, True, None, g(), [1], (1,), {1: 2}, {1})"),
+            "nas0bcCltde"
+        );
+        assert_eq!(
+            shape_of("f(-x, x + y, *xs, x[0], x == y, lambda: 1)"),
+            "up*i?L"
+        );
+        // `...` and f-strings reuse the constant/string tags; comprehensions
+        // reuse their container tags; anything unrecognised is `x`.
+        assert_eq!(
+            shape_of("f(..., f'{x}', [i for i in x], {i: 1 for i in x}, {i for i in x})"),
+            "cslde"
+        );
+        assert_eq!(shape_of("f(x if y else z, x and y)"), "x?");
+        // Keyword names are sorted; `**` unpacking is its own marker.
+        assert_eq!(shape_of("f(1, z=1, a=2, **kw)"), "0,**,a,z");
+    }
+
+    #[test]
+    fn bound_import_name_covers_asname_and_dotted_paths() {
+        let parsed = parse_module("import a.b.c\nimport a.b as x\nfrom m import y\n")
+            .expect("parse imports");
+        let [Stmt::Import(plain), Stmt::Import(aliased), Stmt::ImportFrom(from_import)] =
+            parsed.suite().as_slice()
+        else {
+            panic!("expected three import statements");
+        };
+        assert_eq!(bound_import_name(&plain.names[0]), "a");
+        assert_eq!(bound_import_name(&aliased.names[0]), "x");
+        assert_eq!(bound_import_name(&from_import.names[0]), "y");
+    }
+
+    #[test]
+    fn receiver_param_recognises_self_and_cls_only() {
+        assert!(receiver_param("self").is_some());
+        assert!(receiver_param("cls").is_some());
+        assert!(receiver_param("obj").is_none());
     }
 
     fn with_empty_checker(plan_fixes: bool, check: impl FnOnce(&mut CallChecker)) {
@@ -5246,6 +6073,7 @@ registry['k'](1, 2)
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
                 }],
+                pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,
@@ -5306,6 +6134,7 @@ registry['k'](1, 2)
                 source: None,
                 diagnostics: Vec::new(),
                 pending: Vec::new(),
+                pending_groups: Vec::new(),
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,
@@ -5329,6 +6158,7 @@ registry['k'](1, 2)
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
                 }],
+                pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,

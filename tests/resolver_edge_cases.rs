@@ -749,6 +749,43 @@ fn ty_hover_flags_too_many_positional_on_stdlib() {
     );
 }
 
+/// Repeated same-shape `self.method(...)` calls share one ty hover answer
+/// (the scan groups them; see `CallChecker::hover_group_for_call`). Every
+/// member of the group must still get its own diagnostic, and a
+/// different-shape sibling must be resolved independently. The base class
+/// is bound through an alias the built-in resolver does not follow, so the
+/// calls genuinely reach the ty fallback's grouped hover path.
+#[test]
+fn ty_hover_reuse_flags_every_grouped_self_call() {
+    let messages = check_source(
+        "\
+import unittest
+
+Base = unittest.TestCase
+
+
+class T(Base):
+    def m(self):
+        self.assertEqual(1, 2)
+        self.assertEqual(3, 4)
+        self.assertEqual(5, 6)
+        with self.assertRaises(ValueError):
+            pass
+",
+    );
+    for line in [8, 9, 10] {
+        assert!(
+            has_error_at(&messages, line, "Too many positional"),
+            "every grouped assertEqual call must be flagged, got: {messages:?}"
+        );
+    }
+    assert!(
+        !messages.iter().any(|m| m.starts_with("main:11:")),
+        "the context-manager assertRaises overload allows its positional \
+         argument, got: {messages:?}"
+    );
+}
+
 #[test]
 fn ty_hover_honors_ignore_names_for_bound_builtin_method() {
     let project = TestProject::new()
