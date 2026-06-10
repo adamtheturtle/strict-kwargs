@@ -209,27 +209,25 @@ fn pipeline_phases(
     index: &DefinitionIndex,
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
-    ty: &mut Option<TyResolver>,
-    ty_start_attempted: &mut bool,
-    ty_file_cache: &mut FxHashMap<PathBuf, Option<String>>,
-    ty_def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<(usize, PathBuf, String)>,
 ) -> Result<(), CheckError> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
-    let mut ty_work: Vec<PendingTyWork> = Vec::new();
+    let mut released_pending_files = 0usize;
 
-    let scan_result = std::thread::scope(|scope| -> Result<(), CheckError> {
-        // Phase 1 (parallel, background): the built-in pass over every file.
-        // Each file is an independent, pure-CPU unit of work sharing only the
-        // `Sync` demand-driven index; results are sent to `rx` as each worker
-        // finishes rather than being collected all at once. `tx` is moved in
-        // and dropped when all workers finish, closing the channel.
+    let shard_results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
+        // Phase 1 (parallel, background): the built-in pass over every
+        // file. Each file is an independent, pure-CPU unit of work
+        // sharing only the `Sync` demand-driven index; results are sent
+        // to `rx` as each worker finishes rather than being collected
+        // all at once. `tx` is moved in and dropped when all workers
+        // finish, closing the channel.
         //
-        // The coordinator thread only needs an explicit stack on platforms
-        // with small default thread stacks. On glibc Linux this keeps the
-        // hot benchmark path on the low-overhead `scope.spawn` implementation.
+        // The coordinator thread only needs an explicit stack on
+        // platforms with small default thread stacks. On glibc Linux
+        // this keeps the hot benchmark path on the low-overhead
+        // `scope.spawn` implementation.
         #[cfg(any(target_env = "musl", windows))]
         let scan_handle = std::thread::Builder::new()
             .stack_size(crate::limits::STACK_SIZE)
@@ -258,140 +256,54 @@ fn pipeline_phases(
             )
         });
 
-        for (i, path, result) in rx {
-            if consumer_err.is_some() {
-                // A ty or scan error has already been recorded; drain the
-                // remaining items so the background thread can finish.
-                continue;
-            }
-            let outcome = match result {
-                Ok(o) => o,
-                Err(e) => {
-                    consumer_err = Some(e);
-                    continue;
-                }
-            };
-            if let Err(e) = process_scan_outcome_for_ty(
-                i,
-                path,
-                outcome,
-                diagnostics,
-                skip_warnings,
-                &mut ty_work,
-            ) {
-                consumer_err = Some(e);
-            }
-        }
-
-        match scan_handle.join() {
-            Ok(result) => result,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    });
-    scan_result?;
-    if let Some(e) = consumer_err {
-        return Err(e);
-    }
-    // Scan results arrive in nondeterministic worker order. ty's answers for
-    // multi-location symbols depend on the order files were opened, so sort
-    // the queue before any didOpen reaches ty — every run then opens and
-    // queries files identically and the fallback results are reproducible.
-    ty_work.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    if ty_work.len() > 1 {
-        resolve_ty_work_sharded(
-            &ty_work,
-            project_root,
-            all_project_files,
-            index,
-            indexed_files,
-            python_env,
-            config,
-            diagnostics,
-        )?;
-    } else {
-        for work in ty_work {
-            resolve_file_with_ty(
-                ty,
-                ty_start_attempted,
-                project_root,
-                all_project_files,
-                index,
-                indexed_files,
-                python_env,
-                &work.path,
-                &work.source,
-                &work.pending,
-                &work.pending_groups,
-                config,
-                ty_file_cache,
-                ty_def_caches,
-                diagnostics,
-                None,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Fixed shard count for the parallel ty fallback. This must be a constant —
-/// never derived from the host's core count — because the shard a file lands
-/// in determines which `ty server` answers its queries, and ty's answers for
-/// multi-location symbols depend on which files that server saw earlier. A
-/// machine-dependent shard count would make diagnostics differ across
-/// machines. Four shards: measured sweet spot — each extra server pays a
-/// fixed project-indexing cost on start, so a wider fan-out stops paying for
-/// itself (issue #46 measurements), while four still hides most of ty's
-/// serial per-query inference time on large projects.
-const TY_SHARD_COUNT: usize = 4;
-
-/// Deterministically partition `ty_work` into [`TY_SHARD_COUNT`] shards,
-/// then resolve each shard on its own thread with its own `ty server`,
-/// keeping the serial one-request-in-flight discipline *within* each server
-/// (see [`TY_MAX_IN_FLIGHT`]). Each server's request stream is then a pure
-/// function of the (sorted, greedily partitioned) work list, so every run —
-/// on any machine — replays identical streams and gets identical answers.
-///
-/// Diagnostics are reassembled in the original sorted-work order so the
-/// output matches what a serial pass over the same shards would emit.
-///
-/// `ty`-subprocess orchestration (thread fan-out + lazy server starts) whose
-/// timing/failure branches are environment-specific; excluded from the
-/// coverage gate like the rest of the ty fallback glue. The deterministic
-/// partitioning logic is factored into [`partition_ty_work`] and unit-tested.
-/// One shard's outcome: each owned work item's index in the sorted work list
-/// paired with the diagnostics its ty queries produced.
-type TyShardResult = Result<Vec<(usize, Vec<Diagnostic>)>, CheckError>;
-
-#[cfg_attr(coverage, coverage(off))]
-#[allow(clippy::too_many_arguments)]
-fn resolve_ty_work_sharded(
-    ty_work: &[PendingTyWork],
-    project_root: &Path,
-    all_project_files: &[PathBuf],
-    index: &DefinitionIndex,
-    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
-    python_env: Option<&Path>,
-    config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Result<(), CheckError> {
-    let shards = partition_ty_work(ty_work, TY_SHARD_COUNT);
-    let mut slots: Vec<Option<Vec<Diagnostic>>> = vec![None; ty_work.len()];
-    let results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
-        let mut handles = Vec::new();
-        for shard in shards {
+        // Phase 2 (parallel, background): one thread per ty shard. Files
+        // with deferred calls stream in as the scan releases them in
+        // sorted order; the greedy owner assignment below reproduces the
+        // partition a whole-list pass would compute, so each server's
+        // request stream — and therefore its answers — is identical to
+        // the previous scan-then-shard pipeline's, while the servers now
+        // work concurrently with the scan instead of idling behind it.
+        let mut shard_senders = Vec::with_capacity(TY_SHARD_COUNT);
+        let mut shard_handles = Vec::with_capacity(TY_SHARD_COUNT);
+        for _ in 0..TY_SHARD_COUNT {
+            let (shard_tx, shard_rx) =
+                std::sync::mpsc::channel::<(usize, std::sync::Arc<PendingTyWork>, bool)>();
+            shard_senders.push(shard_tx);
             let handle = std::thread::Builder::new()
                 .stack_size(crate::limits::STACK_SIZE)
-                .spawn_scoped(scope, move || {
+                .spawn_scoped(scope, move || -> TyShardResult {
                     let mut ty: Option<TyResolver> = None;
                     let mut ty_start_attempted = false;
                     let mut file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
                     let mut def_caches = TyDefCaches::default();
+                    // Opens deferred until this shard's first own query:
+                    // a server that is never queried is never started
+                    // (and a file's opens still precede every query that
+                    // could observe them, in sorted order).
+                    let mut deferred_opens: Vec<std::sync::Arc<PendingTyWork>> = Vec::new();
                     let mut out: Vec<(usize, Vec<Diagnostic>)> = Vec::new();
-                    let mut shard_iter = shard.into_iter().peekable();
-                    for (work_index, work) in ty_work.iter().enumerate() {
-                        let mine = shard_iter.peek() == Some(&work_index);
+                    for (work_index, work, mine) in shard_rx {
                         if mine {
-                            shard_iter.next();
+                            if !ty_start_attempted {
+                                ty_start_attempted = true;
+                                ty = Some(start_ty_for_fallback(project_root, python_env)?);
+                            }
+                            // Replay the serial pass's open history: ty's
+                            // answers for multi-location symbols depend
+                            // on which files were opened before the
+                            // query, so every shard opens *every* file
+                            // with deferred calls in sorted order (cheap
+                            // under pull diagnostics — ty computes
+                            // nothing for an open it is never queried
+                            // about) and only queries its own. Each
+                            // server then sees the exact open-set the
+                            // single-server pass had at the same point
+                            // and returns the same answers.
+                            if let Some(server) = ty.as_mut() {
+                                for earlier in std::mem::take(&mut deferred_opens) {
+                                    let _ = server.ensure_open(&earlier.path, &earlier.source);
+                                }
+                            }
                             let mut file_diagnostics = Vec::new();
                             resolve_file_with_ty(
                                 &mut ty,
@@ -412,32 +324,78 @@ fn resolve_ty_work_sharded(
                                 None,
                             )?;
                             out.push((work_index, file_diagnostics));
+                        } else if let Some(server) = ty.as_mut() {
+                            let _ = server.ensure_open(&work.path, &work.source);
                         } else {
-                            // Replay the serial pass's open history: ty's
-                            // answers for multi-location symbols depend on
-                            // which files were opened before the query, so
-                            // every shard opens *every* file in sorted
-                            // order (cheap under pull diagnostics — ty
-                            // computes nothing for an open it is never
-                            // queried about) and only queries its own.
-                            // Each server then sees the exact open-set the
-                            // single-server pass had at the same point and
-                            // returns the same answers.
-                            if !ty_start_attempted {
-                                ty_start_attempted = true;
-                                ty = Some(start_ty_for_fallback(project_root, python_env)?);
-                            }
-                            if let Some(ty) = ty.as_mut() {
-                                let _ = ty.ensure_open(&work.path, &work.source);
-                            }
+                            deferred_opens.push(work);
                         }
                     }
                     Ok(out)
                 })
                 .map_err(CheckError::Io)?;
-            handles.push(handle);
+            shard_handles.push(handle);
         }
-        Ok(handles
+        let mut shard_senders = Some(shard_senders);
+
+        // Coordinator: release scan outcomes in sorted-file order (scan
+        // results arrive in nondeterministic worker order, but the order
+        // files reach ty — opens and queries alike — must be a pure
+        // function of the file list for the fallback to be
+        // reproducible), assign each pending file to the least-loaded
+        // shard, and fan it out (owner queries it, the rest open it).
+        let mut releaser = InOrderReleaser::new();
+        let mut assigner = TyShardAssigner::new(TY_SHARD_COUNT);
+        for (i, path, result) in rx {
+            if consumer_err.is_some() {
+                // A scan error has already been recorded; drain the
+                // remaining items so the background thread can finish.
+                continue;
+            }
+            let outcome = match result {
+                Ok(o) => o,
+                Err(e) => {
+                    consumer_err = Some(e);
+                    shard_senders = None;
+                    continue;
+                }
+            };
+            for (i, path, outcome) in releaser.push(i, (i, path, outcome)) {
+                let mut staged: Vec<PendingTyWork> = Vec::new();
+                if let Err(e) = process_scan_outcome_for_ty(
+                    i,
+                    path,
+                    outcome,
+                    diagnostics,
+                    skip_warnings,
+                    &mut staged,
+                ) {
+                    consumer_err = Some(e);
+                    shard_senders = None;
+                    break;
+                }
+                if let (Some(senders), Some(work)) = (&shard_senders, staged.pop()) {
+                    let owner = assigner.assign(work.pending.len());
+                    let work = std::sync::Arc::new(work);
+                    for (shard, sender) in senders.iter().enumerate() {
+                        let _ = sender.send((
+                            released_pending_files,
+                            std::sync::Arc::clone(&work),
+                            shard == owner,
+                        ));
+                    }
+                    released_pending_files += 1;
+                }
+            }
+        }
+        // Closing the shard channels lets the shard threads drain and
+        // finish; the scoped join below waits for them.
+        drop(shard_senders);
+
+        match scan_handle.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }?;
+        Ok(shard_handles
             .into_iter()
             .map(|handle| match handle.join() {
                 Ok(result) => result,
@@ -445,7 +403,13 @@ fn resolve_ty_work_sharded(
             })
             .collect())
     })?;
-    for result in results {
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    // Reassemble per-file ty diagnostics in released (sorted-file) order so
+    // the output matches what a serial pass over the same shards would emit.
+    let mut slots: Vec<Option<Vec<Diagnostic>>> = vec![None; released_pending_files];
+    for result in shard_results {
         for (work_index, file_diagnostics) in result? {
             slots[work_index] = Some(file_diagnostics);
         }
@@ -456,29 +420,82 @@ fn resolve_ty_work_sharded(
     Ok(())
 }
 
-/// Greedily split sorted ty work across `shard_count` shards, assigning each
-/// file (in sorted-path order) to the shard with the fewest pending calls so
-/// far (ties: lowest shard index). Pending-call count is the best static
-/// proxy for a file's ty cost, and the greedy rule is a pure function of the
-/// sorted work list, so the partition — and therefore each ty server's
-/// request stream — is reproducible everywhere. Each shard preserves the
-/// sorted order of its files. Returned items carry their index in the
-/// original sorted work list so per-file diagnostics can be reassembled in
-/// order.
-fn partition_ty_work(ty_work: &[PendingTyWork], shard_count: usize) -> Vec<Vec<usize>> {
-    let shard_count = shard_count.min(ty_work.len()).max(1);
-    let mut shards: Vec<Vec<usize>> = (0..shard_count).map(|_| Vec::new()).collect();
-    let mut loads = vec![0usize; shard_count];
-    for (work_index, work) in ty_work.iter().enumerate() {
-        let lightest = loads
+/// Fixed shard count for the parallel ty fallback. This must be a constant —
+/// never derived from the host's core count — because the shard a file lands
+/// in determines which `ty server` answers its queries, and ty's answers for
+/// multi-location symbols depend on which files that server saw earlier. A
+/// machine-dependent shard count would make diagnostics differ across
+/// machines. Four shards: measured sweet spot — each extra server pays a
+/// fixed project-indexing cost on start, so a wider fan-out stops paying for
+/// itself (issue #46 measurements), while four still hides most of ty's
+/// serial per-query inference time on large projects.
+const TY_SHARD_COUNT: usize = 4;
+
+/// One shard's outcome: each owned work item's index in the released
+/// (sorted-file) pending order paired with the diagnostics its ty queries
+/// produced.
+type TyShardResult = Result<Vec<(usize, Vec<Diagnostic>)>, CheckError>;
+
+/// Buffers out-of-order `(index, item)` arrivals and yields items in strict
+/// index order. The parallel scan finishes files in nondeterministic worker
+/// order, but everything ty observes must follow the sorted file list, so
+/// the coordinator releases outcomes only once every earlier index has
+/// arrived.
+struct InOrderReleaser<T> {
+    next: usize,
+    buffered: FxHashMap<usize, T>,
+}
+
+impl<T> InOrderReleaser<T> {
+    fn new() -> Self {
+        Self {
+            next: 0,
+            buffered: FxHashMap::default(),
+        }
+    }
+
+    /// Buffer `item` under `index` and drain the now-contiguous prefix.
+    fn push(&mut self, index: usize, item: T) -> Vec<T> {
+        self.buffered.insert(index, item);
+        let mut released = Vec::new();
+        while let Some(item) = self.buffered.remove(&self.next) {
+            released.push(item);
+            self.next += 1;
+        }
+        released
+    }
+}
+
+/// Greedy shard assignment for sorted ty work: each file (in sorted-path
+/// order) goes to the shard with the fewest pending calls so far (ties:
+/// lowest shard index). Pending-call count is the best static proxy for a
+/// file's ty cost, and the greedy rule is a pure function of the sorted work
+/// prefix, so the partition — and therefore each ty server's request stream
+/// — is reproducible everywhere and can be computed while files stream in.
+struct TyShardAssigner {
+    loads: Vec<usize>,
+}
+
+impl TyShardAssigner {
+    fn new(shard_count: usize) -> Self {
+        Self {
+            loads: vec![0; shard_count],
+        }
+    }
+
+    /// Assign the next sorted file to a shard, weighting it by its deferred
+    /// call count (a file always counts at least 1 so empty-pending files
+    /// cannot all pile onto shard 0).
+    fn assign(&mut self, pending_calls: usize) -> usize {
+        let lightest = self
+            .loads
             .iter()
             .enumerate()
             .min_by_key(|(_, load)| **load)
             .map_or(0, |(shard, _)| shard);
-        loads[lightest] += work.pending.len().max(1);
-        shards[lightest].push(work_index);
+        self.loads[lightest] += pending_calls.max(1);
+        lightest
     }
-    shards
 }
 
 fn check_paths_impl(
@@ -560,32 +577,23 @@ fn check_paths_impl(
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots);
 
-    // Phase 2 (serial): ty-grade resolution (inheritance/MRO, return types,
-    // annotated params, overloads) for calls the built-in pass deferred.
-    // `python_env` (the `--python` value) only steers ty's third-party
-    // discovery; the built-in resolver's env discovery is unchanged. A single
-    // `ty server` is shared across all files (one stdin/stdout subprocess),
-    // so this phase stays single-threaded.
-    //
-    // The server is started lazily — only when some file actually has calls
-    // the built-in resolver could not resolve. `ty server` indexes the whole
-    // project on `initialize`, a multi-second fixed cost (issue #31); a run
-    // where the built-in resolver resolves everything (the common
-    // editor-on-save / pre-commit case on first-party code) must not pay it.
-    let mut ty: Option<TyResolver> = None;
-    let mut ty_start_attempted = false;
-    let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut ty_def_caches = TyDefCaches::default();
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
 
-    // Run pipeline (Phase 1 parallel + Phase 2 serial ty) for cache misses only.
-    // Files that need ty fallback are queued as their scan results arrive,
-    // then opened and queried in sorted-path order after the scan stream
-    // drains; ty computes hover/definition answers on demand (pull
-    // diagnostics keep didOpen itself cheap). Files fully handled by the
-    // built-in resolver do not force ty work.
+    // Run the pipeline (Phase 1 parallel built-in pass + Phase 2 sharded ty
+    // fallback) for cache misses only. Files that need ty fallback stream to
+    // the shard servers in sorted-path order as their scan results arrive —
+    // the servers work concurrently with the scan; ty computes
+    // hover/definition answers on demand (pull diagnostics keep didOpen
+    // itself cheap). Files fully handled by the built-in resolver do not
+    // force ty work, and the shard servers start lazily — only a shard that
+    // actually receives a query pays `ty server`'s project-indexing
+    // initialize cost (issue #31), so a run the built-in resolver fully
+    // handles (the common editor-on-save / pre-commit case on first-party
+    // code) starts no server at all. `python_env` (the `--python` value)
+    // only steers ty's third-party discovery; the built-in resolver's env
+    // discovery is unchanged.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -596,10 +604,6 @@ fn check_paths_impl(
         &index,
         &indexed_files,
         python_env,
-        &mut ty,
-        &mut ty_start_attempted,
-        &mut ty_file_cache,
-        &mut ty_def_caches,
         &mut diagnostics,
         &mut skip_warnings,
     )?;
@@ -946,11 +950,22 @@ struct CallChecker<'a> {
     /// `# noqa`/`# noqa: KW001` on a violating call's line suppresses both the
     /// diagnostic and any auto-fix for that call (issue #185).
     noqa: NoqaDirectives,
-    /// Stack of `self`/`cls` parameter bindings currently in scope, used to
-    /// group deferred `self.m(...)`/`cls.m(...)` calls that must hover
-    /// identically (same binding, same attribute) so the ty fallback asks
-    /// once per group instead of once per call site.
+    /// Stack of name bindings currently in scope (parameters, imports,
+    /// `def`/`class` statements, single assignments), used to group deferred
+    /// `recv.m(...)` and bare `f(...)` calls that must hover identically
+    /// (same binding, same attribute, same call shape) so the ty fallback
+    /// asks once per group instead of once per call site.
     hover_group_frames: Vec<HoverGroupFrame>,
+    /// Per-name stacks of indices into `hover_group_frames`, so the innermost
+    /// frame for a name is found without scanning the whole frame stack
+    /// (module scopes of large files hold one frame per import/def/class/
+    /// assignment, and every bare-name poison probe does a lookup).
+    hover_frame_index: FxHashMap<String, Vec<usize>>,
+    /// Stack of lexical scopes for hover-binding frames (module, function/
+    /// lambda, class). Seeded with the module scope; never empty.
+    hover_scope_stack: Vec<HoverScope>,
+    /// Next fresh hover-scope id for this file.
+    next_hover_scope_id: u32,
     /// Next fresh hover-binding context id for this file.
     next_hover_ctx: u32,
     /// (binding context, attribute, call shape) -> hover group id.
@@ -962,22 +977,40 @@ struct CallChecker<'a> {
     /// `match` statement, ...). Groups in these contexts are dropped.
     poisoned_hover_ctxs: FxHashSet<u32>,
     /// (binding context, attribute) keys whose attribute may have been
-    /// rebound or narrowed (any non-callee mention of `self.attr`).
+    /// rebound or narrowed (any non-callee mention of `recv.attr`).
     poisoned_hover_keys: FxHashSet<(u32, String)>,
+    /// Deferred-call index ranges whose entries must be stripped of a given
+    /// binding context: when a scope binds a name *after* call sites inside
+    /// it were attributed to an enclosing binding of that name, those
+    /// entries referred to the (whole-scope-local) shadowing binding all
+    /// along, so their group attribution is unsafe.
+    hover_retro_poisons: Vec<(u32, usize, usize)>,
     /// Addresses of expressions that are the callee of some visited call,
     /// so the `Attribute` visit can tell `self.m(...)` (groupable) apart
     /// from any other mention of `self.m` (narrowing/rebinding hazard).
     callee_exprs: FxHashSet<usize>,
 }
 
-/// One `self`/`cls` parameter binding introduced by an enclosing function or
-/// lambda. Calls on the bare receiver name resolve to the innermost frame
-/// for that name; a call inside a nested function *without* its own
-/// `self`/`cls` parameter legitimately closes over the outer binding and
-/// inherits the outer frame.
+/// One name binding tracked for hover grouping: a parameter, an import, a
+/// `def`/`class` statement, or a plain single assignment. Calls on the bare
+/// name resolve to the innermost *visible* frame for that name; a call
+/// inside a nested function without its own binding legitimately closes
+/// over the outer binding and inherits the outer frame.
+///
+/// `in_class_scope` frames are visible only while the class body itself is
+/// the current scope: Python name lookup inside methods skips class scopes,
+/// so a class-level binding must not shadow a module binding for code in
+/// the class's methods.
+///
+/// `binding_offset` is the byte offset where the binding is introduced;
+/// call sites before it textually refer to an earlier (or no) binding and
+/// never join the frame's groups.
 struct HoverGroupFrame {
     ctx: u32,
-    receiver: ReceiverParam,
+    name: String,
+    scope_id: u32,
+    in_class_scope: bool,
+    binding_offset: usize,
 }
 
 /// Identity of one hover group: a receiver binding, an attribute, and the
@@ -992,23 +1025,33 @@ struct HoverGroupKey {
     shape: String,
 }
 
-/// The two receiver parameter names whose deferred attribute calls are
-/// grouped for hover reuse. Other parameters are excluded: their bindings
-/// can be narrowed by bare-name truthiness/comparison tests this checker
-/// does not track, while `self`/`cls` are never `Optional` in practice and
-/// the remaining narrowing forms (`isinstance(self, ...)`, `match self:`,
-/// rebinding) are detected and poison the group.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ReceiverParam {
-    SelfParam,
-    ClsParam,
+/// One lexical scope tracked for hover-binding frames: the module, a
+/// function/lambda body, or a class body. `frame_start` is the index of the
+/// first frame owned by this scope (frames above it are truncated on exit);
+/// `pending_start` is the index of the first deferred call recorded while
+/// inside it, used to retro-poison entries that were attributed to an
+/// enclosing binding before a late local binding of the same name was seen
+/// (Python scoping makes such a name local for the *whole* scope).
+struct HoverScope {
+    id: u32,
+    is_class: bool,
+    frame_start: usize,
+    pending_start: usize,
 }
 
-fn receiver_param(name: &str) -> Option<ReceiverParam> {
-    match name {
-        "self" => Some(ReceiverParam::SelfParam),
-        "cls" => Some(ReceiverParam::ClsParam),
-        _ => None,
+/// Collects every bare name mentioned inside an expression, used to poison
+/// all names a `match` subject can narrow.
+#[derive(Default)]
+struct HoverNameCollector {
+    names: Vec<String>,
+}
+
+impl Visitor<'_> for HoverNameCollector {
+    fn visit_expr(&mut self, expr: &Expr) {
+        if let Expr::Name(name) = expr {
+            self.names.push(name.id.to_string());
+        }
+        walk_expr(self, expr);
     }
 }
 
@@ -1179,11 +1222,20 @@ impl<'a> CallChecker<'a> {
             declined_fix_reasons: Vec::new(),
             noqa: NoqaDirectives::from_source(source, tokens),
             hover_group_frames: Vec::new(),
+            hover_frame_index: FxHashMap::default(),
+            hover_scope_stack: vec![HoverScope {
+                id: 0,
+                is_class: false,
+                frame_start: 0,
+                pending_start: 0,
+            }],
+            next_hover_scope_id: 1,
             next_hover_ctx: 0,
             hover_groups: FxHashMap::default(),
             hover_group_of_pending: Vec::new(),
             poisoned_hover_ctxs: FxHashSet::default(),
             poisoned_hover_keys: FxHashSet::default(),
+            hover_retro_poisons: Vec::new(),
             callee_exprs: FxHashSet::default(),
         }
     }
@@ -2191,49 +2243,141 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    /// Push one hover-binding frame per `self`/`cls` parameter of a function
-    /// or lambda being entered, returning how many frames to pop on exit.
-    ///
-    /// Any parameter named `self`/`cls` introduces a fresh binding — whether
-    /// or not it is a real method receiver — so deferred attribute calls on
-    /// the bare name inside this function group together, and never with an
-    /// outer binding the parameter shadows.
-    fn push_receiver_hover_frames(&mut self, parameters: &ast::Parameters) -> usize {
-        let mut pushed = 0;
-        let receiver_names = parameters
+    /// Enter a hover-binding scope (a function, lambda, or class body being
+    /// walked). Paired with [`Self::exit_hover_scope`].
+    fn enter_hover_scope(&mut self, is_class: bool) {
+        let id = self.next_hover_scope_id;
+        self.next_hover_scope_id += 1;
+        self.hover_scope_stack.push(HoverScope {
+            id,
+            is_class,
+            frame_start: self.hover_group_frames.len(),
+            pending_start: self.hover_group_of_pending.len(),
+        });
+    }
+
+    /// Leave the innermost hover-binding scope, discarding its frames.
+    fn exit_hover_scope(&mut self) {
+        // The module scope seeded in `new` is never exited and every exit
+        // pairs with a prior enter, so the stack is non-empty here and the
+        // popped scope's `frame_start` is valid.
+        #[allow(
+            clippy::expect_used,
+            reason = "hover scope stack invariant: always non-empty"
+        )]
+        let scope = self
+            .hover_scope_stack
+            .pop()
+            .expect("hover scope stack non-empty");
+        for frame in self.hover_group_frames.drain(scope.frame_start..) {
+            // Frames are pushed and popped in stack order, so the dropped
+            // frame is always the most recent entry for its name in the
+            // per-name index (which therefore exists).
+            let _ = self
+                .hover_frame_index
+                .get_mut(&frame.name)
+                .and_then(Vec::pop);
+        }
+    }
+
+    /// The innermost hover scope. The stack is seeded with the module scope
+    /// in `new` and every `exit_hover_scope` is balanced with a prior
+    /// `enter_hover_scope`, so it is never empty.
+    fn current_hover_scope(&self) -> &HoverScope {
+        #[allow(
+            clippy::expect_used,
+            reason = "hover scope stack invariant: always non-empty"
+        )]
+        self.hover_scope_stack
+            .last()
+            .expect("hover scope stack non-empty")
+    }
+
+    /// Bind one hover frame per parameter of a function or lambda being
+    /// entered. Every parameter introduces a fresh binding, shadowing any
+    /// outer binding of the same name.
+    fn bind_parameter_hover_frames(&mut self, parameters: &ast::Parameters, offset: usize) {
+        let names: Vec<String> = parameters
             .posonlyargs
             .iter()
             .chain(parameters.args.iter())
             .chain(parameters.kwonlyargs.iter())
-            .map(|param| param.parameter.name.as_str())
-            .chain(parameters.vararg.iter().map(|param| param.name.as_str()))
-            .chain(parameters.kwarg.iter().map(|param| param.name.as_str()))
-            .filter_map(receiver_param);
-        for receiver in receiver_names {
-            let ctx = self.next_hover_ctx;
-            self.next_hover_ctx += 1;
-            self.hover_group_frames
-                .push(HoverGroupFrame { ctx, receiver });
-            pushed += 1;
+            .map(|param| param.parameter.name.to_string())
+            .chain(parameters.vararg.iter().map(|param| param.name.to_string()))
+            .chain(parameters.kwarg.iter().map(|param| param.name.to_string()))
+            .collect();
+        for name in names {
+            self.note_hover_binding(&name, offset);
         }
-        pushed
     }
 
-    fn pop_receiver_hover_frames(&mut self, count: usize) {
-        self.hover_group_frames
-            .truncate(self.hover_group_frames.len() - count);
-    }
-
-    /// The innermost hover-binding context for a bare receiver name, if any.
-    /// A name no enclosing function binds has no context (module-level
-    /// `self` is not a receiver).
-    fn hover_ctx_for(&self, name: &str) -> Option<u32> {
-        let receiver = receiver_param(name)?;
-        self.hover_group_frames
+    /// The innermost *visible* hover frame for a bare name, if any. Frames
+    /// bound in a class body are visible only while that class body is the
+    /// current scope (Python name lookup inside methods skips class scopes);
+    /// an invisible class frame does not hide an outer module/function frame.
+    fn visible_hover_frame_index(&self, name: &str) -> Option<usize> {
+        let current_scope_id = self.current_hover_scope().id;
+        self.hover_frame_index
+            .get(name)?
             .iter()
             .rev()
-            .find(|frame| frame.receiver == receiver)
-            .map(|frame| frame.ctx)
+            .copied()
+            .find(|&index| {
+                let frame = &self.hover_group_frames[index];
+                !frame.in_class_scope || frame.scope_id == current_scope_id
+            })
+    }
+
+    /// The innermost visible hover-binding context for a bare name, if any.
+    fn hover_ctx_for(&self, name: &str) -> Option<u32> {
+        self.visible_hover_frame_index(name)
+            .map(|index| self.hover_group_frames[index].ctx)
+    }
+
+    /// Record a binding of `name` in the current scope (an import, a
+    /// `def`/`class` statement, a parameter, or a `Store`-context name).
+    ///
+    /// The first binding in a scope opens a fresh frame; a *second* binding
+    /// in the same scope poisons it (the name's type may differ between
+    /// call sites on either side of the rebinding). A binding that shadows
+    /// an enclosing frame additionally retro-poisons that frame's entries
+    /// recorded since the current scope was entered: Python scoping makes
+    /// the name local for the whole scope, so those earlier attributions
+    /// were wrong.
+    fn note_hover_binding(&mut self, name: &str, offset: usize) {
+        match self.visible_hover_frame_index(name) {
+            Some(index)
+                if self.hover_group_frames[index].scope_id == self.current_hover_scope().id =>
+            {
+                let ctx = self.hover_group_frames[index].ctx;
+                self.poisoned_hover_ctxs.insert(ctx);
+            }
+            shadowed => {
+                if let Some(index) = shadowed {
+                    let ctx = self.hover_group_frames[index].ctx;
+                    let start = self.current_hover_scope().pending_start;
+                    let end = self.hover_group_of_pending.len();
+                    if end > start {
+                        self.hover_retro_poisons.push((ctx, start, end));
+                    }
+                }
+                let ctx = self.next_hover_ctx;
+                self.next_hover_ctx += 1;
+                let scope = self.current_hover_scope();
+                let (scope_id, in_class_scope) = (scope.id, scope.is_class);
+                self.hover_frame_index
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(self.hover_group_frames.len());
+                self.hover_group_frames.push(HoverGroupFrame {
+                    ctx,
+                    name: name.to_owned(),
+                    scope_id,
+                    in_class_scope,
+                    binding_offset: offset,
+                });
+            }
+        }
     }
 
     /// Mark a receiver binding as unsafe for hover grouping (rebound,
@@ -2284,21 +2428,25 @@ impl<'a> CallChecker<'a> {
         }
     }
 
-    /// Statement-level hover-poison scan, run when a statement is dispatched.
-    /// Covers receiver rebinding and narrowing forms that are not visible as
-    /// expression `Store`/`Del` contexts: `except ... as self`,
-    /// `global`/`nonlocal self`, `import ... as self`, a `def self`/
-    /// `class self` binding, bare-receiver `if`/`while`/`assert` tests, and
-    /// `match` statements (whose subject and capture patterns both narrow —
-    /// poisoned wholesale rather than pattern-walked).
+    /// Statement-level hover-binding/poison scan, run exactly once when a
+    /// statement is dispatched. `import`/`def`/`class` statements *bind*
+    /// their name in the current scope (opening a frame, or poisoning a
+    /// same-scope rebinding); `except ... as`, `global`/`nonlocal`, and
+    /// augmented assignment poison (their binding lifetime or value is not
+    /// hover-stable); `if`/`while`/`assert` tests and `match` statements
+    /// poison the names they can narrow.
     fn scan_stmt_for_hover_poison(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::If(if_stmt) => self.poison_hover_bare_receiver(&if_stmt.test),
             Stmt::While(while_stmt) => self.poison_hover_bare_receiver(&while_stmt.test),
             Stmt::Assert(assert_stmt) => self.poison_hover_bare_receiver(&assert_stmt.test),
-            Stmt::Match(_) => {
-                self.poison_hover_ctx_for("self");
-                self.poison_hover_ctx_for("cls");
+            Stmt::Match(match_stmt) => {
+                // The subject (and every name mentioned inside it) is
+                // narrowed per arm; capture patterns bind new names.
+                self.poison_hover_names_in_expr(&match_stmt.subject);
+                for case in &match_stmt.cases {
+                    self.poison_hover_pattern_bindings(&case.pattern);
+                }
             }
             Stmt::Try(try_stmt) => {
                 for handler in &try_stmt.handlers {
@@ -2319,27 +2467,96 @@ impl<'a> CallChecker<'a> {
                 }
             }
             Stmt::Import(import_stmt) => {
+                let offset = stmt.range().start().to_usize();
                 for alias in &import_stmt.names {
-                    self.poison_hover_ctx_for(bound_import_name(alias));
+                    let name = bound_import_name(alias).to_owned();
+                    self.note_hover_binding(&name, offset);
                 }
             }
             Stmt::ImportFrom(import_stmt) => {
+                let offset = stmt.range().start().to_usize();
                 for alias in &import_stmt.names {
-                    self.poison_hover_ctx_for(bound_import_name(alias));
+                    let name = bound_import_name(alias).to_owned();
+                    self.note_hover_binding(&name, offset);
                 }
             }
             Stmt::FunctionDef(function_def) => {
-                self.poison_hover_ctx_for(function_def.name.as_str());
+                let name = function_def.name.to_string();
+                self.note_hover_binding(&name, stmt.range().start().to_usize());
             }
             Stmt::ClassDef(class_def) => {
-                self.poison_hover_ctx_for(class_def.name.as_str());
+                let name = class_def.name.to_string();
+                self.note_hover_binding(&name, stmt.range().start().to_usize());
+            }
+            Stmt::AugAssign(aug_assign) => {
+                // `x += ...` keeps the name bound but changes its value (and
+                // possibly its inferred type), so the binding is unstable.
+                self.poison_hover_bare_receiver(&aug_assign.target);
             }
             _ => {}
         }
     }
 
+    /// Poison every bare name mentioned anywhere inside `expr` (used for
+    /// `match` subjects, which ty narrows per arm).
+    fn poison_hover_names_in_expr(&mut self, expr: &Expr) {
+        let mut collector = HoverNameCollector::default();
+        collector.visit_expr(expr);
+        for name in collector.names {
+            self.poison_hover_ctx_for(&name);
+        }
+    }
+
+    /// Poison every name a `match` case pattern can bind (capture names,
+    /// star/mapping rests), recursively.
+    fn poison_hover_pattern_bindings(&mut self, pattern: &ast::Pattern) {
+        match pattern {
+            ast::Pattern::MatchValue(_) | ast::Pattern::MatchSingleton(_) => {}
+            ast::Pattern::MatchSequence(sequence) => {
+                for inner in &sequence.patterns {
+                    self.poison_hover_pattern_bindings(inner);
+                }
+            }
+            ast::Pattern::MatchMapping(mapping) => {
+                for inner in &mapping.patterns {
+                    self.poison_hover_pattern_bindings(inner);
+                }
+                if let Some(rest) = &mapping.rest {
+                    self.poison_hover_ctx_for(rest.as_str());
+                }
+            }
+            ast::Pattern::MatchClass(class_pattern) => {
+                for inner in &class_pattern.arguments.patterns {
+                    self.poison_hover_pattern_bindings(inner);
+                }
+                for keyword in &class_pattern.arguments.keywords {
+                    self.poison_hover_pattern_bindings(&keyword.pattern);
+                }
+            }
+            ast::Pattern::MatchStar(star) => {
+                if let Some(name) = &star.name {
+                    self.poison_hover_ctx_for(name.as_str());
+                }
+            }
+            ast::Pattern::MatchAs(as_pattern) => {
+                if let Some(inner) = &as_pattern.pattern {
+                    self.poison_hover_pattern_bindings(inner);
+                }
+                if let Some(name) = &as_pattern.name {
+                    self.poison_hover_ctx_for(name.as_str());
+                }
+            }
+            ast::Pattern::MatchOr(or_pattern) => {
+                for inner in &or_pattern.patterns {
+                    self.poison_hover_pattern_bindings(inner);
+                }
+            }
+        }
+    }
+
     /// The hover group for a deferred call, if its callee is an attribute on
-    /// a bare in-scope receiver binding (`self.m(...)`/`cls.m(...)`).
+    /// a bare in-scope binding (`recv.m(...)`) or a bare in-scope name
+    /// (`f(...)`).
     ///
     /// Excluded from the coverage gate for the same instantiation-accounting
     /// reason as `visit_stmt`: the `hover_groups_*` unit tests exercise every
@@ -2347,13 +2564,25 @@ impl<'a> CallChecker<'a> {
     /// one of this function's duplicated test-binary instantiations.
     #[cfg_attr(coverage, coverage(off))]
     fn hover_group_for_call(&mut self, call: &ast::ExprCall) -> Option<u32> {
-        let Expr::Attribute(attr) = &*call.func else {
-            return None;
+        let (name, attr) = match &*call.func {
+            // `recv.m(...)` on a bare in-scope receiver binding.
+            Expr::Attribute(attr) => match &*attr.value {
+                Expr::Name(name) => (name, attr.attr.to_string()),
+                _ => return None,
+            },
+            // Bare `f(...)` on an in-scope binding. The empty attribute
+            // cannot collide with a real one (`x.(...)` does not parse).
+            Expr::Name(name) => (name, String::new()),
+            _ => return None,
         };
-        let Expr::Name(name) = &*attr.value else {
+        let frame_index = self.visible_hover_frame_index(name.id.as_str())?;
+        let frame = &self.hover_group_frames[frame_index];
+        // A call site textually before the binding refers to an earlier (or
+        // no) binding, so it never joins this frame's groups.
+        if name.range().start().to_usize() < frame.binding_offset {
             return None;
-        };
-        let ctx = self.hover_ctx_for(name.id.as_str())?;
+        }
+        let ctx = frame.ctx;
         // Group ids are per-file and bounded by the file's call count, so
         // the conversion cannot overflow; saturate rather than branch.
         let next_id = u32::try_from(self.hover_groups.len()).unwrap_or(u32::MAX);
@@ -2362,7 +2591,7 @@ impl<'a> CallChecker<'a> {
                 .hover_groups
                 .entry(HoverGroupKey {
                     ctx,
-                    attr: attr.attr.to_string(),
+                    attr,
                     shape: call_shape_fingerprint(&call.arguments),
                 })
                 .or_insert(next_id),
@@ -2384,10 +2613,28 @@ impl<'a> CallChecker<'a> {
             })
             .map(|(_, &group)| group)
             .collect();
-        std::mem::take(&mut self.hover_group_of_pending)
+        let mut groups: Vec<Option<u32>> = std::mem::take(&mut self.hover_group_of_pending)
             .into_iter()
             .map(|group| group.filter(|g| !dropped.contains(g)))
-            .collect()
+            .collect();
+        // Strip entries a late shadowing binding retro-poisoned: only the
+        // indicated index range, and only entries whose group belongs to the
+        // shadowed binding context.
+        if !self.hover_retro_poisons.is_empty() {
+            let ctx_of_group: FxHashMap<u32, u32> = self
+                .hover_groups
+                .iter()
+                .map(|(key, &group)| (group, key.ctx))
+                .collect();
+            for &(ctx, start, end) in &self.hover_retro_poisons {
+                for slot in &mut groups[start..end] {
+                    if slot.is_some_and(|group| ctx_of_group.get(&group) == Some(&ctx)) {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        groups
     }
 
     /// Queue an already-diagnosed overload violation for fix-only ty hover
@@ -2615,7 +2862,8 @@ impl<'a> CallChecker<'a> {
         self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
         self.bind_method_parameters(parameters, &class_fullname, binds_instance_self);
-        let hover_frames = self.push_receiver_hover_frames(parameters);
+        self.enter_hover_scope(false);
+        self.bind_parameter_hover_frames(parameters, parameters.range().start().to_usize());
 
         let class_body_depth = self.class_body_depth;
         self.class_body_depth = 0;
@@ -2623,7 +2871,7 @@ impl<'a> CallChecker<'a> {
             self.visit_body_stmt(method_stmt);
         }
         self.class_body_depth = class_body_depth;
-        self.pop_receiver_hover_frames(hover_frames);
+        self.exit_hover_scope();
         self.function_stack.pop();
         self.pop_scope();
     }
@@ -2673,13 +2921,22 @@ impl<'a> CallChecker<'a> {
     /// `walk_stmt` directly; function-local imports are intentionally not
     /// registered.
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
-        self.scan_stmt_for_hover_poison(stmt);
         match stmt {
-            Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody),
+            // Delegated statements reach `visit_stmt`, which runs the
+            // hover-binding scan itself; scanning here too would record a
+            // `def`/`class` binding twice and wrongly poison it as a
+            // same-scope rebinding.
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
                 self.visit_stmt(stmt);
             }
-            _ => walk_stmt(self, stmt),
+            Stmt::If(if_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody);
+            }
+            _ => {
+                self.scan_stmt_for_hover_poison(stmt);
+                walk_stmt(self, stmt);
+            }
         }
     }
 
@@ -2688,7 +2945,14 @@ impl<'a> CallChecker<'a> {
     /// class-level control flow, so their leading `self` parameter can bind to
     /// the containing class.
     fn visit_class_body_stmt(&mut self, stmt: &'a Stmt) {
-        self.scan_stmt_for_hover_poison(stmt);
+        // Delegated statements reach `visit_stmt`, which runs the
+        // hover-binding scan itself (see `visit_body_stmt`).
+        if !matches!(
+            stmt,
+            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_)
+        ) {
+            self.scan_stmt_for_hover_poison(stmt);
+        }
         match stmt {
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::ClassBody),
             Stmt::Try(ast::StmtTry {
@@ -2768,11 +3032,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // don't fall back to a module-level function with the same
                 // name (issue #71).
                 self.bind_function_parameters(parameters);
-                let hover_frames = self.push_receiver_hover_frames(parameters);
+                self.enter_hover_scope(false);
+                self.bind_parameter_hover_frames(parameters, parameters.range().start().to_usize());
                 for inner in body {
                     self.visit_body_stmt(inner);
                 }
-                self.pop_receiver_hover_frames(hover_frames);
+                self.exit_hover_scope();
                 self.pop_scope();
                 self.function_stack.pop();
             }
@@ -2789,11 +3054,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.define(name, class_fullname.clone());
                 self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.enter_hover_scope(true);
                 self.class_body_depth += 1;
                 for inner in body {
                     self.visit_class_body_stmt(inner);
                 }
                 self.class_body_depth -= 1;
+                self.exit_hover_scope();
                 self.pop_scope();
                 self.class_stack.pop();
             }
@@ -2867,18 +3134,26 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.poison_hover_call_args(&call.arguments);
             }
             Expr::Lambda(lambda) => {
-                let hover_frames = lambda
-                    .parameters
-                    .as_deref()
-                    .map_or(0, |parameters| self.push_receiver_hover_frames(parameters));
+                self.enter_hover_scope(false);
+                if let Some(parameters) = lambda.parameters.as_deref() {
+                    self.bind_parameter_hover_frames(parameters, lambda.range().start().to_usize());
+                }
                 walk_expr(self, expr);
-                self.pop_receiver_hover_frames(hover_frames);
+                self.exit_hover_scope();
                 return;
             }
             Expr::Attribute(attr) => {
                 self.note_hover_attribute(attr, expr_addr(expr));
             }
+            Expr::Name(name) if name.ctx.is_store() => {
+                // A plain assignment target opens (or, on a same-scope
+                // rebinding, poisons) a hover frame; `for`/`with`/walrus
+                // targets bind the same way.
+                let name_string = name.id.to_string();
+                self.note_hover_binding(&name_string, name.range().start().to_usize());
+            }
             Expr::Name(name) if !name.ctx.is_load() => {
+                // `del x` (and invalid contexts): the binding disappears.
                 self.poison_hover_ctx_for(name.id.as_str());
             }
             Expr::Compare(compare) => {
@@ -4692,11 +4967,11 @@ mod tests {
         bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
         has_staticmethod_or_classmethod_decorator, is_ignored_path,
         is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        partition_ty_work, plan_rewrite_insertions, process_scan_outcome_for_ty,
-        receiver_is_class_object, receiver_param, record_ty_fix, signature_is_fully_named,
-        strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
-        CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns, IfBranchTraversal,
-        PendingTy, PendingTyWork, ScanOutcome, TyFixAst, TyFixes,
+        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
+        record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
+        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy,
+        PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -4721,29 +4996,40 @@ mod tests {
     }
 
     #[test]
-    fn partition_ty_work_balances_pending_calls_deterministically() {
+    fn ty_shard_assigner_balances_pending_calls_deterministically() {
         // Greedy least-loaded assignment in sorted order: the heavy first
-        // file fills shard 0, the next files go to the emptier shards (ties
-        // break toward the lowest shard index), and each shard preserves the
-        // sorted order of its files via their original work-list indices.
-        let work = vec![
+        // file fills shard 0, the next files go to the emptier shard (ties
+        // break toward the lowest shard index).
+        let work = [
             ty_work("a.py", 10),
             ty_work("b.py", 1),
             ty_work("c.py", 1),
             ty_work("d.py", 1),
         ];
-        let shards = partition_ty_work(&work, 2);
-        assert_eq!(shards, vec![vec![0], vec![1, 2, 3]]);
+        let mut assigner = TyShardAssigner::new(2);
+        let owners: Vec<usize> = work
+            .iter()
+            .map(|w| assigner.assign(w.pending.len()))
+            .collect();
+        assert_eq!(owners, vec![0, 1, 1, 1]);
     }
 
     #[test]
-    fn partition_ty_work_caps_shards_at_work_len_and_floors_empty_pending() {
-        // Fewer files than shards: one shard per file, none empty. A file
-        // with no pending calls still counts as load 1 so it cannot make its
-        // shard look free forever.
-        let work = vec![ty_work("a.py", 0), ty_work("b.py", 0)];
-        let shards = partition_ty_work(&work, 4);
-        assert_eq!(shards, vec![vec![0], vec![1]]);
+    fn ty_shard_assigner_floors_empty_pending_at_one() {
+        // A file with no pending calls still counts as load 1 so it cannot
+        // make its shard look free forever.
+        let mut assigner = TyShardAssigner::new(4);
+        let owners: Vec<usize> = (0..5).map(|_| assigner.assign(0)).collect();
+        assert_eq!(owners, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn in_order_releaser_yields_contiguous_prefixes() {
+        let mut releaser = InOrderReleaser::new();
+        assert_eq!(releaser.push(2, "c"), Vec::<&str>::new());
+        assert_eq!(releaser.push(0, "a"), vec!["a"]);
+        assert_eq!(releaser.push(3, "d"), Vec::<&str>::new());
+        assert_eq!(releaser.push(1, "b"), vec!["b", "c", "d"]);
     }
 
     #[test]
@@ -5840,6 +6126,280 @@ def odd(*self, **cls):
     }
 
     #[test]
+    fn hover_groups_cover_any_parameter_receiver() {
+        // Every parameter is a binding now, not just `self`/`cls`.
+        let groups = pending_hover_groups(
+            "\
+def emitters(out):
+    out.emit(1)
+    out.emit(2)
+",
+        );
+        let [first, second] = groups.as_slice() else {
+            panic!("expected two deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn hover_groups_cover_module_imports_after_the_import() {
+        // A module-level import opens a file-wide binding; only call sites
+        // *after* it join the group (an earlier site refers to whatever was
+        // bound before, if anything).
+        let groups = pending_hover_groups(
+            "\
+helper.do(1)
+import helper
+helper.do(1)
+def inside():
+    helper.do(1)
+",
+        );
+        let [before, after, in_function] = groups.as_slice() else {
+            panic!("expected three deferred calls, got {groups:?}");
+        };
+        assert_eq!(*before, None);
+        assert!(after.is_some());
+        assert_eq!(after, in_function);
+    }
+
+    #[test]
+    fn hover_groups_poisoned_by_a_second_same_scope_binding() {
+        // `import` twice, then both `x = ...` forms: any same-scope
+        // rebinding makes the name's type unstable across call sites.
+        for source in [
+            "import helper\nhelper.do(1)\nimport helper\n",
+            "import helper\nhelper.do(1)\nhelper = q\n",
+            "from m import helper\nhelper.do(1)\nfrom n import helper\n",
+        ] {
+            assert_eq!(
+                pending_hover_groups(source),
+                vec![None],
+                "expected a rebinding in {source:?} to poison the group"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_groups_cover_bare_name_calls() {
+        let groups = pending_hover_groups(
+            "\
+from decimal import Decimal
+Decimal(1)
+Decimal(2)
+Decimal(1, 2)
+undefined(1)
+",
+        );
+        let [first, second, wider, unbound] = groups.as_slice() else {
+            panic!("expected four deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        // A different arity is a different shape.
+        assert!(wider.is_some());
+        assert_ne!(first, wider);
+        // A name with no visible binding has no group.
+        assert_eq!(*unbound, None);
+    }
+
+    #[test]
+    fn hover_groups_cover_single_assignment_locals() {
+        // `with open(...) as f` / `f = open(...)` open a local binding; a
+        // second assignment in the same scope poisons it.
+        let groups = pending_hover_groups(
+            "\
+def stable(p):
+    with open(p) as f:
+        f.write(1)
+        f.write(2)
+
+def rebound(p):
+    g = open(p)
+    g.write(1)
+    g = open(p)
+",
+        );
+        // The `open(p)` calls are deferred too (unbound bare name, no
+        // group); the interesting entries are the `.write(...)` calls.
+        let [open_1, first, second, open_2, rebound, open_3] = groups.as_slice() else {
+            panic!("expected six deferred calls, got {groups:?}");
+        };
+        assert_eq!(*open_1, None);
+        assert_eq!(*open_2, None);
+        assert_eq!(*open_3, None);
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert_eq!(*rebound, None);
+    }
+
+    #[test]
+    fn hover_groups_late_local_binding_retro_poisons_outer_attribution() {
+        // Inside `test`, `helper` is local for the whole function body
+        // (Python scoping), so the call recorded against the module binding
+        // before the local assignment was misattributed and is stripped;
+        // the call after the assignment groups under the local binding, and
+        // module-level sites elsewhere keep theirs.
+        let groups = pending_hover_groups(
+            "\
+import helper
+import other
+helper.do(1)
+def test():
+    helper.do(1)
+    other.do(1)
+    helper = make()
+    helper.do(1)
+helper.do(1)
+",
+        );
+        let [module_before, shadowed, other_kept, local_after, module_after] = groups.as_slice()
+        else {
+            panic!("expected five deferred calls, got {groups:?}");
+        };
+        assert!(module_before.is_some());
+        assert_eq!(*shadowed, None);
+        // An in-range entry for a *different* binding is untouched.
+        assert!(other_kept.is_some());
+        assert!(local_after.is_some());
+        assert_ne!(module_before, local_after);
+        assert_eq!(module_before, module_after);
+    }
+
+    #[test]
+    fn hover_groups_class_body_bindings_do_not_shadow_methods() {
+        // Python name lookup inside methods skips class scopes: the class
+        // attribute `helper` shadows the module binding only inside the
+        // class body itself, never in the method.
+        let groups = pending_hover_groups(
+            "\
+import helper
+class C:
+    helper = q
+    helper.do(1)
+    def m(self):
+        helper.do(1)
+helper.do(1)
+",
+        );
+        let [class_site, method_site, module_site] = groups.as_slice() else {
+            panic!("expected three deferred calls, got {groups:?}");
+        };
+        // The class-body site is attributed to the class binding, whose
+        // groups survive only while no rebinding poisons them.
+        assert!(class_site.is_some());
+        assert!(method_site.is_some());
+        assert_ne!(class_site, method_site);
+        assert_eq!(method_site, module_site);
+    }
+
+    #[test]
+    fn hover_groups_cover_module_def_and_class_bindings() {
+        let groups = pending_hover_groups(
+            "\
+def check(value):
+    pass
+class Thing:
+    pass
+def caller(x):
+    check(x, 1)
+    check(x, 1)
+    Thing(x, 1)
+",
+        );
+        let [first, second, class_call] = groups.as_slice() else {
+            panic!("expected three deferred calls, got {groups:?}");
+        };
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert!(class_call.is_some());
+        assert_ne!(first, class_call);
+    }
+
+    #[test]
+    fn hover_groups_poisoned_by_augmented_assignment() {
+        let groups = pending_hover_groups(
+            "\
+import helper
+helper.do(1)
+helper += q
+",
+        );
+        assert_eq!(groups, vec![None]);
+    }
+
+    #[test]
+    fn hover_groups_poisoned_by_del() {
+        let groups = pending_hover_groups(
+            "\
+import helper
+helper.do(1)
+del helper
+",
+        );
+        assert_eq!(groups, vec![None]);
+    }
+
+    #[test]
+    fn hover_groups_match_poisons_subject_names_and_capture_bindings() {
+        // The subject (any name mentioned in it) is narrowed per arm, and
+        // every capture form binds: sequence elements, `*rest`, mapping
+        // values and `**rest`, class positional/keyword patterns, `as`
+        // names, and or-pattern alternatives. `MatchValue`/`MatchSingleton`
+        // patterns bind nothing.
+        let groups = pending_hover_groups(
+            "\
+import subj, seq, star, mapping, rest, klass, kw, alias, ored
+subj.do(1)
+seq.do(1)
+star.do(1)
+mapping.do(1)
+rest.do(1)
+klass.do(1)
+kw.do(1)
+alias.do(1)
+ored.do(1)
+match subj.value:
+    case 1:
+        pass
+    case None:
+        pass
+    case [seq, *star]:
+        pass
+    case {1: mapping, **rest}:
+        pass
+    case {2: mapping}:
+        pass
+    case [*_]:
+        pass
+    case C(klass, named=kw):
+        pass
+    case (x) as alias:
+        pass
+    case ored | 2:
+        pass
+",
+        );
+        let [subj, seq, star, mapping, rest, klass, kw, alias, ored] = groups.as_slice() else {
+            panic!("expected nine deferred calls, got {groups:?}");
+        };
+        for (name, group) in [
+            ("subj", subj),
+            ("seq", seq),
+            ("star", star),
+            ("mapping", mapping),
+            ("rest", rest),
+            ("klass", klass),
+            ("kw", kw),
+            ("alias", alias),
+            ("ored", ored),
+        ] {
+            assert_eq!(*group, None, "expected match to poison {name}");
+        }
+    }
+
+    #[test]
     fn call_shape_fingerprint_tags_arguments_and_sorts_keywords() {
         fn shape_of(call_source: &str) -> String {
             let parsed = parse_module(call_source).expect("parse call");
@@ -5883,13 +6443,6 @@ def odd(*self, **cls):
         assert_eq!(bound_import_name(&plain.names[0]), "a");
         assert_eq!(bound_import_name(&aliased.names[0]), "x");
         assert_eq!(bound_import_name(&from_import.names[0]), "y");
-    }
-
-    #[test]
-    fn receiver_param_recognises_self_and_cls_only() {
-        assert!(receiver_param("self").is_some());
-        assert!(receiver_param("cls").is_some());
-        assert!(receiver_param("obj").is_none());
     }
 
     fn with_empty_checker(plan_fixes: bool, check: impl FnOnce(&mut CallChecker)) {

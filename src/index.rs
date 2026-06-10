@@ -846,20 +846,25 @@ pub fn build_index_with_sources(
     // module — sibling first-party, stdlib, third-party — is resolved lazily
     // on demand by `get`, so a heavy third-party import closure
     // (numpy/torch/scipy) is never eagerly walked (issue #39).
-    'files: for path in python_files {
+    // Reading + parsing dominates this pass and every file is independent,
+    // so that part fans out across cores; the index insertions stay serial
+    // in `python_files` order so the first file claiming a module name wins
+    // deterministically.
+    for (path, read) in python_files
+        .iter()
+        .zip(read_and_parse_python_files(python_files))
+    {
         // A file that cannot be decoded (non-UTF-8 with no usable PEP 263
-        // declaration) is skipped here silently; the check/fix loop reads the
-        // same set and emits the single user-facing warning (issue #53). Its
-        // definitions just don't get indexed — same as if it were absent.
-        let Some(source) = read_python_source_lossy(path) else {
-            continue;
-        };
-        let Ok(parsed) = parse_module_guarded(&source) else {
+        // declaration) or parsed is skipped here silently; the check/fix
+        // loop reads the same set and emits the single user-facing warning
+        // (issue #53). Its definitions just don't get indexed — same as if
+        // it were absent.
+        let Some((source, parsed)) = read else {
             continue;
         };
         let module_name = module_name_for_path(source_roots, path);
         let Some(claim) = index.claim_first_party_module(&module_name) else {
-            continue 'files;
+            continue;
         };
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
@@ -867,6 +872,39 @@ pub fn build_index_with_sources(
     }
 
     (index, indexed_files)
+}
+
+/// Read and parse one candidate first-party file, or `None` when it cannot
+/// be decoded or parsed (the scan pass re-derives and reports the reason).
+fn read_and_parse_python_file(path: &Path) -> Option<(String, Parsed<ModModule>)> {
+    let source = read_python_source_lossy(path)?;
+    let parsed = parse_module_guarded(&source).ok()?;
+    Some((source, parsed))
+}
+
+/// Read + parse every candidate file in parallel, preserving input order.
+///
+/// Excluded from the coverage gate like the other parallel-pool
+/// orchestration: the pool-construction failure fallback is
+/// environment-only, and the per-file logic is the gated
+/// [`read_and_parse_python_file`].
+#[cfg_attr(coverage, coverage(off))]
+fn read_and_parse_python_files(
+    python_files: &[PathBuf],
+) -> Vec<Option<(String, Parsed<ModModule>)>> {
+    use rayon::prelude::*;
+    crate::limits::with_large_stack_pool(|| {
+        Ok(python_files
+            .par_iter()
+            .map(|path| read_and_parse_python_file(path))
+            .collect())
+    })
+    .unwrap_or_else(|_| {
+        python_files
+            .iter()
+            .map(|path| read_and_parse_python_file(path))
+            .collect()
+    })
 }
 
 /// Walk ``stmts`` collecting submodules to resolve and re-export edges,
