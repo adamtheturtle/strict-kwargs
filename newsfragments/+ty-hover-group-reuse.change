@@ -1,0 +1,20 @@
+Reuse one ``ty`` hover/definition answer for repeated same-shape
+``self.method(...)``/``cls.method(...)`` calls, cutting the ty fallback
+roughly 40% on method-call-heavy projects (CPython completeness benchmark:
+~24s to ~14.5s ty phase, ~29s to ~18s end to end; Sphinx: ~4s to ~2.1s).
+The built-in scan groups deferred calls that are proven to hover
+identically — the same un-rebound ``self``/``cls`` parameter binding, the
+same attribute, and the same call shape (argument arity, coarse argument
+kinds, keyword names; ty's hover is call-site sensitive for overloads and
+generics, so shape is part of the key) — and the ty fallback asks once per
+group. Grouping is dropped conservatively whenever the receiver could be
+rebound or narrowed (assignment to the name, the bare name escaping into a
+call such as ``isinstance(self, T)``, a comparison/truthiness test, a
+``match`` statement, an assignment to or non-call mention of the attribute),
+so every reused answer is exactly what ``ty`` would have returned at that
+site. Each server's request stream remains a pure function of the sorted
+work list, so diagnostics stay deterministic across runs and machines; the
+only observed output change on the pinned completeness repositories is four
+additional true positives on CPython where ty previously answered the same
+call sites inconsistently (``skipTest``/``fail``/``fspath``), with no
+entries lost.

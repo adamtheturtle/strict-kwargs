@@ -166,6 +166,7 @@ fn fix_paths_impl(
             &path,
             &source,
             &scan.pending,
+            &scan.pending_groups,
             config,
             &mut ty_file_cache,
             &mut ty_def_caches,
