@@ -642,15 +642,26 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
     }
 }
 
-/// Extract the first `Location` from a `textDocument/definition` result,
-/// which may be a single `Location`, an array, or `LocationLink`s.
-pub fn location_from_value(result: &Value) -> Option<DefLocation> {
-    let loc = match result {
-        Value::Array(items) => items.first()?,
-        Value::Object(_) => result,
-        _ => return None,
-    };
-    // LocationLink uses `targetUri`/`targetRange`; Location uses `uri`/`range`.
+/// Extract every `Location` from a `textDocument/definition` result, which
+/// may be a single `Location`, an array, or `LocationLink`s, preserving ty's
+/// order. Callers must try the locations in order and use the first one they
+/// can resolve: a multi-location answer (re-exports, `class X` plus a local
+/// binding) frequently leads with a location the local definition parser
+/// cannot use, and the *relative order* of the locations depends on the
+/// open/query history of the answering `ty server`, so committing to only
+/// the first entry both loses resolvable definitions and makes the outcome
+/// depend on request scheduling.
+pub fn locations_from_value(result: &Value) -> Vec<DefLocation> {
+    match result {
+        Value::Array(items) => items.iter().filter_map(single_location).collect(),
+        Value::Object(_) => single_location(result).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Decode one LSP location object. `LocationLink` uses
+/// `targetUri`/`targetRange`; `Location` uses `uri`/`range`.
+fn single_location(loc: &Value) -> Option<DefLocation> {
     let uri = loc
         .get("uri")
         .or_else(|| loc.get("targetUri"))
@@ -1076,41 +1087,52 @@ mod tests {
     }
 
     #[test]
-    fn location_from_value_variants() {
+    fn locations_from_value_variants() {
         // Plain `Location`.
-        let loc = location_from_value(&json!({
+        let locs = locations_from_value(&json!({
             "uri": "file:///a/x.py",
             "range": { "start": { "line": 3, "character": 5 } }
-        }))
-        .unwrap();
+        }));
+        let [loc] = locs.as_slice() else {
+            panic!("expected one location, got {}", locs.len());
+        };
         assert_eq!(loc.path, PathBuf::from("/a/x.py"));
         assert_eq!((loc.line, loc.character), (3, 5));
 
-        // Array of locations: first is taken.
-        assert!(location_from_value(&json!([
-            { "uri": "file:///a/y.py", "range": { "start": { "line": 0, "character": 0 } } }
-        ]))
-        .is_some());
+        // Array of locations: all are kept, in ty's order, and an
+        // undecodable entry is skipped without dropping the rest.
+        let locs = locations_from_value(&json!([
+            { "uri": "file:///a/y.py", "range": { "start": { "line": 0, "character": 0 } } },
+            { "uri": "file:///a/no-range.py" },
+            { "uri": "file:///a/z.py", "range": { "start": { "line": 7, "character": 1 } } }
+        ]));
+        assert_eq!(
+            locs.iter().map(|l| l.path.clone()).collect::<Vec<_>>(),
+            vec![PathBuf::from("/a/y.py"), PathBuf::from("/a/z.py")]
+        );
 
         // `LocationLink` form (`targetUri`/`targetRange`).
-        assert!(location_from_value(&json!({
-            "targetUri": "file:///a/z.py",
-            "targetRange": { "start": { "line": 1, "character": 2 } }
-        }))
-        .is_some());
+        assert_eq!(
+            locations_from_value(&json!({
+                "targetUri": "file:///a/z.py",
+                "targetRange": { "start": { "line": 1, "character": 2 } }
+            }))
+            .len(),
+            1
+        );
 
-        // Non-object/array => None.
-        assert!(location_from_value(&Value::Null).is_none());
-        // Empty array => None.
-        assert!(location_from_value(&json!([])).is_none());
-        // Missing range => None.
-        assert!(location_from_value(&json!({ "uri": "file:///a/x.py" })).is_none());
-        // Line out of u32 range => None.
-        assert!(location_from_value(&json!({
+        // Non-object/array => empty.
+        assert!(locations_from_value(&Value::Null).is_empty());
+        // Empty array => empty.
+        assert!(locations_from_value(&json!([])).is_empty());
+        // Missing range => empty.
+        assert!(locations_from_value(&json!({ "uri": "file:///a/x.py" })).is_empty());
+        // Line out of u32 range => empty.
+        assert!(locations_from_value(&json!({
             "uri": "file:///a/x.py",
             "range": { "start": { "line": 99_999_999_999u64, "character": 0 } }
         }))
-        .is_none());
+        .is_empty());
     }
 
     #[test]
