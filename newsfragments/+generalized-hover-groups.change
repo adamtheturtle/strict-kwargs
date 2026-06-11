@@ -1,0 +1,28 @@
+Extend ``ty`` hover-answer reuse from ``self``/``cls`` attribute calls to
+every call on a stable name binding: any parameter, a module-level
+``import``/``def``/``class``, a single assignment (``f = open(...)``,
+``with open(...) as f``), and bare-name calls on such bindings
+(``Decimal(...)``, ``check(...)``). Deferred calls that share a binding, an
+attribute, and a call-shape fingerprint now resolve from one hover/definition
+round trip instead of one per call site, cutting the CPython completeness
+run's ``ty`` request volume by about 17% (138k to 114k requests). Bindings
+stay grouped only while they are provably stable: any rebinding, ``del``,
+augmented assignment, ``global``/``nonlocal``, ``match`` subject or capture,
+narrowing test, or escape into a call poisons the group, a binding that
+shadows an enclosing name retroactively un-groups call sites recorded before
+it in the same scope (Python makes the name scope-local throughout), and
+class-body bindings never shadow names inside methods. The wider reuse also
+recovers nine CPython diagnostics that per-site queries had been losing to
+``ty``'s answer instability (``LibraryLoader.LoadLibrary``,
+``IdleConf.GetOption``, ``ExitStack.enter_context``, ...), with no entries
+lost on either completeness oracle.
+
+The whole-project pipeline now also streams: files needing the ``ty``
+fallback are dispatched to the four shard servers in sorted order as soon as
+the parallel built-in pass finishes each file, so the servers work
+concurrently with the scan instead of idling until it drains, and a shard
+that never receives a query no longer starts a server at all. The
+first-party index build reads and parses candidate files in parallel as
+well (about 1.1s to 0.5s on a CPython checkout). Each server's request
+stream is byte-identical to the previous scan-then-shard pipeline's, so
+diagnostics are unchanged.
