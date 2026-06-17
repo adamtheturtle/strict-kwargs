@@ -4711,8 +4711,23 @@ fn resolve_pending_with_ty(
                     .and_then(|id| ty.take(id))
                     .as_ref()
                     .and_then(hover_text);
+                // Only a usable callable signature is group-consistent. ty
+                // answers a member sitting in code it deems unreachable — e.g.
+                // a `sys.platform`-guarded branch live on one OS but dead on
+                // another — with the bottom type (`Never`, or no hover at all)
+                // rather than the receiver's real signature. Caching that
+                // answer would suppress the group's *live* members, which do
+                // resolve to a real signature. Leave such answers uncached so
+                // each remaining member falls back to its own hover; the first
+                // member that yields a real signature re-seeds the shared
+                // answer for the rest.
                 if let Some(g) = group {
-                    group_hover.insert(g, raw.clone());
+                    if raw
+                        .as_deref()
+                        .is_some_and(|raw| parse_hover_signature(raw).is_some())
+                    {
+                        group_hover.insert(g, raw.clone());
+                    }
                 }
                 raw
             };
@@ -4895,7 +4910,10 @@ fn resolve_pending_with_ty(
                 cached
             } else {
                 let raw = id.and_then(|id| ty.take(id));
-                if let Some(g) = group {
+                // Only a positive answer is group-consistent; see the matching
+                // note in the hover phase. A definition miss at an unreachable
+                // member must not suppress live members of the same group.
+                if let (Some(g), Some(_)) = (group, raw.as_ref()) {
                     group_def.insert(g, raw.clone());
                 }
                 raw
