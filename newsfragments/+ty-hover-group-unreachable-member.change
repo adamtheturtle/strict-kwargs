@@ -1,0 +1,9 @@
+Fix a regression in ``ty`` hover-answer reuse that dropped real diagnostics
+for calls grouped across a platform-specific branch. When a group's earliest
+call site sits in code ``ty`` considers unreachable (for example a
+``sys.platform``-guarded branch that is dead on the host platform), ``ty``
+answers with the bottom type ``Never`` instead of the receiver's real
+signature. That answer was cached and reused for the whole group, suppressing
+the group's live members, which do resolve. Only a usable callable signature
+is now treated as the shared group answer, so a ``Never`` (or absent) answer
+at one member no longer hides violations at the others.
