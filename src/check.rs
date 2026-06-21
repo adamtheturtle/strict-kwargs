@@ -56,6 +56,23 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 /// pipe round-trips (41.6s serial vs 44s with a 128-wide window).
 const TY_MAX_IN_FLIGHT: usize = 1;
 
+/// Number of `ty server` sessions started in this process (see
+/// [`ty_sessions_started`]).
+static TY_SESSIONS_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Total `ty server` sessions started so far in this process.
+///
+/// Correctness of the `ty` fallback depends on resolving every file through a
+/// **single shared session**: a `ty server` is an incremental analysis engine
+/// whose resolution completeness grows with the work it has already done, so
+/// splitting a project across several sessions silently drops violations that
+/// only a warm whole-project session resolves. This counter lets a regression
+/// test assert that a whole-project check uses exactly one session.
+#[doc(hidden)]
+pub fn ty_sessions_started() -> usize {
+    TY_SESSIONS_STARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy)]
 enum IfBranchTraversal {
     Module,
@@ -4337,7 +4354,9 @@ fn resolve_file_with_ty(
 /// is excluded from the gate.
 #[cfg_attr(coverage, coverage(off))]
 fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver, CheckError> {
-    TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
+    let resolver = TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)?;
+    TY_SESSIONS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(resolver)
 }
 
 /// Start ty for fallback queries. Query sites open the current file before
