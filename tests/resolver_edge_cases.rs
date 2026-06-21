@@ -833,6 +833,31 @@ def get_thing_cls() -> type[Thing]:
     );
 }
 
+/// A loop variable bound to a tuple of class objects has a *union* type
+/// (`type[int] | type[Number]`) that only the ty fallback can follow — the
+/// built-in resolver does not flow-type a `for` target across a tuple of
+/// callables. Calling it resolves each arm, so the over-long no-argument
+/// `Number()` construction is flagged at the call site. This mirrors the
+/// `typea(a)` construct in the `test_richcmp` standard-library test that the
+/// sharded ty fallback now reports (issue #240).
+#[test]
+fn ty_resolves_union_of_class_objects_from_tuple_loop() {
+    let messages = check_source(concat!(
+        "class Number:\n",
+        "    def __init__(self):\n",
+        "        pass\n",
+        "\n",
+        "\n",
+        "def widen(a):\n",
+        "    for ctor in (int, Number):\n",
+        "        ctor(a)\n",
+    ));
+    assert!(
+        has_error_at(&messages, 8, "Too many positional arguments for \"Number\""),
+        "union-typed class-object construction must be flagged via ty: {messages:?}"
+    );
+}
+
 /// A cross-file instance whose type is an inferred return value drives ty's
 /// hover/goto for a method call the built-in resolver cannot follow.
 #[test]

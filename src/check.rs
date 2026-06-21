@@ -259,15 +259,23 @@ fn pipeline_phases(
         // Phase 2 (parallel, background): one thread per ty shard. Files
         // with deferred calls stream in as the scan releases them in
         // sorted order; the greedy owner assignment below reproduces the
-        // partition a whole-list pass would compute, so each server's
-        // request stream — and therefore its answers — is identical to
-        // the previous scan-then-shard pipeline's, while the servers now
-        // work concurrently with the scan instead of idling behind it.
+        // partition a whole-list pass would compute. Each work item is
+        // sent only to its owner shard, which both opens and queries it —
+        // no shard sees the others' files. This is safe because the only
+        // cross-file dependency ty has is goto-definition *location
+        // order* (which files were opened earlier reorders a symbol's
+        // returned locations), and `resolve_first_def_location` (#233)
+        // tries every returned location until one parses, so the order —
+        // and therefore the open-set — no longer changes the resolved
+        // diagnostic. Dropping the per-shard open-history replay cuts the
+        // `didOpen` traffic by `TY_SHARD_COUNT`×: on a venv-backed run
+        // where most files defer to ty (e.g. the completeness check),
+        // each server now parses only its ~1/N share of the project
+        // instead of all of it (issue #240).
         let mut shard_senders = Vec::with_capacity(TY_SHARD_COUNT);
         let mut shard_handles = Vec::with_capacity(TY_SHARD_COUNT);
         for _ in 0..TY_SHARD_COUNT {
-            let (shard_tx, shard_rx) =
-                std::sync::mpsc::channel::<(usize, std::sync::Arc<PendingTyWork>, bool)>();
+            let (shard_tx, shard_rx) = std::sync::mpsc::channel::<(usize, PendingTyWork)>();
             shard_senders.push(shard_tx);
             let handle = std::thread::Builder::new()
                 .stack_size(crate::limits::STACK_SIZE)
@@ -276,59 +284,31 @@ fn pipeline_phases(
                     let mut ty_start_attempted = false;
                     let mut file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
                     let mut def_caches = TyDefCaches::default();
-                    // Opens deferred until this shard's first own query:
-                    // a server that is never queried is never started
-                    // (and a file's opens still precede every query that
-                    // could observe them, in sorted order).
-                    let mut deferred_opens: Vec<std::sync::Arc<PendingTyWork>> = Vec::new();
                     let mut out: Vec<(usize, Vec<Diagnostic>)> = Vec::new();
-                    for (work_index, work, mine) in shard_rx {
-                        if mine {
-                            if !ty_start_attempted {
-                                ty_start_attempted = true;
-                                ty = Some(start_ty_for_fallback(project_root, python_env)?);
-                            }
-                            // Replay the serial pass's open history: ty's
-                            // answers for multi-location symbols depend
-                            // on which files were opened before the
-                            // query, so every shard opens *every* file
-                            // with deferred calls in sorted order (cheap
-                            // under pull diagnostics — ty computes
-                            // nothing for an open it is never queried
-                            // about) and only queries its own. Each
-                            // server then sees the exact open-set the
-                            // single-server pass had at the same point
-                            // and returns the same answers.
-                            if let Some(server) = ty.as_mut() {
-                                for earlier in std::mem::take(&mut deferred_opens) {
-                                    let _ = server.ensure_open(&earlier.path, &earlier.source);
-                                }
-                            }
-                            let mut file_diagnostics = Vec::new();
-                            resolve_file_with_ty(
-                                &mut ty,
-                                &mut ty_start_attempted,
-                                project_root,
-                                all_project_files,
-                                index,
-                                indexed_files,
-                                python_env,
-                                &work.path,
-                                &work.source,
-                                &work.pending,
-                                &work.pending_groups,
-                                config,
-                                &mut file_cache,
-                                &mut def_caches,
-                                &mut file_diagnostics,
-                                None,
-                            )?;
-                            out.push((work_index, file_diagnostics));
-                        } else if let Some(server) = ty.as_mut() {
-                            let _ = server.ensure_open(&work.path, &work.source);
-                        } else {
-                            deferred_opens.push(work);
-                        }
+                    // A shard that never receives an owned file never
+                    // starts its server (`resolve_file_with_ty` starts it
+                    // lazily on the first non-empty pending set).
+                    for (work_index, work) in shard_rx {
+                        let mut file_diagnostics = Vec::new();
+                        resolve_file_with_ty(
+                            &mut ty,
+                            &mut ty_start_attempted,
+                            project_root,
+                            all_project_files,
+                            index,
+                            indexed_files,
+                            python_env,
+                            &work.path,
+                            &work.source,
+                            &work.pending,
+                            &work.pending_groups,
+                            config,
+                            &mut file_cache,
+                            &mut def_caches,
+                            &mut file_diagnostics,
+                            None,
+                        )?;
+                        out.push((work_index, file_diagnostics));
                     }
                     Ok(out)
                 })
@@ -339,10 +319,9 @@ fn pipeline_phases(
 
         // Coordinator: release scan outcomes in sorted-file order (scan
         // results arrive in nondeterministic worker order, but the order
-        // files reach ty — opens and queries alike — must be a pure
-        // function of the file list for the fallback to be
-        // reproducible), assign each pending file to the least-loaded
-        // shard, and fan it out (owner queries it, the rest open it).
+        // files reach each ty server must be a pure function of the file
+        // list for the fallback to be reproducible), assign each pending
+        // file to the least-loaded shard, and send it only to that owner.
         let mut releaser = InOrderReleaser::new();
         let mut assigner = TyShardAssigner::new(TY_SHARD_COUNT);
         for (i, path, result) in rx {
@@ -375,14 +354,7 @@ fn pipeline_phases(
                 }
                 if let (Some(senders), Some(work)) = (&shard_senders, staged.pop()) {
                     let owner = assigner.assign(work.pending.len());
-                    let work = std::sync::Arc::new(work);
-                    for (shard, sender) in senders.iter().enumerate() {
-                        let _ = sender.send((
-                            released_pending_files,
-                            std::sync::Arc::clone(&work),
-                            shard == owner,
-                        ));
-                    }
+                    let _ = senders[owner].send((released_pending_files, work));
                     released_pending_files += 1;
                 }
             }
