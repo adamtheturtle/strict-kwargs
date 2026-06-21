@@ -35,6 +35,7 @@ walkdir = "2.5"
 ruff_python_ast = { package = "rustpython-ruff_python_ast", version = "0.15.8" }
 ruff_python_parser = { package = "rustpython-ruff_python_parser", version = "0.15.8" }
 ruff_text_size = { package = "rustpython-ruff_text_size", version = "0.15.8" }
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 # Renamed to `divan`: the compat layer's proc-macro emits `divan::…` paths, so

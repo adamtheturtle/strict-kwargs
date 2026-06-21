@@ -1,7 +1,7 @@
 //! Index of callable definitions discovered in the project.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, ModModule, Stmt};
@@ -115,7 +115,7 @@ fn bound_callable_instance_signature(signature: Signature) -> Signature {
 
 /// Mutable state shared between the eager construction pass and the lazy
 /// per-query resolution (the latter only has `&self`, hence the interior
-/// `Mutex` — see [`DefinitionIndex::lock`]).
+/// `RwLock` — see [`DefinitionIndex::read`]/[`DefinitionIndex::write`]).
 #[derive(Debug, Default)]
 struct Inner {
     store: Store,
@@ -151,8 +151,7 @@ pub struct DefinitionIndex {
     /// Resolves a dotted module name to source. `None` in unit tests that
     /// drive the edge/signature logic directly (no module resolution).
     resolver: Option<ModuleResolver>,
-    inner: Mutex<Inner>,
-    module_ready: Condvar,
+    inner: RwLock<Inner>,
 }
 
 /// Source and parsed AST for a first-party file that was successfully indexed.
@@ -173,12 +172,10 @@ struct ModuleIndexClaim<'a> {
 
 impl Drop for ModuleIndexClaim<'_> {
     fn drop(&mut self) {
-        let mut inner = self.index.lock();
-        inner
+        self.index
+            .write()
             .modules
             .insert(self.dotted.clone(), ModuleState::Indexed);
-        drop(inner);
-        self.index.module_ready.notify_all();
     }
 }
 
@@ -186,45 +183,57 @@ impl DefinitionIndex {
     fn new(resolver: ModuleResolver) -> Self {
         Self {
             resolver: Some(resolver),
-            inner: Mutex::new(Inner {
+            inner: RwLock::new(Inner {
                 budget: MODULE_BUDGET,
                 ..Inner::default()
             }),
-            module_ready: Condvar::new(),
         }
     }
 
-    /// Lock the shared inner state. The whole-project run scans files in
-    /// parallel (issue #46) and they share this one demand-driven index, so
-    /// access is serialized here. A poisoned lock (a worker panicked while
-    /// holding it) still yields the data: `Inner` is a pure memoization cache
-    /// over deterministic resolution, so a half-updated entry is at worst a
-    /// redundant re-resolve, never unsoundness — strictly better than turning
-    /// every other worker's access into a panic. Every hold is short (a map
-    /// lookup/insert); module parsing happens outside the mutex, with
-    /// `module_ready` coordinating other workers that need the same module.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Shared-read access to the inner state. The whole-project run scans
+    /// files in parallel (issue #46) over this one demand-driven index;
+    /// resolution is overwhelmingly read-only after warmup, so a [`RwLock`]
+    /// lets those reads run concurrently instead of serializing on a single
+    /// mutex (which dominated wall time on many-core machines). A poisoned
+    /// lock (a worker panicked while holding it) still yields the data:
+    /// `Inner` is a pure memoization cache over deterministic resolution, so a
+    /// half-updated entry is at worst a redundant re-resolve, never
+    /// unsoundness — strictly better than turning every other worker's access
+    /// into a panic.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn wait_for_module<'a>(&self, guard: MutexGuard<'a, Inner>) -> MutexGuard<'a, Inner> {
-        self.module_ready
-            .wait(guard)
-            .unwrap_or_else(PoisonError::into_inner)
+    /// Exclusive access for the rare mutations — caching a freshly resolved
+    /// name, claiming/finishing a module, indexing parsed definitions. Every
+    /// hold is short (a map lookup/insert); module parsing happens outside any
+    /// guard. See [`Self::read`].
+    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.inner.write().unwrap_or_else(PoisonError::into_inner)
     }
 
-    // First-party indexing is single-threaded today, but it shares module
-    // state with lazy constructor-base preloading. Keep the coordination
-    // centralized and out of the coverage gate: the in-progress wait is a
-    // defensive branch for a future parallel eager indexer.
-    #[cfg_attr(coverage, coverage(off))]
-    fn claim_first_party_module(&self, dotted: &str) -> Option<ModuleIndexClaim<'_>> {
-        let mut inner = self.lock();
+    /// Claim `dotted` for indexing, coordinating with other parallel workers.
+    /// Returns `None` if it is already fully `Indexed` (nothing to do), or a
+    /// claim whose [`Drop`] marks it `Indexed` once this worker finishes. If
+    /// another worker currently holds an in-progress claim, this spins
+    /// (yielding) until that claim resolves — module parsing is brief and
+    /// lock-free, so the wait is short and only happens on a genuine race for
+    /// the same not-yet-loaded module.
+    fn claim_module(&self, dotted: &str) -> Option<ModuleIndexClaim<'_>> {
+        // Fast path: a concurrent read confirms an already-indexed module, so
+        // the common case (every re-query of a loaded module) never contends
+        // on the write lock.
+        if matches!(self.read().modules.get(dotted), Some(ModuleState::Indexed)) {
+            return None;
+        }
         loop {
+            let mut inner = self.write();
             match inner.modules.get(dotted).copied() {
                 Some(ModuleState::Indexed) => return None,
                 Some(ModuleState::Indexing) => {
-                    inner = self.wait_for_module(inner);
+                    // Another worker is mid-index; release the lock and retry.
+                    drop(inner);
+                    std::thread::yield_now();
                 }
                 None => {
                     inner
@@ -238,6 +247,15 @@ impl DefinitionIndex {
                 }
             }
         }
+    }
+
+    // First-party indexing is single-threaded today, but it shares module
+    // state with lazy constructor-base preloading. Keep the coordination
+    // centralized and out of the coverage gate: the in-progress wait is a
+    // defensive branch for a future parallel eager indexer.
+    #[cfg_attr(coverage, coverage(off))]
+    fn claim_first_party_module(&self, dotted: &str) -> Option<ModuleIndexClaim<'_>> {
+        self.claim_module(dotted)
     }
 
     /// Record re-export edges into the by-destination index, dropping no-ops
@@ -298,7 +316,7 @@ impl DefinitionIndex {
                 self.ensure_for_data_constructor_base(base, &mut query_budget, active_modules);
             }
         }
-        let mut inner = self.lock();
+        let mut inner = self.write();
         let track_data_constructors = collected.has_data_constructor_classes
             || collected
                 .data_constructor_bases
@@ -359,26 +377,8 @@ impl DefinitionIndex {
     // callees, `synthesize_data_constructor`).
     #[cfg_attr(coverage, coverage(off))]
     fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
-        let claim = {
-            let mut inner = self.lock();
-            loop {
-                match inner.modules.get(dotted).copied() {
-                    Some(ModuleState::Indexed) => return,
-                    Some(ModuleState::Indexing) => {
-                        inner = self.wait_for_module(inner);
-                    }
-                    None => {
-                        inner
-                            .modules
-                            .insert(dotted.to_string(), ModuleState::Indexing);
-                        drop(inner);
-                        break ModuleIndexClaim {
-                            index: self,
-                            dotted: dotted.to_string(),
-                        };
-                    }
-                }
-            }
+        let Some(claim) = self.claim_module(dotted) else {
+            return;
         };
         let Some(resolver) = self.resolver.as_ref() else {
             return;
@@ -393,7 +393,7 @@ impl DefinitionIndex {
             return;
         }
         {
-            let mut inner = self.lock();
+            let mut inner = self.write();
             if inner.budget == 0 {
                 return;
             }
@@ -433,26 +433,8 @@ impl DefinitionIndex {
         if active_modules.contains(dotted) {
             return;
         }
-        let claim = {
-            let mut inner = self.lock();
-            loop {
-                match inner.modules.get(dotted).copied() {
-                    Some(ModuleState::Indexed) => return,
-                    Some(ModuleState::Indexing) => {
-                        inner = self.wait_for_module(inner);
-                    }
-                    None => {
-                        inner
-                            .modules
-                            .insert(dotted.to_string(), ModuleState::Indexing);
-                        drop(inner);
-                        break ModuleIndexClaim {
-                            index: self,
-                            dotted: dotted.to_string(),
-                        };
-                    }
-                }
-            }
+        let Some(claim) = self.claim_module(dotted) else {
+            return;
         };
         let Some(resolver) = self.resolver.as_ref() else {
             return;
@@ -464,7 +446,7 @@ impl DefinitionIndex {
             return;
         }
         {
-            let mut inner = self.lock();
+            let mut inner = self.write();
             if inner.budget == 0 {
                 return;
             }
@@ -527,9 +509,9 @@ impl DefinitionIndex {
     pub fn get(&self, fullname: &str) -> Option<Arc<[Signature]>> {
         // Scope the guard so it is released before `resolve_alias` (which
         // re-locks): holding it across that call would self-deadlock the
-        // `Mutex`, where the old `RefCell` merely panicked.
+        // non-reentrant lock, where the old `RefCell` merely panicked.
         {
-            let inner = self.lock();
+            let inner = self.read();
             if let Some(hit) = inner.cache.get(fullname) {
                 return hit.clone();
             }
@@ -538,7 +520,7 @@ impl DefinitionIndex {
         let mut query_budget = MAX_QUERY_MODULES;
         let mut steps = MAX_QUERY_STEPS;
         let resolved = self.resolve_alias(fullname, &mut visited, 0, &mut query_budget, &mut steps);
-        self.lock()
+        self.write()
             .cache
             .insert(fullname.to_string(), resolved.clone());
         resolved
@@ -570,7 +552,7 @@ impl DefinitionIndex {
 
     #[cfg_attr(coverage, coverage(off))]
     fn classes_defining_method(&self, method: &str) -> Vec<String> {
-        let inner = self.lock();
+        let inner = self.read();
         inner
             .store
             .classes
@@ -598,7 +580,7 @@ impl DefinitionIndex {
             .next()
             .unwrap_or(class_name_or_tail);
         let matching_classes: Vec<String> = {
-            let inner = self.lock();
+            let inner = self.read();
             inner
                 .store
                 .classes
@@ -627,7 +609,7 @@ impl DefinitionIndex {
         let bases = {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
-            self.lock()
+            self.read()
                 .store
                 .class_bases
                 .get(class_fullname)
@@ -655,7 +637,7 @@ impl DefinitionIndex {
         let bases = {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
-            self.lock()
+            self.read()
                 .store
                 .class_bases
                 .get(class_fullname)
@@ -711,7 +693,7 @@ impl DefinitionIndex {
         // (end of this statement) before the recursive `resolve_alias` calls
         // below, which re-lock.
         let direct = self
-            .lock()
+            .read()
             .store
             .signatures
             .get(name)
@@ -741,7 +723,7 @@ impl DefinitionIndex {
         // ""`) and non-self-referential subtree aliases (e.g. `np = numpy`,
         // `src = numpy` not under `dst = np`) terminate, so stay unrestricted.
         let candidates: Vec<String> = {
-            let inner = self.lock();
+            let inner = self.read();
             let mut out = Vec::new();
             let mut end = name.len();
             loop {
@@ -783,20 +765,20 @@ impl DefinitionIndex {
     /// Whether `fullname` is a constructor we synthesized from class fields
     /// (see [`Store::synthesized`]).
     pub fn is_synthesized(&self, fullname: &str) -> bool {
-        self.lock().store.synthesized.contains(fullname)
+        self.read().store.synthesized.contains(fullname)
     }
 
     /// Whether `fullname` is a function that must be skipped entirely
     /// (see [`Store::excluded`]).
     pub fn is_excluded(&self, fullname: &str) -> bool {
-        self.lock().store.excluded.contains(fullname)
+        self.read().store.excluded.contains(fullname)
     }
 
     /// Whether `fullname` denotes a class the built-in index has seen.
     pub fn is_class(&self, fullname: &str) -> bool {
         let mut query_budget = MAX_QUERY_MODULES;
         self.ensure_for(fullname, &mut query_budget);
-        self.lock().store.classes.contains(fullname)
+        self.read().store.classes.contains(fullname)
     }
 }
 
@@ -1876,8 +1858,7 @@ impl DefinitionIndex {
     pub(crate) fn for_test() -> Self {
         Self {
             resolver: None,
-            inner: Mutex::new(Inner::default()),
-            module_ready: Condvar::new(),
+            inner: RwLock::new(Inner::default()),
         }
     }
 
@@ -1907,11 +1888,11 @@ impl DefinitionIndex {
     }
 
     fn signature_count(&self) -> usize {
-        self.lock().store.signatures.len()
+        self.read().store.signatures.len()
     }
 
     fn edges_is_empty(&self) -> bool {
-        self.lock().by_dst.is_empty()
+        self.read().by_dst.is_empty()
     }
 }
 
@@ -2405,7 +2386,7 @@ class Child(Base):
     fn waits_for_in_progress_module_before_caching_a_miss() {
         let index = Arc::new(DefinitionIndex::for_test());
         {
-            let mut inner = index.lock();
+            let mut inner = index.write();
             inner
                 .modules
                 .insert("pkg".to_string(), ModuleState::Indexing);
@@ -2423,13 +2404,12 @@ class Child(Base):
         );
 
         {
-            let mut inner = index.lock();
+            let mut inner = index.write();
             inner.store.insert("pkg.f".to_string(), sig(2));
             inner
                 .modules
                 .insert("pkg".to_string(), ModuleState::Indexed);
         }
-        index.module_ready.notify_all();
 
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
@@ -2443,7 +2423,7 @@ class Child(Base):
     fn constructor_base_preload_waits_for_in_progress_module() {
         let index = Arc::new(DefinitionIndex::for_test());
         {
-            let mut inner = index.lock();
+            let mut inner = index.write();
             inner
                 .modules
                 .insert("pkg".to_string(), ModuleState::Indexing);
@@ -2468,12 +2448,11 @@ class Child(Base):
         );
 
         {
-            let mut inner = index.lock();
+            let mut inner = index.write();
             inner
                 .modules
                 .insert("pkg".to_string(), ModuleState::Indexed);
         }
-        index.module_ready.notify_all();
 
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))

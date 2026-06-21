@@ -7,6 +7,16 @@
 // (nightly) coverage identical.
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
+// The whole-project scan resolves call sites in parallel, allocating heavily
+// (every dotted-name lookup builds owned `String`s). The system allocator
+// serializes those allocations on a global lock, which both slows each worker
+// and caps multi-core scaling; `mimalloc` removes that bottleneck (measured
+// ~2x on a real CPython checkout). Declared in the library so every binary
+// that links it — the CLI, the benchmarks, the test harness — shares the
+// allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod ast_util;
 mod cache;
 mod check;
