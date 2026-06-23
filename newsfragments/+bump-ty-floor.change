@@ -1,0 +1,8 @@
+Raise the required ``ty`` floor from ``0.0.46`` to ``0.0.52``, the release the
+LSP/hover integration is now verified against. The full test suite (including
+the hover and goto-definition goldens) passes unchanged on ``0.0.52``, so the
+hover/LSP surface this project parses is unaffected. On the completeness
+oracles the new ``ty`` is effectively neutral versus ``0.0.46`` — a handful of
+diagnostics churn either way, the only systematic change being ty's
+``dict.pop`` overload fix, which drops three ``pop`` call sites that are no
+longer flagged.
