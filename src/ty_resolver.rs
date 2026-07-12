@@ -388,12 +388,11 @@ pub fn parse_hover_signature(value: &str) -> Option<HoverSignature> {
         // to the call site exactly like an unbound `def`.
         let name = rest.split('(').next()?.trim().to_string();
         (name, None)
-    } else if let Some(rest) = head.strip_prefix("bound method ") {
+    } else {
+        let rest = head.strip_prefix("bound method ")?;
         let qualified = rest.split('(').next()?.trim();
         let (owner, name) = qualified.rsplit_once('.')?;
         (name.to_string(), Some(owner.to_string()))
-    } else {
-        return None;
     };
     if name.is_empty() {
         return None;
