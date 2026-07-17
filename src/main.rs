@@ -424,7 +424,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     }
 
     for fix in fixes {
-        std::fs::write(&fix.path, &fix.fixed)?;
+        fix.write_preserving_encoding()?;
     }
     report_fix_summary(rewritten, remaining)?;
     Ok(fix_exit_code(remaining))
