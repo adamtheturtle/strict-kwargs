@@ -112,11 +112,16 @@ fn resolve_python_env(python: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> PathBuf {
-    explicit.unwrap_or_else(|| {
-        let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-        find_project_root(&start)
-    })
+fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<PathBuf, CheckError> {
+    if let Some(root) = explicit {
+        if !root.is_dir() {
+            return Err(CheckError::InvalidProjectRoot { path: root });
+        }
+        return Ok(root);
+    }
+
+    let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    Ok(find_project_root(&start))
 }
 
 fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
@@ -153,7 +158,7 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     if args.fix || args.diff {
         return run_check_fix(args);
     }
-    let project_root = project_root_for(args.project_root, &args.paths);
+    let project_root = project_root_for(args.project_root, &args.paths)?;
     let config = Config::load(&project_root)?;
     let output_format = args.output_format.unwrap_or(config.output_format);
     let python_env = resolve_python_env(args.python);
@@ -393,7 +398,7 @@ fn fix_exit_code(remaining: usize) -> ExitCode {
 
 fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
-    let project_root = project_root_for(args.project_root, &args.paths);
+    let project_root = project_root_for(args.project_root, &args.paths)?;
     let config = Config::load(&project_root)?;
     let fix_opt_ins = FixOptIns {
         synthesized_constructors: config.fix_synthesized_constructors
@@ -437,9 +442,11 @@ mod tests {
 
     #[test]
     fn project_root_uses_explicit_when_given() {
-        let explicit = PathBuf::from("/some/explicit/root");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let explicit = dir.path().to_path_buf();
         assert_eq!(
-            project_root_for(Some(explicit.clone()), &[PathBuf::from("x.py")]),
+            project_root_for(Some(explicit.clone()), &[PathBuf::from("x.py")])
+                .expect("valid project root"),
             explicit
         );
     }
@@ -452,14 +459,17 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("mkdir");
         let file = nested.join("m.py");
         std::fs::write(&file, "").expect("write");
-        assert_eq!(project_root_for(None, &[file]), dir.path());
+        assert_eq!(
+            project_root_for(None, &[file]).expect("discovered project root"),
+            dir.path()
+        );
     }
 
     #[test]
     fn project_root_falls_back_to_dot_when_no_paths() {
         // `paths.first()` is `None` (unreachable from the CLI because clap
         // defaults `paths` to `.`, but covered here for completeness).
-        let root = project_root_for(None, &[]);
+        let root = project_root_for(None, &[]).expect("fallback project root");
         assert_eq!(root, find_project_root(&PathBuf::from(".")));
     }
 

@@ -278,6 +278,32 @@ fn check_explicit_project_root_flag() {
 }
 
 #[test]
+fn check_nonexistent_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["check", "--project-root", "does-not-exist", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("does-not-exist"), "stderr: {err}");
+}
+
+#[test]
+fn check_file_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n")
+        .write("not-a-directory", "plain file\n");
+    let output = project.run(&["check", "--project-root", "not-a-directory", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("not-a-directory"), "stderr: {err}");
+}
+
+#[test]
 fn check_required_version_mismatch_is_fatal_exit_two() {
     let project = Project::new()
         .write(

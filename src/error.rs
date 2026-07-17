@@ -35,6 +35,13 @@ pub enum CheckError {
         /// The nonexistent path as given on the command line.
         path: PathBuf,
     },
+    /// An explicitly supplied `--project-root` is not an existing directory.
+    /// Rejecting it before configuration loading prevents a mistyped root
+    /// from silently disabling project configuration (issue #255).
+    InvalidProjectRoot {
+        /// The invalid project root as given on the command line.
+        path: PathBuf,
+    },
     /// `pyproject.toml` (or its `[tool.strict_kwargs]` table) could not be
     /// read or parsed, or has the wrong shape/value types. Reported instead
     /// of silently running with defaults, which would hide a misconfigured
@@ -99,6 +106,11 @@ impl std::fmt::Display for CheckError {
             Self::PathNotFound { path } => {
                 write!(formatter, "no such file or directory: {}", path.display())
             }
+            Self::InvalidProjectRoot { path } => write!(
+                formatter,
+                "--project-root must be an existing directory: {}",
+                path.display()
+            ),
             Self::ConfigInvalid { path, message } => {
                 write!(formatter, "{}: {message}", path.display())
             }
@@ -183,6 +195,18 @@ mod tests {
         assert!(message.contains("no such file or directory"));
         assert!(message.contains("typo_does_not_exist.py"));
         assert!(format!("{error:?}").starts_with("PathNotFound"));
+    }
+
+    #[test]
+    fn invalid_project_root_names_the_path_and_requirement() {
+        let error = CheckError::InvalidProjectRoot {
+            path: PathBuf::from("not-a-project-root"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("--project-root"));
+        assert!(message.contains("existing directory"));
+        assert!(message.contains("not-a-project-root"));
+        assert!(format!("{error:?}").starts_with("InvalidProjectRoot"));
     }
 
     #[test]
