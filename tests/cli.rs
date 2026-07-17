@@ -585,6 +585,28 @@ fn check_nonexistent_dir_is_fatal_exit_two() {
     assert!(err.contains("no_such_dir"), "stderr: {err}");
 }
 
+/// Issue #252: failing to traverse a requested directory is an operational
+/// error, not permission to report an incomplete scan as clean.
+#[cfg(unix)]
+#[test]
+fn check_unreadable_directory_is_fatal_exit_two() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = Project::new().write("locked/main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let locked = project.root.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("lock directory");
+
+    let output = project.run(&["check", "."]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+        .expect("restore directory");
+
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(err.contains("locked"), "stderr: {err}");
+}
+
 #[test]
 fn fix_nonexistent_path_is_fatal_exit_two() {
     // A mistyped target passed to `fix` must not exit 0 silently (issue #84).
