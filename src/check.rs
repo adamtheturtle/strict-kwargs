@@ -1929,6 +1929,17 @@ impl<'a> CallChecker<'a> {
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
+        if let Some(class_fullname) = callee_fullname
+            .strip_suffix(".__init__")
+            .or_else(|| callee_fullname.strip_suffix(".__new__"))
+        {
+            if self
+                .index
+                .constructor_has_competing_boundary(class_fullname)
+            {
+                return;
+            }
+        }
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }

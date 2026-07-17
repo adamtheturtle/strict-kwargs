@@ -71,6 +71,9 @@ struct Store {
     class_bases: FxHashMap<String, Vec<String>>,
     /// Fully-qualified class names discovered while indexing.
     classes: FxHashSet<String>,
+    /// Explicit metaclass for each indexed class, resolved to its
+    /// fully-qualified name at the class definition.
+    class_metaclasses: FxHashMap<String, String>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
@@ -331,6 +334,9 @@ impl DefinitionIndex {
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
+        }
+        for (class_name, metaclass) in collected.class_metaclasses {
+            inner.store.class_metaclasses.insert(class_name, metaclass);
         }
         for (instance_name, class_name) in collected.callable_instances {
             let Some(signatures) = inner
@@ -780,6 +786,30 @@ impl DefinitionIndex {
         self.ensure_for(fullname, &mut query_budget);
         self.read().store.classes.contains(fullname)
     }
+
+    /// Whether a class call crosses another locally modeled runtime boundary
+    /// in addition to the constructor signature selected by the resolver.
+    pub fn constructor_has_competing_boundary(&self, class_fullname: &str) -> bool {
+        let init = format!("{class_fullname}.__init__");
+        let new = format!("{class_fullname}.__new__");
+        if self.get(&init).is_some() && self.get(&new).is_some() {
+            return true;
+        }
+
+        let metaclass = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            self.read()
+                .store
+                .class_metaclasses
+                .get(class_fullname)
+                .cloned()
+        };
+        metaclass.is_some_and(|metaclass| {
+            self.resolve_method(&metaclass, "__call__")
+                .is_some_and(|method| method != "builtins.type.__call__")
+        })
+    }
 }
 
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
@@ -807,6 +837,7 @@ struct Collected {
     has_data_constructor_classes: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
+    class_metaclasses: FxHashMap<String, String>,
 }
 
 pub fn build_index_with_sources(
@@ -1165,6 +1196,16 @@ fn collect_scoped(
                         .collect();
                     if !bases.is_empty() {
                         out.class_bases.insert(class_scope.clone(), bases);
+                    }
+                    if let Some(metaclass) = arguments
+                        .keywords
+                        .iter()
+                        .find(|keyword| {
+                            keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("metaclass")
+                        })
+                        .and_then(|keyword| resolve_base_name(&keyword.value, scope_name, bindings))
+                    {
+                        out.class_metaclasses.insert(class_scope.clone(), metaclass);
                     }
                 }
                 if collect_class_data_constructor_bases(

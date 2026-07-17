@@ -1,0 +1,4 @@
+Avoid false constructor diagnostics and unsafe fixes when a class call crosses
+multiple locally modeled runtime boundaries. Calls now remain unchanged when
+a local ``__new__`` competes with ``__init__`` or a custom metaclass
+``__call__`` can impose a different positional-only contract.

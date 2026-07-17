@@ -936,6 +936,39 @@ C(a=1)
 }
 
 #[test]
+fn constructor_respects_local_new_positional_only_boundary() {
+    assert_ok(
+        r"
+class C:
+    def __new__(cls, value, /):
+        return super().__new__(cls)
+
+    def __init__(self, value):
+        self.value = value
+
+C(1)
+",
+    );
+}
+
+#[test]
+fn constructor_respects_metaclass_call_positional_only_boundary() {
+    assert_ok(
+        r"
+class Meta(type):
+    def __call__(cls, value, /):
+        return super().__call__(value=value)
+
+class C(metaclass=Meta):
+    def __init__(self, value):
+        self.value = value
+
+C(1)
+",
+    );
+}
+
+#[test]
 fn builtin_ignore_name_suppresses() {
     let project = TestProject::new()
         .file(
