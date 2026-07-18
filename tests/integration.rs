@@ -980,6 +980,20 @@ C(1, 2)
 }
 
 #[test]
+fn constructor_allowance_does_not_hide_arguments_beyond_init_arity() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, first, second, /): ...
+    def __init__(self, first): ...
+C(1, 2)
+",
+        5,
+        "maximum 1",
+    );
+}
+
+#[test]
 fn constructor_respects_metaclass_call_positional_only_boundary() {
     assert_ok(
         r"
@@ -993,6 +1007,21 @@ class C(metaclass=Meta):
 
 C(1)
 ",
+    );
+}
+
+#[test]
+fn metaclass_allowance_does_not_hide_arguments_beyond_init_arity() {
+    assert_error(
+        r"
+class Meta(type):
+    def __call__(cls, first, second, /): ...
+class C(metaclass=Meta):
+    def __init__(self, first): ...
+C(1, 2)
+",
+        6,
+        "maximum 1",
     );
 }
 

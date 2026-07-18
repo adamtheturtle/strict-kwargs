@@ -1931,7 +1931,7 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
-        let constructor_positional_allowance =
+        let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
                 0
             } else {
@@ -1974,6 +1974,29 @@ impl<'a> CallChecker<'a> {
         } else {
             signatures
         };
+        // A competing constructor boundary may require more leading
+        // positional arguments than the selected constructor can accept.
+        // Preserve only the required positions that exist in at least one
+        // selected signature; the requirement is not an arity exemption.
+        let constructor_positional_allowance = constructor_positional_requirement.min(
+            effective
+                .iter()
+                .map(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .skip(1)
+                        .filter(|parameter| {
+                            matches!(
+                                parameter.kind,
+                                ParameterKind::PositionalOnly | ParameterKind::PositionalOrKeyword
+                            )
+                        })
+                        .count()
+                })
+                .max()
+                .unwrap_or(0),
+        );
         let effective_count = if receiver_is_explicit {
             positional_count.saturating_sub(1)
         } else {
