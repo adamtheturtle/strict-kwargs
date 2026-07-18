@@ -1012,6 +1012,21 @@ C(1, 2)
 }
 
 #[test]
+fn callable_instance_constructor_boundary_does_not_affect_dunder_call() {
+    assert_error(
+        r"
+class C:
+    def __init__(self, seed, /): ...
+    def __call__(self, value): ...
+c = C(0)
+c(1)
+",
+        6,
+        "Too many positional",
+    );
+}
+
+#[test]
 fn builtin_ignore_name_suppresses() {
     let project = TestProject::new()
         .file(

@@ -1929,14 +1929,17 @@ impl<'a> CallChecker<'a> {
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
-        let constructor_positional_allowance = if self.index.is_synthesized(&callee_fullname) {
-            0
-        } else {
-            self.class_from_constructor_func(&call.func)
-                .map_or(0, |class| {
-                    self.index.constructor_positional_allowance(&class)
-                })
-        };
+        let is_constructor =
+            callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let constructor_positional_allowance =
+            if !is_constructor || self.index.is_synthesized(&callee_fullname) {
+                0
+            } else {
+                self.class_from_constructor_func(&call.func)
+                    .map_or(0, |class| {
+                        self.index.constructor_positional_allowance(&class)
+                    })
+            };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }

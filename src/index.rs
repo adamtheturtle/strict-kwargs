@@ -57,6 +57,9 @@ enum ModuleState {
 #[derive(Debug, Default)]
 struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
+    /// Modules supplied as check targets rather than loaded from vendored
+    /// typeshed or lazily resolved dependencies.
+    first_party_modules: FxHashSet<String>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -277,6 +280,13 @@ impl DefinitionIndex {
     /// (builtins / checked files) and lazy [`Self::ensure_module`].
     fn index_source(&self, module_name: &str, is_package: bool, stmts: &[Stmt]) {
         self.index_source_with_imported_base_preload(module_name, is_package, stmts, true);
+    }
+
+    fn mark_first_party_module(&self, module_name: &str) {
+        self.write()
+            .store
+            .first_party_modules
+            .insert(module_name.to_string());
     }
 
     fn index_source_with_imported_base_preload(
@@ -796,40 +806,57 @@ impl DefinitionIndex {
     /// a keyword, but a merely keyword-capable competing boundary must not
     /// suppress diagnostics from the selected constructor (issue #254).
     pub fn constructor_positional_allowance(&self, class_fullname: &str) -> usize {
-        let mut boundaries = ["__init__", "__new__"]
-            .into_iter()
-            .filter_map(|method| self.resolve_method(class_fullname, method))
-            .collect::<Vec<_>>();
-        let metaclass = {
+        let (mut boundary_signatures, metaclass) = {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
-            self.read()
-                .store
-                .class_metaclasses
-                .get(class_fullname)
+            let inner = self.read();
+            let mut owner = class_fullname;
+            let first_party = loop {
+                let Some((parent, _)) = owner.rsplit_once('.') else {
+                    break false;
+                };
+                if inner.store.first_party_modules.contains(parent) {
+                    break true;
+                }
+                owner = parent;
+            };
+            if !first_party {
+                return 0;
+            }
+            let signatures = ["__init__", "__new__"]
+                .into_iter()
+                .filter_map(|method| {
+                    inner
+                        .store
+                        .signatures
+                        .get(&format!("{class_fullname}.{method}"))
+                })
+                .flatten()
                 .cloned()
+                .collect::<Vec<_>>();
+            let metaclass = inner.store.class_metaclasses.get(class_fullname).cloned();
+            drop(inner);
+            (signatures, metaclass)
         };
         if let Some(call) = metaclass
             .and_then(|metaclass| self.resolve_method(&metaclass, "__call__"))
             .filter(|method| method != "builtins.type.__call__")
         {
-            boundaries.push(call);
+            boundary_signatures.extend(self.get(&call).unwrap_or_default().iter().cloned());
         }
 
-        let mut allowance = 0;
-        for boundary in boundaries {
-            let signatures = self.get(&boundary).unwrap_or_default();
-            for signature in signatures.iter() {
-                let positional_only = signature
+        boundary_signatures
+            .iter()
+            .map(|signature| {
+                signature
                     .parameters
                     .iter()
                     .skip(1)
                     .filter(|parameter| parameter.kind == ParameterKind::PositionalOnly)
-                    .count();
-                allowance = allowance.max(positional_only);
-            }
-        }
-        allowance
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -900,6 +927,7 @@ pub fn build_index_with_sources(
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue;
         };
+        index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
         indexed_files.insert(path.clone(), IndexedFile { source, parsed });
