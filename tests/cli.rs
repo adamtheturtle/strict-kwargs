@@ -857,6 +857,18 @@ fn fix_reports_when_nothing_to_fix() {
 }
 
 #[test]
+fn fix_and_diff_are_mutually_exclusive() {
+    let source = "def f(a: int) -> None: ...\nf(1)\n";
+    let project = Project::new().write("main.py", source);
+    let output = project.run(&["check", "--fix", "--diff", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--fix"), "stderr: {err}");
+    assert!(err.contains("--diff"), "stderr: {err}");
+    assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
 fn fix_rejects_output_format() {
     let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
     let output = project.run(&["check", "--fix", "--output-format", "json", "main.py"]);

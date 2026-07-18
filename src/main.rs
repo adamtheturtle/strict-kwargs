@@ -57,7 +57,7 @@ struct CheckArgs {
     project_root: Option<PathBuf>,
 
     /// Apply fixes to resolve violations.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "diff")]
     fix: bool,
 
     /// Preview fixes as a unified diff instead of writing files.
