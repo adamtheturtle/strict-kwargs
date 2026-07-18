@@ -1986,11 +1986,33 @@ fn index_class_body(
                 );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
+            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        store.remove(&format!("{class_name}.{}", name.id));
+                    }
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+                if let Expr::Name(name) = target.as_ref() {
+                    store.remove(&format!("{class_name}.{}", name.id));
+                }
+            }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
+                let branches = std::iter::once(body.as_slice())
+                    .chain(
+                        elif_else_clauses
+                            .iter()
+                            .map(|clause| clause.body.as_slice()),
+                    )
+                    .collect::<Vec<_>>();
+                store
+                    .conditional_alternatives
+                    .push(conditional_alternatives(class_name, &branches));
                 index_class_body(store, module_name, is_package, class_name, body, bindings);
                 for clause in elif_else_clauses {
                     index_class_body(
@@ -2002,6 +2024,7 @@ fn index_class_body(
                         bindings,
                     );
                 }
+                store.conditional_alternatives.pop();
             }
             _ => {}
         }
@@ -2050,15 +2073,38 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 store.classes.insert(nested.clone());
                 index_class_body_fast(store, &nested, &class_def.body);
             }
+            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        store.remove(&format!("{class_name}.{}", name.id));
+                    }
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+                if let Expr::Name(name) = target.as_ref() {
+                    store.remove(&format!("{class_name}.{}", name.id));
+                }
+            }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
+                let branches = std::iter::once(body.as_slice())
+                    .chain(
+                        elif_else_clauses
+                            .iter()
+                            .map(|clause| clause.body.as_slice()),
+                    )
+                    .collect::<Vec<_>>();
+                store
+                    .conditional_alternatives
+                    .push(conditional_alternatives(class_name, &branches));
                 index_class_body_fast(store, class_name, body);
                 for clause in elif_else_clauses {
                     index_class_body_fast(store, class_name, &clause.body);
                 }
+                store.conditional_alternatives.pop();
             }
             _ => {}
         }
@@ -2361,6 +2407,22 @@ class Child(Base):
     fn assignment_removes_stale_function_signature() {
         let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
         assert!(!store.signatures.contains_key("main.f"));
+    }
+
+    #[test]
+    fn class_assignment_removes_stale_method_signature() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\n    method = lambda self, value, /: value\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+    }
+
+    #[test]
+    fn class_assignment_removes_stale_method_signature_with_bindings() {
+        let store = indexed_store(
+            "from dataclasses import dataclass\n@dataclass\nclass C:\n    def method(self, value): ...\n    method = lambda self, value, /: value\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
     }
 
     #[test]
