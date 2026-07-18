@@ -33,6 +33,7 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Resolved `[tool.strict_kwargs]` configuration.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Required `strict-kwargs` version specifier for this project.
     #[serde(default)]
@@ -93,7 +94,8 @@ impl Config {
     ///
     /// Returns [`CheckError::ConfigInvalid`] if `pyproject.toml` exists but
     /// cannot be read, is not valid TOML, or its `[tool.strict_kwargs]`
-    /// table is malformed or wrongly typed.
+    /// table is malformed, contains unknown keys, or has wrongly typed
+    /// values.
     pub fn load(project_root: &Path) -> Result<Self, CheckError> {
         let pyproject = project_root.join("pyproject.toml");
         if !pyproject.is_file() {
@@ -441,6 +443,21 @@ mod tests {
                 .expect_err("wrong value type must be reported");
         assert!(
             message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_is_an_error() {
+        let message =
+            Config::from_pyproject_str("[tool.strict_kwargs]\nignore_nams = [\"main.f\"]\n")
+                .expect_err("unknown keys must be reported");
+        assert!(
+            message.contains("invalid `[tool.strict_kwargs]` table"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&["ignore_", "na", "ms"].concat()),
             "message: {message}"
         );
     }
