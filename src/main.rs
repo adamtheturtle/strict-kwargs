@@ -69,7 +69,7 @@ struct CheckArgs {
     unsafe_fixes: bool,
 
     /// Diagnostic output format.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with_all = ["fix", "diff"])]
     output_format: Option<OutputFormat>,
 
     /// Directory for the persistent on-disk diagnostic cache.

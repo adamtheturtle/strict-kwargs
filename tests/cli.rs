@@ -857,6 +857,26 @@ fn fix_reports_when_nothing_to_fix() {
 }
 
 #[test]
+fn fix_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--fix", "--output-format", "json", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--fix"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
+}
+
+#[test]
+fn diff_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--diff", "--output-format", "github", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--diff"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
+}
+
+#[test]
 fn fix_diff_prints_patch_without_writing() {
     let source = "def f(a: int) -> None: ...\nf(1)\n";
     let project = Project::new().write("main.py", source);
