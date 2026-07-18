@@ -1102,9 +1102,9 @@ struct PendingTy {
     call_start: usize,
     positional_count: usize,
     rewrite_args_are_statically_precise: bool,
-    /// Indexed constructor signature to use only if ty emits no diagnostic for
-    /// a dynamic ``instance.__class__`` call. Successful ty diagnostics remain
-    /// authoritative for polymorphic code.
+    /// Indexed constructor signature used to normalize ty's unstable
+    /// ``object.__class__`` answer for a dynamic ``instance.__class__`` call.
+    /// The ty query still runs so later responses keep the same request stream.
     fallback_fullname: Option<String>,
 }
 
@@ -2198,12 +2198,19 @@ impl<'a> CallChecker<'a> {
             }
             _ => return None,
         };
+        let fallback_fullname = self.instance_class_fallback_fullname(&call.func);
+        if fallback_fullname.is_some() {
+            // ``instance.__class__`` can dispatch to a subclass constructor,
+            // so its indexed signature is diagnostic-only and never safe for
+            // an automatic argument rewrite.
+            rewrite_args_are_statically_precise = false;
+        }
         Some(PendingTy {
             callee_offset: callee_offset.to_usize(),
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
             rewrite_args_are_statically_precise,
-            fallback_fullname: self.instance_class_fallback_fullname(&call.func),
+            fallback_fullname,
         })
     }
 
@@ -4367,11 +4374,12 @@ struct TyFixAst<'a> {
     tokens: &'a Tokens,
 }
 
-/// Emit an indexed constructor diagnostic only after ty has emitted no
-/// diagnostic. This keeps ty's polymorphic diagnostics authoritative while
-/// making a false-negative hover or definition answer deterministic.
+/// Normalize a dynamic ``instance.__class__`` call to its indexed constructor
+/// diagnostic after ty has answered. The query still runs (preserving ty's
+/// request stream), while the final diagnostic no longer depends on whether ty
+/// labels the same call as the concrete class or as ``object.__class__``.
 #[cfg_attr(coverage, coverage(off))]
-fn emit_static_ty_fallback(
+fn normalize_static_ty_fallback(
     index: &DefinitionIndex,
     config: &Config,
     pending: &PendingTy,
@@ -4390,7 +4398,8 @@ fn emit_static_ty_fallback(
         .iter()
         .map(without_leading_self)
         .collect::<Vec<_>>();
-    emit_if_violation_with_signature_fullname(
+    let mut normalized = Vec::new();
+    if emit_if_violation_with_signature_fullname(
         fullname,
         fullname,
         &effective,
@@ -4399,10 +4408,23 @@ fn emit_static_ty_fallback(
         source,
         pending.call_start,
         path,
-        diagnostics,
+        &mut normalized,
         Some(source_line_starts),
     )
-    .is_some()
+    .is_none()
+    {
+        return false;
+    }
+    let Some(normalized) = normalized.pop() else {
+        return false;
+    };
+    diagnostics.retain(|diagnostic| {
+        diagnostic.path != normalized.path
+            || diagnostic.line != normalized.line
+            || diagnostic.column != normalized.column
+    });
+    diagnostics.push(normalized);
+    true
 }
 
 /// Try to rewrite built-in-diagnosed overload violations by asking ty for the
@@ -5015,46 +5037,24 @@ fn resolve_pending_with_ty(
         }
     }
 
-    // Keep successful ty answers authoritative, including their inferred
-    // callee display. If ty produced no diagnostic at a dynamic
-    // ``instance.__class__`` call, an indexed constructor can still provide a
-    // deterministic fail-closed result (notably for unstable ``Self`` hover
-    // answers in large repository runs).
+    // Normalize concrete ``instance.__class__`` constructor calls after every
+    // ty query has run. ty 0.0.44 can label the same call either as the class
+    // constructor or as ``object.__class__`` depending on the project-wide
+    // request stream; retaining the stream and replacing only the final
+    // diagnostic makes repository runs deterministic.
     for fallback in pending
         .iter()
         .filter(|pending| pending.fallback_fullname.is_some())
     {
-        let offset = TextSize::new(u32::try_from(fallback.call_start).unwrap_or(u32::MAX));
-        let (line, column) = line_column_from_starts(&source_line_starts, offset);
-        let already_reported = diagnostics.iter().any(|diagnostic| {
-            diagnostic.path == path && diagnostic.line == line && diagnostic.column == column
-        });
-        if (path.ends_with("Lib/socket.py") && line == 288)
-            || path.ends_with("sphinx/domains/c/__init__.py")
-            || path.ends_with("sphinx/writers/manpage.py")
-            || path.ends_with("Lib/idlelib/tree.py")
-        {
-            eprintln!(
-                "socket fallback: fullname={:?} already={already_reported} diagnostics={:?}",
-                fallback.fallback_fullname,
-                diagnostics
-                    .iter()
-                    .filter(|diagnostic| diagnostic.path == path && diagnostic.line == line)
-                    .map(|diagnostic| diagnostic.callee.as_str())
-                    .collect::<Vec<_>>()
-            );
-        }
-        if !already_reported
-            && emit_static_ty_fallback(
-                index,
-                config,
-                fallback,
-                source,
-                path,
-                &source_line_starts,
-                diagnostics,
-            )
-        {
+        if normalize_static_ty_fallback(
+            index,
+            config,
+            fallback,
+            source,
+            path,
+            &source_line_starts,
+            diagnostics,
+        ) {
             record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
         }
     }
@@ -5065,13 +5065,14 @@ fn resolve_pending_with_ty(
 mod tests {
     use super::{
         bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
-        emit_static_ty_fallback, has_staticmethod_or_classmethod_decorator, is_ignored_path,
-        is_typing_special_form_constructor, line_starts, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
-        record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy,
-        PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
+        has_staticmethod_or_classmethod_decorator, is_ignored_path,
+        is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
+        parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
+        process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
+        without_leading_self, CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns,
+        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
+        TyFixes, TyShardAssigner,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -7568,9 +7569,23 @@ class C:
         };
         let pending = checker.pending_ty_for_call(call).expect("pending call");
         assert_eq!(pending.fallback_fullname.as_deref(), Some("pkg.K.__init__"));
+        assert!(!pending.rewrite_args_are_statically_precise);
 
         let mut diagnostics = Vec::new();
-        assert!(emit_static_ty_fallback(
+        assert!(normalize_static_ty_fallback(
+            &index,
+            &config,
+            &pending,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].callee, "\"K\"");
+
+        diagnostics[0].callee = "\"__class__\" of \"object\"".to_string();
+        assert!(normalize_static_ty_fallback(
             &index,
             &config,
             &pending,
@@ -7584,7 +7599,7 @@ class C:
 
         let mut no_fallback = pending;
         no_fallback.fallback_fullname = None;
-        assert!(!emit_static_ty_fallback(
+        assert!(!normalize_static_ty_fallback(
             &index,
             &config,
             &no_fallback,
