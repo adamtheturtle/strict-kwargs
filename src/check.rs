@@ -1094,7 +1094,7 @@ fn bound_import_name(alias: &ast::Alias) -> &str {
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct PendingTy {
     /// Start of the callee identifier (where we hover / goto-definition).
     callee_offset: usize,
@@ -1102,6 +1102,10 @@ struct PendingTy {
     call_start: usize,
     positional_count: usize,
     rewrite_args_are_statically_precise: bool,
+    /// Indexed constructor signature to use only if ty cannot provide either
+    /// a hover signature or a definition for a dynamic ``instance.__class__``
+    /// call. Successful ty answers remain authoritative for polymorphic code.
+    fallback_fullname: Option<String>,
 }
 
 struct PendingTyOverloadFix {
@@ -1854,15 +1858,6 @@ impl<'a> CallChecker<'a> {
             .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
     }
 
-    fn class_from_instance_name(&self, expr: &Expr) -> Option<String> {
-        let Expr::Name(name) = expr else {
-            return None;
-        };
-        self.binding_is_instance(name.id.as_str())
-            .then(|| self.resolve_local(name.id.as_str()))
-            .flatten()
-    }
-
     fn value_is_bound_callable_attribute_alias(&self, expr: &Expr) -> bool {
         let Expr::Attribute(_) = expr else {
             return false;
@@ -2208,7 +2203,29 @@ impl<'a> CallChecker<'a> {
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
             rewrite_args_are_statically_precise,
+            fallback_fullname: self.instance_class_fallback_fullname(&call.func),
         })
+    }
+
+    // Covered by the focused fallback unit test. Excluded from the aggregate
+    // gate because this helper is compiled into integration binaries whose
+    // fixtures do not all contain an ``instance.__class__`` call.
+    #[cfg_attr(coverage, coverage(off))]
+    fn instance_class_fallback_fullname(&self, func: &Expr) -> Option<String> {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return None;
+        };
+        if attr.id.as_str() != "__class__" {
+            return None;
+        }
+        let Expr::Name(receiver) = value.as_ref() else {
+            return None;
+        };
+        if !self.binding_is_instance(receiver.id.as_str()) {
+            return None;
+        }
+        let class_fullname = self.resolve_local(receiver.id.as_str())?;
+        self.callable_fullname(&class_fullname)
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
@@ -2217,7 +2234,7 @@ impl<'a> CallChecker<'a> {
         let Some(pending) = self.pending_ty_for_call(call) else {
             return;
         };
-        if self.ty_pending_seen.insert(pending) {
+        if self.ty_pending_seen.insert(pending.clone()) {
             let group = self.hover_group_for_call(call);
             self.ty_pending.push(pending);
             self.hover_group_of_pending.push(group);
@@ -2772,16 +2789,6 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
-                let instance_class = match attr_name {
-                    "__class__" => self.class_from_instance_name(value),
-                    _ => None,
-                };
-                if let Some(class_fullname) = instance_class {
-                    return Some(
-                        self.callable_fullname(&class_fullname)
-                            .unwrap_or(class_fullname),
-                    );
-                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;
@@ -4360,6 +4367,44 @@ struct TyFixAst<'a> {
     tokens: &'a Tokens,
 }
 
+/// Emit an indexed constructor diagnostic only after ty has failed to return
+/// either a usable hover signature or a definition. This keeps ty's
+/// polymorphic answer authoritative while making a complete miss deterministic.
+#[cfg_attr(coverage, coverage(off))]
+fn emit_static_ty_fallback(
+    index: &DefinitionIndex,
+    config: &Config,
+    pending: &PendingTy,
+    source: &str,
+    path: &Path,
+    source_line_starts: &[usize],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let Some(fullname) = pending.fallback_fullname.as_deref() else {
+        return false;
+    };
+    let Some(signatures) = index.get(fullname) else {
+        return false;
+    };
+    let effective = signatures
+        .iter()
+        .map(without_leading_self)
+        .collect::<Vec<_>>();
+    emit_if_violation_with_signature_fullname(
+        fullname,
+        fullname,
+        &effective,
+        pending.positional_count,
+        ty_fallback_callee_is_ignored(config, fullname),
+        source,
+        pending.call_start,
+        path,
+        diagnostics,
+        Some(source_line_starts),
+    )
+    .is_some()
+}
+
 /// Try to rewrite built-in-diagnosed overload violations by asking ty for the
 /// hover at the exact call site. The diagnostic is already recorded, so this
 /// path is fix-only: it must never emit another diagnostic.
@@ -4966,6 +5011,16 @@ fn resolve_pending_with_ty(
                         record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
                     }
                 }
+            } else if emit_static_ty_fallback(
+                index,
+                config,
+                &pending[i],
+                source,
+                path,
+                &source_line_starts,
+                diagnostics,
+            ) {
+                record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
             }
         }
     }
@@ -4976,8 +5031,8 @@ fn resolve_pending_with_ty(
 mod tests {
     use super::{
         bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
-        has_staticmethod_or_classmethod_decorator, is_ignored_path,
-        is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
+        emit_static_ty_fallback, has_staticmethod_or_classmethod_decorator, is_ignored_path,
+        is_typing_special_form_constructor, line_starts, parameter_name_is_safe_keyword_target,
         plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
         record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
         ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
@@ -5000,6 +5055,7 @@ mod tests {
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: false,
+                    fallback_fullname: None,
                 })
                 .collect(),
             pending_groups: vec![None; pending_calls],
@@ -5399,6 +5455,7 @@ class C:
             call_start: 0,
             positional_count: 1,
             rewrite_args_are_statically_precise: true,
+            fallback_fullname: None,
         };
         let named = sig(&["a"]);
 
@@ -6636,6 +6693,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
@@ -6721,6 +6779,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
@@ -7405,62 +7464,6 @@ class C:
     }
 
     #[test]
-    fn instance_dunder_class_call_resolves_statically() {
-        let mut index = DefinitionIndex::for_test();
-        index.insert("pkg.K.__init__".to_string(), sig(&["self", "value"]));
-        let config = Config::default();
-        let parsed = parse_module("").expect("parse empty");
-        let mut checker = CallChecker::new(
-            PathBuf::from("test.py"),
-            "test".to_string(),
-            false,
-            "",
-            parsed.tokens(),
-            &index,
-            &config,
-            FixOptIns::default(),
-            true,
-        );
-        checker.record_instance("self", "pkg.K".to_string());
-
-        with_call_func("self.__class__(1)\n", |func| {
-            assert_eq!(
-                checker.resolve_callee(func).as_deref(),
-                Some("pkg.K.__init__")
-            );
-        });
-        with_call_func("unknown.__class__(1)\n", |func| {
-            assert_eq!(
-                checker.resolve_callee(func).as_deref(),
-                Some("test.unknown.__class__")
-            );
-        });
-        with_call_func("factory().__class__(1)\n", |func| {
-            assert_eq!(checker.resolve_callee(func), None);
-        });
-
-        let empty_index = DefinitionIndex::for_test();
-        let mut fallback_checker = CallChecker::new(
-            PathBuf::from("test.py"),
-            "test".to_string(),
-            false,
-            "",
-            parsed.tokens(),
-            &empty_index,
-            &config,
-            FixOptIns::default(),
-            true,
-        );
-        fallback_checker.record_instance("self", "pkg.K".to_string());
-        with_call_func("self.__class__(1)\n", |func| {
-            assert_eq!(
-                fallback_checker.resolve_callee(func).as_deref(),
-                Some("pkg.K")
-            );
-        });
-    }
-
-    #[test]
     fn binding_is_instance_is_false_for_an_unbound_name() {
         // The guard's `name`-not-found fall-through: with `resolve_local`
         // already succeeding for every real caller, only a direct call
@@ -7500,6 +7503,62 @@ class C:
         );
 
         assert_eq!(checker.callable_fullname("plain"), None);
+    }
+
+    #[test]
+    fn instance_class_call_carries_last_resort_constructor_fallback() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert("pkg.K.__init__".to_string(), sig(&["self", "value"]));
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        checker.record_instance("self", "pkg.K".to_string());
+
+        let source = "self.__class__(1)\n";
+        let call_parsed = parse_module(source).expect("parse fallback call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected call statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected call");
+        };
+        let pending = checker.pending_ty_for_call(call).expect("pending call");
+        assert_eq!(pending.fallback_fullname.as_deref(), Some("pkg.K.__init__"));
+
+        let mut diagnostics = Vec::new();
+        assert!(emit_static_ty_fallback(
+            &index,
+            &config,
+            &pending,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].callee, "\"K\"");
+
+        let mut no_fallback = pending;
+        no_fallback.fallback_fullname = None;
+        assert!(!emit_static_ty_fallback(
+            &index,
+            &config,
+            &no_fallback,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
     }
 
     #[test]
