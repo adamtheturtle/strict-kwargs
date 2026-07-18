@@ -7429,6 +7429,35 @@ class C:
                 Some("pkg.K.__init__")
             );
         });
+        with_call_func("unknown.__class__(1)\n", |func| {
+            assert_eq!(
+                checker.resolve_callee(func).as_deref(),
+                Some("test.unknown.__class__")
+            );
+        });
+        with_call_func("factory().__class__(1)\n", |func| {
+            assert_eq!(checker.resolve_callee(func), None);
+        });
+
+        let empty_index = DefinitionIndex::for_test();
+        let mut fallback_checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &empty_index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        fallback_checker.record_instance("self", "pkg.K".to_string());
+        with_call_func("self.__class__(1)\n", |func| {
+            assert_eq!(
+                fallback_checker.resolve_callee(func).as_deref(),
+                Some("pkg.K")
+            );
+        });
     }
 
     #[test]
