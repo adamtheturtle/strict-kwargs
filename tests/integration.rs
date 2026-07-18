@@ -2031,6 +2031,65 @@ def d(): ...
 // --- @singledispatch / @singledispatchmethod ---
 
 #[test]
+fn arbitrary_decorator_definition_signature_is_not_trusted() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@positional_only
+def consume(value):
+    return value
+
+consume(1)
+",
+    );
+}
+
+#[test]
+fn imported_arbitrary_decorator_definition_signature_is_not_trusted() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "decorated.py",
+            r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@positional_only
+def consume(value):
+    return value
+",
+        )
+        .main("from decorated import consume\n\nconsume(1)\n");
+    let messages = project.check();
+    assert!(messages.is_empty(), "expected no errors, got: {messages:?}");
+}
+
+#[test]
+fn nested_arbitrary_decorator_definition_signature_is_not_trusted() {
+    assert_ok(
+        r"
+def outer():
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(value):
+        return value
+
+    consume(1)
+",
+    );
+}
+
+#[test]
 fn singledispatch_positional_not_flagged() {
     // Calls to @singledispatch functions must not be flagged: the dispatch
     // mechanism reads args[0].__class__, so the first argument must stay

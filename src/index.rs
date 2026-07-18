@@ -57,6 +57,10 @@ enum ModuleState {
 #[derive(Debug, Default)]
 struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
+    /// Functions whose decorators may replace the written definition with a
+    /// different runtime callable. Calls to these must not use the
+    /// undecorated parameters stored above.
+    runtime_decorated: FxHashSet<String>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -774,6 +778,11 @@ impl DefinitionIndex {
         self.read().store.excluded.contains(fullname)
     }
 
+    /// Whether `fullname` has an unknown post-decoration signature.
+    pub fn is_runtime_decorated(&self, fullname: &str) -> bool {
+        self.read().store.runtime_decorated.contains(fullname)
+    }
+
     /// Whether `fullname` denotes a class the built-in index has seen.
     pub fn is_class(&self, fullname: &str) -> bool {
         let mut query_budget = MAX_QUERY_MODULES;
@@ -1438,6 +1447,18 @@ fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
+/// Whether a function has a decorator whose runtime signature is not known
+/// to preserve the written definition. These calls must fail closed rather
+/// than trusting `signature_from_parameters` (issue #256).
+pub fn has_runtime_signature_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list.iter().any(|decorator| {
+        !matches!(
+            callee_tail(&decorator.expression),
+            Some("overload" | "staticmethod" | "classmethod")
+        )
+    })
+}
+
 // Maintains statement-order import/alias bindings for synthesized constructor
 // base resolution. The user-visible behavior is covered by imported and
 // aliased dataclass-base integration tests; the branches here duplicate the
@@ -1540,6 +1561,9 @@ fn index_stmt(
             if has_singledispatch_decorator(decorator_list) {
                 store.excluded.insert(fullname.clone());
             } else {
+                if has_runtime_signature_decorator(decorator_list) {
+                    store.runtime_decorated.insert(fullname.clone());
+                }
                 let signature = signature_from_parameters(parameters);
                 store.insert(fullname.clone(), signature);
             }
@@ -1663,6 +1687,9 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
                     store.excluded.insert(fullname);
                 }
             } else {
+                if has_runtime_signature_decorator(decorator_list) {
+                    store.runtime_decorated.insert(fullname.clone());
+                }
                 let signature = signature_from_parameters(parameters);
                 if body_may_contain_indexed_def(body) {
                     store.insert(fullname.clone(), signature);
@@ -1749,6 +1776,9 @@ fn index_class_body(
                         store.excluded.insert(fullname);
                     }
                 } else {
+                    if has_runtime_signature_decorator(decorator_list) {
+                        store.runtime_decorated.insert(fullname.clone());
+                    }
                     let signature = signature_from_parameters(parameters);
                     if body_may_contain_indexed_def(body) {
                         store.insert(fullname.clone(), signature);
@@ -1821,6 +1851,9 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                         store.excluded.insert(fullname);
                     }
                 } else {
+                    if has_runtime_signature_decorator(decorator_list) {
+                        store.runtime_decorated.insert(fullname.clone());
+                    }
                     let signature = signature_from_parameters(parameters);
                     if body_may_contain_indexed_def(body) {
                         store.insert(fullname.clone(), signature);
