@@ -1854,6 +1854,15 @@ impl<'a> CallChecker<'a> {
             .or_else(|| Self::class_from_literal_expr(expr).map(str::to_string))
     }
 
+    fn class_from_instance_name(&self, expr: &Expr) -> Option<String> {
+        let Expr::Name(name) = expr else {
+            return None;
+        };
+        self.binding_is_instance(name.id.as_str())
+            .then(|| self.resolve_local(name.id.as_str()))
+            .flatten()
+    }
+
     fn value_is_bound_callable_attribute_alias(&self, expr: &Expr) -> bool {
         let Expr::Attribute(_) = expr else {
             return false;
@@ -2763,6 +2772,16 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                let instance_class = match attr_name {
+                    "__class__" => self.class_from_instance_name(value),
+                    _ => None,
+                };
+                if let Some(class_fullname) = instance_class {
+                    return Some(
+                        self.callable_fullname(&class_fullname)
+                            .unwrap_or(class_fullname),
+                    );
+                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;
@@ -7383,6 +7402,33 @@ class C:
         assert!(is_unbound("K.m(0)\n", "pkg.K.m", Some("self"), |c| {
             c.define("K", "pkg.K".to_string());
         }));
+    }
+
+    #[test]
+    fn instance_dunder_class_call_resolves_statically() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert("pkg.K.__init__".to_string(), sig(&["self", "value"]));
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        checker.record_instance("self", "pkg.K".to_string());
+
+        with_call_func("self.__class__(1)\n", |func| {
+            assert_eq!(
+                checker.resolve_callee(func).as_deref(),
+                Some("pkg.K.__init__")
+            );
+        });
     }
 
     #[test]

@@ -107,6 +107,15 @@ func()
 }
 
 #[test]
+fn instance_dunder_class_constructor_is_checked_statically() {
+    assert_error(
+        "class Socket:\n    def __init__(self, family=-1, type=-1, proto=-1, fileno=None): ...\n    def dup(self):\n        return self.__class__(1, 2, 3, fileno=4)\n",
+        4,
+        "Too many positional",
+    );
+}
+
+#[test]
 fn keyword_only() {
     assert_ok(
         r"
