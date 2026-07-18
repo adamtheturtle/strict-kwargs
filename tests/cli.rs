@@ -701,6 +701,25 @@ fn check_invalid_config_is_fatal_exit_two() {
 }
 
 #[test]
+fn check_unknown_config_key_is_fatal_exit_two() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nignore_nams = [\"main.f\"]\n",
+        )
+        .write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(err.contains("pyproject.toml"), "stderr: {err}");
+    assert!(
+        err.contains(&["ignore_", "na", "ms"].concat()),
+        "stderr: {err}"
+    );
+}
+
+#[test]
 fn check_uses_cache_dir_from_pyproject_relative_to_project_root() {
     let project = Project::new()
         .write(
