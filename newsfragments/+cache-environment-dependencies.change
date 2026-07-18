@@ -1,0 +1,4 @@
+Include Python environment modules and stubs in the persistent diagnostic
+cache fingerprint. Changes below a project ``.venv``, ``VIRTUAL_ENV``, or an
+explicit ``--python`` environment now invalidate cached results instead of
+returning diagnostics based on stale dependency signatures.
