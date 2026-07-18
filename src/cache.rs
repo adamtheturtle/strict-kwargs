@@ -11,6 +11,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::check::is_prunable_dir;
 use crate::diagnostic::Diagnostic;
+use crate::resolve::{discover_site_packages, discover_site_packages_in_environment};
 
 // ---------------------------------------------------------------------------
 // FNV-1a 64-bit hasher
@@ -169,6 +170,8 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
 /// - `ty` binary path + mtime (located via `PATH`)
 /// - every `.py`/`.pyi` file under `project_root`, sorted by path, each
 ///   contributing its canonical path bytes and **mtime** (not content)
+/// - every `.py`/`.pyi` file in automatically discovered or explicitly
+///   selected `site-packages`
 ///
 /// Using mtime rather than content for the dependency files keeps the
 /// fingerprint computation to `stat(2)` calls — one per file — avoiding the
@@ -212,6 +215,21 @@ pub fn compute_global_fingerprint(
     // path, each contributing path bytes + mtime.  Mtime-based hashing keeps
     // this to stat(2) calls (cheap) rather than full file reads (expensive).
     hash_py_file_mtimes(project_root, &mut h);
+
+    // Third-party modules and stubs can change resolution just like
+    // first-party source. The project walk intentionally prunes `.venv`, so
+    // fingerprint each site-packages root separately. Include both the
+    // resolver's automatic environments and the explicit `--python` target.
+    let mut site_packages = discover_site_packages(project_root);
+    if let Some(env_path) = python_env {
+        site_packages.extend(discover_site_packages_in_environment(env_path));
+    }
+    site_packages.sort();
+    site_packages.dedup();
+    for root in site_packages {
+        h.write_bytes(root.as_os_str().as_encoded_bytes());
+        hash_py_file_mtimes(&root, &mut h);
+    }
 
     h.finish()
 }
@@ -520,5 +538,25 @@ mod tests {
         let f1 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
         let f2 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
         assert_eq!(f1, f2);
+    }
+
+    #[test]
+    fn global_fingerprint_changes_with_explicit_environment_stub() {
+        let project = tempdir().expect("project tempdir");
+        let env = tempdir().expect("environment tempdir");
+        let site_packages = env
+            .path()
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        std::fs::create_dir_all(&site_packages).expect("mkdir site-packages");
+        let before = compute_global_fingerprint(project.path(), "{}", Some(env.path()));
+        std::fs::write(
+            site_packages.join("dep.pyi"),
+            "def f(a: int, /) -> None: ...\n",
+        )
+        .expect("write stub");
+        let after = compute_global_fingerprint(project.path(), "{}", Some(env.path()));
+        assert_ne!(before, after);
     }
 }
