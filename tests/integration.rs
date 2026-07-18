@@ -822,7 +822,7 @@ fn overload_is_permissive() {
     let messages = check_multi(&[
         (
             "lib.py",
-            "def f(a: int, /) -> None: ...\ndef f(a: int, b: int, /) -> None: ...\n",
+            "from typing import overload\n\n@overload\ndef f(a: int, /) -> None: ...\n@overload\ndef f(a: int, b: int, /) -> None: ...\ndef f(a: int, b: int | None = None) -> None: ...\n",
         ),
         ("app.py", "from lib import f\n\nf(1, 2)\n"),
     ]);
@@ -837,12 +837,29 @@ fn overload_flags_when_all_exceed() {
     let messages = check_multi(&[
         (
             "lib.py",
-            "def f(a: int) -> None: ...\ndef f(a: int, b: int) -> None: ...\n",
+            "from typing import overload\n\n@overload\ndef f(a: int) -> None: ...\n@overload\ndef f(a: int, b: int) -> None: ...\ndef f(a: int, b: int | None = None) -> None: ...\n",
         ),
         ("app.py", "from lib import f\n\nf(1, 2)\n"),
     ]);
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn sequential_function_redefinition_uses_last_binding() {
+    let messages = check_source(
+        r"
+def f(value, /):
+    return value
+
+def f(value):
+    return value
+
+f(1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:8:"), "got: {messages:?}");
 }
 
 #[test]
@@ -2461,6 +2478,61 @@ fn cache_invalidated_on_file_change() {
     assert!(
         without_violation.is_empty(),
         "cache must be invalidated after file change; got: {without_violation:?}"
+    );
+}
+
+/// Issue #253: project-local environment dependencies participate in the
+/// global fingerprint even though the first-party walk prunes `.venv`.
+#[test]
+fn cache_invalidated_when_project_venv_dependency_changes() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache_venv")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let file = root.join("main.py");
+    std::fs::write(&file, "from dep import f\n\nf(1)\n").expect("write main");
+    let package = root.join(".venv/lib/python3.12/site-packages").join("dep");
+    std::fs::create_dir_all(&package).expect("mkdir package");
+    std::fs::write(package.join("__init__.py"), "def f(a: int) -> None: ...\n")
+        .expect("write dependency");
+    std::fs::write(package.join("py.typed"), "").expect("write py.typed");
+
+    let config = Config::load(&root).expect("config");
+    let before = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(before.len(), 1, "expected dependency-based violation");
+
+    // A newly installed stub changes the resolved signature. Its path is
+    // nested below the pruned `.venv`, so this was previously a stale hit.
+    std::fs::write(
+        package.join("__init__.pyi"),
+        "def f(a: int, /) -> None: ...\n",
+    )
+    .expect("write dependency stub");
+    let after = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check after dependency change");
+    assert!(
+        after.is_empty(),
+        "environment change must invalidate cached diagnostics: {after:?}"
     );
 }
 

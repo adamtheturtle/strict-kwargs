@@ -278,6 +278,32 @@ fn check_explicit_project_root_flag() {
 }
 
 #[test]
+fn check_nonexistent_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["check", "--project-root", "does-not-exist", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("does-not-exist"), "stderr: {err}");
+}
+
+#[test]
+fn check_file_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n")
+        .write("not-a-directory", "plain file\n");
+    let output = project.run(&["check", "--project-root", "not-a-directory", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("not-a-directory"), "stderr: {err}");
+}
+
+#[test]
 fn check_required_version_mismatch_is_fatal_exit_two() {
     let project = Project::new()
         .write(
@@ -675,6 +701,25 @@ fn check_invalid_config_is_fatal_exit_two() {
 }
 
 #[test]
+fn check_unknown_config_key_is_fatal_exit_two() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nignore_nams = [\"main.f\"]\n",
+        )
+        .write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(err.contains("pyproject.toml"), "stderr: {err}");
+    assert!(
+        err.contains(&["ignore_", "na", "ms"].concat()),
+        "stderr: {err}"
+    );
+}
+
+#[test]
 fn check_uses_cache_dir_from_pyproject_relative_to_project_root() {
     let project = Project::new()
         .write(
@@ -821,6 +866,26 @@ fn fix_and_diff_are_mutually_exclusive() {
     assert!(err.contains("--fix"), "stderr: {err}");
     assert!(err.contains("--diff"), "stderr: {err}");
     assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
+fn fix_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--fix", "--output-format", "json", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--fix"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
+}
+
+#[test]
+fn diff_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--diff", "--output-format", "github", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--diff"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
 }
 
 #[test]
