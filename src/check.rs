@@ -5029,6 +5029,21 @@ fn resolve_pending_with_ty(
         let already_reported = diagnostics.iter().any(|diagnostic| {
             diagnostic.path == path && diagnostic.line == line && diagnostic.column == column
         });
+        if (path.ends_with("Lib/socket.py") && line == 288)
+            || path.ends_with("sphinx/domains/c/__init__.py")
+            || path.ends_with("sphinx/writers/manpage.py")
+            || path.ends_with("Lib/idlelib/tree.py")
+        {
+            eprintln!(
+                "socket fallback: fullname={:?} already={already_reported} diagnostics={:?}",
+                fallback.fallback_fullname,
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.path == path && diagnostic.line == line)
+                    .map(|diagnostic| diagnostic.callee.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
         if !already_reported
             && emit_static_ty_fallback(
                 index,
