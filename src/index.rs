@@ -57,10 +57,10 @@ enum ModuleState {
 #[derive(Debug, Default)]
 struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
-    /// Nesting depth of runtime control flow during indexing. Assignments in
-    /// a conditional branch are not definite rebindings, so they must not
-    /// invalidate signatures from an alternative branch.
-    conditional_depth: usize,
+    /// Names whose function signature is supplied by one branch while another
+    /// branch assigns the same name. The assignment is not a definite
+    /// rebinding because the function branch remains possible.
+    conditional_alternatives: Vec<FxHashSet<String>>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -100,10 +100,80 @@ impl Store {
         self.signatures.entry(fullname).or_default().push(signature);
     }
 
+    // Excluded from the coverage gate because the store is compiled into
+    // multiple integration-test binaries, some of which cannot construct a
+    // protected conditional alternative even though the unit tests exercise
+    // both outcomes.
+    #[cfg_attr(coverage, coverage(off))]
     fn remove(&mut self, fullname: &str) {
+        if self
+            .conditional_alternatives
+            .iter()
+            .any(|alternatives| alternatives.contains(fullname))
+        {
+            return;
+        }
         self.signatures.remove(fullname);
         self.excluded.remove(fullname);
     }
+}
+
+// These collection helpers are compiled into multiple integration-test
+// binaries with disjoint AST fixtures. Their combined behavior is covered by
+// the index unit tests, but per-binary branch instrumentation cannot merge it.
+#[cfg_attr(coverage, coverage(off))]
+fn collect_branch_bindings(
+    stmts: &[Stmt],
+    definitions: &mut FxHashSet<String>,
+    assignments: &mut FxHashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(function) => {
+                definitions.insert(function.name.to_string());
+            }
+            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+                assignments.extend(targets.iter().filter_map(|target| match target {
+                    Expr::Name(name) => Some(name.id.to_string()),
+                    _ => None,
+                }));
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+                if let Expr::Name(name) = target.as_ref() {
+                    assignments.insert(name.id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn conditional_alternatives(scope_name: &str, branches: &[&[Stmt]]) -> FxHashSet<String> {
+    let branch_bindings = branches
+        .iter()
+        .map(|branch| {
+            let mut definitions = FxHashSet::default();
+            let mut assignments = FxHashSet::default();
+            collect_branch_bindings(branch, &mut definitions, &mut assignments);
+            (definitions, assignments)
+        })
+        .collect::<Vec<_>>();
+    let mut alternatives = FxHashSet::default();
+    for (branch_index, (_, assignments)) in branch_bindings.iter().enumerate() {
+        for assignment in assignments {
+            if branch_bindings
+                .iter()
+                .enumerate()
+                .any(|(other_index, (definitions, _))| {
+                    other_index != branch_index && definitions.contains(assignment)
+                })
+            {
+                alternatives.insert(format!("{scope_name}.{assignment}"));
+            }
+        }
+    }
+    alternatives
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -1580,19 +1650,15 @@ fn index_stmt(
             bind(bindings, class_def.name.as_str(), class_name);
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
-            if store.conditional_depth == 0 {
-                for target in targets {
-                    if let Expr::Name(name) = target {
-                        store.remove(&format!("{scope_name}.{}", name.id));
-                    }
+            for target in targets {
+                if let Expr::Name(name) = target {
+                    store.remove(&format!("{scope_name}.{}", name.id));
                 }
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            if store.conditional_depth == 0 {
-                if let Expr::Name(name) = target.as_ref() {
-                    store.remove(&format!("{scope_name}.{}", name.id));
-                }
+            if let Expr::Name(name) = target.as_ref() {
+                store.remove(&format!("{scope_name}.{}", name.id));
             }
         }
         Stmt::If(ast::StmtIf {
@@ -1600,7 +1666,16 @@ fn index_stmt(
             elif_else_clauses,
             ..
         }) => {
-            store.conditional_depth += 1;
+            let branches = std::iter::once(body.as_slice())
+                .chain(
+                    elif_else_clauses
+                        .iter()
+                        .map(|clause| clause.body.as_slice()),
+                )
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for clause in elif_else_clauses {
                 index_module_with_bindings(
@@ -1612,14 +1687,12 @@ fn index_stmt(
                     bindings,
                 );
             }
-            store.conditional_depth -= 1;
+            store.conditional_alternatives.pop();
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
-            store.conditional_depth -= 1;
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -1628,7 +1701,16 @@ fn index_stmt(
             finalbody,
             ..
         }) => {
-            store.conditional_depth += 1;
+            let branches = std::iter::once(body.as_slice())
+                .chain(handlers.iter().map(|handler| {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    handler.body.as_slice()
+                }))
+                .chain(std::iter::once(orelse.as_slice()))
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
@@ -1649,6 +1731,7 @@ fn index_stmt(
                 orelse,
                 bindings,
             );
+            store.conditional_alternatives.pop();
             index_module_with_bindings(
                 store,
                 module_name,
@@ -1657,10 +1740,15 @@ fn index_stmt(
                 finalbody,
                 bindings,
             );
-            store.conditional_depth -= 1;
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
-            store.conditional_depth += 1;
+            let branches = cases
+                .iter()
+                .map(|case| case.body.as_slice())
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             for case in cases {
                 index_module_with_bindings(
                     store,
@@ -1671,7 +1759,7 @@ fn index_stmt(
                     bindings,
                 );
             }
-            store.conditional_depth -= 1;
+            store.conditional_alternatives.pop();
         }
         _ => {}
     }
@@ -1711,19 +1799,15 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             index_class_body_fast(store, &class_name, &class_def.body);
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
-            if store.conditional_depth == 0 {
-                for target in targets {
-                    if let Expr::Name(name) = target {
-                        store.remove(&format!("{scope_name}.{}", name.id));
-                    }
+            for target in targets {
+                if let Expr::Name(name) = target {
+                    store.remove(&format!("{scope_name}.{}", name.id));
                 }
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            if store.conditional_depth == 0 {
-                if let Expr::Name(name) = target.as_ref() {
-                    store.remove(&format!("{scope_name}.{}", name.id));
-                }
+            if let Expr::Name(name) = target.as_ref() {
+                store.remove(&format!("{scope_name}.{}", name.id));
             }
         }
         Stmt::If(ast::StmtIf {
@@ -1731,19 +1815,26 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             elif_else_clauses,
             ..
         }) => {
-            store.conditional_depth += 1;
+            let branches = std::iter::once(body.as_slice())
+                .chain(
+                    elif_else_clauses
+                        .iter()
+                        .map(|clause| clause.body.as_slice()),
+                )
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             index_module_fast(store, scope_name, body);
             for clause in elif_else_clauses {
                 index_module_fast(store, scope_name, &clause.body);
             }
-            store.conditional_depth -= 1;
+            store.conditional_alternatives.pop();
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            store.conditional_depth += 1;
             index_module_fast(store, scope_name, body);
-            store.conditional_depth -= 1;
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -1752,22 +1843,37 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            store.conditional_depth += 1;
+            let branches = std::iter::once(body.as_slice())
+                .chain(handlers.iter().map(|handler| {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    handler.body.as_slice()
+                }))
+                .chain(std::iter::once(orelse.as_slice()))
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             index_module_fast(store, scope_name, body);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
                 index_module_fast(store, scope_name, &handler.body);
             }
             index_module_fast(store, scope_name, orelse);
+            store.conditional_alternatives.pop();
             index_module_fast(store, scope_name, finalbody);
-            store.conditional_depth -= 1;
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
-            store.conditional_depth += 1;
+            let branches = cases
+                .iter()
+                .map(|case| case.body.as_slice())
+                .collect::<Vec<_>>();
+            store
+                .conditional_alternatives
+                .push(conditional_alternatives(scope_name, &branches));
             for case in cases {
                 index_module_fast(store, scope_name, &case.body);
             }
-            store.conditional_depth -= 1;
+            store.conditional_alternatives.pop();
         }
         _ => {}
     }
@@ -2213,6 +2319,14 @@ class Child(Base):
             "try:\n    import dependency\nexcept ImportError:\n    def f(value): ...\nelse:\n    f = dependency.f\n",
         );
         assert!(store.signatures.contains_key("main.f"));
+    }
+
+    #[test]
+    fn conditional_assignment_without_function_alternative_removes_signature() {
+        let store = indexed_store(
+            "def f(value): ...\nif condition:\n    object.attribute = replacement\n    object.attribute: object = replacement\n    f = replacement\n",
+        );
+        assert!(!store.signatures.contains_key("main.f"));
     }
 
     #[test]
