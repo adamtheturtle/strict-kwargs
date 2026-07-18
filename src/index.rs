@@ -107,17 +107,29 @@ impl Store {
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn exclude_assigned_attribute(store: &mut Store, scope_name: &str, target: &Expr) {
+fn exclude_assigned_attribute(
+    store: &mut Store,
+    scope_name: &str,
+    target: &Expr,
+    bindings: Option<&FxHashMap<String, String>>,
+) {
     if store.conditional_depth > 0 {
         return;
     }
     let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
         return;
     };
-    let Expr::Name(base) = value.as_ref() else {
+    let Some(segments) = reference_path(value) else {
         return;
     };
-    store.exclude(format!("{scope_name}.{}.{}", base.id, attr.id));
+    let owner = bindings.map_or_else(
+        || format!("{scope_name}.{}", segments.join(".")),
+        |bindings| {
+            resolve_reference(bindings, scope_name, &segments)
+                .unwrap_or_else(|| format!("{scope_name}.{}", segments.join(".")))
+        },
+    );
+    store.exclude(format!("{owner}.{}", attr.id));
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -340,7 +352,8 @@ impl DefinitionIndex {
             }
         }
         let mut inner = self.write();
-        let track_data_constructors = collected.has_data_constructor_classes
+        let track_bindings = collected.has_attribute_rebindings
+            || collected.has_data_constructor_classes
             || collected
                 .data_constructor_bases
                 .iter()
@@ -350,7 +363,7 @@ impl DefinitionIndex {
             module_name,
             is_package,
             stmts,
-            track_data_constructors,
+            track_bindings,
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
@@ -828,6 +841,7 @@ struct Collected {
     bindings: FxHashMap<String, String>,
     preload_imported_bases: bool,
     has_data_constructor_classes: bool,
+    has_attribute_rebindings: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
 }
@@ -1124,6 +1138,9 @@ fn collect_scoped(
             // Only pure name/attribute references alias; calls, literals and
             // comprehensions are not (they would not share a signature).
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) if module_scope => {
+                out.has_attribute_rebindings |= targets
+                    .iter()
+                    .any(|target| matches!(target, Expr::Attribute(_)));
                 if let Some(src) = reference_path(value)
                     .and_then(|segments| resolve_reference(bindings, module_name, &segments))
                 {
@@ -1141,6 +1158,7 @@ fn collect_scoped(
                 value: Some(value),
                 ..
             }) if module_scope => {
+                out.has_attribute_rebindings |= matches!(target.as_ref(), Expr::Attribute(_));
                 if let (Expr::Name(name), Some(src)) = (
                     target.as_ref(),
                     reference_path(value)
@@ -1595,11 +1613,11 @@ fn index_stmt(
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
-                exclude_assigned_attribute(store, scope_name, target);
+                exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            exclude_assigned_attribute(store, scope_name, target);
+            exclude_assigned_attribute(store, scope_name, target, Some(bindings));
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -1718,11 +1736,11 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
-                exclude_assigned_attribute(store, scope_name, target);
+                exclude_assigned_attribute(store, scope_name, target, None);
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            exclude_assigned_attribute(store, scope_name, target);
+            exclude_assigned_attribute(store, scope_name, target, None);
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -2206,6 +2224,13 @@ class Child(Base):
         );
         assert!(!store.signatures.contains_key("main.C.method"));
         assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn imported_attribute_assignment_excludes_resolved_method_signature() {
+        let store = indexed_store("from pkg import C\nC.method = replacement\n");
+        assert!(store.excluded.contains("pkg.C.method"));
+        assert!(!store.excluded.contains("main.C.method"));
     }
 
     #[test]
