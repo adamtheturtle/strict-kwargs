@@ -1,0 +1,4 @@
+Preserve a Python file's PEP 263 encoding when applying ``check --fix``.
+Legacy Latin-1 source is now written back as Latin-1 instead of silently
+changing non-ASCII bytes to UTF-8 while leaving the original encoding
+declaration in place. UTF-8 byte-order marks are preserved as well.

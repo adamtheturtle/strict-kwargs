@@ -165,6 +165,45 @@ pub fn decode_python_source(bytes: &[u8]) -> Source {
     }
 }
 
+/// Encode rewritten source using the codec selected by the original file.
+///
+/// The checker works with decoded UTF-8 [`String`]s, but an in-place fix must
+/// not silently change the meaning of a legacy PEP 263 source file. A UTF-8
+/// BOM is also restored when the original bytes carried one.
+pub fn encode_python_source(original_bytes: &[u8], source: &str) -> Result<Vec<u8>, String> {
+    if original_bytes.starts_with(UTF8_BOM) {
+        let mut encoded = UTF8_BOM.to_vec();
+        encoded.extend_from_slice(source.as_bytes());
+        return Ok(encoded);
+    }
+
+    let codec = match sniff_coding(original_bytes) {
+        None => Codec::Utf8,
+        Some(name) => codec_for(&name)
+            .ok_or_else(|| format!("unsupported PEP 263 encoding declaration `{name}`"))?,
+    };
+    match codec {
+        Codec::Utf8 => Ok(source.as_bytes().to_vec()),
+        Codec::Latin1 => source
+            .chars()
+            .map(|character| {
+                u8::try_from(u32::from(character)).map_err(|_| {
+                    format!(
+                        "rewritten source contains character {character:?} not representable in latin-1"
+                    )
+                })
+            })
+            .collect(),
+        Codec::Ascii => {
+            if source.is_ascii() {
+                Ok(source.as_bytes().to_vec())
+            } else {
+                Err("rewritten source contains a character not representable in ascii".to_owned())
+            }
+        }
+    }
+}
+
 /// Read a Python source file, honouring a BOM / PEP 263 encoding declaration.
 ///
 /// `Ok(Source::Undecodable)` means the bytes are not decodable as Python
@@ -280,6 +319,35 @@ mod tests {
             decoded(b"# coding=utf-8\nx = 1\n"),
             "# coding=utf-8\nx = 1\n"
         );
+    }
+
+    #[test]
+    fn rewritten_source_preserves_original_encoding() {
+        assert_eq!(
+            encode_python_source(
+                b"# coding: latin-1\nx = \"\xe9\"\n",
+                "# coding: latin-1\nx = \"\u{e9}\"\nf(a=1)\n",
+            ),
+            Ok(b"# coding: latin-1\nx = \"\xe9\"\nf(a=1)\n".to_vec())
+        );
+        assert_eq!(
+            encode_python_source(b"# coding: ascii\nx = 1\n", "# coding: ascii\nx = 2\n"),
+            Ok(b"# coding: ascii\nx = 2\n".to_vec())
+        );
+        assert_eq!(
+            encode_python_source(b"x = 1\n", "x = '\u{e9}'\n"),
+            Ok("x = '\u{e9}'\n".as_bytes().to_vec())
+        );
+
+        let mut bom_source = UTF8_BOM.to_vec();
+        bom_source.extend_from_slice(b"x = 1\n");
+        let mut expected = UTF8_BOM.to_vec();
+        expected.extend_from_slice(b"x = 2\n");
+        assert_eq!(encode_python_source(&bom_source, "x = 2\n"), Ok(expected));
+
+        assert!(encode_python_source(b"# coding: latin-1\n", "x = '\u{100}'\n").is_err());
+        assert!(encode_python_source(b"# coding: ascii\n", "x = '\u{e9}'\n").is_err());
+        assert!(encode_python_source(b"# coding: shift_jis\n", "x = 1\n").is_err());
     }
 
     #[test]

@@ -105,6 +105,22 @@ pub struct FileFix {
     pub count: usize,
 }
 
+impl FileFix {
+    /// Write this fix while preserving the source file's declared encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the original file cannot be read, the fixed
+    /// text cannot be represented in its original encoding, or the rewritten
+    /// bytes cannot be written.
+    pub fn write_preserving_encoding(&self) -> std::io::Result<()> {
+        let original_bytes = std::fs::read(&self.path)?;
+        let fixed_bytes = crate::source::encode_python_source(&original_bytes, &self.fixed)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        std::fs::write(&self.path, fixed_bytes)
+    }
+}
+
 /// What a fix run produced: the files it would rewrite plus the number of
 /// violations it detected but deliberately left untouched.
 ///
@@ -233,6 +249,24 @@ mod tests {
             ],
         );
         assert_eq!(out, "f(x=a, y=b)");
+    }
+
+    #[test]
+    fn write_preserving_encoding_rejects_unrepresentable_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.py");
+        std::fs::write(&path, b"# coding: ascii\nx = 1\n").expect("write source");
+        let fix = FileFix {
+            path,
+            original: "# coding: ascii\nx = 1\n".to_owned(),
+            fixed: "# coding: ascii\nx = '\u{e9}'\n".to_owned(),
+            count: 1,
+        };
+
+        let error = fix
+            .write_preserving_encoding()
+            .expect_err("ascii cannot represent the rewritten text");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

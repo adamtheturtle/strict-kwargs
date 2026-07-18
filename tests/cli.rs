@@ -509,6 +509,26 @@ fn pep263_latin1_declaration_is_honored() {
     assert!(!err.contains("warning: skipping"), "stderr: {err}");
 }
 
+/// Issue #251: in-place fixes must emit the original PEP 263 codec rather
+/// than writing the decoded Rust string as UTF-8 under a latin-1 declaration.
+#[test]
+fn fix_preserves_pep263_latin1_bytes() {
+    let project = Project::new();
+    let path = project.root.join("legacy.py");
+    std::fs::write(
+        &path,
+        b"# coding: latin-1\ntext = \"\xe9\"\ndef f(a: int) -> None: ...\nf(1)\n",
+    )
+    .expect("write legacy.py");
+
+    let output = project.run(&["check", "--fix", "legacy.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        std::fs::read(path).expect("read legacy.py"),
+        b"# coding: latin-1\ntext = \"\xe9\"\ndef f(a: int) -> None: ...\nf(a=1)\n"
+    );
+}
+
 /// `fix` is robust to the same stray file: the undecodable one is skipped
 /// with a warning while the fixable sibling is still rewritten (issue #53).
 #[test]
