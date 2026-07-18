@@ -149,6 +149,13 @@ fn rewrites_method_excluding_self() {
 }
 
 #[test]
+fn stale_method_signature_after_attribute_rebinding_is_not_used() {
+    assert_unchanged(
+        "class C:\n    def method(self, value):\n        return value\n\nC.method = lambda self, value, /: value\n\nassert C().method(1) == 1\n",
+    );
+}
+
+#[test]
 fn does_not_fix_self_method_call_when_subclass_override_renames_parameter() {
     // A base-class `self.m(...)` call may dispatch to a subclass override.
     // Rewriting with the base parameter name can break overrides that chose a

@@ -95,6 +95,22 @@ impl Store {
     fn insert(&mut self, fullname: String, signature: Signature) {
         self.signatures.entry(fullname).or_default().push(signature);
     }
+
+    fn exclude(&mut self, fullname: String) {
+        self.signatures.remove(&fullname);
+        self.excluded.insert(fullname);
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn exclude_assigned_attribute(store: &mut Store, scope_name: &str, target: &Expr) {
+    let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
+        return;
+    };
+    let Expr::Name(base) = value.as_ref() else {
+        return;
+    };
+    store.exclude(format!("{scope_name}.{}.{}", base.id, attr.id));
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -1570,6 +1586,14 @@ fn index_stmt(
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
         }
+        Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            for target in targets {
+                exclude_assigned_attribute(store, scope_name, target);
+            }
+        }
+        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+            exclude_assigned_attribute(store, scope_name, target);
+        }
         Stmt::If(ast::StmtIf {
             body,
             elif_else_clauses,
@@ -1676,6 +1700,14 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
             index_class_body_fast(store, &class_name, &class_def.body);
+        }
+        Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            for target in targets {
+                exclude_assigned_attribute(store, scope_name, target);
+            }
+        }
+        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+            exclude_assigned_attribute(store, scope_name, target);
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -2140,6 +2172,15 @@ class Child(Base):
             index.resolve_method("main.Child", "m"),
             Some("main.Base.m".to_string())
         );
+    }
+
+    #[test]
+    fn attribute_assignment_excludes_stale_method_signature() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\nC.method = lambda self, value, /: value\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+        assert!(store.excluded.contains("main.C.method"));
     }
 
     #[test]
