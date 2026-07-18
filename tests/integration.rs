@@ -822,7 +822,7 @@ fn overload_is_permissive() {
     let messages = check_multi(&[
         (
             "lib.py",
-            "def f(a: int, /) -> None: ...\ndef f(a: int, b: int, /) -> None: ...\n",
+            "from typing import overload\n\n@overload\ndef f(a: int, /) -> None: ...\n@overload\ndef f(a: int, b: int, /) -> None: ...\ndef f(a: int, b: int | None = None) -> None: ...\n",
         ),
         ("app.py", "from lib import f\n\nf(1, 2)\n"),
     ]);
@@ -837,12 +837,29 @@ fn overload_flags_when_all_exceed() {
     let messages = check_multi(&[
         (
             "lib.py",
-            "def f(a: int) -> None: ...\ndef f(a: int, b: int) -> None: ...\n",
+            "from typing import overload\n\n@overload\ndef f(a: int) -> None: ...\n@overload\ndef f(a: int, b: int) -> None: ...\ndef f(a: int, b: int | None = None) -> None: ...\n",
         ),
         ("app.py", "from lib import f\n\nf(1, 2)\n"),
     ]);
     assert_eq!(messages.len(), 1, "got: {messages:?}");
     assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn sequential_function_redefinition_uses_last_binding() {
+    let messages = check_source(
+        r"
+def f(value, /):
+    return value
+
+def f(value):
+    return value
+
+f(1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("main:8:"), "got: {messages:?}");
 }
 
 #[test]
