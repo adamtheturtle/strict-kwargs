@@ -2068,6 +2068,29 @@ consume(1)
 }
 
 #[test]
+fn runtime_decorator_signature_replaces_overloads() {
+    assert_ok(
+        r"
+from typing import overload
+
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@overload
+def consume(value: int): ...
+@overload
+def consume(value: str): ...
+@positional_only
+def consume(value): ...
+
+consume(1)
+",
+    );
+}
+
+#[test]
 fn imported_arbitrary_decorator_definition_signature_is_not_trusted() {
     let project = TestProject::new()
         .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")

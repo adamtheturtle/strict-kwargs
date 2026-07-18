@@ -117,6 +117,11 @@ impl Store {
             self.signatures.insert(fullname, vec![signature]);
         }
     }
+
+    fn insert_runtime_definition(&mut self, fullname: String, signature: Signature) {
+        self.pending_overloads.remove(&fullname);
+        self.signatures.insert(fullname, vec![signature]);
+    }
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -1639,7 +1644,7 @@ fn index_stmt(
                 inferred_runtime_signature(store, scope_name, decorator_list, bindings)
             {
                 store.runtime_decorated.insert(fullname.clone());
-                store.insert_definition(fullname.clone(), signature, false);
+                store.insert_runtime_definition(fullname.clone(), signature);
             } else {
                 let signature = signature_from_parameters(parameters);
                 store.insert_definition(
@@ -1770,28 +1775,23 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
                 } else {
                     store.excluded.insert(fullname);
                 }
-            } else {
-                let signature = if let Some(signature) =
-                    inferred_runtime_signature_fast(store, scope_name, decorator_list)
-                {
-                    store.runtime_decorated.insert(fullname.clone());
-                    signature
-                } else {
-                    signature_from_parameters(parameters)
-                };
+            } else if let Some(signature) =
+                inferred_runtime_signature_fast(store, scope_name, decorator_list)
+            {
+                store.runtime_decorated.insert(fullname.clone());
+                store.insert_runtime_definition(fullname.clone(), signature);
                 if body_may_contain_indexed_def(body) {
-                    store.insert_definition(
-                        fullname.clone(),
-                        signature,
-                        has_overload_decorator(decorator_list),
-                    );
                     index_module_fast(store, &fullname, body);
-                } else {
-                    store.insert_definition(
-                        fullname,
-                        signature,
-                        has_overload_decorator(decorator_list),
-                    );
+                }
+            } else {
+                let signature = signature_from_parameters(parameters);
+                store.insert_definition(
+                    fullname.clone(),
+                    signature,
+                    has_overload_decorator(decorator_list),
+                );
+                if body_may_contain_indexed_def(body) {
+                    index_module_fast(store, &fullname, body);
                 }
             }
         }
@@ -1874,21 +1874,12 @@ fn index_class_body(
                     } else {
                         store.excluded.insert(fullname);
                     }
-                } else {
-                    let signature = if let Some(signature) =
-                        inferred_runtime_signature(store, class_name, decorator_list, bindings)
-                    {
-                        store.runtime_decorated.insert(fullname.clone());
-                        signature
-                    } else {
-                        signature_from_parameters(parameters)
-                    };
+                } else if let Some(signature) =
+                    inferred_runtime_signature(store, class_name, decorator_list, bindings)
+                {
+                    store.runtime_decorated.insert(fullname.clone());
+                    store.insert_runtime_definition(fullname.clone(), signature);
                     if body_may_contain_indexed_def(body) {
-                        store.insert_definition(
-                            fullname.clone(),
-                            signature,
-                            has_overload_decorator(decorator_list),
-                        );
                         let mut nested_bindings = bindings.clone();
                         index_module_with_bindings(
                             store,
@@ -1898,11 +1889,23 @@ fn index_class_body(
                             body,
                             &mut nested_bindings,
                         );
-                    } else {
-                        store.insert_definition(
-                            fullname,
-                            signature,
-                            has_overload_decorator(decorator_list),
+                    }
+                } else {
+                    let signature = signature_from_parameters(parameters);
+                    store.insert_definition(
+                        fullname.clone(),
+                        signature,
+                        has_overload_decorator(decorator_list),
+                    );
+                    if body_may_contain_indexed_def(body) {
+                        let mut nested_bindings = bindings.clone();
+                        index_module_with_bindings(
+                            store,
+                            module_name,
+                            is_package,
+                            &fullname,
+                            body,
+                            &mut nested_bindings,
                         );
                     }
                 }
@@ -1964,28 +1967,23 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                     } else {
                         store.excluded.insert(fullname);
                     }
-                } else {
-                    let signature = if let Some(signature) =
-                        inferred_runtime_signature_fast(store, class_name, decorator_list)
-                    {
-                        store.runtime_decorated.insert(fullname.clone());
-                        signature
-                    } else {
-                        signature_from_parameters(parameters)
-                    };
+                } else if let Some(signature) =
+                    inferred_runtime_signature_fast(store, class_name, decorator_list)
+                {
+                    store.runtime_decorated.insert(fullname.clone());
+                    store.insert_runtime_definition(fullname.clone(), signature);
                     if body_may_contain_indexed_def(body) {
-                        store.insert_definition(
-                            fullname.clone(),
-                            signature,
-                            has_overload_decorator(decorator_list),
-                        );
                         index_module_fast(store, &fullname, body);
-                    } else {
-                        store.insert_definition(
-                            fullname,
-                            signature,
-                            has_overload_decorator(decorator_list),
-                        );
+                    }
+                } else {
+                    let signature = signature_from_parameters(parameters);
+                    store.insert_definition(
+                        fullname.clone(),
+                        signature,
+                        has_overload_decorator(decorator_list),
+                    );
+                    if body_may_contain_indexed_def(body) {
+                        index_module_fast(store, &fullname, body);
                     }
                 }
             }
@@ -2382,6 +2380,35 @@ class C:
             parameter_names(&store, "main.C.method.nested"),
             names(&["argument"])
         );
+    }
+
+    #[test]
+    fn runtime_decorator_signature_replaces_pending_overloads() {
+        let store = indexed_store(
+            r"
+from typing import overload
+
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@overload
+def consume(value: int): ...
+@overload
+def consume(value: str): ...
+@positional_only
+def consume(value): ...
+",
+        );
+
+        let signatures = store.signatures.get("main.consume").expect("signature");
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(
+            signatures[0].parameters[0].kind,
+            ParameterKind::PositionalOnly
+        );
+        assert!(!store.pending_overloads.contains("main.consume"));
     }
 
     #[test]
