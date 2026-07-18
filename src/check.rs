@@ -1102,9 +1102,9 @@ struct PendingTy {
     call_start: usize,
     positional_count: usize,
     rewrite_args_are_statically_precise: bool,
-    /// Indexed constructor signature to use only if ty cannot provide either
-    /// a hover signature or a definition for a dynamic ``instance.__class__``
-    /// call. Successful ty answers remain authoritative for polymorphic code.
+    /// Indexed constructor signature to use only if ty emits no diagnostic for
+    /// a dynamic ``instance.__class__`` call. Successful ty diagnostics remain
+    /// authoritative for polymorphic code.
     fallback_fullname: Option<String>,
 }
 
@@ -4367,9 +4367,9 @@ struct TyFixAst<'a> {
     tokens: &'a Tokens,
 }
 
-/// Emit an indexed constructor diagnostic only after ty has failed to return
-/// either a usable hover signature or a definition. This keeps ty's
-/// polymorphic answer authoritative while making a complete miss deterministic.
+/// Emit an indexed constructor diagnostic only after ty has emitted no
+/// diagnostic. This keeps ty's polymorphic diagnostics authoritative while
+/// making a false-negative hover or definition answer deterministic.
 #[cfg_attr(coverage, coverage(off))]
 fn emit_static_ty_fallback(
     index: &DefinitionIndex,
@@ -5011,17 +5011,36 @@ fn resolve_pending_with_ty(
                         record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
                     }
                 }
-            } else if emit_static_ty_fallback(
+            }
+        }
+    }
+
+    // Keep successful ty answers authoritative, including their inferred
+    // callee display. If ty produced no diagnostic at a dynamic
+    // ``instance.__class__`` call, an indexed constructor can still provide a
+    // deterministic fail-closed result (notably for unstable ``Self`` hover
+    // answers in large repository runs).
+    for fallback in pending
+        .iter()
+        .filter(|pending| pending.fallback_fullname.is_some())
+    {
+        let offset = TextSize::new(u32::try_from(fallback.call_start).unwrap_or(u32::MAX));
+        let (line, column) = line_column_from_starts(&source_line_starts, offset);
+        let already_reported = diagnostics.iter().any(|diagnostic| {
+            diagnostic.path == path && diagnostic.line == line && diagnostic.column == column
+        });
+        if !already_reported
+            && emit_static_ty_fallback(
                 index,
                 config,
-                &pending[i],
+                fallback,
                 source,
                 path,
                 &source_line_starts,
                 diagnostics,
-            ) {
-                record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
-            }
+            )
+        {
+            record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
         }
     }
 }
