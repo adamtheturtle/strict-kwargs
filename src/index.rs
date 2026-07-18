@@ -1841,13 +1841,15 @@ fn index_class_body(
                     } else {
                         store.excluded.insert(fullname);
                     }
-                } else if let Some(signature) =
-                    inferred_runtime_signature(store, class_name, decorator_list, bindings)
-                {
-                    store.runtime_decorated.insert(fullname.clone());
-                    store.insert(fullname.clone(), signature);
                 } else {
-                    let signature = signature_from_parameters(parameters);
+                    let signature = if let Some(signature) =
+                        inferred_runtime_signature(store, class_name, decorator_list, bindings)
+                    {
+                        store.runtime_decorated.insert(fullname.clone());
+                        signature
+                    } else {
+                        signature_from_parameters(parameters)
+                    };
                     if body_may_contain_indexed_def(body) {
                         store.insert(fullname.clone(), signature);
                         let mut nested_bindings = bindings.clone();
@@ -2308,6 +2310,28 @@ from other import Base
         assert_eq!(
             parameter_names(&store, "main.Child.__init__"),
             names(&["self", "local", "child"])
+        );
+    }
+
+    #[test]
+    fn binding_aware_decorated_method_indexes_nested_definitions() {
+        let store = indexed_store(
+            r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+class C:
+    @positional_only
+    def method(self, value):
+        def nested(argument): ...
+",
+        );
+
+        assert_eq!(
+            parameter_names(&store, "main.C.method.nested"),
+            names(&["argument"])
         );
     }
 
