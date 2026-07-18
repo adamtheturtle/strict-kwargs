@@ -95,6 +95,11 @@ impl Store {
     fn insert(&mut self, fullname: String, signature: Signature) {
         self.signatures.entry(fullname).or_default().push(signature);
     }
+
+    fn remove(&mut self, fullname: &str) {
+        self.signatures.remove(fullname);
+        self.excluded.remove(fullname);
+    }
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -1570,6 +1575,18 @@ fn index_stmt(
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
         }
+        Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            for target in targets {
+                if let Expr::Name(name) = target {
+                    store.remove(&format!("{scope_name}.{}", name.id));
+                }
+            }
+        }
+        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.remove(&format!("{scope_name}.{}", name.id));
+            }
+        }
         Stmt::If(ast::StmtIf {
             body,
             elif_else_clauses,
@@ -1676,6 +1693,18 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
             index_class_body_fast(store, &class_name, &class_def.body);
+        }
+        Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            for target in targets {
+                if let Expr::Name(name) = target {
+                    store.remove(&format!("{scope_name}.{}", name.id));
+                }
+            }
+        }
+        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.remove(&format!("{scope_name}.{}", name.id));
+            }
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -2140,6 +2169,12 @@ class Child(Base):
             index.resolve_method("main.Child", "m"),
             Some("main.Base.m".to_string())
         );
+    }
+
+    #[test]
+    fn assignment_removes_stale_function_signature() {
+        let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
+        assert!(!store.signatures.contains_key("main.f"));
     }
 
     #[test]
