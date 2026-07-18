@@ -278,6 +278,32 @@ fn check_explicit_project_root_flag() {
 }
 
 #[test]
+fn check_nonexistent_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = project.run(&["check", "--project-root", "does-not-exist", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("does-not-exist"), "stderr: {err}");
+}
+
+#[test]
+fn check_file_explicit_project_root_is_fatal_exit_two() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n")
+        .write("not-a-directory", "plain file\n");
+    let output = project.run(&["check", "--project-root", "not-a-directory", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--project-root"), "stderr: {err}");
+    assert!(err.contains("existing directory"), "stderr: {err}");
+    assert!(err.contains("not-a-directory"), "stderr: {err}");
+}
+
+#[test]
 fn check_required_version_mismatch_is_fatal_exit_two() {
     let project = Project::new()
         .write(
@@ -509,6 +535,26 @@ fn pep263_latin1_declaration_is_honored() {
     assert!(!err.contains("warning: skipping"), "stderr: {err}");
 }
 
+/// Issue #251: in-place fixes must emit the original PEP 263 codec rather
+/// than writing the decoded Rust string as UTF-8 under a latin-1 declaration.
+#[test]
+fn fix_preserves_pep263_latin1_bytes() {
+    let project = Project::new();
+    let path = project.root.join("legacy.py");
+    std::fs::write(
+        &path,
+        b"# coding: latin-1\ntext = \"\xe9\"\ndef f(a: int) -> None: ...\nf(1)\n",
+    )
+    .expect("write legacy.py");
+
+    let output = project.run(&["check", "--fix", "legacy.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        std::fs::read(path).expect("read legacy.py"),
+        b"# coding: latin-1\ntext = \"\xe9\"\ndef f(a: int) -> None: ...\nf(a=1)\n"
+    );
+}
+
 /// `fix` is robust to the same stray file: the undecodable one is skipped
 /// with a warning while the fixable sibling is still rewritten (issue #53).
 #[test]
@@ -585,6 +631,28 @@ fn check_nonexistent_dir_is_fatal_exit_two() {
     assert!(err.contains("no_such_dir"), "stderr: {err}");
 }
 
+/// Issue #252: failing to traverse a requested directory is an operational
+/// error, not permission to report an incomplete scan as clean.
+#[cfg(unix)]
+#[test]
+fn check_unreadable_directory_is_fatal_exit_two() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = Project::new().write("locked/main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let locked = project.root.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("lock directory");
+
+    let output = project.run(&["check", "."]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+        .expect("restore directory");
+
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(err.contains("locked"), "stderr: {err}");
+}
+
 #[test]
 fn fix_nonexistent_path_is_fatal_exit_two() {
     // A mistyped target passed to `fix` must not exit 0 silently (issue #84).
@@ -628,6 +696,25 @@ fn check_invalid_config_is_fatal_exit_two() {
     assert!(err.contains("pyproject.toml"), "stderr: {err}");
     assert!(
         err.contains("invalid `[tool.strict_kwargs]` table"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn check_unknown_config_key_is_fatal_exit_two() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[tool.strict_kwargs]\nignore_nams = [\"main.f\"]\n",
+        )
+        .write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(err.contains("pyproject.toml"), "stderr: {err}");
+    assert!(
+        err.contains(&["ignore_", "na", "ms"].concat()),
         "stderr: {err}"
     );
 }
@@ -767,6 +854,38 @@ fn fix_reports_when_nothing_to_fix() {
     assert_eq!(code(&output), 0);
     assert!(stderr(&output).is_empty());
     assert_eq!(stdout(&output), "All checks passed!\n");
+}
+
+#[test]
+fn fix_and_diff_are_mutually_exclusive() {
+    let source = "def f(a: int) -> None: ...\nf(1)\n";
+    let project = Project::new().write("main.py", source);
+    let output = project.run(&["check", "--fix", "--diff", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--fix"), "stderr: {err}");
+    assert!(err.contains("--diff"), "stderr: {err}");
+    assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
+fn fix_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--fix", "--output-format", "json", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--fix"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
+}
+
+#[test]
+fn diff_rejects_output_format() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--diff", "--output-format", "github", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--diff"), "stderr: {err}");
+    assert!(err.contains("--output-format"), "stderr: {err}");
 }
 
 #[test]
