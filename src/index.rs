@@ -1641,7 +1641,11 @@ fn index_stmt(
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             }
         }
-        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+        Stmt::AnnAssign(ast::StmtAnnAssign {
+            target,
+            value: Some(_),
+            ..
+        }) => {
             exclude_assigned_attribute(store, scope_name, target, Some(bindings));
         }
         Stmt::If(ast::StmtIf {
@@ -1666,9 +1670,7 @@ fn index_stmt(
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
-            store.conditional_depth -= 1;
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -1772,7 +1774,11 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
                 exclude_assigned_attribute(store, scope_name, target, None);
             }
         }
-        Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
+        Stmt::AnnAssign(ast::StmtAnnAssign {
+            target,
+            value: Some(_),
+            ..
+        }) => {
             exclude_assigned_attribute(store, scope_name, target, None);
         }
         Stmt::If(ast::StmtIf {
@@ -1790,9 +1796,7 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            store.conditional_depth += 1;
             index_module_fast(store, scope_name, body);
-            store.conditional_depth -= 1;
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -2286,6 +2290,24 @@ class Child(Base):
     fn conditional_attribute_assignment_preserves_method_signature() {
         let store = indexed_store(
             "class C:\n    def method(self, value): ...\nif condition:\n    C.method = replacement\n",
+        );
+        assert!(store.signatures.contains_key("main.C.method"));
+        assert!(!store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn loop_attribute_assignment_excludes_stale_method_signature() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\nfor replacement in replacements:\n    C.method = replacement\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+        assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn annotation_only_attribute_assignment_preserves_method_signature() {
+        let store = indexed_store(
+            "from typing import Callable\nclass C:\n    def method(self, value): ...\nC.method: Callable[..., object]\n",
         );
         assert!(store.signatures.contains_key("main.C.method"));
         assert!(!store.excluded.contains("main.C.method"));
