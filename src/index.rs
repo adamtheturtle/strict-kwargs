@@ -57,6 +57,10 @@ enum ModuleState {
 #[derive(Debug, Default)]
 struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
+    /// Nesting depth of runtime control flow during indexing. Assignments in
+    /// a conditional branch are not definite rebindings, so they must not
+    /// invalidate signatures from an alternative branch.
+    conditional_depth: usize,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -1576,15 +1580,19 @@ fn index_stmt(
             bind(bindings, class_def.name.as_str(), class_name);
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
-            for target in targets {
-                if let Expr::Name(name) = target {
-                    store.remove(&format!("{scope_name}.{}", name.id));
+            if store.conditional_depth == 0 {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        store.remove(&format!("{scope_name}.{}", name.id));
+                    }
                 }
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            if let Expr::Name(name) = target.as_ref() {
-                store.remove(&format!("{scope_name}.{}", name.id));
+            if store.conditional_depth == 0 {
+                if let Expr::Name(name) = target.as_ref() {
+                    store.remove(&format!("{scope_name}.{}", name.id));
+                }
             }
         }
         Stmt::If(ast::StmtIf {
@@ -1592,6 +1600,7 @@ fn index_stmt(
             elif_else_clauses,
             ..
         }) => {
+            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for clause in elif_else_clauses {
                 index_module_with_bindings(
@@ -1603,11 +1612,14 @@ fn index_stmt(
                     bindings,
                 );
             }
+            store.conditional_depth -= 1;
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
+            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            store.conditional_depth -= 1;
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -1616,6 +1628,7 @@ fn index_stmt(
             finalbody,
             ..
         }) => {
+            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
@@ -1644,8 +1657,10 @@ fn index_stmt(
                 finalbody,
                 bindings,
             );
+            store.conditional_depth -= 1;
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
+            store.conditional_depth += 1;
             for case in cases {
                 index_module_with_bindings(
                     store,
@@ -1656,6 +1671,7 @@ fn index_stmt(
                     bindings,
                 );
             }
+            store.conditional_depth -= 1;
         }
         _ => {}
     }
@@ -1695,15 +1711,19 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             index_class_body_fast(store, &class_name, &class_def.body);
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
-            for target in targets {
-                if let Expr::Name(name) = target {
-                    store.remove(&format!("{scope_name}.{}", name.id));
+            if store.conditional_depth == 0 {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        store.remove(&format!("{scope_name}.{}", name.id));
+                    }
                 }
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign { target, .. }) => {
-            if let Expr::Name(name) = target.as_ref() {
-                store.remove(&format!("{scope_name}.{}", name.id));
+            if store.conditional_depth == 0 {
+                if let Expr::Name(name) = target.as_ref() {
+                    store.remove(&format!("{scope_name}.{}", name.id));
+                }
             }
         }
         Stmt::If(ast::StmtIf {
@@ -1711,14 +1731,20 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             elif_else_clauses,
             ..
         }) => {
+            store.conditional_depth += 1;
             index_module_fast(store, scope_name, body);
             for clause in elif_else_clauses {
                 index_module_fast(store, scope_name, &clause.body);
             }
+            store.conditional_depth -= 1;
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => index_module_fast(store, scope_name, body),
+        | Stmt::With(ast::StmtWith { body, .. }) => {
+            store.conditional_depth += 1;
+            index_module_fast(store, scope_name, body);
+            store.conditional_depth -= 1;
+        }
         Stmt::Try(ast::StmtTry {
             body,
             handlers,
@@ -1726,6 +1752,7 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
+            store.conditional_depth += 1;
             index_module_fast(store, scope_name, body);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
@@ -1733,11 +1760,14 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             }
             index_module_fast(store, scope_name, orelse);
             index_module_fast(store, scope_name, finalbody);
+            store.conditional_depth -= 1;
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
+            store.conditional_depth += 1;
             for case in cases {
                 index_module_fast(store, scope_name, &case.body);
             }
+            store.conditional_depth -= 1;
         }
         _ => {}
     }
@@ -2175,6 +2205,14 @@ class Child(Base):
     fn assignment_removes_stale_function_signature() {
         let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
         assert!(!store.signatures.contains_key("main.f"));
+    }
+
+    #[test]
+    fn conditional_assignment_preserves_alternative_function_signature() {
+        let store = indexed_store(
+            "try:\n    import dependency\nexcept ImportError:\n    def f(value): ...\nelse:\n    f = dependency.f\n",
+        );
+        assert!(store.signatures.contains_key("main.f"));
     }
 
     #[test]
