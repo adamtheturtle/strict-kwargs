@@ -17,7 +17,8 @@ use crate::error::CheckError;
 /// # Errors
 ///
 /// Returns [`CheckError::PathNotFound`] for the first path that does not
-/// exist.
+/// exist, or [`CheckError::Io`] if a requested directory cannot be traversed
+/// completely. An incomplete walk must not be reported as a clean check.
 pub(super) fn collect_python_files(
     project_root: &Path,
     paths: &[PathBuf],
@@ -43,10 +44,11 @@ pub(super) fn collect_python_files(
                     entry.depth() == 0
                         || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
                 });
-            for entry in walk
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().is_file())
-            {
+            for entry in walk {
+                let entry = entry.map_err(walk_error)?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
                 let entry_path = entry.path().to_path_buf();
                 if is_python_file(&entry_path) {
                     files.push(entry_path);
@@ -61,6 +63,13 @@ pub(super) fn collect_python_files(
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+fn walk_error(error: walkdir::Error) -> CheckError {
+    let kind = error
+        .io_error()
+        .map_or(std::io::ErrorKind::Other, std::io::Error::kind);
+    CheckError::Io(std::io::Error::new(kind, error))
 }
 
 pub(super) fn explicit_python_files(paths: &[PathBuf]) -> FxHashSet<PathBuf> {

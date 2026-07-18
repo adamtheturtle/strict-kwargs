@@ -1,0 +1,4 @@
+Treat filesystem errors encountered during directory traversal as operational
+errors. A check now exits with status 2 and names the unreadable path instead
+of silently skipping part of the requested tree and potentially reporting a
+false clean result.
