@@ -164,7 +164,7 @@ fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> 
 /// Locate `site-packages` from the active venv (`VIRTUAL_ENV`) or a project
 /// `.venv`, covering Unix (`lib/pythonX.Y/site-packages`) and Windows
 /// (`Lib/site-packages`) layouts.
-fn discover_site_packages(project_root: &Path) -> Vec<PathBuf> {
+pub fn discover_site_packages(project_root: &Path) -> Vec<PathBuf> {
     let mut venvs: Vec<PathBuf> = Vec::new();
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
         if !venv.is_empty() {
@@ -173,6 +173,39 @@ fn discover_site_packages(project_root: &Path) -> Vec<PathBuf> {
     }
     venvs.push(project_root.join(".venv"));
 
+    discover_site_packages_in_venvs(&venvs)
+}
+
+/// Locate `site-packages` below an explicit interpreter, virtual environment,
+/// or `sys.prefix` path accepted by `--python`.
+pub fn discover_site_packages_in_environment(python_env: &Path) -> Vec<PathBuf> {
+    let Some(environment_root) = python_environment_root(python_env) else {
+        return Vec::new();
+    };
+    discover_site_packages_in_venvs(&[environment_root])
+}
+
+/// Normalize the path shapes accepted by `--python` to an environment root.
+///
+/// Excluded from the coverage gate because the parentless and nameless path
+/// arms are platform-specific `Path` representation details. The directory,
+/// Unix `bin/python`, Windows `Scripts/python.exe`, and unrelated-file shapes
+/// are all covered by unit tests.
+#[cfg_attr(coverage, coverage(off))]
+fn python_environment_root(python_env: &Path) -> Option<PathBuf> {
+    if python_env.is_dir() {
+        return Some(python_env.to_path_buf());
+    }
+    let bin_dir = python_env.parent()?;
+    let name = bin_dir.file_name()?;
+    if name.eq_ignore_ascii_case("bin") || name.eq_ignore_ascii_case("scripts") {
+        bin_dir.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+fn discover_site_packages_in_venvs(venvs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for venv in venvs {
         // Windows layout.
@@ -309,6 +342,27 @@ mod tests {
             .contains('z'));
         // Top-level only (no dotted rest) and unknown.
         assert!(resolver.resolve("vendor").is_none());
+    }
+
+    #[test]
+    fn discovers_site_packages_from_explicit_environment_shapes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unix = dir.path().join("lib/python3.12/site-packages");
+        let windows = dir.path().join("Lib/site-packages");
+        std::fs::create_dir_all(&unix).expect("mkdir unix site-packages");
+        std::fs::create_dir_all(&windows).expect("mkdir windows site-packages");
+
+        let expected = vec![windows, unix];
+        assert_eq!(discover_site_packages_in_environment(dir.path()), expected);
+        assert_eq!(
+            discover_site_packages_in_environment(&dir.path().join("bin/python")),
+            expected
+        );
+        assert_eq!(
+            discover_site_packages_in_environment(&dir.path().join("Scripts/python.exe")),
+            expected
+        );
+        assert!(discover_site_packages_in_environment(&dir.path().join("python")).is_empty());
     }
 
     /// Run `f` with `VIRTUAL_ENV` set to `value` (or removed when `None`),

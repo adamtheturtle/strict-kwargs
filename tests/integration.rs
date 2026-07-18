@@ -2464,6 +2464,61 @@ fn cache_invalidated_on_file_change() {
     );
 }
 
+/// Issue #253: project-local environment dependencies participate in the
+/// global fingerprint even though the first-party walk prunes `.venv`.
+#[test]
+fn cache_invalidated_when_project_venv_dependency_changes() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache_venv")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let file = root.join("main.py");
+    std::fs::write(&file, "from dep import f\n\nf(1)\n").expect("write main");
+    let package = root.join(".venv/lib/python3.12/site-packages").join("dep");
+    std::fs::create_dir_all(&package).expect("mkdir package");
+    std::fs::write(package.join("__init__.py"), "def f(a: int) -> None: ...\n")
+        .expect("write dependency");
+    std::fs::write(package.join("py.typed"), "").expect("write py.typed");
+
+    let config = Config::load(&root).expect("config");
+    let before = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(before.len(), 1, "expected dependency-based violation");
+
+    // A newly installed stub changes the resolved signature. Its path is
+    // nested below the pruned `.venv`, so this was previously a stale hit.
+    std::fs::write(
+        package.join("__init__.pyi"),
+        "def f(a: int, /) -> None: ...\n",
+    )
+    .expect("write dependency stub");
+    let after = check_paths(
+        &root,
+        std::slice::from_ref(&file),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check after dependency change");
+    assert!(
+        after.is_empty(),
+        "environment change must invalidate cached diagnostics: {after:?}"
+    );
+}
+
 /// Undecodable-encoding files are never written to the cache — a skipped file
 /// must not produce a stale "no violations" cache hit on the next run.
 #[test]
