@@ -952,6 +952,34 @@ C(1)
 }
 
 #[test]
+fn constructor_with_keywordable_new_still_flags() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, value): ...
+    def __init__(self, value): ...
+C(1)
+",
+        5,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn constructor_flags_only_surplus_after_local_new_boundary() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, value, /, other): ...
+    def __init__(self, value, other): ...
+C(1, 2)
+",
+        5,
+        "maximum 1",
+    );
+}
+
+#[test]
 fn constructor_respects_metaclass_call_positional_only_boundary() {
     assert_ok(
         r"
@@ -965,6 +993,21 @@ class C(metaclass=Meta):
 
 C(1)
 ",
+    );
+}
+
+#[test]
+fn constructor_flags_only_surplus_after_metaclass_call_boundary() {
+    assert_error(
+        r"
+class Meta(type):
+    def __call__(cls, value, /, other): ...
+class C(metaclass=Meta):
+    def __init__(self, value, other): ...
+C(1, 2)
+",
+        6,
+        "maximum 1",
     );
 }
 

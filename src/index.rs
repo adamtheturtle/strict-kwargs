@@ -13,7 +13,7 @@ use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
 
 mod data_model;
@@ -787,15 +787,19 @@ impl DefinitionIndex {
         self.read().store.classes.contains(fullname)
     }
 
-    /// Whether a class call crosses another locally modeled runtime boundary
-    /// in addition to the constructor signature selected by the resolver.
-    pub fn constructor_has_competing_boundary(&self, class_fullname: &str) -> bool {
-        let init = format!("{class_fullname}.__init__");
-        let new = format!("{class_fullname}.__new__");
-        if self.get(&init).is_some() && self.get(&new).is_some() {
-            return true;
-        }
-
+    /// Number of leading user arguments that must remain positional across
+    /// the runtime boundaries of a class call.
+    ///
+    /// Class construction may cross `__init__`, `__new__`, and an explicit
+    /// metaclass `__call__`. A positional-only parameter on any modeled
+    /// boundary prevents the corresponding argument from being rewritten as
+    /// a keyword, but a merely keyword-capable competing boundary must not
+    /// suppress diagnostics from the selected constructor (issue #254).
+    pub fn constructor_positional_allowance(&self, class_fullname: &str) -> usize {
+        let mut boundaries = ["__init__", "__new__"]
+            .into_iter()
+            .filter_map(|method| self.resolve_method(class_fullname, method))
+            .collect::<Vec<_>>();
         let metaclass = {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
@@ -805,10 +809,27 @@ impl DefinitionIndex {
                 .get(class_fullname)
                 .cloned()
         };
-        metaclass.is_some_and(|metaclass| {
-            self.resolve_method(&metaclass, "__call__")
-                .is_some_and(|method| method != "builtins.type.__call__")
-        })
+        if let Some(call) = metaclass
+            .and_then(|metaclass| self.resolve_method(&metaclass, "__call__"))
+            .filter(|method| method != "builtins.type.__call__")
+        {
+            boundaries.push(call);
+        }
+
+        let mut allowance = 0;
+        for boundary in boundaries {
+            let signatures = self.get(&boundary).unwrap_or_default();
+            for signature in signatures.iter() {
+                let positional_only = signature
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .filter(|parameter| parameter.kind == ParameterKind::PositionalOnly)
+                    .count();
+                allowance = allowance.max(positional_only);
+            }
+        }
+        allowance
     }
 }
 

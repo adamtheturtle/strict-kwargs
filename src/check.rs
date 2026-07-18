@@ -1929,17 +1929,14 @@ impl<'a> CallChecker<'a> {
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
-        if let Some(class_fullname) = callee_fullname
-            .strip_suffix(".__init__")
-            .or_else(|| callee_fullname.strip_suffix(".__new__"))
-        {
-            if self
-                .index
-                .constructor_has_competing_boundary(class_fullname)
-            {
-                return;
-            }
-        }
+        let constructor_positional_allowance = if self.index.is_synthesized(&callee_fullname) {
+            0
+        } else {
+            self.class_from_constructor_func(&call.func)
+                .map_or(0, |class| {
+                    self.index.constructor_positional_allowance(&class)
+                })
+        };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
@@ -1982,9 +1979,16 @@ impl<'a> CallChecker<'a> {
         // Overload-safe: only flag when the call exceeds the positional limit
         // of *every* candidate signature (the most permissive overload wins),
         // so ``.pyi`` stub overloads never produce false positives.
-        if effective.iter().any(|signature| {
-            !call_exceeds_positional_limit(signature, &callee_fullname, ignored, effective_count)
-        }) {
+        if effective_count <= constructor_positional_allowance
+            || effective.iter().any(|signature| {
+                !call_exceeds_positional_limit(
+                    signature,
+                    &callee_fullname,
+                    ignored,
+                    effective_count,
+                )
+            })
+        {
             return;
         }
         let max_positional = effective
@@ -1993,7 +1997,8 @@ impl<'a> CallChecker<'a> {
                 signature.max_positional_at_call_site(&callee_fullname, ignored)
             })
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(constructor_positional_allowance);
         let (line, column) = self.diagnostic_position(call.start());
         self.diagnostics.push(Diagnostic {
             path: self.path.clone(),
