@@ -50,7 +50,7 @@ enum ModuleState {
 }
 
 /// The real definitions discovered so far: fully-qualified name -> one or
-/// more signatures (multiple for ``@overload`` stubs / redefinitions), plus
+/// more signatures (multiple for ``@overload`` stubs), plus
 /// the set of *synthesized* constructors. This is the part the indexing
 /// walk (`index_module`) writes; it grows as modules are resolved — eagerly
 /// for builtins/checked files, lazily on demand for everything else.
@@ -61,6 +61,10 @@ struct Store {
     /// a conditional branch are not definite rebindings, so they must not
     /// invalidate signatures from an alternative branch.
     conditional_depth: usize,
+    /// Names whose most recent definitions are an open sequence of
+    /// ``@overload`` arms. The following undecorated implementation closes
+    /// the sequence without replacing its public overload signatures.
+    pending_overloads: FxHashSet<String>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -103,6 +107,17 @@ impl Store {
     fn exclude(&mut self, fullname: String) {
         self.signatures.remove(&fullname);
         self.excluded.insert(fullname);
+    }
+
+    fn insert_definition(&mut self, fullname: String, signature: Signature, is_overload: bool) {
+        if is_overload {
+            if self.pending_overloads.insert(fullname.clone()) {
+                self.signatures.remove(&fullname);
+            }
+            self.insert(fullname, signature);
+        } else if !self.pending_overloads.remove(&fullname) {
+            self.signatures.insert(fullname, vec![signature]);
+        }
     }
 }
 
@@ -1479,6 +1494,12 @@ fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
+fn has_overload_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list
+        .iter()
+        .any(|decorator| callee_tail(&decorator.expression) == Some("overload"))
+}
+
 // Maintains statement-order import/alias bindings for synthesized constructor
 // base resolution. The user-visible behavior is covered by imported and
 // aliased dataclass-base integration tests; the branches here duplicate the
@@ -1582,7 +1603,11 @@ fn index_stmt(
                 store.excluded.insert(fullname.clone());
             } else {
                 let signature = signature_from_parameters(parameters);
-                store.insert(fullname.clone(), signature);
+                store.insert_definition(
+                    fullname.clone(),
+                    signature,
+                    has_overload_decorator(decorator_list),
+                );
             }
             if body_may_contain_indexed_def(body) {
                 let mut nested_bindings = bindings.clone();
@@ -1722,10 +1747,18 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             } else {
                 let signature = signature_from_parameters(parameters);
                 if body_may_contain_indexed_def(body) {
-                    store.insert(fullname.clone(), signature);
+                    store.insert_definition(
+                        fullname.clone(),
+                        signature,
+                        has_overload_decorator(decorator_list),
+                    );
                     index_module_fast(store, &fullname, body);
                 } else {
-                    store.insert(fullname, signature);
+                    store.insert_definition(
+                        fullname,
+                        signature,
+                        has_overload_decorator(decorator_list),
+                    );
                 }
             }
         }
@@ -1826,7 +1859,11 @@ fn index_class_body(
                 } else {
                     let signature = signature_from_parameters(parameters);
                     if body_may_contain_indexed_def(body) {
-                        store.insert(fullname.clone(), signature);
+                        store.insert_definition(
+                            fullname.clone(),
+                            signature,
+                            has_overload_decorator(decorator_list),
+                        );
                         let mut nested_bindings = bindings.clone();
                         index_module_with_bindings(
                             store,
@@ -1837,7 +1874,11 @@ fn index_class_body(
                             &mut nested_bindings,
                         );
                     } else {
-                        store.insert(fullname, signature);
+                        store.insert_definition(
+                            fullname,
+                            signature,
+                            has_overload_decorator(decorator_list),
+                        );
                     }
                 }
             }
@@ -1898,10 +1939,18 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 } else {
                     let signature = signature_from_parameters(parameters);
                     if body_may_contain_indexed_def(body) {
-                        store.insert(fullname.clone(), signature);
+                        store.insert_definition(
+                            fullname.clone(),
+                            signature,
+                            has_overload_decorator(decorator_list),
+                        );
                         index_module_fast(store, &fullname, body);
                     } else {
-                        store.insert(fullname, signature);
+                        store.insert_definition(
+                            fullname,
+                            signature,
+                            has_overload_decorator(decorator_list),
+                        );
                     }
                 }
             }
