@@ -2035,6 +2035,8 @@ fn arbitrary_decorator_definition_signature_is_not_trusted() {
     assert_ok(
         r"
 def positional_only(decorated):
+    def unrelated():
+        return None
     def wrapper(value, /):
         return decorated(value)
     return wrapper

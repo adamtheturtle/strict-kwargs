@@ -24,8 +24,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
-    build_index_with_sources, has_runtime_signature_decorator, is_package_init,
-    module_name_for_path, relative_base, DefinitionIndex, IndexedFile,
+    build_index_with_sources, is_package_init, module_name_for_path, relative_base,
+    DefinitionIndex, IndexedFile,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -1143,7 +1143,6 @@ struct Scope {
 struct LocalFunction {
     fullname: String,
     signature: Signature,
-    runtime_decorated: bool,
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -1261,13 +1260,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn define_function(
-        &mut self,
-        local_name: &str,
-        fullname: String,
-        signature: Signature,
-        runtime_decorated: bool,
-    ) {
+    fn define_function(&mut self, local_name: &str, fullname: String, signature: Signature) {
         let newly_active_scope = {
             let scope = self.current_scope();
             let newly_active_scope = !scope.had_function_binding;
@@ -1278,7 +1271,6 @@ impl<'a> CallChecker<'a> {
                 LocalFunction {
                     fullname,
                     signature,
-                    runtime_decorated,
                 },
             );
             scope.modules.remove(local_name);
@@ -1917,12 +1909,6 @@ impl<'a> CallChecker<'a> {
         if self.index.is_excluded(&callee_fullname) {
             return;
         }
-        if local_function
-            .as_ref()
-            .is_some_and(|function| function.runtime_decorated)
-        {
-            return;
-        }
         let indexed_signatures;
         let local_signatures;
         let signatures: &[Signature] = if let Some(local_function) = &local_function {
@@ -1940,9 +1926,6 @@ impl<'a> CallChecker<'a> {
             self.record_ty_pending_unless_lazily_excluded(&callee_fullname, call);
             return;
         };
-        if self.index.is_runtime_decorated(&callee_fullname) {
-            return;
-        }
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
@@ -3008,12 +2991,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if self.function_stack.is_empty() {
                     self.define(name, fullname.clone());
                 } else {
-                    self.define_function(
-                        name,
-                        fullname.clone(),
-                        signature_from_parameters(parameters),
-                        has_runtime_signature_decorator(decorator_list),
-                    );
+                    let written_signature = signature_from_parameters(parameters);
+                    let signature = if self.index.is_runtime_decorated(&fullname) {
+                        self.index
+                            .get(&fullname)
+                            .and_then(|signatures| signatures.first().cloned())
+                            .unwrap_or(written_signature)
+                    } else {
+                        written_signature
+                    };
+                    self.define_function(name, fullname.clone(), signature);
                 }
                 self.function_stack.push(fullname);
                 self.push_scope();

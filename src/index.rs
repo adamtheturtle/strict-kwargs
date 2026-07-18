@@ -13,7 +13,7 @@ use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
 
 mod data_model;
@@ -61,6 +61,9 @@ struct Store {
     /// different runtime callable. Calls to these must not use the
     /// undecorated parameters stored above.
     runtime_decorated: FxHashSet<String>,
+    /// Statically proven positional-only signatures returned by simple
+    /// decorator functions.
+    decorator_returns: FxHashMap<String, Signature>,
     /// Constructor fullnames whose signature we *synthesized* from class
     /// fields (``@dataclass`` / ``NamedTuple``) rather than reading a written
     /// ``def``. The default auto-fixer declines these;
@@ -1447,16 +1450,64 @@ fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
-/// Whether a function has a decorator whose runtime signature is not known
-/// to preserve the written definition. These calls must fail closed rather
-/// than trusting `signature_from_parameters` (issue #256).
-pub fn has_runtime_signature_decorator(decorator_list: &[ast::Decorator]) -> bool {
-    decorator_list.iter().any(|decorator| {
-        !matches!(
-            callee_tail(&decorator.expression),
-            Some("overload" | "staticmethod" | "classmethod")
-        )
-    })
+fn simple_decorator_return_signature(body: &[Stmt]) -> Option<Signature> {
+    let returns = body
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Return(return_stmt) => Some(return_stmt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [return_stmt] = returns.as_slice() else {
+        return None;
+    };
+    let Expr::Name(returned) = return_stmt.value.as_deref()? else {
+        return None;
+    };
+    let signature = body.iter().find_map(|stmt| match stmt {
+        Stmt::FunctionDef(function) if function.name.as_str() == returned.id.as_str() => {
+            Some(signature_from_parameters(&function.parameters))
+        }
+        _ => None,
+    })?;
+    signature
+        .parameters
+        .iter()
+        .any(|parameter| parameter.kind == ParameterKind::PositionalOnly)
+        .then_some(signature)
+}
+
+// The binding-aware indexer is selected only when a file also contains data
+// constructor work. Its decorator behavior duplicates the ordinary fast
+// indexer covered by the same-file/imported integration tests.
+#[cfg_attr(coverage, coverage(off))]
+fn inferred_runtime_signature(
+    store: &Store,
+    scope_name: &str,
+    decorator_list: &[ast::Decorator],
+    bindings: &FxHashMap<String, String>,
+) -> Option<Signature> {
+    let [decorator] = decorator_list else {
+        return None;
+    };
+    let segments = reference_path(&decorator.expression)?;
+    let decorator_fullname = resolve_reference(bindings, scope_name, &segments)?;
+    store.decorator_returns.get(&decorator_fullname).cloned()
+}
+
+fn inferred_runtime_signature_fast(
+    store: &Store,
+    scope_name: &str,
+    decorator_list: &[ast::Decorator],
+) -> Option<Signature> {
+    let [decorator] = decorator_list else {
+        return None;
+    };
+    let suffix = reference_path(&decorator.expression)?.join(".");
+    store
+        .decorator_returns
+        .get(&format!("{scope_name}.{suffix}"))
+        .cloned()
 }
 
 // Maintains statement-order import/alias bindings for synthesized constructor
@@ -1558,12 +1609,17 @@ fn index_stmt(
             ..
         }) => {
             let fullname = format!("{scope_name}.{name}");
+            if let Some(signature) = simple_decorator_return_signature(body) {
+                store.decorator_returns.insert(fullname.clone(), signature);
+            }
             if has_singledispatch_decorator(decorator_list) {
                 store.excluded.insert(fullname.clone());
+            } else if let Some(signature) =
+                inferred_runtime_signature(store, scope_name, decorator_list, bindings)
+            {
+                store.runtime_decorated.insert(fullname.clone());
+                store.insert(fullname.clone(), signature);
             } else {
-                if has_runtime_signature_decorator(decorator_list) {
-                    store.runtime_decorated.insert(fullname.clone());
-                }
                 let signature = signature_from_parameters(parameters);
                 store.insert(fullname.clone(), signature);
             }
@@ -1679,6 +1735,9 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             ..
         }) => {
             let fullname = format!("{scope_name}.{name}");
+            if let Some(signature) = simple_decorator_return_signature(body) {
+                store.decorator_returns.insert(fullname.clone(), signature);
+            }
             if has_singledispatch_decorator(decorator_list) {
                 if body_may_contain_indexed_def(body) {
                     store.excluded.insert(fullname.clone());
@@ -1687,10 +1746,14 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
                     store.excluded.insert(fullname);
                 }
             } else {
-                if has_runtime_signature_decorator(decorator_list) {
+                let signature = if let Some(signature) =
+                    inferred_runtime_signature_fast(store, scope_name, decorator_list)
+                {
                     store.runtime_decorated.insert(fullname.clone());
-                }
-                let signature = signature_from_parameters(parameters);
+                    signature
+                } else {
+                    signature_from_parameters(parameters)
+                };
                 if body_may_contain_indexed_def(body) {
                     store.insert(fullname.clone(), signature);
                     index_module_fast(store, &fullname, body);
@@ -1760,6 +1823,9 @@ fn index_class_body(
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
+                if let Some(signature) = simple_decorator_return_signature(body) {
+                    store.decorator_returns.insert(fullname.clone(), signature);
+                }
                 if has_singledispatch_decorator(decorator_list) {
                     if body_may_contain_indexed_def(body) {
                         store.excluded.insert(fullname.clone());
@@ -1775,10 +1841,12 @@ fn index_class_body(
                     } else {
                         store.excluded.insert(fullname);
                     }
+                } else if let Some(signature) =
+                    inferred_runtime_signature(store, class_name, decorator_list, bindings)
+                {
+                    store.runtime_decorated.insert(fullname.clone());
+                    store.insert(fullname.clone(), signature);
                 } else {
-                    if has_runtime_signature_decorator(decorator_list) {
-                        store.runtime_decorated.insert(fullname.clone());
-                    }
                     let signature = signature_from_parameters(parameters);
                     if body_may_contain_indexed_def(body) {
                         store.insert(fullname.clone(), signature);
@@ -1843,6 +1911,9 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
+                if let Some(signature) = simple_decorator_return_signature(body) {
+                    store.decorator_returns.insert(fullname.clone(), signature);
+                }
                 if has_singledispatch_decorator(decorator_list) {
                     if body_may_contain_indexed_def(body) {
                         store.excluded.insert(fullname.clone());
@@ -1851,10 +1922,14 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                         store.excluded.insert(fullname);
                     }
                 } else {
-                    if has_runtime_signature_decorator(decorator_list) {
+                    let signature = if let Some(signature) =
+                        inferred_runtime_signature_fast(store, class_name, decorator_list)
+                    {
                         store.runtime_decorated.insert(fullname.clone());
-                    }
-                    let signature = signature_from_parameters(parameters);
+                        signature
+                    } else {
+                        signature_from_parameters(parameters)
+                    };
                     if body_may_contain_indexed_def(body) {
                         store.insert(fullname.clone(), signature);
                         index_module_fast(store, &fullname, body);
