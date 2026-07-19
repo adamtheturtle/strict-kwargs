@@ -403,6 +403,13 @@ fn pipeline_phases(
 /// serial per-query inference time on large projects.
 const TY_SHARD_COUNT: usize = 4;
 
+/// How many times a single file's ty fallback is attempted before a still-off
+/// backend is treated as fatal. A transient timeout/disconnect under shard
+/// contention is retried on the same warm server; a persistent failure after
+/// this many tries surfaces as [`CheckError::TyServerFailed`] rather than a
+/// silent diagnostic drop (issue #275).
+const TY_FILE_ATTEMPTS: usize = 3;
+
 /// One shard's outcome: each owned work item's index in the released
 /// (sorted-file) pending order paired with the diagnostics its ty queries
 /// produced.
@@ -4321,7 +4328,18 @@ fn resolve_file_with_ty(
         // downgrade, so results stay deterministic.
         *ty = Some(start_ty_for_fallback(project_root, python_env)?);
     }
-    if let Some(ty) = ty.as_mut() {
+    let Some(ty) = ty.as_mut() else {
+        return Ok(());
+    };
+    // A transient timeout/disconnect latches the shard's server OFF part-way
+    // through a file, which would otherwise silently drop the rest of its
+    // diagnostics (issue #275). Retry on the same warm server, discarding the
+    // failed attempt's partial results; only a backend that stays off after
+    // every attempt is fatal. This keeps results deterministic under shard
+    // contention instead of load-dependent.
+    let baseline = diagnostics.len();
+    let mut fixes = fixes;
+    for _ in 0..TY_FILE_ATTEMPTS {
         resolve_pending_with_ty(
             ty,
             index,
@@ -4334,10 +4352,15 @@ fn resolve_file_with_ty(
             ty_file_cache,
             ty_def_caches,
             diagnostics,
-            fixes,
+            fixes.take(),
         );
+        if !ty.is_disabled() {
+            return Ok(());
+        }
+        diagnostics.truncate(baseline);
+        ty.reenable();
     }
-    Ok(())
+    Err(CheckError::TyServerFailed)
 }
 
 /// Start the `ty` language server once. `ty`'s binary is verified up front
