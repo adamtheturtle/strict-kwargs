@@ -162,7 +162,14 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     let Expr::Name(name) = target else {
         return;
     };
-    store.exclude(format!("{scope_name}.{}", name.id));
+    // Only a genuine rebinding of an indexed method invalidates a signature.
+    // A plain class attribute that aliases a callable (``theclass = date``,
+    // ``assert_is_copy = Base.assert_is_copy``) has no stale ``def`` to drop;
+    // excluding it would wrongly suppress every call routed through the alias.
+    let fullname = format!("{scope_name}.{}", name.id);
+    if store.signatures.contains_key(&fullname) {
+        store.exclude(fullname);
+    }
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -2594,6 +2601,18 @@ Child.m = lambda self, a, /: a
         );
         assert!(!store.signatures.contains_key("main.C.method"));
         assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn class_body_name_alias_without_prior_definition_stays_resolvable() {
+        // ``theclass = date`` / ``factory = ipaddress.IPv4Address`` is a plain
+        // class attribute aliasing a callable, not a rebinding of an indexed
+        // ``def``. There is no stale signature to invalidate, so the name must
+        // not be excluded (that would suppress every call routed through it).
+        let store = indexed_store(
+            "class Widget:\n    def __init__(self, value): ...\nclass TestWidget:\n    theclass = Widget\n",
+        );
+        assert!(!store.excluded.contains("main.TestWidget.theclass"));
     }
 
     #[test]
