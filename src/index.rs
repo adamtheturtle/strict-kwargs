@@ -64,6 +64,9 @@ struct Store {
     /// Statically proven positional-only signatures returned by simple
     /// decorator functions.
     decorator_returns: FxHashMap<String, Signature>,
+    /// Modules supplied as check targets rather than loaded from vendored
+    /// typeshed or lazily resolved dependencies.
+    first_party_modules: FxHashSet<String>,
     /// Names whose most recent definitions are an open sequence of
     /// ``@overload`` arms. The following undecorated implementation closes
     /// the sequence without replacing its public overload signatures.
@@ -82,6 +85,9 @@ struct Store {
     class_bases: FxHashMap<String, Vec<String>>,
     /// Fully-qualified class names discovered while indexing.
     classes: FxHashSet<String>,
+    /// Explicit metaclass for each indexed class, resolved to its
+    /// fully-qualified name at the class definition.
+    class_metaclasses: FxHashMap<String, String>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
@@ -303,6 +309,13 @@ impl DefinitionIndex {
         self.index_source_with_imported_base_preload(module_name, is_package, stmts, true);
     }
 
+    fn mark_first_party_module(&self, module_name: &str) {
+        self.write()
+            .store
+            .first_party_modules
+            .insert(module_name.to_string());
+    }
+
     fn index_source_with_imported_base_preload(
         &self,
         module_name: &str,
@@ -349,15 +362,20 @@ impl DefinitionIndex {
                 .data_constructor_bases
                 .iter()
                 .any(|base| inner.store.data_models.contains_key(base));
+        let track_bindings =
+            track_data_constructors || collected.has_singledispatch_decorator_candidates;
         index_module(
             &mut inner.store,
             module_name,
             is_package,
             stmts,
-            track_data_constructors,
+            track_bindings,
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
+        }
+        for (class_name, metaclass) in collected.class_metaclasses {
+            inner.store.class_metaclasses.insert(class_name, metaclass);
         }
         for (instance_name, class_name) in collected.callable_instances {
             let Some(signatures) = inner
@@ -812,6 +830,68 @@ impl DefinitionIndex {
         self.ensure_for(fullname, &mut query_budget);
         self.read().store.classes.contains(fullname)
     }
+
+    /// Number of leading user arguments that must remain positional across
+    /// the runtime boundaries of a class call.
+    ///
+    /// Class construction may cross `__init__`, `__new__`, and an explicit
+    /// metaclass `__call__`. A positional-only parameter on any modeled
+    /// boundary prevents the corresponding argument from being rewritten as
+    /// a keyword, but a merely keyword-capable competing boundary must not
+    /// suppress diagnostics from the selected constructor (issue #254).
+    pub fn constructor_positional_allowance(&self, class_fullname: &str) -> usize {
+        let (mut boundary_signatures, metaclass) = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            let inner = self.read();
+            let mut owner = class_fullname;
+            let first_party = loop {
+                let Some((parent, _)) = owner.rsplit_once('.') else {
+                    break false;
+                };
+                if inner.store.first_party_modules.contains(parent) {
+                    break true;
+                }
+                owner = parent;
+            };
+            if !first_party {
+                return 0;
+            }
+            let signatures = ["__init__", "__new__"]
+                .into_iter()
+                .filter_map(|method| {
+                    inner
+                        .store
+                        .signatures
+                        .get(&format!("{class_fullname}.{method}"))
+                })
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let metaclass = inner.store.class_metaclasses.get(class_fullname).cloned();
+            drop(inner);
+            (signatures, metaclass)
+        };
+        if let Some(call) = metaclass
+            .and_then(|metaclass| self.resolve_method(&metaclass, "__call__"))
+            .filter(|method| method != "builtins.type.__call__")
+        {
+            boundary_signatures.extend(self.get(&call).unwrap_or_default().iter().cloned());
+        }
+
+        boundary_signatures
+            .iter()
+            .map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .filter(|parameter| parameter.kind == ParameterKind::PositionalOnly)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
@@ -837,8 +917,10 @@ struct Collected {
     bindings: FxHashMap<String, String>,
     preload_imported_bases: bool,
     has_data_constructor_classes: bool,
+    has_singledispatch_decorator_candidates: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
+    class_metaclasses: FxHashMap<String, String>,
 }
 
 pub fn build_index_with_sources(
@@ -880,6 +962,7 @@ pub fn build_index_with_sources(
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue;
         };
+        index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
         indexed_files.insert(path.clone(), IndexedFile { source, parsed });
@@ -1176,7 +1259,14 @@ fn collect_scoped(
             }
             // Imports here bind in the function/class namespace, never the
             // module's, so descend with ``module_scope = false``.
-            Stmt::FunctionDef(ast::StmtFunctionDef { body, .. }) => {
+            Stmt::FunctionDef(ast::StmtFunctionDef {
+                decorator_list,
+                body,
+                ..
+            }) => {
+                out.has_singledispatch_decorator_candidates |=
+                    may_have_singledispatch_decorator(decorator_list)
+                        || has_singledispatch_decorator(decorator_list, bindings, scope_name);
                 collect_scoped(
                     body,
                     module_name,
@@ -1197,6 +1287,16 @@ fn collect_scoped(
                         .collect();
                     if !bases.is_empty() {
                         out.class_bases.insert(class_scope.clone(), bases);
+                    }
+                    if let Some(metaclass) = arguments
+                        .keywords
+                        .iter()
+                        .find(|keyword| {
+                            keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("metaclass")
+                        })
+                        .and_then(|keyword| resolve_base_name(&keyword.value, scope_name, bindings))
+                    {
+                        out.class_metaclasses.insert(class_scope.clone(), metaclass);
                     }
                 }
                 if collect_class_data_constructor_bases(
@@ -1365,10 +1465,10 @@ fn index_module(
     module_name: &str,
     is_package: bool,
     stmts: &[Stmt],
-    track_data_constructors: bool,
+    track_bindings: bool,
 ) {
-    if !track_data_constructors {
-        index_module_fast(store, module_name, stmts);
+    if !track_bindings {
+        index_module_fast(store, module_name, module_name, stmts);
         return;
     }
     let mut bindings = FxHashMap::default();
@@ -1388,9 +1488,9 @@ fn index_module(
 // out of coverage avoids requiring a second full branch matrix for duplicated
 // control-flow recursion.
 #[cfg_attr(coverage, coverage(off))]
-fn index_module_fast(store: &mut Store, scope_name: &str, stmts: &[Stmt]) {
+fn index_module_fast(store: &mut Store, module_name: &str, scope_name: &str, stmts: &[Stmt]) {
     for stmt in stmts {
-        index_stmt_fast(store, scope_name, stmt);
+        index_stmt_fast(store, module_name, scope_name, stmt);
     }
 }
 
@@ -1456,18 +1556,20 @@ fn index_module_with_bindings(
     }
 }
 
-/// Whether `decorator_list` contains ``@singledispatch`` or
-/// ``@singledispatchmethod`` (bare name, attribute access, or call form).
-/// Those functions dispatch on ``args[0].__class__``; passing the first
-/// argument as a keyword leaves ``args`` empty and raises ``TypeError`` at
-/// runtime, so calls to them must not be flagged or rewritten.
-fn has_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
+fn may_have_singledispatch_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|dec| {
         matches!(
             callee_tail(&dec.expression),
             Some("singledispatch" | "singledispatchmethod")
         )
     })
+}
+
+fn decorator_reference(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Call(ast::ExprCall { func, .. }) => decorator_reference(func),
+        _ => reference_path(expr),
+    }
 }
 
 fn simple_decorator_return_signature(body: &[Stmt]) -> Option<Signature> {
@@ -1497,12 +1599,32 @@ fn simple_decorator_return_signature(body: &[Stmt]) -> Option<Signature> {
         .then_some(signature)
 }
 
+fn lookup_decorator_return(
+    store: &Store,
+    module_name: &str,
+    scope_name: &str,
+    suffix: &str,
+) -> Option<Signature> {
+    let mut prefix = scope_name;
+    loop {
+        if let Some(signature) = store.decorator_returns.get(&format!("{prefix}.{suffix}")) {
+            return Some(signature.clone());
+        }
+        if prefix == module_name {
+            break;
+        }
+        prefix = prefix.rsplit_once('.').map_or(module_name, |(parent, _)| parent);
+    }
+    None
+}
+
 // The binding-aware indexer is selected only when a file also contains data
 // constructor work. Its decorator behavior duplicates the ordinary fast
 // indexer covered by the same-file/imported integration tests.
 #[cfg_attr(coverage, coverage(off))]
 fn inferred_runtime_signature(
     store: &Store,
+    module_name: &str,
     scope_name: &str,
     decorator_list: &[ast::Decorator],
     bindings: &FxHashMap<String, String>,
@@ -1510,24 +1632,47 @@ fn inferred_runtime_signature(
     let [decorator] = decorator_list else {
         return None;
     };
-    let segments = reference_path(&decorator.expression)?;
-    let decorator_fullname = resolve_reference(bindings, scope_name, &segments)?;
-    store.decorator_returns.get(&decorator_fullname).cloned()
+    let segments = decorator_reference(&decorator.expression)?;
+    let suffix = segments.join(".");
+    lookup_decorator_return(store, module_name, scope_name, &suffix).or_else(|| {
+        let decorator_fullname = resolve_reference(bindings, scope_name, &segments)?;
+        store.decorator_returns.get(&decorator_fullname).cloned()
+    })
 }
 
 fn inferred_runtime_signature_fast(
     store: &Store,
+    module_name: &str,
     scope_name: &str,
     decorator_list: &[ast::Decorator],
 ) -> Option<Signature> {
     let [decorator] = decorator_list else {
         return None;
     };
-    let suffix = reference_path(&decorator.expression)?.join(".");
-    store
-        .decorator_returns
-        .get(&format!("{scope_name}.{suffix}"))
-        .cloned()
+    let suffix = decorator_reference(&decorator.expression)?.join(".");
+    lookup_decorator_return(store, module_name, scope_name, &suffix)
+}
+
+/// Whether a decorator resolves specifically to ``functools.singledispatch``
+/// or ``functools.singledispatchmethod``. Those functions dispatch on
+/// ``args[0].__class__``; passing the first argument as a keyword leaves
+/// ``args`` empty and raises ``TypeError`` at runtime, so calls to them must
+/// not be flagged or rewritten. A same-named local decorator is not exempt.
+fn has_singledispatch_decorator(
+    decorator_list: &[ast::Decorator],
+    bindings: &FxHashMap<String, String>,
+    scope_name: &str,
+) -> bool {
+    decorator_list.iter().any(|decorator| {
+        decorator_reference(&decorator.expression)
+            .and_then(|segments| resolve_reference(bindings, scope_name, &segments))
+            .is_some_and(|fullname| {
+                matches!(
+                    fullname.as_str(),
+                    "functools.singledispatch" | "functools.singledispatchmethod"
+                )
+            })
+    })
 }
 
 fn has_overload_decorator(decorator_list: &[ast::Decorator]) -> bool {
@@ -1638,11 +1783,15 @@ fn index_stmt(
             if let Some(signature) = simple_decorator_return_signature(body) {
                 store.decorator_returns.insert(fullname.clone(), signature);
             }
-            if has_singledispatch_decorator(decorator_list) {
+            if has_singledispatch_decorator(decorator_list, bindings, scope_name) {
                 store.excluded.insert(fullname.clone());
-            } else if let Some(signature) =
-                inferred_runtime_signature(store, scope_name, decorator_list, bindings)
-            {
+            } else if let Some(signature) = inferred_runtime_signature(
+                store,
+                module_name,
+                scope_name,
+                decorator_list,
+                bindings,
+            ) {
                 store.runtime_decorated.insert(fullname.clone());
                 store.insert_runtime_definition(fullname.clone(), signature);
             } else {
@@ -1755,7 +1904,7 @@ fn index_stmt(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
+fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt: &Stmt) {
     match stmt {
         Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
@@ -1768,20 +1917,23 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             if let Some(signature) = simple_decorator_return_signature(body) {
                 store.decorator_returns.insert(fullname.clone(), signature);
             }
-            if has_singledispatch_decorator(decorator_list) {
+            if may_have_singledispatch_decorator(decorator_list) {
                 if body_may_contain_indexed_def(body) {
                     store.excluded.insert(fullname.clone());
-                    index_module_fast(store, &fullname, body);
+                    index_module_fast(store, module_name, &fullname, body);
                 } else {
                     store.excluded.insert(fullname);
                 }
-            } else if let Some(signature) =
-                inferred_runtime_signature_fast(store, scope_name, decorator_list)
-            {
+            } else if let Some(signature) = inferred_runtime_signature_fast(
+                store,
+                module_name,
+                scope_name,
+                decorator_list,
+            ) {
                 store.runtime_decorated.insert(fullname.clone());
                 store.insert_runtime_definition(fullname.clone(), signature);
                 if body_may_contain_indexed_def(body) {
-                    index_module_fast(store, &fullname, body);
+                    index_module_fast(store, module_name, &fullname, body);
                 }
             } else {
                 let signature = signature_from_parameters(parameters);
@@ -1791,28 +1943,30 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
                     has_overload_decorator(decorator_list),
                 );
                 if body_may_contain_indexed_def(body) {
-                    index_module_fast(store, &fullname, body);
+                    index_module_fast(store, module_name, &fullname, body);
                 }
             }
         }
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
-            index_class_body_fast(store, &class_name, &class_def.body);
+            index_class_body_fast(store, module_name, &class_name, &class_def.body);
         }
         Stmt::If(ast::StmtIf {
             body,
             elif_else_clauses,
             ..
         }) => {
-            index_module_fast(store, scope_name, body);
+            index_module_fast(store, module_name, scope_name, body);
             for clause in elif_else_clauses {
-                index_module_fast(store, scope_name, &clause.body);
+                index_module_fast(store, module_name, scope_name, &clause.body);
             }
         }
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => index_module_fast(store, scope_name, body),
+        | Stmt::With(ast::StmtWith { body, .. }) => {
+            index_module_fast(store, module_name, scope_name, body)
+        }
         Stmt::Try(ast::StmtTry {
             body,
             handlers,
@@ -1820,17 +1974,17 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            index_module_fast(store, scope_name, body);
+            index_module_fast(store, module_name, scope_name, body);
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module_fast(store, scope_name, &handler.body);
+                index_module_fast(store, module_name, scope_name, &handler.body);
             }
-            index_module_fast(store, scope_name, orelse);
-            index_module_fast(store, scope_name, finalbody);
+            index_module_fast(store, module_name, scope_name, orelse);
+            index_module_fast(store, module_name, scope_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
-                index_module_fast(store, scope_name, &case.body);
+                index_module_fast(store, module_name, scope_name, &case.body);
             }
         }
         _ => {}
@@ -1844,7 +1998,7 @@ fn index_class_body(
     is_package: bool,
     class_name: &str,
     body: &[Stmt],
-    bindings: &FxHashMap<String, String>,
+    bindings: &mut FxHashMap<String, String>,
 ) {
     for stmt in body {
         match stmt {
@@ -1859,7 +2013,7 @@ fn index_class_body(
                 if let Some(signature) = simple_decorator_return_signature(body) {
                     store.decorator_returns.insert(fullname.clone(), signature);
                 }
-                if has_singledispatch_decorator(decorator_list) {
+                if has_singledispatch_decorator(decorator_list, bindings, class_name) {
                     if body_may_contain_indexed_def(body) {
                         store.excluded.insert(fullname.clone());
                         let mut nested_bindings = bindings.clone();
@@ -1872,11 +2026,15 @@ fn index_class_body(
                             &mut nested_bindings,
                         );
                     } else {
-                        store.excluded.insert(fullname);
+                        store.excluded.insert(fullname.clone());
                     }
-                } else if let Some(signature) =
-                    inferred_runtime_signature(store, class_name, decorator_list, bindings)
-                {
+                } else if let Some(signature) = inferred_runtime_signature(
+                    store,
+                    module_name,
+                    class_name,
+                    decorator_list,
+                    bindings,
+                ) {
                     store.runtime_decorated.insert(fullname.clone());
                     store.insert_runtime_definition(fullname.clone(), signature);
                     if body_may_contain_indexed_def(body) {
@@ -1909,6 +2067,7 @@ fn index_class_body(
                         );
                     }
                 }
+                bind(bindings, name.as_str(), fullname);
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
@@ -1946,7 +2105,7 @@ fn index_class_body(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
+fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str, body: &[Stmt]) {
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -1960,20 +2119,23 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 if let Some(signature) = simple_decorator_return_signature(body) {
                     store.decorator_returns.insert(fullname.clone(), signature);
                 }
-                if has_singledispatch_decorator(decorator_list) {
+                if may_have_singledispatch_decorator(decorator_list) {
                     if body_may_contain_indexed_def(body) {
                         store.excluded.insert(fullname.clone());
-                        index_module_fast(store, &fullname, body);
+                        index_module_fast(store, module_name, &fullname, body);
                     } else {
-                        store.excluded.insert(fullname);
+                        store.excluded.insert(fullname.clone());
                     }
-                } else if let Some(signature) =
-                    inferred_runtime_signature_fast(store, class_name, decorator_list)
-                {
+                } else if let Some(signature) = inferred_runtime_signature_fast(
+                    store,
+                    module_name,
+                    class_name,
+                    decorator_list,
+                ) {
                     store.runtime_decorated.insert(fullname.clone());
                     store.insert_runtime_definition(fullname.clone(), signature);
                     if body_may_contain_indexed_def(body) {
-                        index_module_fast(store, &fullname, body);
+                        index_module_fast(store, module_name, &fullname, body);
                     }
                 } else {
                     let signature = signature_from_parameters(parameters);
@@ -1983,23 +2145,23 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                         has_overload_decorator(decorator_list),
                     );
                     if body_may_contain_indexed_def(body) {
-                        index_module_fast(store, &fullname, body);
+                        index_module_fast(store, module_name, &fullname, body);
                     }
                 }
             }
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
                 store.classes.insert(nested.clone());
-                index_class_body_fast(store, &nested, &class_def.body);
+                index_class_body_fast(store, module_name, &nested, &class_def.body);
             }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
-                index_class_body_fast(store, class_name, body);
+                index_class_body_fast(store, module_name, class_name, body);
                 for clause in elif_else_clauses {
-                    index_class_body_fast(store, class_name, &clause.body);
+                    index_class_body_fast(store, module_name, class_name, &clause.body);
                 }
             }
             _ => {}

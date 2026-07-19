@@ -953,6 +953,126 @@ C(a=1)
 }
 
 #[test]
+fn constructor_respects_local_new_positional_only_boundary() {
+    assert_ok(
+        r"
+class C:
+    def __new__(cls, value, /):
+        return super().__new__(cls)
+
+    def __init__(self, value):
+        self.value = value
+
+C(1)
+",
+    );
+}
+
+#[test]
+fn constructor_with_keywordable_new_still_flags() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, value): ...
+    def __init__(self, value): ...
+C(1)
+",
+        5,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn constructor_flags_only_surplus_after_local_new_boundary() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, value, /, other): ...
+    def __init__(self, value, other): ...
+C(1, 2)
+",
+        5,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn constructor_allowance_does_not_hide_arguments_beyond_init_arity() {
+    assert_error(
+        r"
+class C:
+    def __new__(cls, first, second, /): ...
+    def __init__(self, first): ...
+C(1, 2)
+",
+        5,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn constructor_respects_metaclass_call_positional_only_boundary() {
+    assert_ok(
+        r"
+class Meta(type):
+    def __call__(cls, value, /):
+        return super().__call__(value=value)
+
+class C(metaclass=Meta):
+    def __init__(self, value):
+        self.value = value
+
+C(1)
+",
+    );
+}
+
+#[test]
+fn metaclass_allowance_does_not_hide_arguments_beyond_init_arity() {
+    assert_error(
+        r"
+class Meta(type):
+    def __call__(cls, first, second, /): ...
+class C(metaclass=Meta):
+    def __init__(self, first): ...
+C(1, 2)
+",
+        6,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn constructor_flags_only_surplus_after_metaclass_call_boundary() {
+    assert_error(
+        r"
+class Meta(type):
+    def __call__(cls, value, /, other): ...
+class C(metaclass=Meta):
+    def __init__(self, value, other): ...
+C(1, 2)
+",
+        6,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn callable_instance_constructor_boundary_does_not_affect_dunder_call() {
+    assert_error(
+        r"
+class C:
+    def __init__(self, seed, /): ...
+    def __call__(self, value): ...
+c = C(0)
+c(1)
+",
+        6,
+        "Too many positional",
+    );
+}
+
+#[test]
 fn builtin_ignore_name_suppresses() {
     let project = TestProject::new()
         .file(
@@ -2132,6 +2252,107 @@ def outer():
 }
 
 #[test]
+fn class_local_decorator_shadows_module_level() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def wrapper(x, y, z, /):
+        return decorated(x, y, z)
+    return wrapper
+
+class C:
+    @staticmethod
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(value):
+        return value
+
+C.consume(1)
+",
+    );
+}
+
+#[test]
+fn class_local_decorator_shadows_module_level_with_bindings() {
+    assert_ok(
+        r"
+from dataclasses import dataclass
+
+def positional_only(decorated):
+    def wrapper(x, y, z, /):
+        return decorated(x, y, z)
+    return wrapper
+
+@dataclass
+class C:
+    @staticmethod
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(self, value):
+        return value
+
+C().consume(1)
+",
+    );
+}
+
+#[test]
+fn nested_function_uses_module_decorator_on_fast_path() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+def outer():
+    @positional_only
+    def consume(value):
+        return value
+
+    consume(1)
+
+outer()
+",
+    );
+}
+
+#[test]
+fn runtime_decorated_method_body_still_indexes_nested_defs() {
+    assert_error(
+        r"
+from dataclasses import dataclass
+
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@dataclass
+class C:
+    @positional_only
+    def method(self):
+        def nested(*, only_kw):
+            return only_kw
+
+        nested(1)
+
+C().method()
+",
+        16,
+        "Too many positional",
+    );
+}
+
+#[test]
 fn singledispatch_positional_not_flagged() {
     // Calls to @singledispatch functions must not be flagged: the dispatch
     // mechanism reads args[0].__class__, so the first argument must stay
@@ -2157,6 +2378,39 @@ fn singledispatch_qualified_not_flagged() {
 import functools
 
 @functools.singledispatch
+def process(node):
+    ...
+
+process(42)
+",
+    );
+}
+
+#[test]
+fn user_defined_singledispatch_does_not_disable_checking() {
+    assert_error(
+        r"
+def singledispatch(function):
+    return function
+
+@singledispatch
+def f(value):
+    return value
+
+f(1)
+",
+        9,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn aliased_functools_singledispatch_not_flagged() {
+    assert_ok(
+        r"
+from functools import singledispatch as dispatch
+
+@dispatch
 def process(node):
     ...
 
