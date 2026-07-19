@@ -2082,6 +2082,39 @@ process(42)
 }
 
 #[test]
+fn user_defined_singledispatch_does_not_disable_checking() {
+    assert_error(
+        r"
+def singledispatch(function):
+    return function
+
+@singledispatch
+def f(value):
+    return value
+
+f(1)
+",
+        9,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn aliased_functools_singledispatch_not_flagged() {
+    assert_ok(
+        r"
+from functools import singledispatch as dispatch
+
+@dispatch
+def process(node):
+    ...
+
+process(42)
+",
+    );
+}
+
+#[test]
 fn singledispatchmethod_not_flagged() {
     // @singledispatchmethod on a class method must not be flagged.
     assert_ok(
