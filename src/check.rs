@@ -1933,6 +1933,17 @@ impl<'a> CallChecker<'a> {
         if is_typing_special_form_constructor(&callee_fullname) {
             return;
         }
+        let is_constructor =
+            callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let constructor_positional_requirement =
+            if !is_constructor || self.index.is_synthesized(&callee_fullname) {
+                0
+            } else {
+                self.class_from_constructor_func(&call.func)
+                    .map_or(0, |class| {
+                        self.index.constructor_positional_allowance(&class)
+                    })
+            };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }
@@ -1967,6 +1978,29 @@ impl<'a> CallChecker<'a> {
         } else {
             signatures
         };
+        // A competing constructor boundary may require more leading
+        // positional arguments than the selected constructor can accept.
+        // Preserve only the required positions that exist in at least one
+        // selected signature; the requirement is not an arity exemption.
+        let constructor_positional_allowance = constructor_positional_requirement.min(
+            effective
+                .iter()
+                .map(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .skip(1)
+                        .filter(|parameter| {
+                            matches!(
+                                parameter.kind,
+                                ParameterKind::PositionalOnly | ParameterKind::PositionalOrKeyword
+                            )
+                        })
+                        .count()
+                })
+                .max()
+                .unwrap_or(0),
+        );
         let effective_count = if receiver_is_explicit {
             positional_count.saturating_sub(1)
         } else {
@@ -1975,9 +2009,16 @@ impl<'a> CallChecker<'a> {
         // Overload-safe: only flag when the call exceeds the positional limit
         // of *every* candidate signature (the most permissive overload wins),
         // so ``.pyi`` stub overloads never produce false positives.
-        if effective.iter().any(|signature| {
-            !call_exceeds_positional_limit(signature, &callee_fullname, ignored, effective_count)
-        }) {
+        if effective_count <= constructor_positional_allowance
+            || effective.iter().any(|signature| {
+                !call_exceeds_positional_limit(
+                    signature,
+                    &callee_fullname,
+                    ignored,
+                    effective_count,
+                )
+            })
+        {
             return;
         }
         let max_positional = effective
@@ -1986,7 +2027,8 @@ impl<'a> CallChecker<'a> {
                 signature.max_positional_at_call_site(&callee_fullname, ignored)
             })
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(constructor_positional_allowance);
         let (line, column) = self.diagnostic_position(call.start());
         self.diagnostics.push(Diagnostic {
             path: self.path.clone(),
