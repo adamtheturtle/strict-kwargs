@@ -155,21 +155,24 @@ fn exclude_assigned_attribute(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
+fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, value: &Expr) {
     if store.conditional_depth > 0 {
+        return;
+    }
+    // Only an inline ``lambda`` demonstrably replaces a method with a
+    // different call signature, so it is the sole class-body name rebinding
+    // that must invalidate the indexed ``def``. Every other form keeps a
+    // resolvable signature: a plain alias (``theclass = date``,
+    // ``assert_is_copy = Base.assert_is_copy``), or a signature-preserving
+    // wrapper (``from_param = classmethod(from_param)``). Excluding those
+    // would wrongly suppress every call routed through the name.
+    if !matches!(value, Expr::Lambda(_)) {
         return;
     }
     let Expr::Name(name) = target else {
         return;
     };
-    // Only a genuine rebinding of an indexed method invalidates a signature.
-    // A plain class attribute that aliases a callable (``theclass = date``,
-    // ``assert_is_copy = Base.assert_is_copy``) has no stale ``def`` to drop;
-    // excluding it would wrongly suppress every call routed through the alias.
-    let fullname = format!("{scope_name}.{}", name.id);
-    if store.signatures.contains_key(&fullname) {
-        store.exclude(fullname);
-    }
+    store.exclude(format!("{scope_name}.{}", name.id));
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -2048,19 +2051,19 @@ fn index_class_body(
                 );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
-            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
-                    exclude_assigned_name(store, class_name, target);
+                    exclude_assigned_name(store, class_name, target, value);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
-                value: Some(_),
+                value: Some(value),
                 ..
             }) => {
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
-                exclude_assigned_name(store, class_name, target);
+                exclude_assigned_name(store, class_name, target, value);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -2178,19 +2181,19 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 store.classes.insert(nested.clone());
                 index_class_body_fast(store, &nested, &class_def.body);
             }
-            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
                     exclude_assigned_attribute(store, class_name, target, None);
-                    exclude_assigned_name(store, class_name, target);
+                    exclude_assigned_name(store, class_name, target, value);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
-                value: Some(_),
+                value: Some(value),
                 ..
             }) => {
                 exclude_assigned_attribute(store, class_name, target, None);
-                exclude_assigned_name(store, class_name, target);
+                exclude_assigned_name(store, class_name, target, value);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -2653,11 +2656,25 @@ Child.m = lambda self, a, /: a
 
     #[test]
     fn class_body_loop_name_assign_excludes_method() {
+        // A loop body is not a conditional branch, so a ``lambda`` rebinding
+        // inside it still invalidates the indexed ``def``.
         let store = indexed_store(
-            "class C:\n    def method(self, value): ...\n    for replacement in replacements:\n        method = replacement\n",
+            "class C:\n    def method(self, value): ...\n    for _ in replacements:\n        method = lambda self, value, /: value\n",
         );
         assert!(!store.signatures.contains_key("main.C.method"));
         assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn class_body_wrapper_and_alias_rebinds_stay_resolvable() {
+        // ``from_param = classmethod(from_param)`` /
+        // ``convert_mbcs = staticmethod(convert_mbcs)`` keep a resolvable
+        // signature, so the indexed ``def`` must survive the rebinding.
+        let store = indexed_store(
+            "class C:\n    def from_param(cls, value): ...\n    from_param = classmethod(from_param)\n",
+        );
+        assert!(store.signatures.contains_key("main.C.from_param"));
+        assert!(!store.excluded.contains("main.C.from_param"));
     }
 
     #[test]
