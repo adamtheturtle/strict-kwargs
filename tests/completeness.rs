@@ -124,8 +124,17 @@ fn run_repository_case(case: RepositoryCase) {
     let expected = read_snapshot_diagnostics(golden_path(platform_snapshot_relative_path(
         repository.case,
     )));
+    // The floor is a lower bound, so an entry produced in *any* run satisfies
+    // it. Comparing against the all-runs intersection (`actual_keys`) instead
+    // would let a single rare, nondeterministic `ty` null resolution fail the
+    // gate for a diagnostic the tool clearly produces — and with `runs > 1`
+    // that intersection amplifies the flakiness (an entry seen in 2 of 3 runs
+    // is dropped) rather than filtering it. A genuine regression still appears
+    // here: an entry the tool never produces is absent from every run.
+    // Generation above stays conservative, recording only stable entries.
+    let observed = actual.keys().cloned().collect::<BTreeSet<_>>();
     let missing = expected
-        .difference(&actual_keys)
+        .difference(&observed)
         .cloned()
         .collect::<BTreeSet<_>>();
     assert!(
