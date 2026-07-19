@@ -13,7 +13,7 @@ use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
 
 mod data_model;
@@ -61,6 +61,9 @@ struct Store {
     /// a conditional branch are not definite rebindings, so they must not
     /// invalidate signatures from an alternative branch.
     conditional_depth: usize,
+    /// Modules supplied as check targets rather than loaded from vendored
+    /// typeshed or lazily resolved dependencies.
+    first_party_modules: FxHashSet<String>,
     /// Names whose most recent definitions are an open sequence of
     /// ``@overload`` arms. The following undecorated implementation closes
     /// the sequence without replacing its public overload signatures.
@@ -79,6 +82,9 @@ struct Store {
     class_bases: FxHashMap<String, Vec<String>>,
     /// Fully-qualified class names discovered while indexing.
     classes: FxHashSet<String>,
+    /// Explicit metaclass for each indexed class, resolved to its
+    /// fully-qualified name at the class definition.
+    class_metaclasses: FxHashMap<String, String>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
@@ -145,6 +151,17 @@ fn exclude_assigned_attribute(
         },
     );
     store.exclude(format!("{owner}.{}", attr.id));
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
+    if store.conditional_depth > 0 {
+        return;
+    }
+    let Expr::Name(name) = target else {
+        return;
+    };
+    store.exclude(format!("{scope_name}.{}", name.id));
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -326,6 +343,13 @@ impl DefinitionIndex {
         self.index_source_with_imported_base_preload(module_name, is_package, stmts, true);
     }
 
+    fn mark_first_party_module(&self, module_name: &str) {
+        self.write()
+            .store
+            .first_party_modules
+            .insert(module_name.to_string());
+    }
+
     fn index_source_with_imported_base_preload(
         &self,
         module_name: &str,
@@ -384,6 +408,9 @@ impl DefinitionIndex {
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
+        }
+        for (class_name, metaclass) in collected.class_metaclasses {
+            inner.store.class_metaclasses.insert(class_name, metaclass);
         }
         for (instance_name, class_name) in collected.callable_instances {
             let Some(signatures) = inner
@@ -684,6 +711,9 @@ impl DefinitionIndex {
             return None;
         }
         let candidate = format!("{class_fullname}.{method}");
+        if self.is_excluded(&candidate) {
+            return None;
+        }
         if self.get(&candidate).is_some() {
             return Some(candidate);
         }
@@ -833,6 +863,68 @@ impl DefinitionIndex {
         self.ensure_for(fullname, &mut query_budget);
         self.read().store.classes.contains(fullname)
     }
+
+    /// Number of leading user arguments that must remain positional across
+    /// the runtime boundaries of a class call.
+    ///
+    /// Class construction may cross `__init__`, `__new__`, and an explicit
+    /// metaclass `__call__`. A positional-only parameter on any modeled
+    /// boundary prevents the corresponding argument from being rewritten as
+    /// a keyword, but a merely keyword-capable competing boundary must not
+    /// suppress diagnostics from the selected constructor (issue #254).
+    pub fn constructor_positional_allowance(&self, class_fullname: &str) -> usize {
+        let (mut boundary_signatures, metaclass) = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            let inner = self.read();
+            let mut owner = class_fullname;
+            let first_party = loop {
+                let Some((parent, _)) = owner.rsplit_once('.') else {
+                    break false;
+                };
+                if inner.store.first_party_modules.contains(parent) {
+                    break true;
+                }
+                owner = parent;
+            };
+            if !first_party {
+                return 0;
+            }
+            let signatures = ["__init__", "__new__"]
+                .into_iter()
+                .filter_map(|method| {
+                    inner
+                        .store
+                        .signatures
+                        .get(&format!("{class_fullname}.{method}"))
+                })
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let metaclass = inner.store.class_metaclasses.get(class_fullname).cloned();
+            drop(inner);
+            (signatures, metaclass)
+        };
+        if let Some(call) = metaclass
+            .and_then(|metaclass| self.resolve_method(&metaclass, "__call__"))
+            .filter(|method| method != "builtins.type.__call__")
+        {
+            boundary_signatures.extend(self.get(&call).unwrap_or_default().iter().cloned());
+        }
+
+        boundary_signatures
+            .iter()
+            .map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .filter(|parameter| parameter.kind == ParameterKind::PositionalOnly)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
@@ -863,6 +955,7 @@ struct Collected {
     has_singledispatch_decorator_candidates: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
+    class_metaclasses: FxHashMap<String, String>,
 }
 
 pub fn build_index_with_sources(
@@ -904,6 +997,7 @@ pub fn build_index_with_sources(
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue;
         };
+        index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
         indexed_files.insert(path.clone(), IndexedFile { source, parsed });
@@ -1232,6 +1326,16 @@ fn collect_scoped(
                         .collect();
                     if !bases.is_empty() {
                         out.class_bases.insert(class_scope.clone(), bases);
+                    }
+                    if let Some(metaclass) = arguments
+                        .keywords
+                        .iter()
+                        .find(|keyword| {
+                            keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("metaclass")
+                        })
+                        .and_then(|keyword| resolve_base_name(&keyword.value, scope_name, bindings))
+                    {
+                        out.class_metaclasses.insert(class_scope.clone(), metaclass);
                     }
                 }
                 if collect_class_data_constructor_bases(
@@ -1714,8 +1818,8 @@ fn index_stmt(
             finalbody,
             ..
         }) => {
-            store.conditional_depth += 1;
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            store.conditional_depth += 1;
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
                 index_module_with_bindings(
@@ -1735,6 +1839,7 @@ fn index_stmt(
                 orelse,
                 bindings,
             );
+            store.conditional_depth -= 1;
             index_module_with_bindings(
                 store,
                 module_name,
@@ -1743,7 +1848,6 @@ fn index_stmt(
                 finalbody,
                 bindings,
             );
-            store.conditional_depth -= 1;
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             store.conditional_depth += 1;
@@ -1840,15 +1944,15 @@ fn index_stmt_fast(store: &mut Store, scope_name: &str, stmt: &Stmt) {
             finalbody,
             ..
         }) => {
-            store.conditional_depth += 1;
             index_module_fast(store, scope_name, body);
+            store.conditional_depth += 1;
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
                 index_module_fast(store, scope_name, &handler.body);
             }
             index_module_fast(store, scope_name, orelse);
-            index_module_fast(store, scope_name, finalbody);
             store.conditional_depth -= 1;
+            index_module_fast(store, scope_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             store.conditional_depth += 1;
@@ -1934,11 +2038,26 @@ fn index_class_body(
                 );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
+            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+                for target in targets {
+                    exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                    exclude_assigned_name(store, class_name, target);
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                value: Some(_),
+                ..
+            }) => {
+                exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                exclude_assigned_name(store, class_name, target);
+            }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
+                store.conditional_depth += 1;
                 index_class_body(store, module_name, is_package, class_name, body, bindings);
                 for clause in elif_else_clauses {
                     index_class_body(
@@ -1950,6 +2069,7 @@ fn index_class_body(
                         bindings,
                     );
                 }
+                store.conditional_depth -= 1;
             }
             _ => {}
         }
@@ -1998,15 +2118,31 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 store.classes.insert(nested.clone());
                 index_class_body_fast(store, &nested, &class_def.body);
             }
+            Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+                for target in targets {
+                    exclude_assigned_attribute(store, class_name, target, None);
+                    exclude_assigned_name(store, class_name, target);
+                }
+            }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                value: Some(_),
+                ..
+            }) => {
+                exclude_assigned_attribute(store, class_name, target, None);
+                exclude_assigned_name(store, class_name, target);
+            }
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
                 ..
             }) => {
+                store.conditional_depth += 1;
                 index_class_body_fast(store, class_name, body);
                 for clause in elif_else_clauses {
                     index_class_body_fast(store, class_name, &clause.body);
                 }
+                store.conditional_depth -= 1;
             }
             _ => {}
         }
@@ -2343,6 +2479,63 @@ class Child(Base):
     fn annotation_only_attribute_assignment_preserves_method_signature() {
         let store = indexed_store(
             "from typing import Callable\nclass C:\n    def method(self, value): ...\nC.method: Callable[..., object]\n",
+        );
+        assert!(store.signatures.contains_key("main.C.method"));
+        assert!(!store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn excluded_method_does_not_resolve_via_mro_to_base() {
+        let parsed = parse_module(
+            r"
+class Base:
+    def m(self, a): ...
+
+class Child(Base):
+    def m(self, a): ...
+
+Child.m = lambda self, a, /: a
+",
+        )
+        .expect("parse");
+        let index = DefinitionIndex::for_test();
+        index.index_source("main", false, parsed.suite());
+
+        assert!(index.is_excluded("main.Child.m"));
+        assert_eq!(index.resolve_method("main.Child", "m"), None);
+    }
+
+    #[test]
+    fn class_body_name_assign_excludes_method() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\n    method = lambda self, value, /: value\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+        assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn try_body_attribute_assignment_excludes_method() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\ntry:\n    C.method = replacement\nexcept Exception:\n    pass\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+        assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn finally_attribute_assignment_excludes_method() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\ntry:\n    pass\nfinally:\n    C.method = replacement\n",
+        );
+        assert!(!store.signatures.contains_key("main.C.method"));
+        assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn except_handler_attribute_assignment_preserves_method() {
+        let store = indexed_store(
+            "class C:\n    def method(self, value): ...\ntry:\n    pass\nexcept Exception:\n    C.method = replacement\n",
         );
         assert!(store.signatures.contains_key("main.C.method"));
         assert!(!store.excluded.contains("main.C.method"));
