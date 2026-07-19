@@ -13,7 +13,7 @@ use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
-use crate::signature::Signature;
+use crate::signature::{ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
 
 mod data_model;
@@ -57,6 +57,9 @@ enum ModuleState {
 #[derive(Debug, Default)]
 struct Store {
     signatures: FxHashMap<String, Vec<Signature>>,
+    /// Modules supplied as check targets rather than loaded from vendored
+    /// typeshed or lazily resolved dependencies.
+    first_party_modules: FxHashSet<String>,
     /// Names whose most recent definitions are an open sequence of
     /// ``@overload`` arms. The following undecorated implementation closes
     /// the sequence without replacing its public overload signatures.
@@ -75,6 +78,9 @@ struct Store {
     class_bases: FxHashMap<String, Vec<String>>,
     /// Fully-qualified class names discovered while indexing.
     classes: FxHashSet<String>,
+    /// Explicit metaclass for each indexed class, resolved to its
+    /// fully-qualified name at the class definition.
+    class_metaclasses: FxHashMap<String, String>,
     /// Function fullnames that must be skipped entirely (neither flagged nor
     /// rewritten). Currently populated for ``@singledispatch`` /
     /// ``@singledispatchmethod`` functions, whose dispatch reads
@@ -291,6 +297,13 @@ impl DefinitionIndex {
         self.index_source_with_imported_base_preload(module_name, is_package, stmts, true);
     }
 
+    fn mark_first_party_module(&self, module_name: &str) {
+        self.write()
+            .store
+            .first_party_modules
+            .insert(module_name.to_string());
+    }
+
     fn index_source_with_imported_base_preload(
         &self,
         module_name: &str,
@@ -348,6 +361,9 @@ impl DefinitionIndex {
         );
         for (class_name, bases) in collected.class_bases {
             inner.store.class_bases.insert(class_name, bases);
+        }
+        for (class_name, metaclass) in collected.class_metaclasses {
+            inner.store.class_metaclasses.insert(class_name, metaclass);
         }
         for (instance_name, class_name) in collected.callable_instances {
             let Some(signatures) = inner
@@ -797,6 +813,68 @@ impl DefinitionIndex {
         self.ensure_for(fullname, &mut query_budget);
         self.read().store.classes.contains(fullname)
     }
+
+    /// Number of leading user arguments that must remain positional across
+    /// the runtime boundaries of a class call.
+    ///
+    /// Class construction may cross `__init__`, `__new__`, and an explicit
+    /// metaclass `__call__`. A positional-only parameter on any modeled
+    /// boundary prevents the corresponding argument from being rewritten as
+    /// a keyword, but a merely keyword-capable competing boundary must not
+    /// suppress diagnostics from the selected constructor (issue #254).
+    pub fn constructor_positional_allowance(&self, class_fullname: &str) -> usize {
+        let (mut boundary_signatures, metaclass) = {
+            let mut query_budget = MAX_QUERY_MODULES;
+            self.ensure_for(class_fullname, &mut query_budget);
+            let inner = self.read();
+            let mut owner = class_fullname;
+            let first_party = loop {
+                let Some((parent, _)) = owner.rsplit_once('.') else {
+                    break false;
+                };
+                if inner.store.first_party_modules.contains(parent) {
+                    break true;
+                }
+                owner = parent;
+            };
+            if !first_party {
+                return 0;
+            }
+            let signatures = ["__init__", "__new__"]
+                .into_iter()
+                .filter_map(|method| {
+                    inner
+                        .store
+                        .signatures
+                        .get(&format!("{class_fullname}.{method}"))
+                })
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let metaclass = inner.store.class_metaclasses.get(class_fullname).cloned();
+            drop(inner);
+            (signatures, metaclass)
+        };
+        if let Some(call) = metaclass
+            .and_then(|metaclass| self.resolve_method(&metaclass, "__call__"))
+            .filter(|method| method != "builtins.type.__call__")
+        {
+            boundary_signatures.extend(self.get(&call).unwrap_or_default().iter().cloned());
+        }
+
+        boundary_signatures
+            .iter()
+            .map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .filter(|parameter| parameter.kind == ParameterKind::PositionalOnly)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 pub fn module_name_for_path(source_roots: &SourceRoots, path: &Path) -> String {
@@ -825,6 +903,7 @@ struct Collected {
     has_singledispatch_decorator_candidates: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
+    class_metaclasses: FxHashMap<String, String>,
 }
 
 pub fn build_index_with_sources(
@@ -866,6 +945,7 @@ pub fn build_index_with_sources(
         let Some(claim) = index.claim_first_party_module(&module_name) else {
             continue;
         };
+        index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
         indexed_files.insert(path.clone(), IndexedFile { source, parsed });
@@ -1190,6 +1270,16 @@ fn collect_scoped(
                         .collect();
                     if !bases.is_empty() {
                         out.class_bases.insert(class_scope.clone(), bases);
+                    }
+                    if let Some(metaclass) = arguments
+                        .keywords
+                        .iter()
+                        .find(|keyword| {
+                            keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("metaclass")
+                        })
+                        .and_then(|keyword| resolve_base_name(&keyword.value, scope_name, bindings))
+                    {
+                        out.class_metaclasses.insert(class_scope.clone(), metaclass);
                     }
                 }
                 if collect_class_data_constructor_bases(

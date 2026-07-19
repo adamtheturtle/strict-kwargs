@@ -123,6 +123,44 @@ fn rewrites_constructor_excluding_self() {
 }
 
 #[test]
+fn does_not_fix_across_local_new_boundary() {
+    assert_unchanged(
+        "class C:\n    def __new__(cls, value, /): ...\n    def __init__(self, value): ...\n\nC(1)\n",
+    );
+}
+
+#[test]
+fn fixes_constructor_with_keywordable_new_boundary() {
+    assert_fixed(
+        "class C:\n    def __new__(cls, value): ...\n    def __init__(self, value): ...\n\nC(1)\n",
+        "class C:\n    def __new__(cls, value): ...\n    def __init__(self, value): ...\n\nC(value=1)\n",
+    );
+}
+
+#[test]
+fn fixes_only_surplus_after_local_new_boundary() {
+    assert_fixed(
+        "class C:\n    def __new__(cls, value, /, other): ...\n    def __init__(self, value, other): ...\n\nC(1, 2)\n",
+        "class C:\n    def __new__(cls, value, /, other): ...\n    def __init__(self, value, other): ...\n\nC(1, other=2)\n",
+    );
+}
+
+#[test]
+fn does_not_fix_across_metaclass_call_boundary() {
+    assert_unchanged(
+        "class Meta(type):\n    def __call__(cls, value, /): ...\n\nclass C(metaclass=Meta):\n    def __init__(self, value): ...\n\nC(1)\n",
+    );
+}
+
+#[test]
+fn fixes_only_surplus_after_metaclass_call_boundary() {
+    assert_fixed(
+        "class Meta(type):\n    def __call__(cls, value, /, other): ...\n\nclass C(metaclass=Meta):\n    def __init__(self, value, other): ...\n\nC(1, 2)\n",
+        "class Meta(type):\n    def __call__(cls, value, /, other): ...\n\nclass C(metaclass=Meta):\n    def __init__(self, value, other): ...\n\nC(1, other=2)\n",
+    );
+}
+
+#[test]
 fn class_construction_prefers_init_over_instance_call() {
     assert_fixed(
         "class C:\n    def __init__(self, x: int) -> None: ...\n    def __call__(self, document: object) -> None: ...\nC(1)\n",
