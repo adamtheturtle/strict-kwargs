@@ -34,14 +34,11 @@ pub struct LspLineIndex {
 
 impl LspLineIndex {
     pub fn new(source: &str) -> Self {
-        let mut line_starts = vec![0usize];
-        line_starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
-        );
-        Self { line_starts }
+        // Share the tool's universal-newline line splitting so LSP positions
+        // agree with diagnostic positions on `\r`-delimited source (issue #270).
+        Self {
+            line_starts: crate::ast_util::line_starts(source),
+        }
     }
 
     pub fn position(&self, source: &str, offset: usize) -> (u32, u32) {
@@ -51,7 +48,7 @@ impl LspLineIndex {
         let mut col_utf16 = 0usize;
         if let Some(line_suffix) = source.get(line_start..) {
             for (relative, ch) in line_suffix.char_indices() {
-                if line_start + relative >= offset || ch == '\n' {
+                if line_start + relative >= offset || ch == '\n' || ch == '\r' {
                     break;
                 }
                 col_utf16 += ch.len_utf16();
