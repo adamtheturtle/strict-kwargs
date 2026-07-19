@@ -1613,7 +1613,9 @@ fn lookup_decorator_return(
         if prefix == module_name {
             break;
         }
-        prefix = prefix.rsplit_once('.').map_or(module_name, |(parent, _)| parent);
+        prefix = prefix
+            .rsplit_once('.')
+            .map_or(module_name, |(parent, _)| parent);
     }
     None
 }
@@ -1785,13 +1787,9 @@ fn index_stmt(
             }
             if has_singledispatch_decorator(decorator_list, bindings, scope_name) {
                 store.excluded.insert(fullname.clone());
-            } else if let Some(signature) = inferred_runtime_signature(
-                store,
-                module_name,
-                scope_name,
-                decorator_list,
-                bindings,
-            ) {
+            } else if let Some(signature) =
+                inferred_runtime_signature(store, module_name, scope_name, decorator_list, bindings)
+            {
                 store.runtime_decorated.insert(fullname.clone());
                 store.insert_runtime_definition(fullname.clone(), signature);
             } else {
@@ -1924,12 +1922,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 } else {
                     store.excluded.insert(fullname);
                 }
-            } else if let Some(signature) = inferred_runtime_signature_fast(
-                store,
-                module_name,
-                scope_name,
-                decorator_list,
-            ) {
+            } else if let Some(signature) =
+                inferred_runtime_signature_fast(store, module_name, scope_name, decorator_list)
+            {
                 store.runtime_decorated.insert(fullname.clone());
                 store.insert_runtime_definition(fullname.clone(), signature);
                 if body_may_contain_indexed_def(body) {
@@ -1965,7 +1960,7 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::While(ast::StmtWhile { body, .. })
         | Stmt::For(ast::StmtFor { body, .. })
         | Stmt::With(ast::StmtWith { body, .. }) => {
-            index_module_fast(store, module_name, scope_name, body)
+            index_module_fast(store, module_name, scope_name, body);
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -2014,20 +2009,7 @@ fn index_class_body(
                     store.decorator_returns.insert(fullname.clone(), signature);
                 }
                 if has_singledispatch_decorator(decorator_list, bindings, class_name) {
-                    if body_may_contain_indexed_def(body) {
-                        store.excluded.insert(fullname.clone());
-                        let mut nested_bindings = bindings.clone();
-                        index_module_with_bindings(
-                            store,
-                            module_name,
-                            is_package,
-                            &fullname,
-                            body,
-                            &mut nested_bindings,
-                        );
-                    } else {
-                        store.excluded.insert(fullname.clone());
-                    }
+                    store.excluded.insert(fullname.clone());
                 } else if let Some(signature) = inferred_runtime_signature(
                     store,
                     module_name,
@@ -2037,17 +2019,6 @@ fn index_class_body(
                 ) {
                     store.runtime_decorated.insert(fullname.clone());
                     store.insert_runtime_definition(fullname.clone(), signature);
-                    if body_may_contain_indexed_def(body) {
-                        let mut nested_bindings = bindings.clone();
-                        index_module_with_bindings(
-                            store,
-                            module_name,
-                            is_package,
-                            &fullname,
-                            body,
-                            &mut nested_bindings,
-                        );
-                    }
                 } else {
                     let signature = signature_from_parameters(parameters);
                     store.insert_definition(
@@ -2055,17 +2026,17 @@ fn index_class_body(
                         signature,
                         has_overload_decorator(decorator_list),
                     );
-                    if body_may_contain_indexed_def(body) {
-                        let mut nested_bindings = bindings.clone();
-                        index_module_with_bindings(
-                            store,
-                            module_name,
-                            is_package,
-                            &fullname,
-                            body,
-                            &mut nested_bindings,
-                        );
-                    }
+                }
+                if body_may_contain_indexed_def(body) {
+                    let mut nested_bindings = bindings.clone();
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        &fullname,
+                        body,
+                        &mut nested_bindings,
+                    );
                 }
                 bind(bindings, name.as_str(), fullname);
             }
@@ -2120,23 +2091,12 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                     store.decorator_returns.insert(fullname.clone(), signature);
                 }
                 if may_have_singledispatch_decorator(decorator_list) {
-                    if body_may_contain_indexed_def(body) {
-                        store.excluded.insert(fullname.clone());
-                        index_module_fast(store, module_name, &fullname, body);
-                    } else {
-                        store.excluded.insert(fullname.clone());
-                    }
-                } else if let Some(signature) = inferred_runtime_signature_fast(
-                    store,
-                    module_name,
-                    class_name,
-                    decorator_list,
-                ) {
+                    store.excluded.insert(fullname.clone());
+                } else if let Some(signature) =
+                    inferred_runtime_signature_fast(store, module_name, class_name, decorator_list)
+                {
                     store.runtime_decorated.insert(fullname.clone());
                     store.insert_runtime_definition(fullname.clone(), signature);
-                    if body_may_contain_indexed_def(body) {
-                        index_module_fast(store, module_name, &fullname, body);
-                    }
                 } else {
                     let signature = signature_from_parameters(parameters);
                     store.insert_definition(
@@ -2144,9 +2104,9 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         signature,
                         has_overload_decorator(decorator_list),
                     );
-                    if body_may_contain_indexed_def(body) {
-                        index_module_fast(store, module_name, &fullname, body);
-                    }
+                }
+                if body_may_contain_indexed_def(body) {
+                    index_module_fast(store, module_name, &fullname, body);
                 }
             }
             Stmt::ClassDef(class_def) => {
