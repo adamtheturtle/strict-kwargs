@@ -852,6 +852,7 @@ const MODULE_BUDGET: usize = 4000;
 /// for lazy alias resolution. (Submodules are no longer collected: the import
 /// closure is walked on demand, not eagerly — issue #39.)
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // independent indexing feature probes
 struct Collected {
     reexports: Vec<(String, String)>,
     callable_instances: Vec<(String, String)>,
