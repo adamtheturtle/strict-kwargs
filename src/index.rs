@@ -159,20 +159,25 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     if store.conditional_depth > 0 {
         return;
     }
-    // Only an inline ``lambda`` demonstrably replaces a method with a
-    // different call signature, so it is the sole class-body name rebinding
-    // that must invalidate the indexed ``def``. Every other form keeps a
-    // resolvable signature: a plain alias (``theclass = date``,
-    // ``assert_is_copy = Base.assert_is_copy``), or a signature-preserving
-    // wrapper (``from_param = classmethod(from_param)``). Excluding those
-    // would wrongly suppress every call routed through the name.
+    // Invalidate a name only when an inline ``lambda`` *replaces an already
+    // indexed ``def``* with a different, untrusted call signature. Both
+    // conditions matter:
+    //
+    // * Not a lambda — an alias (``theclass = date``) or a signature-preserving
+    //   wrapper (``from_param = classmethod(from_param)``) stays resolvable.
+    // * No prior ``def`` — a class attribute that simply *is* a lambda
+    //   (``_factory = lambda self, path: ...``) has a signature ty resolves
+    //   directly, so excluding it would suppress every call through the name.
     if !matches!(value, Expr::Lambda(_)) {
         return;
     }
     let Expr::Name(name) = target else {
         return;
     };
-    store.exclude(format!("{scope_name}.{}", name.id));
+    let fullname = format!("{scope_name}.{}", name.id);
+    if store.signatures.contains_key(&fullname) {
+        store.exclude(fullname);
+    }
 }
 
 // Covered through callable-instance integration tests. Excluded from the
@@ -2663,6 +2668,18 @@ Child.m = lambda self, a, /: a
         );
         assert!(!store.signatures.contains_key("main.C.method"));
         assert!(store.excluded.contains("main.C.method"));
+    }
+
+    #[test]
+    fn class_body_lambda_attribute_without_prior_def_stays_resolvable() {
+        // ``_factory = lambda self, path: ...`` with no preceding ``def`` is a
+        // class attribute that *is* a lambda, not a rebinding of an indexed
+        // method. ty resolves the lambda's signature, so excluding it would
+        // suppress every ``self._factory(...)`` call.
+        let store = indexed_store(
+            "class C:\n    _factory = lambda self, path, factory=None: make(path, factory)\n",
+        );
+        assert!(!store.excluded.contains("main.C._factory"));
     }
 
     #[test]
