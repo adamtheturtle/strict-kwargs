@@ -136,6 +136,7 @@ impl Store {
 
     fn insert_runtime_definition(&mut self, fullname: String, signature: Signature) {
         self.pending_overloads.remove(&fullname);
+        self.excluded.remove(&fullname);
         self.signatures.insert(fullname, vec![signature]);
     }
 }
@@ -2917,6 +2918,16 @@ def consume(value): ...
             ParameterKind::PositionalOnly
         );
         assert!(!store.pending_overloads.contains("main.consume"));
+    }
+
+    #[test]
+    fn runtime_definition_clears_a_prior_exclusion() {
+        let mut store = Store::default();
+        store.exclude("main.consume".to_string());
+        store.insert_runtime_definition("main.consume".to_string(), sig(1));
+
+        assert!(store.signatures.contains_key("main.consume"));
+        assert!(!store.excluded.contains("main.consume"));
     }
 
     #[test]
