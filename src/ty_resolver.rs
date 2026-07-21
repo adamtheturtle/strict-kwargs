@@ -12,7 +12,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -64,10 +64,13 @@ impl LspLineIndex {
     }
 }
 
-/// Per-request timeout. ty normally answers in milliseconds; this only
-/// bounds pathological hangs. The first failure latches ty OFF for the rest
-/// of the run, so a slow ty never multiplies into a timeout storm.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-request timeout. ty normally answers in milliseconds, but under the
+/// parallel shard fallback several servers contend for the CPU, so a single
+/// hover/definition can stall for seconds without the backend being unhealthy.
+/// The bound is therefore generous: it exists only to catch a genuinely wedged
+/// server, which the caller then recovers from (retry) or surfaces (issue
+/// #275), never to clip a slow-but-live answer into a silent miss.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// The initialize handshake (project discovery) can be slower than steady
 /// state, so allow more headroom.
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -301,20 +304,55 @@ impl TyResolver {
         Some(())
     }
 
+    /// Whether a timeout, disconnect, or JSON-RPC error response has latched
+    /// the backend OFF. Once inference is known to be required, a caller
+    /// treats this as an operational failure to recover from (restart) or
+    /// surface, never as a resolution miss (issues #275, #276, #277).
+    pub const fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    /// Clear the OFF latch so a caller can retry on the same warm server after
+    /// a transient timeout. A truly dead server re-latches on the next failed
+    /// send, so this cannot mask a persistent failure.
+    pub const fn reenable(&mut self) {
+        self.disabled = false;
+    }
+
     /// Wait for the response with `id`, buffering out-of-order responses and
-    /// answering server→client requests so ty never blocks. Any timeout or
-    /// disconnect latches ty OFF for the remainder of the run.
+    /// answering server→client requests so ty never blocks. A timeout,
+    /// disconnect, or JSON-RPC error response latches ty OFF and returns
+    /// `None`; that is distinct from a successful null result (`Some(Null)`),
+    /// which is a genuine "nothing resolved".
     fn collect(&mut self, id: i64, timeout: Duration) -> Option<Value> {
+        // A fixed deadline bounds the total wall-clock wait for this response.
+        // Absorbed notifications must not extend the budget by restarting a
+        // fresh per-receive timeout (issue #277).
+        self.collect_until(id, Instant::now() + timeout)
+    }
+
+    fn collect_until(&mut self, id: i64, deadline: Instant) -> Option<Value> {
         if let Some(value) = self.pending.remove(&id) {
             return Some(value);
         }
         loop {
-            match self.incoming.recv_timeout(timeout) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                self.disabled = true;
+                return None;
+            };
+            match self.incoming.recv_timeout(remaining) {
                 Ok(msg) => {
                     // The awaited response: return it directly.
                     if msg.get("method").is_none()
                         && msg.get("id").and_then(Value::as_i64) == Some(id)
                     {
+                        // A JSON-RPC error is a backend failure, not a null
+                        // definition (issue #276): latch OFF so the caller can
+                        // recover rather than record a false "nothing resolved".
+                        if msg.get("error").is_some() {
+                            self.disabled = true;
+                            return None;
+                        }
                         return Some(msg.get("result").cloned().unwrap_or(Value::Null));
                     }
                     // Anything else (server request, other response, or a
@@ -339,6 +377,11 @@ impl TyResolver {
                 // Server→client request: reply empty so ty never blocks.
                 let _ = self.send(&json!({ "jsonrpc": "2.0", "id": msg_id, "result": null }));
             } else {
+                // An out-of-order error response is still a backend failure
+                // (issue #276); latch OFF so the pipelined caller recovers.
+                if msg.get("error").is_some() {
+                    self.disabled = true;
+                }
                 self.pending
                     .insert(msg_id, msg.get("result").cloned().unwrap_or(Value::Null));
             }
@@ -1338,6 +1381,83 @@ mod tests {
             assert_eq!(r.take(1), Some(Value::Null));
             // Buffered id 2 is served from `pending` without touching the channel.
             assert_eq!(r.take(2), Some(Value::from("two")));
+        }
+
+        #[test]
+        fn collect_error_response_disables_resolver() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            // A JSON-RPC error for the awaited id is a backend failure, not a
+            // null result: `take` returns `None` and latches OFF (issue #276).
+            tx.send(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": -32603, "message": "synthetic failure" }
+            }))
+            .unwrap();
+            assert_eq!(r.take(1), None);
+            assert!(r.is_disabled());
+        }
+
+        #[test]
+        fn absorb_error_response_disables_resolver() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            // An out-of-order error (id 2) arrives while awaiting id 1; it must
+            // still latch OFF even though its own `take` has not been reached.
+            tx.send(json!({
+                "jsonrpc": "2.0", "id": 2,
+                "error": { "code": 1, "message": "boom" }
+            }))
+            .unwrap();
+            tx.send(json!({ "jsonrpc": "2.0", "id": 1, "result": "ok" }))
+                .unwrap();
+            assert_eq!(r.take(1), Some(Value::from("ok")));
+            assert!(r.is_disabled());
+            assert_eq!(r.take(2), Some(Value::Null));
+        }
+
+        #[test]
+        fn collect_until_past_deadline_disables_without_blocking() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel();
+            // A queued notification would keep a per-receive-timeout impl
+            // waiting; the fixed deadline stops regardless (issue #277).
+            tx.send(json!({ "jsonrpc": "2.0", "method": "$/progress" }))
+                .unwrap();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            let past = Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("monotonic clock is past 1ms");
+            assert_eq!(r.collect_until(1, past), None);
+            assert!(r.is_disabled());
+        }
+
+        #[test]
+        fn collect_times_out_when_no_response_arrives() {
+            let (child, stdin) = alive_child();
+            // Keep the sender alive so `recv_timeout` yields `Timeout`, not
+            // `Disconnected`.
+            let (_tx, rx) = std::sync::mpsc::channel::<Value>();
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            assert_eq!(
+                r.collect_until(1, Instant::now() + Duration::from_millis(20)),
+                None
+            );
+            assert!(r.is_disabled());
+        }
+
+        #[test]
+        fn reenable_clears_the_off_latch() {
+            let (child, stdin) = alive_child();
+            let (tx, rx) = std::sync::mpsc::channel::<Value>();
+            drop(tx);
+            let mut r = TyResolver::from_parts(child, stdin, rx);
+            assert_eq!(r.take(1), None);
+            assert!(r.is_disabled());
+            r.reenable();
+            assert!(!r.is_disabled());
         }
 
         #[test]
