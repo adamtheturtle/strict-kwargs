@@ -122,6 +122,18 @@ impl Store {
         self.excluded.insert(fullname);
     }
 
+    /// Drop an indexed signature after an unconditional rebinding. Branch
+    /// bodies are deliberately ignored: a sibling branch may retain the
+    /// original function binding.
+    fn remove(&mut self, fullname: &str) {
+        if self.conditional_depth > 0 {
+            return;
+        }
+        self.signatures.remove(fullname);
+        self.excluded.remove(fullname);
+        self.pending_overloads.remove(fullname);
+    }
+
     fn insert_definition(&mut self, fullname: String, signature: Signature, is_overload: bool) {
         if is_overload {
             if self.pending_overloads.insert(fullname.clone()) {
@@ -190,6 +202,15 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     let fullname = format!("{scope_name}.{}", name.id);
     if store.signatures.contains_key(&fullname) {
         store.exclude(fullname);
+    }
+}
+
+fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
+    if let Expr::Name(name) = target {
+        let fullname = format!("{scope_name}.{}", name.id);
+        if !store.excluded.contains(&fullname) {
+            store.remove(&fullname);
+        }
     }
 }
 
@@ -1901,6 +1922,9 @@ fn index_stmt(
             bind(bindings, class_def.name.as_str(), class_name);
         }
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
+            for target in targets {
+                remove_assigned_name(store, scope_name, target);
+            }
             if scope_name == module_name {
                 for target in targets {
                     exclude_assigned_attribute(store, scope_name, target, Some(bindings));
@@ -1911,8 +1935,11 @@ fn index_stmt(
             target,
             value: Some(_),
             ..
-        }) if scope_name == module_name => {
-            exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+        }) => {
+            remove_assigned_name(store, scope_name, target);
+            if scope_name == module_name {
+                exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+            }
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -2040,17 +2067,23 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             store.classes.insert(class_name.clone());
             index_class_body_fast(store, module_name, &class_name, &class_def.body);
         }
-        Stmt::Assign(ast::StmtAssign { targets, .. }) if scope_name == module_name => {
+        Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
-                exclude_assigned_attribute(store, scope_name, target, None);
+                remove_assigned_name(store, scope_name, target);
+                if scope_name == module_name {
+                    exclude_assigned_attribute(store, scope_name, target, None);
+                }
             }
         }
         Stmt::AnnAssign(ast::StmtAnnAssign {
             target,
             value: Some(_),
             ..
-        }) if scope_name == module_name => {
-            exclude_assigned_attribute(store, scope_name, target, None);
+        }) => {
+            remove_assigned_name(store, scope_name, target);
+            if scope_name == module_name {
+                exclude_assigned_attribute(store, scope_name, target, None);
+            }
         }
         Stmt::If(ast::StmtIf {
             body,
@@ -2644,6 +2677,19 @@ class Child(Base):
     }
 
     #[test]
+    fn assignment_removes_stale_function_signature() {
+        let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
+        assert!(!store.signatures.contains_key("main.f"));
+        assert!(!store.excluded.contains("main.f"));
+    }
+
+    #[test]
+    fn conditional_assignment_preserves_function_signature() {
+        let store = indexed_store("def f(value): ...\nif condition:\n    f = replacement\n");
+        assert!(store.signatures.contains_key("main.f"));
+    }
+
+    #[test]
     fn attribute_assignment_excludes_stale_method_signature() {
         let store = indexed_store(
             "class C:\n    def method(self, value): ...\nC.method = lambda self, value, /: value\n",
@@ -2794,6 +2840,17 @@ Child.m = lambda self, a, /: a
         // signature, so the indexed ``def`` must survive the rebinding.
         let store = indexed_store(
             "class C:\n    def from_param(cls, value): ...\n    from_param = classmethod(from_param)\n",
+        );
+        assert!(store.signatures.contains_key("main.C.from_param"));
+        assert!(!store.excluded.contains("main.C.from_param"));
+    }
+
+    #[test]
+    fn class_body_wrapper_survives_binding_aware_indexing() {
+        // The trailing attribute assignment selects the binding-aware indexer,
+        // which must apply the same wrapper-preserving rule as the fast path.
+        let store = indexed_store(
+            "class C:\n    def from_param(cls, value): ...\n    from_param = classmethod(from_param)\nC.marker = None\n",
         );
         assert!(store.signatures.contains_key("main.C.from_param"));
         assert!(!store.excluded.contains("main.C.from_param"));

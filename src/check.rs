@@ -1101,7 +1101,7 @@ fn bound_import_name(alias: &ast::Alias) -> &str {
 }
 
 /// A call awaiting ty resolution: byte offsets into the file's source.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct PendingTy {
     /// Start of the callee identifier (where we hover / goto-definition).
     callee_offset: usize,
@@ -1109,6 +1109,10 @@ struct PendingTy {
     call_start: usize,
     positional_count: usize,
     rewrite_args_are_statically_precise: bool,
+    /// Indexed constructor signature used to normalize ty's unstable
+    /// ``object.__class__`` answer for a dynamic ``instance.__class__`` call.
+    /// The ty query still runs so later responses keep the same request stream.
+    fallback_fullname: Option<String>,
 }
 
 struct PendingTyOverloadFix {
@@ -2243,12 +2247,41 @@ impl<'a> CallChecker<'a> {
             }
             _ => return None,
         };
+        let fallback_fullname = self.instance_class_fallback_fullname(&call.func);
+        if fallback_fullname.is_some() {
+            // ``instance.__class__`` can dispatch to a subclass constructor,
+            // so its indexed signature is diagnostic-only and never safe for
+            // an automatic argument rewrite.
+            rewrite_args_are_statically_precise = false;
+        }
         Some(PendingTy {
             callee_offset: callee_offset.to_usize(),
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
             rewrite_args_are_statically_precise,
+            fallback_fullname,
         })
+    }
+
+    // Covered by the focused fallback unit test. Excluded from the aggregate
+    // gate because this helper is compiled into integration binaries whose
+    // fixtures do not all contain an ``instance.__class__`` call.
+    #[cfg_attr(coverage, coverage(off))]
+    fn instance_class_fallback_fullname(&self, func: &Expr) -> Option<String> {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+            return None;
+        };
+        if attr.id.as_str() != "__class__" {
+            return None;
+        }
+        let Expr::Name(receiver) = value.as_ref() else {
+            return None;
+        };
+        if !self.binding_is_instance(receiver.id.as_str()) {
+            return None;
+        }
+        let class_fullname = self.resolve_local(receiver.id.as_str())?;
+        self.callable_fullname(&class_fullname)
     }
 
     /// Defer a call the built-in resolver missed to a pipelined ty query.
@@ -2257,7 +2290,7 @@ impl<'a> CallChecker<'a> {
         let Some(pending) = self.pending_ty_for_call(call) else {
             return;
         };
-        if self.ty_pending_seen.insert(pending) {
+        if self.ty_pending_seen.insert(pending.clone()) {
             let group = self.hover_group_for_call(call);
             self.ty_pending.push(pending);
             self.hover_group_of_pending.push(group);
@@ -3094,12 +3127,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let class_fullname = self.class_from_obvious_instance(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
+                let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
-                        } else if is_callable_attribute_alias {
+                        } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
                         } else {
                             self.clear_instance_binding(name.id.as_str());
@@ -3116,12 +3150,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let class_fullname = self.class_from_obvious_instance(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
+                let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
-                    } else if is_callable_attribute_alias {
+                    } else if is_callable_attribute_alias || is_lambda {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
@@ -4409,6 +4444,59 @@ struct TyFixAst<'a> {
     tokens: &'a Tokens,
 }
 
+/// Normalize a dynamic ``instance.__class__`` call to its indexed constructor
+/// diagnostic after ty has answered. The query still runs (preserving ty's
+/// request stream), while the final diagnostic no longer depends on whether ty
+/// labels the same call as the concrete class or as ``object.__class__``.
+#[cfg_attr(coverage, coverage(off))]
+fn normalize_static_ty_fallback(
+    index: &DefinitionIndex,
+    config: &Config,
+    pending: &PendingTy,
+    source: &str,
+    path: &Path,
+    source_line_starts: &[usize],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let Some(fullname) = pending.fallback_fullname.as_deref() else {
+        return false;
+    };
+    let Some(signatures) = index.get(fullname) else {
+        return false;
+    };
+    let effective = signatures
+        .iter()
+        .map(without_leading_self)
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::new();
+    if emit_if_violation_with_signature_fullname(
+        fullname,
+        fullname,
+        &effective,
+        pending.positional_count,
+        ty_fallback_callee_is_ignored(config, fullname),
+        source,
+        pending.call_start,
+        path,
+        &mut normalized,
+        Some(source_line_starts),
+    )
+    .is_none()
+    {
+        return false;
+    }
+    let Some(normalized) = normalized.pop() else {
+        return false;
+    };
+    diagnostics.retain(|diagnostic| {
+        diagnostic.path != normalized.path
+            || diagnostic.line != normalized.line
+            || diagnostic.column != normalized.column
+    });
+    diagnostics.push(normalized);
+    true
+}
+
 /// Try to rewrite built-in-diagnosed overload violations by asking ty for the
 /// hover at the exact call site. The diagnostic is already recorded, so this
 /// path is fix-only: it must never emit another diagnostic.
@@ -5018,6 +5106,28 @@ fn resolve_pending_with_ty(
             }
         }
     }
+
+    // Normalize concrete ``instance.__class__`` constructor calls after every
+    // ty query has run. ty 0.0.44 can label the same call either as the class
+    // constructor or as ``object.__class__`` depending on the project-wide
+    // request stream; retaining the stream and replacing only the final
+    // diagnostic makes repository runs deterministic.
+    for fallback in pending
+        .iter()
+        .filter(|pending| pending.fallback_fullname.is_some())
+    {
+        if normalize_static_ty_fallback(
+            index,
+            config,
+            fallback,
+            source,
+            path,
+            &source_line_starts,
+            diagnostics,
+        ) {
+            record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5026,12 +5136,13 @@ mod tests {
     use super::{
         bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
         has_staticmethod_or_classmethod_decorator, is_ignored_path,
-        is_typing_special_form_constructor, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
-        record_ty_fix, signature_is_fully_named, strip_unbound_receiver,
-        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy,
-        PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
+        is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
+        parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
+        process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
+        signature_is_fully_named, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
+        without_leading_self, CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns,
+        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
+        TyFixes, TyShardAssigner,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -5049,6 +5160,7 @@ mod tests {
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: false,
+                    fallback_fullname: None,
                 })
                 .collect(),
             pending_groups: vec![None; pending_calls],
@@ -5448,6 +5560,7 @@ class C:
             call_start: 0,
             positional_count: 1,
             rewrite_args_are_statically_precise: true,
+            fallback_fullname: None,
         };
         let named = sig(&["a"]);
 
@@ -6685,6 +6798,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
@@ -6770,6 +6884,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
                 overload_fix_pending: Vec::new(),
@@ -7493,6 +7608,76 @@ class C:
         );
 
         assert_eq!(checker.callable_fullname("plain"), None);
+    }
+
+    #[test]
+    fn instance_class_call_carries_last_resort_constructor_fallback() {
+        let mut index = DefinitionIndex::for_test();
+        index.insert("pkg.K.__init__".to_string(), sig(&["self", "value"]));
+        let config = Config::default();
+        let parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        checker.record_instance("self", "pkg.K".to_string());
+
+        let source = "self.__class__(1)\n";
+        let call_parsed = parse_module(source).expect("parse fallback call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected call statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected call");
+        };
+        let pending = checker.pending_ty_for_call(call).expect("pending call");
+        assert_eq!(pending.fallback_fullname.as_deref(), Some("pkg.K.__init__"));
+        assert!(!pending.rewrite_args_are_statically_precise);
+
+        let mut diagnostics = Vec::new();
+        assert!(normalize_static_ty_fallback(
+            &index,
+            &config,
+            &pending,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].callee, "\"K\"");
+
+        diagnostics[0].callee = "\"__class__\" of \"object\"".to_string();
+        assert!(normalize_static_ty_fallback(
+            &index,
+            &config,
+            &pending,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].callee, "\"K\"");
+
+        let mut no_fallback = pending;
+        no_fallback.fallback_fullname = None;
+        assert!(!normalize_static_ty_fallback(
+            &index,
+            &config,
+            &no_fallback,
+            source,
+            Path::new("test.py"),
+            &line_starts(source),
+            &mut diagnostics,
+        ));
     }
 
     #[test]
