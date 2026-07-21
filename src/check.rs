@@ -554,7 +554,7 @@ fn check_paths_impl(
     }
 
     let (index, indexed_files) =
-        build_index_with_sources(project_root, &python_files, &source_roots);
+        build_index_with_sources(project_root, &python_files, &source_roots, python_env);
 
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
@@ -571,8 +571,7 @@ fn check_paths_impl(
     // initialize cost (issue #31), so a run the built-in resolver fully
     // handles (the common editor-on-save / pre-commit case on first-party
     // code) starts no server at all. `python_env` (the `--python` value)
-    // only steers ty's third-party discovery; the built-in resolver's env
-    // discovery is unchanged.
+    // also steers the built-in resolver's third-party discovery.
     pipeline_phases(
         &files_to_scan,
         &python_files,
