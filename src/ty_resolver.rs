@@ -781,16 +781,21 @@ pub fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
 pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usize> {
     let mut cur_line = 0u32;
     let mut col_utf16 = 0u32;
-    for (idx, ch) in source.char_indices() {
+    let mut chars = source.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
         if cur_line == line && col_utf16 == character {
             return Some(idx);
         }
-        if ch == '\n' {
+        if ch == '\n' || ch == '\r' {
             if cur_line == line {
                 return Some(idx);
             }
             cur_line += 1;
             col_utf16 = 0;
+            // Python's universal newline rule treats CRLF as one newline.
+            if ch == '\r' {
+                let _ = chars.next_if(|&(_, next)| next == '\n');
+            }
         } else if cur_line == line {
             col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
         }
@@ -1150,6 +1155,17 @@ mod tests {
         assert_eq!(lsp_to_byte_offset("abc", 0, 3), Some(3));
         // Unreachable line => None.
         assert_eq!(lsp_to_byte_offset("abc", 9, 0), None);
+    }
+
+    #[test]
+    fn lsp_to_byte_offset_uses_universal_newlines() {
+        let src = "first\rsecond\r\nthird";
+        assert_eq!(lsp_to_byte_offset(src, 1, 0), Some("first\r".len()));
+        assert_eq!(lsp_to_byte_offset(src, 1, 99), Some("first\rsecond".len()));
+        assert_eq!(
+            lsp_to_byte_offset(src, 2, 0),
+            Some("first\rsecond\r\n".len())
+        );
     }
 
     #[test]
