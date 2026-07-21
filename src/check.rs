@@ -5179,6 +5179,35 @@ mod tests {
         assert_eq!(files, vec![root.path().join("src/real.py")]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn collect_python_files_follows_nested_symlinked_python_sources() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let source = root.path().join("external").join("module.py");
+        std::fs::create_dir_all(source.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source, "").expect("write");
+        let scan = root.path().join("scan");
+        std::fs::create_dir_all(&scan).expect("mkdir");
+        symlink("../external/module.py", scan.join("linked.py")).expect("symlink file");
+        symlink("../external", scan.join("linked-dir")).expect("symlink dir");
+
+        let files =
+            collect_python_files(root.path(), &[scan], &Config::default()).expect("collect");
+
+        assert_eq!(
+            files,
+            vec![
+                root.path().join("scan/linked-dir/module.py"),
+                root.path().join("scan/linked.py"),
+            ]
+        );
+    }
+
     #[test]
     fn collect_python_files_reports_invalid_extend_exclude_pattern() {
         let root = tempfile::tempdir().expect("tempdir");

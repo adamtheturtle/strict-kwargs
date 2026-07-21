@@ -39,6 +39,11 @@ pub(super) fn collect_python_files(
             // walk root is never pruned so `strict-kwargs .` keeps working
             // even when `.` contains ignored path components.
             let walk = walkdir::WalkDir::new(path)
+                // Match explicitly supplied symlinked directories: scan the
+                // source they point at instead of silently treating it as
+                // absent. `walkdir` detects symlink loops and reports them
+                // through the existing fallible walk path below.
+                .follow_links(true)
                 .into_iter()
                 .filter_entry(|entry| {
                     entry.depth() == 0
