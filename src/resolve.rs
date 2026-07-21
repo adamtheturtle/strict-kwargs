@@ -23,13 +23,20 @@ pub struct ModuleResolver {
 }
 
 impl ModuleResolver {
-    pub(crate) fn new(project_root: &Path, source_roots: &SourceRoots) -> Self {
+    pub(crate) fn new(
+        project_root: &Path,
+        source_roots: &SourceRoots,
+        python_env: Option<&Path>,
+    ) -> Self {
         let namespace_packages = source_roots.namespace_packages();
         Self {
             first_party: source_roots.first_party_for_resolution(),
             namespace_packages: (!namespace_packages.is_empty())
                 .then(|| namespace_packages.to_vec()),
-            site_packages: discover_site_packages(project_root),
+            site_packages: python_env.map_or_else(
+                || discover_site_packages(project_root),
+                discover_site_packages_in_environment,
+            ),
         }
     }
 
@@ -249,7 +256,7 @@ mod tests {
         std::fs::write(root.join("mypkg.py"), "def f(): ...\n").expect("write");
         let config = crate::config::Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let resolver = ModuleResolver::new(root, &source_roots);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
 
         // First-party `.py`.
         let first = resolver.resolve("mypkg").expect("first-party module");
@@ -278,7 +285,7 @@ mod tests {
         std::fs::write(root.join("pkg").join("__init__.pyi"), "x: int\n").expect("write");
         let config = crate::config::Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let resolver = ModuleResolver::new(root, &source_roots);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
         let module = resolver.resolve("pkg").expect("package");
         assert!(module.is_package);
     }
@@ -297,7 +304,7 @@ mod tests {
             ..crate::config::Config::default()
         };
         let source_roots = SourceRoots::from_config(root, &config);
-        let resolver = ModuleResolver::new(root, &source_roots);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
 
         let namespace = resolver
             .resolve("airflow.providers")
@@ -327,7 +334,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("lock");
         let config = crate::config::Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let resolver = ModuleResolver::new(root, &source_roots);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
         // `*-stubs` distribution is preferred for a submodule.
         assert!(resolver
             .resolve("vendor.sub")
@@ -342,6 +349,33 @@ mod tests {
             .contains('z'));
         // Top-level only (no dotted rest) and unknown.
         assert!(resolver.resolve("vendor").is_none());
+    }
+
+    #[test]
+    fn explicit_python_environment_overrides_project_venv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let project_site = root.join(".venv/lib/python3.12/site-packages");
+        let external_env = root.join("external-env");
+        let external_site = external_env.join("lib/python3.12/site-packages");
+        for (site, source) in [
+            (&project_site, "def f(value): ...\n"),
+            (&external_site, "def f(value, /): ...\n"),
+        ] {
+            let package = site.join("dep");
+            std::fs::create_dir_all(&package).expect("mkdir package");
+            std::fs::write(package.join("__init__.py"), source).expect("write package");
+        }
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+
+        let resolver = ModuleResolver::new(root, &source_roots, Some(&external_env));
+
+        assert!(resolver
+            .resolve("dep")
+            .expect("external package")
+            .source
+            .contains("value, /"));
     }
 
     #[test]

@@ -996,8 +996,9 @@ pub fn build_index_with_sources(
     project_root: &Path,
     python_files: &[PathBuf],
     source_roots: &SourceRoots,
+    python_env: Option<&Path>,
 ) -> (DefinitionIndex, FxHashMap<PathBuf, IndexedFile>) {
-    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots));
+    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots, python_env));
     let mut indexed_files = FxHashMap::default();
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
@@ -2605,7 +2606,7 @@ class Mid(Base):
         .expect("write mid");
         let config = Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots));
+        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots, None));
         let parsed = parse_module(
             r"
 from mid import Mid
