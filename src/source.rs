@@ -104,23 +104,33 @@ fn find_coding(line: &[u8]) -> Option<String> {
     None
 }
 
-/// Search the first two physical lines for a PEP 263 coding declaration.
+/// Search the physical lines PEP 263 permits for a coding declaration.
 fn sniff_coding(bytes: &[u8]) -> Option<String> {
-    let mut start = 0;
-    for _ in 0..2 {
-        if start >= bytes.len() {
-            break;
-        }
-        let end = bytes[start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(bytes.len(), |p| start + p);
-        if let Some(name) = find_coding(&bytes[start..end]) {
-            return Some(name);
-        }
-        start = end + 1;
+    let first_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let first = &bytes[..first_end];
+    if let Some(name) = find_coding(first) {
+        return Some(name);
     }
-    None
+    // Python only considers a second-line cookie after a blank or comment
+    // first line (including a shebang), never after source code.
+    let first_content = first
+        .iter()
+        .skip_while(|&&byte| matches!(byte, b' ' | b'\t' | b'\x0c' | b'\r'));
+    if !matches!(first_content.clone().next(), None | Some(b'#')) {
+        return None;
+    }
+    let second_start = first_end.saturating_add(1);
+    if second_start >= bytes.len() {
+        return None;
+    }
+    let second_end = bytes[second_start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |p| second_start + p);
+    find_coding(&bytes[second_start..second_end])
 }
 
 /// Decode raw file bytes into Python source text, honouring a UTF-8 BOM and a
@@ -128,6 +138,13 @@ fn sniff_coding(bytes: &[u8]) -> Option<String> {
 /// [`Source::Undecodable`] with a reason rather than an error.
 pub fn decode_python_source(bytes: &[u8]) -> Source {
     if let Some(rest) = bytes.strip_prefix(UTF8_BOM) {
+        if let Some(name) = sniff_coding(rest) {
+            if !matches!(codec_for(&name), Some(Codec::Utf8)) {
+                return Source::Undecodable(format!(
+                    "UTF-8 BOM conflicts with PEP 263 encoding declaration `{name}`"
+                ));
+            }
+        }
         return match std::str::from_utf8(rest) {
             Ok(text) => Source::Decoded(text.to_owned()),
             Err(_) => Source::Undecodable("has a UTF-8 BOM but is not valid UTF-8".to_owned()),
@@ -293,6 +310,19 @@ mod tests {
             decoded(bytes),
             "#!/usr/bin/env python\n# coding: iso-8859-1\nx = \"\u{e9}\"\n"
         );
+    }
+
+    #[test]
+    fn pep263_declaration_on_second_line_after_code_is_ignored() {
+        let bytes = b"x = 1\n# coding: latin-1\ntext = \"\xe9\"\n";
+        assert!(reason(bytes).contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn utf8_bom_rejects_conflicting_pep263_declaration() {
+        let mut bytes = UTF8_BOM.to_vec();
+        bytes.extend_from_slice(b"# coding: latin-1\nx = 1\n");
+        assert!(reason(&bytes).contains("conflicts"));
     }
 
     #[test]
