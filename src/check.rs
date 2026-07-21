@@ -498,7 +498,13 @@ fn check_paths_impl(
     let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
         .map(|dir| -> Result<_, CheckError> {
             let config_json = serde_json::to_string(config).unwrap_or_default();
-            let fp = compute_global_fingerprint(project_root, &config_json, python_env);
+            let first_party_roots = source_roots.first_party_for_resolution();
+            let fp = compute_global_fingerprint(
+                project_root,
+                &config_json,
+                python_env,
+                &first_party_roots,
+            );
             Ok((DiagnosticCache::open(dir)?, fp))
         })
         .transpose()?;
