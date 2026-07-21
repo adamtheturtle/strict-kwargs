@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
+use rustc_hash::FxHashSet;
 
 use crate::config::SourceRoots;
 use crate::source::read_python_source_lossy;
@@ -208,10 +209,11 @@ fn python_environment_root(python_env: &Path) -> Option<PathBuf> {
 fn discover_site_packages_in_venvs(venvs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for venv in venvs {
+        let mut in_venv = Vec::new();
         // Windows layout.
         let win = venv.join("Lib").join("site-packages");
         if win.is_dir() {
-            found.push(win);
+            in_venv.push(win);
         }
         // Unix layout: lib/python*/site-packages (any minor version).
         let lib = venv.join("lib");
@@ -221,14 +223,19 @@ fn discover_site_packages_in_venvs(venvs: &[PathBuf]) -> Vec<PathBuf> {
                 if name.to_string_lossy().starts_with("python") {
                     let sp = entry.path().join("site-packages");
                     if sp.is_dir() {
-                        found.push(sp);
+                        in_venv.push(sp);
                     }
                 }
             }
         }
+        // Directory iteration order is not stable, but virtual-environment
+        // order is significant: an active VIRTUAL_ENV takes precedence over
+        // the project's fallback .venv.
+        in_venv.sort();
+        found.extend(in_venv);
     }
-    found.sort();
-    found.dedup();
+    let mut seen = FxHashSet::default();
+    found.retain(|path| seen.insert(path.clone()));
     found
 }
 
@@ -428,5 +435,23 @@ mod tests {
             let unset = with_virtual_env(None, || discover_site_packages(dir.path()));
             assert!(unset.is_empty());
         });
+    }
+
+    #[test]
+    fn discover_site_packages_preserves_virtual_env_precedence() {
+        let _guard = ENV_LOCK.lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active = dir.path().join("z-active");
+        let project = dir.path().join("a-project");
+        let active_site_packages = active.join("lib/python3.12/site-packages");
+        let project_site_packages = project.join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&active_site_packages).expect("mkdir active");
+        std::fs::create_dir_all(&project_site_packages).expect("mkdir project");
+
+        let found = with_virtual_env(Some(active.as_os_str()), || {
+            discover_site_packages(&project)
+        });
+
+        assert_eq!(found, vec![active_site_packages, project_site_packages]);
     }
 }
