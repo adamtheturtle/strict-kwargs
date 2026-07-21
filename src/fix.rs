@@ -121,6 +121,40 @@ impl FileFix {
     }
 }
 
+/// Write all fixes as one recoverable operation.
+///
+/// Every source is read and encoded before the first destination is changed.
+/// If a later write fails, previously written files are restored from their
+/// original bytes before the error is returned.
+///
+/// # Errors
+///
+/// Returns an I/O error when a source cannot be read or encoded, or when a
+/// destination cannot be written.
+pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
+    let prepared: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = fixes
+        .iter()
+        .map(|fix| {
+            let original = std::fs::read(&fix.path)?;
+            let fixed_bytes = crate::source::encode_python_source(&original, &fix.fixed)
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+            Ok((fix.path.clone(), original, fixed_bytes))
+        })
+        .collect::<std::io::Result<_>>()?;
+
+    let mut written = Vec::new();
+    for (path, original, fixed) in &prepared {
+        if let Err(error) = std::fs::write(path, fixed) {
+            for (path, original) in written.into_iter().rev() {
+                let _ = std::fs::write(path, original);
+            }
+            return Err(error);
+        }
+        written.push((path, original));
+    }
+    Ok(())
+}
+
 /// What a fix run produced: the files it would rewrite plus the number of
 /// violations it detected but deliberately left untouched.
 ///
@@ -267,6 +301,35 @@ mod tests {
             .write_preserving_encoding()
             .expect_err("ascii cannot represent the rewritten text");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn write_all_preflights_every_file_before_changing_any() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let invalid_target = dir.path().join("directory");
+        std::fs::write(&first, "before\n").expect("write first");
+        std::fs::create_dir(&invalid_target).expect("mkdir");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "before\n".to_owned(),
+                fixed: "after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: invalid_target,
+                original: String::new(),
+                fixed: String::new(),
+                count: 1,
+            },
+        ];
+
+        assert!(write_all_preserving_encoding(&fixes).is_err());
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "before\n"
+        );
     }
 
     #[test]
