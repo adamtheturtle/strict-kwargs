@@ -153,7 +153,97 @@ impl Project {
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         self.run_isolated(args, "__sk_bin__", &bin)
     }
+
+    /// Run with `PATH` pointing at a fake `ty` that passes `ty version`,
+    /// completes the LSP `initialize` handshake, then answers every
+    /// hover/definition with a JSON-RPC error. This exercises the
+    /// server-started-then-fails path: losing the required backend must abort
+    /// (`CheckError::TyServerFailed`), not silently reduce diagnostics (issues
+    /// #275, #276). Unix + Python only; the coverage gate runs on Linux.
+    #[cfg(unix)]
+    fn run_with_erroring_ty_server(&self, args: &[&str]) -> Output {
+        use std::os::unix::fs::PermissionsExt;
+        let python = {
+            let located = Command::new("sh")
+                .arg("-c")
+                .arg("command -v python3")
+                .output()
+                .expect("locate python3");
+            String::from_utf8(located.stdout)
+                .expect("python3 path is utf8")
+                .trim()
+                .to_owned()
+        };
+        assert!(!python.is_empty(), "python3 is required for the ty stub");
+        let bin = self.root.join("__erroring_ty__");
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let stub = bin.join("ty_stub.py");
+        std::fs::write(&stub, ERRORING_TY_STUB).expect("write stub");
+        let shim = bin.join("ty");
+        std::fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec {python} \"{}\" \"$@\"\n", stub.display()),
+        )
+        .expect("write shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        self.run_isolated(args, "__sk_err_bin__", &bin)
+    }
 }
+
+/// A minimal `ty` replacement: it passes `ty version`, answers the LSP
+/// `initialize` request, then returns a JSON-RPC error for every subsequent
+/// request (hover/definition/shutdown).
+#[cfg(unix)]
+const ERRORING_TY_STUB: &str = r#"import sys, json
+
+if len(sys.argv) > 1 and sys.argv[1] == "version":
+    print("ty 0.0.0")
+    sys.exit(0)
+if len(sys.argv) < 2 or sys.argv[1] != "server":
+    sys.exit(1)
+
+inp = sys.stdin.buffer
+out = sys.stdout.buffer
+
+
+def read_message():
+    length = None
+    while True:
+        line = inp.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if not line:
+            break
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "content-length":
+            length = int(value.strip())
+    if length is None:
+        return None
+    return json.loads(inp.read(length))
+
+
+def write_message(obj):
+    data = json.dumps(obj).encode("utf-8")
+    out.write(b"Content-Length: %d\r\n\r\n" % len(data))
+    out.write(data)
+    out.flush()
+
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    request_id = message.get("id")
+    if message.get("method") == "initialize":
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"capabilities": {}}})
+    elif request_id is not None:
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32603, "message": "synthetic query failure"},
+        })
+"#;
 
 fn code(output: &Output) -> i32 {
     output.status.code().expect("exit code")
@@ -1262,6 +1352,24 @@ fn check_with_unstartable_ty_server_is_fatal_exit_two() {
     // start, so the run aborts rather than silently degrading.
     let project = Project::new().write("main.py", TY_DEFERRED);
     let output = project.run_with_broken_ty_server(&["check", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = combined_output(&output);
+    assert!(err.starts_with("error: "), "stderr: {err}");
+    assert!(
+        err.contains("ty server") && err.contains("required"),
+        "stderr: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn check_with_erroring_ty_query_is_fatal_exit_two() {
+    // `ty` starts and initializes, but every hover/definition returns a
+    // JSON-RPC error. Once inference is known to be required, losing it is an
+    // operational failure (exit 2), never a silent `All checks passed!`
+    // (issues #275, #276).
+    let project = Project::new().write("main.py", TY_DEFERRED);
+    let output = project.run_with_erroring_ty_server(&["check", "main.py"]);
     assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
     let err = combined_output(&output);
     assert!(err.starts_with("error: "), "stderr: {err}");
