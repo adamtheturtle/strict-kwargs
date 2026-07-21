@@ -136,14 +136,22 @@ pub fn decode_python_source(bytes: &[u8]) -> Source {
     let declared = sniff_coding(bytes);
     let codec = match &declared {
         None => Codec::Utf8,
-        Some(name) => match codec_for(name) {
-            Some(codec) => codec,
-            None => {
+        Some(name) => {
+            if let Some(codec) = codec_for(name) {
+                codec
+            } else {
+                // ASCII has the same byte-for-character mapping in Python's
+                // ASCII-compatible source codecs (including cp1252 and
+                // Shift-JIS), so an otherwise unsupported declaration need
+                // not turn an unambiguous file into a clean skip.
+                if bytes.is_ascii() {
+                    return Source::Decoded(bytes.iter().copied().map(char::from).collect());
+                }
                 return Source::Undecodable(format!(
                     "unsupported PEP 263 encoding declaration `{name}`"
-                ))
+                ));
             }
-        },
+        }
     };
     match codec {
         Codec::Utf8 => match std::str::from_utf8(bytes) {
@@ -360,8 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_declared_encoding_is_undecodable_not_fatal() {
-        let reason = reason(b"# coding: shift_jis\nx = 1\n");
+    fn unsupported_declared_encoding_decodes_ascii_source() {
+        assert_eq!(
+            decoded(b"# coding: cp1252\nx = 1\n"),
+            "# coding: cp1252\nx = 1\n"
+        );
+    }
+
+    #[test]
+    fn unsupported_declared_encoding_with_non_ascii_bytes_is_undecodable() {
+        let reason = reason(b"# coding: shift_jis\nx = \x82\n");
         assert!(reason.contains("unsupported"));
         assert!(reason.contains("shift_jis"));
     }
