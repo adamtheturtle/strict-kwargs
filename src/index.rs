@@ -2093,7 +2093,6 @@ fn index_class_body(
                 for target in targets {
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
-                    remove_assigned_name(store, class_name, target);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -2103,7 +2102,6 @@ fn index_class_body(
             }) => {
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
-                remove_assigned_name(store, class_name, target);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -2225,7 +2223,6 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 for target in targets {
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
-                    remove_assigned_name(store, class_name, target);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -2235,7 +2232,6 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
             }) => {
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
-                remove_assigned_name(store, class_name, target);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -2739,6 +2735,17 @@ Child.m = lambda self, a, /: a
         // signature, so the indexed ``def`` must survive the rebinding.
         let store = indexed_store(
             "class C:\n    def from_param(cls, value): ...\n    from_param = classmethod(from_param)\n",
+        );
+        assert!(store.signatures.contains_key("main.C.from_param"));
+        assert!(!store.excluded.contains("main.C.from_param"));
+    }
+
+    #[test]
+    fn class_body_wrapper_survives_binding_aware_indexing() {
+        // The trailing attribute assignment selects the binding-aware indexer,
+        // which must apply the same wrapper-preserving rule as the fast path.
+        let store = indexed_store(
+            "class C:\n    def from_param(cls, value): ...\n    from_param = classmethod(from_param)\nC.marker = None\n",
         );
         assert!(store.signatures.contains_key("main.C.from_param"));
         assert!(!store.excluded.contains("main.C.from_param"));
