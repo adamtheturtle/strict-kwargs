@@ -194,7 +194,10 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
 
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     if let Expr::Name(name) = target {
-        store.remove(&format!("{scope_name}.{}", name.id));
+        let fullname = format!("{scope_name}.{}", name.id);
+        if !store.excluded.contains(&fullname) {
+            store.remove(&fullname);
+        }
     }
 }
 
@@ -2088,9 +2091,9 @@ fn index_class_body(
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
-                    remove_assigned_name(store, class_name, target);
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
+                    remove_assigned_name(store, class_name, target);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -2098,9 +2101,9 @@ fn index_class_body(
                 value: Some(value),
                 ..
             }) => {
-                remove_assigned_name(store, class_name, target);
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
+                remove_assigned_name(store, class_name, target);
             }
             Stmt::If(ast::StmtIf {
                 body,
@@ -2220,9 +2223,9 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
-                    remove_assigned_name(store, class_name, target);
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
+                    remove_assigned_name(store, class_name, target);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -2230,9 +2233,9 @@ fn index_class_body_fast(store: &mut Store, class_name: &str, body: &[Stmt]) {
                 value: Some(value),
                 ..
             }) => {
-                remove_assigned_name(store, class_name, target);
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
+                remove_assigned_name(store, class_name, target);
             }
             Stmt::If(ast::StmtIf {
                 body,
