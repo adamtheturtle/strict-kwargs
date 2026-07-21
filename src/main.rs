@@ -233,12 +233,18 @@ fn report_check_diagnostics(
                 .map(JsonDiagnostic::from)
                 .collect::<Vec<_>>();
             let json = json_diagnostics(&diagnostics);
-            println!("{json}");
+            let stdout = std::io::stdout();
+            let mut stdout = BufWriter::new(stdout.lock());
+            writeln!(stdout, "{json}")?;
+            stdout.flush()?;
         }
         OutputFormat::Github => {
+            let stdout = std::io::stdout();
+            let mut stdout = BufWriter::new(stdout.lock());
             for diagnostic in diagnostics {
-                println!("{}", diagnostic.github_annotation());
+                writeln!(stdout, "{}", diagnostic.github_annotation())?;
             }
+            stdout.flush()?;
         }
     }
     Ok(())
