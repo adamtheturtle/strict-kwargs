@@ -1234,7 +1234,7 @@ impl<'a> CallChecker<'a> {
         let line_starts = self
             .line_starts
             .get_or_insert_with(|| line_starts(self.source));
-        line_column_from_starts(line_starts, offset)
+        line_column_from_starts(self.source, line_starts, offset)
     }
 
     fn push_scope(&mut self) {
@@ -4078,7 +4078,7 @@ fn emit_if_violation_with_signature_fullname(
     let offset = TextSize::new(offset);
     let (line, column) = line_starts.map_or_else(
         || line_column(source, offset),
-        |starts| line_column_from_starts(starts, offset),
+        |starts| line_column_from_starts(source, starts, offset),
     );
     diagnostics.push(Diagnostic {
         path: path.to_path_buf(),

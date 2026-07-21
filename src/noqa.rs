@@ -166,16 +166,10 @@ fn strip_ascii_ci_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-/// Byte offset of the start of every line in `source` (line 1 starts at 0).
-fn line_starts(source: &str) -> Vec<usize> {
-    let mut starts = vec![0usize];
-    for (index, ch) in source.char_indices() {
-        if ch == '\n' {
-            starts.push(index + 1);
-        }
-    }
-    starts
-}
+/// Byte offset of the start of every line in `source` (line 1 starts at 0),
+/// using the same universal-newline rule as the rest of the tool so a `# noqa`
+/// on a `\r`-delimited line maps to the correct physical line (issue #270).
+use crate::ast_util::line_starts;
 
 /// 1-based line containing `offset`, matching [`crate::ast_util::line_column`].
 fn line_for_offset(line_starts: &[usize], offset: usize) -> usize {
