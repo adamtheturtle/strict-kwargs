@@ -3040,11 +3040,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if self.function_stack.is_empty() {
                     self.define(name, fullname.clone());
                 } else {
-                    self.define_function(
-                        name,
-                        fullname.clone(),
-                        signature_from_parameters(parameters),
-                    );
+                    let written_signature = signature_from_parameters(parameters);
+                    let signature = if self.index.is_runtime_decorated(&fullname) {
+                        self.index
+                            .get(&fullname)
+                            .and_then(|signatures| signatures.first().cloned())
+                            .unwrap_or(written_signature)
+                    } else {
+                        written_signature
+                    };
+                    self.define_function(name, fullname.clone(), signature);
                 }
                 self.function_stack.push(fullname);
                 self.push_scope();

@@ -2168,6 +2168,191 @@ def d(): ...
 // --- @singledispatch / @singledispatchmethod ---
 
 #[test]
+fn arbitrary_decorator_definition_signature_is_not_trusted() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def unrelated():
+        return None
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@positional_only
+def consume(value):
+    return value
+
+consume(1)
+",
+    );
+}
+
+#[test]
+fn runtime_decorator_signature_replaces_overloads() {
+    assert_ok(
+        r"
+from typing import overload
+
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@overload
+def consume(value: int): ...
+@overload
+def consume(value: str): ...
+@positional_only
+def consume(value): ...
+
+consume(1)
+",
+    );
+}
+
+#[test]
+fn imported_arbitrary_decorator_definition_signature_is_not_trusted() {
+    let project = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
+        .file(
+            "decorated.py",
+            r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@positional_only
+def consume(value):
+    return value
+",
+        )
+        .main("from decorated import consume\n\nconsume(1)\n");
+    let messages = project.check();
+    assert!(messages.is_empty(), "expected no errors, got: {messages:?}");
+}
+
+#[test]
+fn nested_arbitrary_decorator_definition_signature_is_not_trusted() {
+    assert_ok(
+        r"
+def outer():
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(value):
+        return value
+
+    consume(1)
+",
+    );
+}
+
+#[test]
+fn class_local_decorator_shadows_module_level() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def wrapper(x, y, z, /):
+        return decorated(x, y, z)
+    return wrapper
+
+class C:
+    @staticmethod
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(value):
+        return value
+
+C.consume(1)
+",
+    );
+}
+
+#[test]
+fn class_local_decorator_shadows_module_level_with_bindings() {
+    assert_ok(
+        r"
+from dataclasses import dataclass
+
+def positional_only(decorated):
+    def wrapper(x, y, z, /):
+        return decorated(x, y, z)
+    return wrapper
+
+@dataclass
+class C:
+    @staticmethod
+    def positional_only(decorated):
+        def wrapper(value, /):
+            return decorated(value)
+        return wrapper
+
+    @positional_only
+    def consume(self, value):
+        return value
+
+C().consume(1)
+",
+    );
+}
+
+#[test]
+fn nested_function_uses_module_decorator_on_fast_path() {
+    assert_ok(
+        r"
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+def outer():
+    @positional_only
+    def consume(value):
+        return value
+
+    consume(1)
+
+outer()
+",
+    );
+}
+
+#[test]
+fn runtime_decorated_method_body_still_indexes_nested_defs() {
+    assert_error(
+        r"
+from dataclasses import dataclass
+
+def positional_only(decorated):
+    def wrapper(value, /):
+        return decorated(value)
+    return wrapper
+
+@dataclass
+class C:
+    @positional_only
+    def method(self):
+        def nested(*, only_kw):
+            return only_kw
+
+        nested(1)
+
+C().method()
+",
+        16,
+        "Too many positional",
+    );
+}
+
+#[test]
 fn singledispatch_positional_not_flagged() {
     // Calls to @singledispatch functions must not be flagged: the dispatch
     // mechanism reads args[0].__class__, so the first argument must stay

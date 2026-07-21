@@ -1066,6 +1066,13 @@ fn singledispatch_call_not_rewritten() {
 }
 
 #[test]
+fn arbitrary_decorator_runtime_positional_only_call_not_rewritten() {
+    assert_unchanged(
+        "def positional_only(decorated):\n    def wrapper(value, /):\n        return decorated(value)\n    return wrapper\n\n@positional_only\ndef consume(value):\n    return value\n\nconsume(1)\n",
+    );
+}
+
+#[test]
 fn singledispatch_multi_arg_call_not_rewritten() {
     // Multiple positional args to a @singledispatch function must not be
     // rewritten: dispatch on the first positional arg would break (issue #81).
