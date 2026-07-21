@@ -47,5 +47,6 @@ pub use config::{find_project_root, Config, OutputFormat};
 pub use diagnostic::Diagnostic;
 pub use error::CheckError;
 pub use fix::{
-    unified_diff, DeclinedFixReason, DeclinedFixReasonCount, FileFix, FixOptIns, FixOutcome,
+    unified_diff, write_all_preserving_encoding, DeclinedFixReason, DeclinedFixReasonCount,
+    FileFix, FixOptIns, FixOutcome,
 };

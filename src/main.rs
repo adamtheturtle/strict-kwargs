@@ -428,9 +428,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
         return Ok(ExitCode::from(0));
     }
 
-    for fix in fixes {
-        fix.write_preserving_encoding()?;
-    }
+    strict_kwargs::write_all_preserving_encoding(fixes)?;
     report_fix_summary(rewritten, remaining)?;
     Ok(fix_exit_code(remaining))
 }
