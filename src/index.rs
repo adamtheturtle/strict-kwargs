@@ -141,6 +141,19 @@ impl Store {
     }
 }
 
+fn fullname_is_first_party(store: &Store, fullname: &str) -> bool {
+    let mut owner = fullname;
+    loop {
+        let Some((parent, _)) = owner.rsplit_once('.') else {
+            return false;
+        };
+        if store.first_party_modules.contains(parent) {
+            return true;
+        }
+        owner = parent;
+    }
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_assigned_attribute(
     store: &mut Store,
@@ -898,6 +911,11 @@ impl DefinitionIndex {
         self.read().store.classes.contains(fullname)
     }
 
+    /// Whether a fullname belongs to one of the files being checked.
+    pub fn is_first_party(&self, fullname: &str) -> bool {
+        fullname_is_first_party(&self.read().store, fullname)
+    }
+
     /// Number of leading user arguments that must remain positional across
     /// the runtime boundaries of a class call.
     ///
@@ -911,17 +929,7 @@ impl DefinitionIndex {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
             let inner = self.read();
-            let mut owner = class_fullname;
-            let first_party = loop {
-                let Some((parent, _)) = owner.rsplit_once('.') else {
-                    break false;
-                };
-                if inner.store.first_party_modules.contains(parent) {
-                    break true;
-                }
-                owner = parent;
-            };
-            if !first_party {
+            if !fullname_is_first_party(&inner.store, class_fullname) {
                 return 0;
             }
             let signatures = ["__init__", "__new__"]

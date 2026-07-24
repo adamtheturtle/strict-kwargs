@@ -93,17 +93,8 @@ impl ModuleResolver {
             if let Some(m) = read_module(sp, &stub_rel, &["pyi"]) {
                 return Some(m);
             }
-            if let Some(m) = read_module(sp, &rel, &["pyi"]) {
+            if let Some(m) = read_module(sp, &rel, &["pyi", "py"]) {
                 return Some(m);
-            }
-            // Runtime package source is authoritative only when the
-            // distribution opts into PEP 561. Otherwise leave the call for
-            // ty, which can apply its full untyped-package inference instead
-            // of treating our partial source index as a complete signature.
-            if sp.join(top).join("py.typed").is_file() {
-                if let Some(m) = read_module(sp, &rel, &["py"]) {
-                    return Some(m);
-                }
             }
         }
 
@@ -386,22 +377,6 @@ mod tests {
             .expect("external package")
             .source
             .contains("value, /"));
-    }
-
-    #[test]
-    fn explicit_python_environment_ignores_untyped_runtime_package() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        let package = root
-            .join("external-env/lib/python3.12/site-packages")
-            .join("dep");
-        std::fs::create_dir_all(&package).expect("mkdir package");
-        std::fs::write(package.join("__init__.py"), "def f(value): ...\n").expect("write package");
-        let config = crate::config::Config::default();
-        let source_roots = SourceRoots::from_config(root, &config);
-        let resolver = ModuleResolver::new(root, &source_roots, Some(&root.join("external-env")));
-
-        assert!(resolver.resolve("dep").is_none());
     }
 
     #[test]

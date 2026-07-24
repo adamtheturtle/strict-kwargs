@@ -1943,14 +1943,16 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let constructed_class = is_constructor
+            .then(|| self.class_from_constructor_func(&call.func))
+            .flatten();
         let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
                 0
             } else {
-                self.class_from_constructor_func(&call.func)
-                    .map_or(0, |class| {
-                        self.index.constructor_positional_allowance(&class)
-                    })
+                constructed_class.as_ref().map_or(0, |class| {
+                    self.index.constructor_positional_allowance(class)
+                })
             };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
@@ -2038,11 +2040,21 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(0)
             .max(constructor_positional_allowance);
         let (line, column) = self.diagnostic_position(call.start());
+        let callee = constructed_class
+            .as_deref()
+            .filter(|class| !self.index.is_first_party(class))
+            .map_or_else(
+                || format_callee_display(&callee_fullname),
+                |class| {
+                    let class = class.rsplit('.').next().unwrap_or(class);
+                    format!("\"{class}\"")
+                },
+            );
         self.diagnostics.push(Diagnostic {
             path: self.path.clone(),
             line,
             column,
-            callee: format_callee_display(&callee_fullname),
+            callee,
             positional_count: effective_count,
             max_positional,
         });
