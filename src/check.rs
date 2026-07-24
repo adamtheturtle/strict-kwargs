@@ -2042,7 +2042,7 @@ impl<'a> CallChecker<'a> {
         let (line, column) = self.diagnostic_position(call.start());
         let callee = constructed_class
             .as_deref()
-            .filter(|class| !self.index.is_first_party(class))
+            .filter(|_| !self.index.is_first_party(&callee_fullname))
             .map_or_else(
                 || format_callee_display(&callee_fullname),
                 |class| {
