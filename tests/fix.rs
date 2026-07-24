@@ -99,6 +99,13 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn stale_function_signature_after_rebinding_is_not_used() {
+    assert_unchanged(
+        "def f(value):\n    return value\n\nf = lambda value, /: value\n\nassert f(1) == 1\n",
+    );
+}
+
+#[test]
 fn rewrites_mixed_call() {
     assert_fixed(
         "def add(a: int, b: int) -> int: ...\nadd(1, b=2)\n",
