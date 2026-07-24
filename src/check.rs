@@ -560,7 +560,7 @@ fn check_paths_impl(
     }
 
     let (index, indexed_files) =
-        build_index_with_sources(project_root, &python_files, &source_roots);
+        build_index_with_sources(project_root, &python_files, &source_roots, python_env);
 
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
@@ -577,8 +577,7 @@ fn check_paths_impl(
     // initialize cost (issue #31), so a run the built-in resolver fully
     // handles (the common editor-on-save / pre-commit case on first-party
     // code) starts no server at all. `python_env` (the `--python` value)
-    // only steers ty's third-party discovery; the built-in resolver's env
-    // discovery is unchanged.
+    // also steers the built-in resolver's third-party discovery.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -1948,14 +1947,16 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let constructed_class = is_constructor
+            .then(|| self.class_from_constructor_func(&call.func))
+            .flatten();
         let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
                 0
             } else {
-                self.class_from_constructor_func(&call.func)
-                    .map_or(0, |class| {
-                        self.index.constructor_positional_allowance(&class)
-                    })
+                constructed_class.as_ref().map_or(0, |class| {
+                    self.index.constructor_positional_allowance(class)
+                })
             };
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");

@@ -153,6 +153,19 @@ impl Store {
     }
 }
 
+fn fullname_is_first_party(store: &Store, fullname: &str) -> bool {
+    let mut owner = fullname;
+    loop {
+        let Some((parent, _)) = owner.rsplit_once('.') else {
+            return false;
+        };
+        if store.first_party_modules.contains(parent) {
+            return true;
+        }
+        owner = parent;
+    }
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_assigned_attribute(
     store: &mut Store,
@@ -932,17 +945,7 @@ impl DefinitionIndex {
             let mut query_budget = MAX_QUERY_MODULES;
             self.ensure_for(class_fullname, &mut query_budget);
             let inner = self.read();
-            let mut owner = class_fullname;
-            let first_party = loop {
-                let Some((parent, _)) = owner.rsplit_once('.') else {
-                    break false;
-                };
-                if inner.store.first_party_modules.contains(parent) {
-                    break true;
-                }
-                owner = parent;
-            };
-            if !first_party {
+            if !fullname_is_first_party(&inner.store, class_fullname) {
                 return 0;
             }
             let signatures = ["__init__", "__new__"]
@@ -1017,8 +1020,9 @@ pub fn build_index_with_sources(
     project_root: &Path,
     python_files: &[PathBuf],
     source_roots: &SourceRoots,
+    python_env: Option<&Path>,
 ) -> (DefinitionIndex, FxHashMap<PathBuf, IndexedFile>) {
-    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots));
+    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots, python_env));
     let mut indexed_files = FxHashMap::default();
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
@@ -2638,7 +2642,7 @@ class Mid(Base):
         .expect("write mid");
         let config = Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots));
+        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots, None));
         let parsed = parse_module(
             r"
 from mid import Mid

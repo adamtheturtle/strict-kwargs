@@ -107,6 +107,20 @@ func()
 }
 
 #[test]
+fn inherited_stdlib_constructor_retains_signature_owner() {
+    assert_error(
+        r"
+from logging import StreamHandler
+class LocalHandler(StreamHandler):
+    pass
+LocalHandler(None)
+",
+        5,
+        "\"StreamHandler\"",
+    );
+}
+
+#[test]
 fn keyword_only() {
     assert_ok(
         r"
@@ -1202,6 +1216,7 @@ fn reexport_from_submodule_in_init() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import handler\n",
@@ -1221,6 +1236,7 @@ fn reexport_imported_name_resolves() {
     let messages = check_with_aux(
         &[("app.py", "from mypkg import handler\n\nhandler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import handler\n",
@@ -1241,6 +1257,7 @@ fn reexport_chained_through_packages() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.deep(1)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from .sub import deep\n",
@@ -1265,6 +1282,7 @@ fn reexport_star() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import *\n",
@@ -1838,14 +1856,11 @@ fn make_venv(dir: &std::path::Path) -> Option<PathBuf> {
 }
 
 #[test]
-fn ty_forwards_external_python_env() {
-    // Issue #12: a venv outside the project root (not `$VIRTUAL_ENV`, not
-    // `<root>/.venv`) is invisible to the built-in resolver *and* to ty's
-    // auto-discovery. Passing the `--python` value forwards it to
-    // `ty server`, so the inference fallback resolves the third-party import
-    // and the positional call is flagged. With `None` (the default) nothing
-    // resolves and no diagnostic is produced — proving both that the flag is
-    // what enables resolution and that the unset path is unchanged.
+fn explicit_python_env_resolves_module_level_dependency() {
+    // A venv outside the project root (not `$VIRTUAL_ENV`, not
+    // `<root>/.venv`) is invisible to automatic discovery. Passing the
+    // `--python` value makes the built-in resolver and ty use that same
+    // third-party environment.
     let env_temp = tempfile::tempdir().expect("tempdir");
     let Some(venv) = make_venv(&env_temp.path().join("ext-env")) else {
         eprintln!("skipping: `python -m venv` unavailable");
@@ -1861,7 +1876,9 @@ fn ty_forwards_external_python_env() {
     std::fs::write(pkg.join("py.typed"), "").expect("py.typed");
     std::fs::write(
         pkg.join("__init__.py"),
-        "def configure(host, port):\n    return (host, port)\n",
+        "def configure(host, port):\n    return (host, port)\n\n\
+         class Base:\n    def __init__(self, value): ...\n\n\
+         class Child(Base):\n    pass\n",
     )
     .expect("pkg init");
 
@@ -1875,7 +1892,10 @@ fn ty_forwards_external_python_env() {
     let main = root.join("main.py");
     std::fs::write(
         &main,
-        "import extdep\n\nextdep.configure(\"localhost\", 8080)\nextdep.configure(host=\"localhost\", port=8080)\n",
+        "import extdep\n\n\
+         extdep.configure(\"localhost\", 8080)\n\
+         extdep.configure(host=\"localhost\", port=8080)\n\
+         extdep.Child(1)\n",
     )
     .expect("main");
     let config = Config::load(root).expect("valid config");
@@ -1887,17 +1907,19 @@ fn ty_forwards_external_python_env() {
         "expected no diagnostics without --python, got: {none:?}"
     );
 
-    // Forwarded: ty resolves `extdep.configure` against the external venv
-    // and flags the positional call (line 3); the keyword call (line 4) is
-    // fine.
+    // Forwarded: the positional function and inherited constructor calls are
+    // both flagged, while the keyword function call is fine. The constructor
+    // diagnostic retains the inherited signature owner.
     let got = check_paths(root, &[main], &config, Some(venv.as_path()), None).expect("check");
     let msgs: Vec<String> = got
         .iter()
         .map(|d| format!("{}: {}", d.line, d.message()))
         .collect();
-    assert_eq!(got.len(), 1, "got: {msgs:?}");
+    assert_eq!(got.len(), 2, "got: {msgs:?}");
     assert_eq!(got[0].line, 3, "got: {msgs:?}");
     assert!(msgs[0].contains("\"configure\""), "got: {msgs:?}");
+    assert_eq!(got[1].line, 5, "got: {msgs:?}");
+    assert!(msgs[1].contains("\"Base\""), "got: {msgs:?}");
 }
 
 #[test]
