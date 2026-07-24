@@ -34,14 +34,11 @@ pub struct LspLineIndex {
 
 impl LspLineIndex {
     pub fn new(source: &str) -> Self {
-        let mut line_starts = vec![0usize];
-        line_starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
-        );
-        Self { line_starts }
+        // Share the tool's universal-newline line splitting so LSP positions
+        // agree with diagnostic positions on `\r`-delimited source (issue #270).
+        Self {
+            line_starts: crate::ast_util::line_starts(source),
+        }
     }
 
     pub fn position(&self, source: &str, offset: usize) -> (u32, u32) {
@@ -51,7 +48,7 @@ impl LspLineIndex {
         let mut col_utf16 = 0usize;
         if let Some(line_suffix) = source.get(line_start..) {
             for (relative, ch) in line_suffix.char_indices() {
-                if line_start + relative >= offset || ch == '\n' {
+                if line_start + relative >= offset || ch == '\n' || ch == '\r' {
                     break;
                 }
                 col_utf16 += ch.len_utf16();
@@ -827,16 +824,21 @@ pub fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
 pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usize> {
     let mut cur_line = 0u32;
     let mut col_utf16 = 0u32;
-    for (idx, ch) in source.char_indices() {
+    let mut chars = source.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
         if cur_line == line && col_utf16 == character {
             return Some(idx);
         }
-        if ch == '\n' {
+        if ch == '\n' || ch == '\r' {
             if cur_line == line {
                 return Some(idx);
             }
             cur_line += 1;
             col_utf16 = 0;
+            // Python's universal newline rule treats CRLF as one newline.
+            if ch == '\r' {
+                let _ = chars.next_if(|&(_, next)| next == '\n');
+            }
         } else if cur_line == line {
             col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
         }
@@ -1196,6 +1198,17 @@ mod tests {
         assert_eq!(lsp_to_byte_offset("abc", 0, 3), Some(3));
         // Unreachable line => None.
         assert_eq!(lsp_to_byte_offset("abc", 9, 0), None);
+    }
+
+    #[test]
+    fn lsp_to_byte_offset_uses_universal_newlines() {
+        let src = "first\rsecond\r\nthird";
+        assert_eq!(lsp_to_byte_offset(src, 1, 0), Some("first\r".len()));
+        assert_eq!(lsp_to_byte_offset(src, 1, 99), Some("first\rsecond".len()));
+        assert_eq!(
+            lsp_to_byte_offset(src, 2, 0),
+            Some("first\rsecond\r\n".len())
+        );
     }
 
     #[test]
