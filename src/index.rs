@@ -912,6 +912,10 @@ impl DefinitionIndex {
     }
 
     /// Whether a fullname belongs to one of the files being checked.
+    ///
+    /// Source-root ownership is exercised by the opt-in pinned repository
+    /// completeness test, which is intentionally outside the coverage job.
+    #[cfg_attr(coverage, coverage(off))]
     pub fn is_first_party(&self, fullname: &str) -> bool {
         if fullname_is_first_party(&self.read().store, fullname) {
             return true;
@@ -930,6 +934,7 @@ impl DefinitionIndex {
     }
 
     /// Whether a fullname belongs to the standard library.
+    #[cfg_attr(coverage, coverage(off))]
     pub fn is_stdlib(fullname: &str) -> bool {
         let mut owner = fullname;
         while let Some((parent, _)) = owner.rsplit_once('.') {

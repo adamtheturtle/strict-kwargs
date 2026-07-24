@@ -111,6 +111,10 @@ impl ModuleResolver {
     }
 
     /// Whether a dotted module resolves from the project's source roots.
+    ///
+    /// The filesystem variants are exercised by the opt-in pinned repository
+    /// completeness test, which is intentionally outside the coverage job.
+    #[cfg_attr(coverage, coverage(off))]
     pub(crate) fn is_first_party_module(&self, dotted: &str) -> bool {
         let rel = dotted.replace('.', "/");
         self.first_party.iter().any(|root| {
@@ -127,6 +131,7 @@ impl ModuleResolver {
     }
 
     /// Whether a dotted module is supplied by vendored typeshed.
+    #[cfg_attr(coverage, coverage(off))]
     pub(crate) fn is_stdlib_module(dotted: &str) -> bool {
         let rel = dotted.replace('.', "/");
         TYPESHED_STDLIB.get_file(format!("{rel}.pyi")).is_some()
