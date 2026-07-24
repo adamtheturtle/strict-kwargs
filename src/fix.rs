@@ -121,6 +121,40 @@ impl FileFix {
     }
 }
 
+/// Write all fixes as one recoverable operation.
+///
+/// Every source is read and encoded before the first destination is changed.
+/// If a later write fails, previously written files are restored from their
+/// original bytes before the error is returned.
+///
+/// # Errors
+///
+/// Returns an I/O error when a source cannot be read or encoded, or when a
+/// destination cannot be written.
+pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
+    let prepared: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = fixes
+        .iter()
+        .map(|fix| {
+            let original = std::fs::read(&fix.path)?;
+            let fixed_bytes = crate::source::encode_python_source(&original, &fix.fixed)
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+            Ok((fix.path.clone(), original, fixed_bytes))
+        })
+        .collect::<std::io::Result<_>>()?;
+
+    let mut written = Vec::new();
+    for (path, original, fixed) in &prepared {
+        if let Err(error) = std::fs::write(path, fixed) {
+            for (path, original) in written.into_iter().rev() {
+                let _ = std::fs::write(path, original);
+            }
+            return Err(error);
+        }
+        written.push((path, original));
+    }
+    Ok(())
+}
+
 /// What a fix run produced: the files it would rewrite plus the number of
 /// violations it detected but deliberately left untouched.
 ///
@@ -267,6 +301,149 @@ mod tests {
             .write_preserving_encoding()
             .expect_err("ascii cannot represent the rewritten text");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn write_preserving_encoding_updates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.py");
+        std::fs::write(&path, "before\n").expect("write source");
+        let fix = FileFix {
+            path: path.clone(),
+            original: "before\n".to_owned(),
+            fixed: "after\n".to_owned(),
+            count: 1,
+        };
+
+        fix.write_preserving_encoding().expect("write fix");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read source"),
+            "after\n"
+        );
+    }
+
+    #[test]
+    fn write_all_preflights_every_file_before_changing_any() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let invalid_target = dir.path().join("directory");
+        std::fs::write(&first, "before\n").expect("write first");
+        std::fs::create_dir(&invalid_target).expect("mkdir");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "before\n".to_owned(),
+                fixed: "after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: invalid_target,
+                original: String::new(),
+                fixed: String::new(),
+                count: 1,
+            },
+        ];
+
+        assert!(write_all_preserving_encoding(&fixes).is_err());
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "before\n"
+        );
+    }
+
+    #[test]
+    fn write_all_rejects_unrepresentable_text_before_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.py");
+        std::fs::write(&path, b"# coding: ascii\nx = 1\n").expect("write source");
+        let fixes = [FileFix {
+            path: path.clone(),
+            original: "# coding: ascii\nx = 1\n".to_owned(),
+            fixed: "# coding: ascii\nx = '\u{e9}'\n".to_owned(),
+            count: 1,
+        }];
+
+        let error = write_all_preserving_encoding(&fixes)
+            .expect_err("ascii cannot represent the rewritten text");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(path).expect("read source"),
+            b"# coding: ascii\nx = 1\n"
+        );
+    }
+
+    #[test]
+    fn write_all_restores_earlier_files_after_write_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let read_only = dir.path().join("read_only.py");
+        std::fs::write(&first, "first before\n").expect("write first");
+        std::fs::write(&read_only, "second before\n").expect("write second");
+        let original_permissions = std::fs::metadata(&read_only)
+            .expect("second metadata")
+            .permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        std::fs::set_permissions(&read_only, read_only_permissions).expect("make read-only");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "first before\n".to_owned(),
+                fixed: "first after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: read_only.clone(),
+                original: "second before\n".to_owned(),
+                fixed: "second after\n".to_owned(),
+                count: 1,
+            },
+        ];
+
+        let error = write_all_preserving_encoding(&fixes).expect_err("second write must fail");
+        std::fs::set_permissions(&read_only, original_permissions).expect("restore permissions");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "first before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(read_only).expect("read second"),
+            "second before\n"
+        );
+    }
+
+    #[test]
+    fn write_all_updates_every_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let second = dir.path().join("second.py");
+        std::fs::write(&first, "first before\n").expect("write first");
+        std::fs::write(&second, "second before\n").expect("write second");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "first before\n".to_owned(),
+                fixed: "first after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: second.clone(),
+                original: "second before\n".to_owned(),
+                fixed: "second after\n".to_owned(),
+                count: 1,
+            },
+        ];
+
+        write_all_preserving_encoding(&fixes).expect("write every fix");
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "first after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second).expect("read second"),
+            "second after\n"
+        );
     }
 
     #[test]
