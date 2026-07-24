@@ -327,6 +327,7 @@ mod tests {
         let resolver = ModuleResolver::new(root, &source_roots, None);
         let module = resolver.resolve("pkg").expect("package");
         assert!(module.is_package);
+        assert!(resolver.is_first_party_module("pkg"));
     }
 
     #[test]

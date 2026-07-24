@@ -2467,6 +2467,12 @@ mod tests {
         index
     }
 
+    #[test]
+    fn module_origin_helpers_cover_resolverless_and_external_names() {
+        assert!(!DefinitionIndex::for_test().is_first_party("external.Class"));
+        assert!(!DefinitionIndex::is_stdlib("external.Class"));
+    }
+
     fn with_edges(mut index: DefinitionIndex, edges: &[(&str, &str)]) -> DefinitionIndex {
         index.set_edges(
             edges
