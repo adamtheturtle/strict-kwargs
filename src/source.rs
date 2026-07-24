@@ -327,6 +327,11 @@ mod tests {
     }
 
     #[test]
+    fn pep263_comment_only_file_has_no_second_line() {
+        assert_eq!(decoded(b"# comment"), "# comment");
+    }
+
+    #[test]
     fn utf8_bom_rejects_conflicting_pep263_declaration() {
         let mut bytes = UTF8_BOM.to_vec();
         bytes.extend_from_slice(b"# coding: latin-1\nx = 1\n");
