@@ -304,6 +304,25 @@ mod tests {
     }
 
     #[test]
+    fn write_preserving_encoding_updates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.py");
+        std::fs::write(&path, "before\n").expect("write source");
+        let fix = FileFix {
+            path: path.clone(),
+            original: "before\n".to_owned(),
+            fixed: "after\n".to_owned(),
+            count: 1,
+        };
+
+        fix.write_preserving_encoding().expect("write fix");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read source"),
+            "after\n"
+        );
+    }
+
+    #[test]
     fn write_all_preflights_every_file_before_changing_any() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.py");
