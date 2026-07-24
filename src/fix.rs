@@ -352,6 +352,27 @@ mod tests {
     }
 
     #[test]
+    fn write_all_rejects_unrepresentable_text_before_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.py");
+        std::fs::write(&path, b"# coding: ascii\nx = 1\n").expect("write source");
+        let fixes = [FileFix {
+            path: path.clone(),
+            original: "# coding: ascii\nx = 1\n".to_owned(),
+            fixed: "# coding: ascii\nx = '\u{e9}'\n".to_owned(),
+            count: 1,
+        }];
+
+        let error = write_all_preserving_encoding(&fixes)
+            .expect_err("ascii cannot represent the rewritten text");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(path).expect("read source"),
+            b"# coding: ascii\nx = 1\n"
+        );
+    }
+
+    #[test]
     fn write_all_restores_earlier_files_after_write_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.py");
