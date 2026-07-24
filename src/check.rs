@@ -2040,25 +2040,11 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(0)
             .max(constructor_positional_allowance);
         let (line, column) = self.diagnostic_position(call.start());
-        let callee = constructed_class
-            .as_deref()
-            .filter(|class| {
-                self.index.is_first_party(class)
-                    && !self.index.is_first_party(&callee_fullname)
-                    && !DefinitionIndex::is_stdlib(&callee_fullname)
-            })
-            .map_or_else(
-                || format_callee_display(&callee_fullname),
-                |class| {
-                    let class = class.rsplit('.').next().unwrap_or(class);
-                    format!("\"{class}\"")
-                },
-            );
         self.diagnostics.push(Diagnostic {
             path: self.path.clone(),
             line,
             column,
-            callee,
+            callee: format_callee_display(&callee_fullname),
             positional_count: effective_count,
             max_positional,
         });

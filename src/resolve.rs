@@ -100,7 +100,7 @@ impl ModuleResolver {
             // distribution opts into PEP 561. Otherwise leave the call for
             // ty, which can apply its full untyped-package inference instead
             // of treating our partial source index as a complete signature.
-            if sp.join(top).join("py.typed").is_file() {
+            if has_py_typed_marker(sp, dotted) {
                 if let Some(m) = read_module(sp, &rel, &["py"]) {
                     return Some(m);
                 }
@@ -109,36 +109,14 @@ impl ModuleResolver {
 
         None
     }
+}
 
-    /// Whether a dotted module resolves from the project's source roots.
-    ///
-    /// The filesystem variants are exercised by the opt-in pinned repository
-    /// completeness test, which is intentionally outside the coverage job.
-    #[cfg_attr(coverage, coverage(off))]
-    pub(crate) fn is_first_party_module(&self, dotted: &str) -> bool {
-        let rel = dotted.replace('.', "/");
-        self.first_party.iter().any(|root| {
-            ["py", "pyi"]
-                .into_iter()
-                .any(|ext| root.join(&rel).with_extension(ext).is_file())
-                || ["py", "pyi"].into_iter().any(|ext| {
-                    root.join(&rel)
-                        .join("__init__")
-                        .with_extension(ext)
-                        .is_file()
-                })
-        })
-    }
-
-    /// Whether a dotted module is supplied by vendored typeshed.
-    #[cfg_attr(coverage, coverage(off))]
-    pub(crate) fn is_stdlib_module(dotted: &str) -> bool {
-        let rel = dotted.replace('.', "/");
-        TYPESHED_STDLIB.get_file(format!("{rel}.pyi")).is_some()
-            || TYPESHED_STDLIB
-                .get_file(format!("{rel}/__init__.pyi"))
-                .is_some()
-    }
+fn has_py_typed_marker(site_packages: &Path, dotted: &str) -> bool {
+    let mut package = site_packages.to_path_buf();
+    dotted.split('.').any(|component| {
+        package.push(component);
+        package.join("py.typed").is_file()
+    })
 }
 
 fn is_namespace_package(namespace_packages: &[PathBuf], path: &Path) -> bool {
@@ -301,11 +279,6 @@ mod tests {
         let first = resolver.resolve("mypkg").expect("first-party module");
         assert!(first.source.contains("def f"));
         assert!(!first.is_package);
-        assert!(resolver.is_first_party_module("mypkg"));
-        assert!(!resolver.is_first_party_module("os"));
-        assert!(ModuleResolver::is_stdlib_module("os"));
-        assert!(ModuleResolver::is_stdlib_module("http"));
-        assert!(!ModuleResolver::is_stdlib_module("mypkg"));
 
         // Vendored typeshed stdlib module (`<name>.pyi`).
         let stdlib = resolver.resolve("types").expect("stdlib module");
@@ -332,7 +305,6 @@ mod tests {
         let resolver = ModuleResolver::new(root, &source_roots, None);
         let module = resolver.resolve("pkg").expect("package");
         assert!(module.is_package);
-        assert!(resolver.is_first_party_module("pkg"));
     }
 
     #[test]
@@ -438,6 +410,27 @@ mod tests {
         let resolver = ModuleResolver::new(root, &source_roots, Some(&root.join("external-env")));
 
         assert!(resolver.resolve("dep").is_none());
+    }
+
+    #[test]
+    fn explicit_python_environment_honors_subpackage_py_typed_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let package = root
+            .join("external-env/lib/python3.12/site-packages")
+            .join("namespace/typed");
+        std::fs::create_dir_all(&package).expect("mkdir package");
+        std::fs::write(package.join("py.typed"), "").expect("write marker");
+        std::fs::write(package.join("module.py"), "def f(value): ...\n").expect("write module");
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots, Some(&root.join("external-env")));
+
+        assert!(resolver
+            .resolve("namespace.typed.module")
+            .expect("typed namespace subpackage")
+            .source
+            .contains("def f"));
     }
 
     #[test]

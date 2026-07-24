@@ -911,41 +911,6 @@ impl DefinitionIndex {
         self.read().store.classes.contains(fullname)
     }
 
-    /// Whether a fullname belongs to one of the files being checked.
-    ///
-    /// Source-root ownership is exercised by the opt-in pinned repository
-    /// completeness test, which is intentionally outside the coverage job.
-    #[cfg_attr(coverage, coverage(off))]
-    pub fn is_first_party(&self, fullname: &str) -> bool {
-        if fullname_is_first_party(&self.read().store, fullname) {
-            return true;
-        }
-        let Some(resolver) = &self.resolver else {
-            return false;
-        };
-        let mut owner = fullname;
-        while let Some((parent, _)) = owner.rsplit_once('.') {
-            if resolver.is_first_party_module(parent) {
-                return true;
-            }
-            owner = parent;
-        }
-        false
-    }
-
-    /// Whether a fullname belongs to the standard library.
-    #[cfg_attr(coverage, coverage(off))]
-    pub fn is_stdlib(fullname: &str) -> bool {
-        let mut owner = fullname;
-        while let Some((parent, _)) = owner.rsplit_once('.') {
-            if ModuleResolver::is_stdlib_module(parent) {
-                return true;
-            }
-            owner = parent;
-        }
-        false
-    }
-
     /// Number of leading user arguments that must remain positional across
     /// the runtime boundaries of a class call.
     ///
@@ -2470,12 +2435,6 @@ mod tests {
             index.insert(name.to_string(), sig(arity));
         }
         index
-    }
-
-    #[test]
-    fn module_origin_helpers_cover_resolverless_and_external_names() {
-        assert!(!DefinitionIndex::for_test().is_first_party("external.Class"));
-        assert!(!DefinitionIndex::is_stdlib("external.Class"));
     }
 
     fn with_edges(mut index: DefinitionIndex, edges: &[(&str, &str)]) -> DefinitionIndex {
