@@ -299,6 +299,7 @@ mod tests {
         assert!(resolver.is_first_party_module("mypkg"));
         assert!(!resolver.is_first_party_module("os"));
         assert!(ModuleResolver::is_stdlib_module("os"));
+        assert!(ModuleResolver::is_stdlib_module("http"));
         assert!(!ModuleResolver::is_stdlib_module("mypkg"));
 
         // Vendored typeshed stdlib module (`<name>.pyi`).

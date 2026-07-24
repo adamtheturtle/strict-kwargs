@@ -107,6 +107,20 @@ func()
 }
 
 #[test]
+fn inherited_stdlib_constructor_retains_signature_owner() {
+    assert_error(
+        r"
+from logging import StreamHandler
+class LocalHandler(StreamHandler):
+    pass
+LocalHandler(None)
+",
+        5,
+        "\"StreamHandler\"",
+    );
+}
+
+#[test]
 fn keyword_only() {
     assert_ok(
         r"
