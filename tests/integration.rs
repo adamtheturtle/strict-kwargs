@@ -1202,6 +1202,7 @@ fn reexport_from_submodule_in_init() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import handler\n",
@@ -1221,6 +1222,7 @@ fn reexport_imported_name_resolves() {
     let messages = check_with_aux(
         &[("app.py", "from mypkg import handler\n\nhandler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import handler\n",
@@ -1241,6 +1243,7 @@ fn reexport_chained_through_packages() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.deep(1)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from .sub import deep\n",
@@ -1265,6 +1268,7 @@ fn reexport_star() {
     let messages = check_with_aux(
         &[("app.py", "import mypkg\n\nmypkg.handler(1, 2)\n")],
         &[
+            (".venv/lib/python3.12/site-packages/mypkg/py.typed", ""),
             (
                 ".venv/lib/python3.12/site-packages/mypkg/__init__.py",
                 "from ._impl import *\n",
