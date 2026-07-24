@@ -2690,6 +2690,17 @@ class Child(Base):
     }
 
     #[test]
+    fn assignment_preserves_prior_function_exclusion() {
+        let store = indexed_store(
+            "from functools import singledispatch\n\
+             @singledispatch\n\
+             def f(value): ...\n\
+             f = replacement\n",
+        );
+        assert!(store.excluded.contains("main.f"));
+    }
+
+    #[test]
     fn attribute_assignment_excludes_stale_method_signature() {
         let store = indexed_store(
             "class C:\n    def method(self, value): ...\nC.method = lambda self, value, /: value\n",
