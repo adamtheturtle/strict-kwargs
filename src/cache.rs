@@ -170,6 +170,8 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
 /// - `ty` binary path + mtime (located via `PATH`)
 /// - every `.py`/`.pyi` file under `project_root`, sorted by path, each
 ///   contributing its canonical path bytes and **mtime** (not content)
+/// - every configured first-party source root, including absolute roots
+///   outside `project_root`
 /// - every `.py`/`.pyi` file in automatically discovered or explicitly
 ///   selected `site-packages`
 ///
@@ -191,6 +193,7 @@ pub fn compute_global_fingerprint(
     project_root: &Path,
     config_json: &str,
     python_env: Option<&Path>,
+    first_party_roots: &[PathBuf],
 ) -> u64 {
     let mut h = FnvHasher::new();
 
@@ -215,6 +218,12 @@ pub fn compute_global_fingerprint(
     // path, each contributing path bytes + mtime.  Mtime-based hashing keeps
     // this to stat(2) calls (cheap) rather than full file reads (expensive).
     hash_py_file_mtimes(project_root, &mut h);
+    for root in first_party_roots {
+        if root != project_root {
+            h.write_bytes(root.as_os_str().as_encoded_bytes());
+            hash_py_file_mtimes(root, &mut h);
+        }
+    }
 
     // Third-party modules and stubs can change resolution just like
     // first-party source. The project walk intentionally prunes `.venv`, so
@@ -496,25 +505,25 @@ mod tests {
     #[test]
     fn global_fingerprint_is_consistent() {
         let dir = tempdir().expect("tempdir");
-        let f1 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None);
-        let f2 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None);
+        let f1 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None, &[]);
+        let f2 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None, &[]);
         assert_eq!(f1, f2);
     }
 
     #[test]
     fn global_fingerprint_changes_with_config() {
         let dir = tempdir().expect("tempdir");
-        let f1 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None);
-        let f2 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":["foo"]}"#, None);
+        let f1 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":[]}"#, None, &[]);
+        let f2 = compute_global_fingerprint(dir.path(), r#"{"ignore_names":["foo"]}"#, None, &[]);
         assert_ne!(f1, f2);
     }
 
     #[test]
     fn global_fingerprint_changes_with_new_py_file() {
         let dir = tempdir().expect("tempdir");
-        let f1 = compute_global_fingerprint(dir.path(), "{}", None);
+        let f1 = compute_global_fingerprint(dir.path(), "{}", None, &[]);
         std::fs::write(dir.path().join("mod.py"), b"x = 1").expect("write");
-        let f2 = compute_global_fingerprint(dir.path(), "{}", None);
+        let f2 = compute_global_fingerprint(dir.path(), "{}", None, &[]);
         assert_ne!(f1, f2);
     }
 
@@ -524,8 +533,8 @@ mod tests {
         // fingerprint still completes (the path bytes are still hashed).
         let dir = tempdir().expect("tempdir");
         let no_env = PathBuf::from("/no/such/python");
-        let f1 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env));
-        let f2 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env));
+        let f1 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env), &[]);
+        let f2 = compute_global_fingerprint(dir.path(), "{}", Some(&no_env), &[]);
         assert_eq!(f1, f2);
     }
 
@@ -535,8 +544,8 @@ mod tests {
         // the mtime-hashing branch for the python environment.
         let dir = tempdir().expect("tempdir");
         let env_dir = tempdir().expect("env tempdir");
-        let f1 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
-        let f2 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()));
+        let f1 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()), &[]);
+        let f2 = compute_global_fingerprint(dir.path(), "{}", Some(env_dir.path()), &[]);
         assert_eq!(f1, f2);
     }
 
@@ -550,13 +559,26 @@ mod tests {
             .join("python3.12")
             .join("site-packages");
         std::fs::create_dir_all(&site_packages).expect("mkdir site-packages");
-        let before = compute_global_fingerprint(project.path(), "{}", Some(env.path()));
+        let before = compute_global_fingerprint(project.path(), "{}", Some(env.path()), &[]);
         std::fs::write(
             site_packages.join("dep.pyi"),
             "def f(a: int, /) -> None: ...\n",
         )
         .expect("write stub");
-        let after = compute_global_fingerprint(project.path(), "{}", Some(env.path()));
+        let after = compute_global_fingerprint(project.path(), "{}", Some(env.path()), &[]);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn global_fingerprint_changes_with_external_source_root() {
+        let project = tempdir().expect("project tempdir");
+        let external = tempdir().expect("external tempdir");
+        let roots = vec![project.path().to_path_buf(), external.path().to_path_buf()];
+        let before = compute_global_fingerprint(project.path(), "{}", None, &roots);
+        std::fs::write(external.path().join("dep.py"), "def f(value): ...\n")
+            .expect("write dependency");
+        let after = compute_global_fingerprint(project.path(), "{}", None, &roots);
+
         assert_ne!(before, after);
     }
 }
