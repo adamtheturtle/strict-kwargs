@@ -333,6 +333,47 @@ mod tests {
     }
 
     #[test]
+    fn write_all_restores_earlier_files_after_write_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let read_only = dir.path().join("read_only.py");
+        std::fs::write(&first, "first before\n").expect("write first");
+        std::fs::write(&read_only, "second before\n").expect("write second");
+        let original_permissions = std::fs::metadata(&read_only)
+            .expect("second metadata")
+            .permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        std::fs::set_permissions(&read_only, read_only_permissions).expect("make read-only");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "first before\n".to_owned(),
+                fixed: "first after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: read_only.clone(),
+                original: "second before\n".to_owned(),
+                fixed: "second after\n".to_owned(),
+                count: 1,
+            },
+        ];
+
+        let error = write_all_preserving_encoding(&fixes).expect_err("second write must fail");
+        std::fs::set_permissions(&read_only, original_permissions).expect("restore permissions");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "first before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(read_only).expect("read second"),
+            "second before\n"
+        );
+    }
+
+    #[test]
     fn declined_fix_reason_counts_are_ordered_and_labeled() {
         let reasons = [
             DeclinedFixReason::UnsupportedSignatureShape,
