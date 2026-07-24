@@ -374,6 +374,39 @@ mod tests {
     }
 
     #[test]
+    fn write_all_updates_every_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let second = dir.path().join("second.py");
+        std::fs::write(&first, "first before\n").expect("write first");
+        std::fs::write(&second, "second before\n").expect("write second");
+        let fixes = vec![
+            FileFix {
+                path: first.clone(),
+                original: "first before\n".to_owned(),
+                fixed: "first after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: second.clone(),
+                original: "second before\n".to_owned(),
+                fixed: "second after\n".to_owned(),
+                count: 1,
+            },
+        ];
+
+        write_all_preserving_encoding(&fixes).expect("write every fix");
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "first after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second).expect("read second"),
+            "second after\n"
+        );
+    }
+
+    #[test]
     fn declined_fix_reason_counts_are_ordered_and_labeled() {
         let reasons = [
             DeclinedFixReason::UnsupportedSignatureShape,
