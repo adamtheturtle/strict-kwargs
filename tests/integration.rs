@@ -1895,7 +1895,7 @@ fn explicit_python_env_resolves_module_level_dependency() {
 
     // Forwarded: the positional function and inherited constructor calls are
     // both flagged, while the keyword function call is fine. The constructor
-    // diagnostic names the class at the call site, not its inherited base.
+    // diagnostic retains the inherited signature owner.
     let got = check_paths(root, &[main], &config, Some(venv.as_path()), None).expect("check");
     let msgs: Vec<String> = got
         .iter()
@@ -1905,7 +1905,7 @@ fn explicit_python_env_resolves_module_level_dependency() {
     assert_eq!(got[0].line, 3, "got: {msgs:?}");
     assert!(msgs[0].contains("\"configure\""), "got: {msgs:?}");
     assert_eq!(got[1].line, 5, "got: {msgs:?}");
-    assert!(msgs[1].contains("\"Child\""), "got: {msgs:?}");
+    assert!(msgs[1].contains("\"Base\""), "got: {msgs:?}");
 }
 
 #[test]

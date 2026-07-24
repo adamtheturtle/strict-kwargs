@@ -913,7 +913,32 @@ impl DefinitionIndex {
 
     /// Whether a fullname belongs to one of the files being checked.
     pub fn is_first_party(&self, fullname: &str) -> bool {
-        fullname_is_first_party(&self.read().store, fullname)
+        if fullname_is_first_party(&self.read().store, fullname) {
+            return true;
+        }
+        let Some(resolver) = &self.resolver else {
+            return false;
+        };
+        let mut owner = fullname;
+        while let Some((parent, _)) = owner.rsplit_once('.') {
+            if resolver.is_first_party_module(parent) {
+                return true;
+            }
+            owner = parent;
+        }
+        false
+    }
+
+    /// Whether a fullname belongs to the standard library.
+    pub fn is_stdlib(fullname: &str) -> bool {
+        let mut owner = fullname;
+        while let Some((parent, _)) = owner.rsplit_once('.') {
+            if ModuleResolver::is_stdlib_module(parent) {
+                return true;
+            }
+            owner = parent;
+        }
+        false
     }
 
     /// Number of leading user arguments that must remain positional across

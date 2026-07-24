@@ -109,6 +109,31 @@ impl ModuleResolver {
 
         None
     }
+
+    /// Whether a dotted module resolves from the project's source roots.
+    pub(crate) fn is_first_party_module(&self, dotted: &str) -> bool {
+        let rel = dotted.replace('.', "/");
+        self.first_party.iter().any(|root| {
+            ["py", "pyi"]
+                .into_iter()
+                .any(|ext| root.join(&rel).with_extension(ext).is_file())
+                || ["py", "pyi"].into_iter().any(|ext| {
+                    root.join(&rel)
+                        .join("__init__")
+                        .with_extension(ext)
+                        .is_file()
+                })
+        })
+    }
+
+    /// Whether a dotted module is supplied by vendored typeshed.
+    pub(crate) fn is_stdlib_module(dotted: &str) -> bool {
+        let rel = dotted.replace('.', "/");
+        TYPESHED_STDLIB.get_file(format!("{rel}.pyi")).is_some()
+            || TYPESHED_STDLIB
+                .get_file(format!("{rel}/__init__.pyi"))
+                .is_some()
+    }
 }
 
 fn is_namespace_package(namespace_packages: &[PathBuf], path: &Path) -> bool {
@@ -271,6 +296,10 @@ mod tests {
         let first = resolver.resolve("mypkg").expect("first-party module");
         assert!(first.source.contains("def f"));
         assert!(!first.is_package);
+        assert!(resolver.is_first_party_module("mypkg"));
+        assert!(!resolver.is_first_party_module("os"));
+        assert!(ModuleResolver::is_stdlib_module("os"));
+        assert!(!ModuleResolver::is_stdlib_module("mypkg"));
 
         // Vendored typeshed stdlib module (`<name>.pyi`).
         let stdlib = resolver.resolve("types").expect("stdlib module");
