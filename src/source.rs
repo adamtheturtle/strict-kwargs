@@ -339,6 +339,13 @@ mod tests {
     }
 
     #[test]
+    fn utf8_bom_accepts_utf8_pep263_declaration() {
+        let mut bytes = UTF8_BOM.to_vec();
+        bytes.extend_from_slice(b"# coding: utf-8\nx = 1\n");
+        assert_eq!(decoded(&bytes), "# coding: utf-8\nx = 1\n");
+    }
+
+    #[test]
     fn pep263_declaration_is_not_read_past_two_lines() {
         // A declaration on line 3 is ignored; the bytes are then plain UTF-8.
         assert_eq!(
