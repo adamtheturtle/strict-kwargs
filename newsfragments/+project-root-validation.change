@@ -1,1 +1,0 @@
-Reject an explicit ``--project-root`` that is missing or is not a directory instead of silently ignoring project configuration.

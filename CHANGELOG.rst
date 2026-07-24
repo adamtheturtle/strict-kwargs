@@ -3,6 +3,142 @@ Changelog
 
 .. towncrier release notes start
 
+2026.7.24
+---------
+
+- Avoid false constructor diagnostics and unsafe fixes when a class call crosses
+  multiple locally modeled runtime boundaries. Calls now remain unchanged when
+  a local ``__new__`` competes with ``__init__`` or a custom metaclass
+  ``__call__`` can impose a different positional-only contract.
+
+- Extend ``ty`` hover-answer reuse from ``self``/``cls`` attribute calls to
+  every call on a stable name binding: any parameter, a module-level
+  ``import``/``def``/``class``, a single assignment (``f = open(...)``,
+  ``with open(...) as f``), and bare-name calls on such bindings
+  (``Decimal(...)``, ``check(...)``). Deferred calls that share a binding, an
+  attribute, and a call-shape fingerprint now resolve from one hover/definition
+  round trip instead of one per call site, cutting the CPython completeness
+  run's ``ty`` request volume by about 17% (138k to 114k requests). Bindings
+  stay grouped only while they are provably stable: any rebinding, ``del``,
+  augmented assignment, ``global``/``nonlocal``, ``match`` subject or capture,
+  narrowing test, or escape into a call poisons the group, a binding that
+  shadows an enclosing name retroactively un-groups call sites recorded before
+  it in the same scope (Python makes the name scope-local throughout), and
+  class-body bindings never shadow names inside methods. The wider reuse also
+  recovers nine CPython diagnostics that per-site queries had been losing to
+  ``ty``'s answer instability (``LibraryLoader.LoadLibrary``,
+  ``IdleConf.GetOption``, ``ExitStack.enter_context``, ...), with no entries
+  lost on either completeness oracle.
+
+  The whole-project pipeline now also streams: files needing the ``ty``
+  fallback are dispatched to the four shard servers in sorted order as soon as
+  the parallel built-in pass finishes each file, so the servers work
+  concurrently with the scan instead of idling until it drains, and a shard
+  that never receives a query no longer starts a server at all. The
+  first-party index build reads and parses candidate files in parallel as
+  well (about 1.1s to 0.5s on a CPython checkout). Each server's request
+  stream is byte-identical to the previous scan-then-shard pipeline's, so
+  diagnostics are unchanged.
+
+- Fix a regression in ``ty`` hover-answer reuse that dropped real diagnostics
+  for calls grouped across a platform-specific branch. When a group's earliest
+  call site sits in code ``ty`` considers unreachable (for example a
+  ``sys.platform``-guarded branch that is dead on the host platform), ``ty``
+  answers with the bottom type ``Never`` instead of the receiver's real
+  signature. That answer was cached and reused for the whole group, suppressing
+  the group's live members, which do resolve. Only a usable callable signature
+  is now treated as the shared group answer, so a ``Never`` (or absent) answer
+  at one member no longer hides violations at the others.
+
+- Include Python environment modules and stubs in the persistent diagnostic
+  cache fingerprint. Changes below a project ``.venv``, ``VIRTUAL_ENV``, or an
+  explicit ``--python`` environment now invalidate cached results instead of
+  returning diagnostics based on stale dependency signatures.
+
+- Preserve a Python file's PEP 263 encoding when applying ``check --fix``.
+  Legacy Latin-1 source is now written back as Latin-1 instead of silently
+  changing non-ASCII bytes to UTF-8 while leaving the original encoding
+  declaration in place. UTF-8 byte-order marks are preserved as well.
+
+- Raise the required ``ty`` floor from ``0.0.46`` to ``0.0.52``, the release the
+  LSP/hover integration is now verified against. The full test suite (including
+  the hover and goto-definition goldens) passes unchanged on ``0.0.52``, so the
+  hover/LSP surface this project parses is unaffected. On the completeness
+  oracles the new ``ty`` is effectively neutral versus ``0.0.46`` — a handful of
+  diagnostics churn either way, the only systematic change being ty's
+  ``dict.pop`` overload fix, which drops three ``pop`` call sites that are no
+  longer flagged.
+
+- Reject an explicit ``--project-root`` that is missing or is not a directory instead of silently ignoring project configuration.
+
+- Reuse one ``ty`` hover/definition answer for repeated same-shape
+  ``self.method(...)``/``cls.method(...)`` calls, cutting the ty fallback
+  roughly 40% on method-call-heavy projects (CPython completeness benchmark:
+  ~24s to ~14.5s ty phase, ~29s to ~18s end to end; Sphinx: ~4s to ~2.1s).
+  The built-in scan groups deferred calls that are proven to hover
+  identically — the same un-rebound ``self``/``cls`` parameter binding, the
+  same attribute, and the same call shape (argument arity, coarse argument
+  kinds, keyword names; ty's hover is call-site sensitive for overloads and
+  generics, so shape is part of the key) — and the ty fallback asks once per
+  group. Grouping is dropped conservatively whenever the receiver could be
+  rebound or narrowed (assignment to the name, the bare name escaping into a
+  call such as ``isinstance(self, T)``, a comparison/truthiness test, a
+  ``match`` statement, an assignment to or non-call mention of the attribute),
+  so every reused answer is exactly what ``ty`` would have returned at that
+  site. Each server's request stream remains a pure function of the sorted
+  work list, so diagnostics stay deterministic across runs and machines; the
+  only observed output change on the pinned completeness repositories is four
+  additional true positives on CPython where ty previously answered the same
+  call sites inconsistently (``skipTest``/``fail``/``fspath``), with no
+  entries lost.
+
+- Run the ``ty`` inference fallback on four parallel ``ty server`` shards when
+  more than one file needs it, making whole-project runs ~3.5x faster on large
+  repositories (CPython: ~45s to ~13s; Sphinx: ~6.6s to ~1.9s). Files are
+  partitioned deterministically (greedy least-loaded over the sorted file list,
+  with a fixed shard count that never depends on the host's core count) and
+  each shard keeps the serial one-request-in-flight discipline, so every run on
+  every machine replays identical request streams per server. Each shard also
+  replays the full sorted ``didOpen`` history (cheap under pull diagnostics),
+  keeping per-query answers aligned with the previous single-server pass.
+
+  The goto-definition fallback now tries every location ``ty`` returns, in
+  order, instead of only the first: the relative order of a multi-location
+  answer (re-exports, a class plus a local binding) depends on the answering
+  server's open/query history, and the leading entry is often a local binding
+  the definition parser cannot use. Trying each location makes the outcome
+  independent of that ordering and recovers definitions a first-entry-only
+  read silently dropped — roughly 200 new true positives on the CPython
+  completeness oracle (``mock.patch.dict``, ``inspect.signature``, ``ctypes``
+  constructors) and a handful on Sphinx, with no entries lost; one CPython
+  call site is now attributed to the resolved class constructor instead of
+  ``object.__class__``. The completeness snapshots were regenerated for these
+  additions.
+
+- Speed up the ``ty`` inference fallback dramatically on large projects and
+  make its results reproducible. The LSP client now advertises
+  pull-diagnostics support, so ``ty`` no longer eagerly type-checks (and
+  pushes diagnostics for) every file the fallback opens — hover and definition
+  answers are computed on demand instead. The full CPython completeness run
+  drops from ~42 minutes to ~42 seconds. Requests sent to ``ty`` also always
+  carry absolute ``file://`` URIs now: a relative CLI path (``strict-kwargs
+  check .``) previously produced relative URIs whose diagnostics wait could
+  never match ``ty``'s absolute ones, stalling for a 15-second timeout per
+  file. Fallback results are also deterministic now: files are opened in
+  sorted order and queries are issued one at a time, because ``ty`` answers
+  multi-location definition requests differently depending on its internal
+  thread scheduling when several requests are in flight. Calls whose hover
+  previously got dropped under ``ty``'s diagnostics load fell through to the
+  goto-definition path (which cannot evaluate ``sys.version_info``-gated
+  typeshed signatures); they are now consistently resolved from the
+  version-aware hover, and the completeness snapshots were regenerated to
+  match the (more accurate, and substantially larger) stable result set.
+
+- Treat filesystem errors encountered during directory traversal as operational
+  errors. A check now exits with status 2 and names the unreadable path instead
+  of silently skipping part of the requested tree and potentially reporting a
+  false clean result.
+
 2026.6.8-post.1
 ---------------
 
