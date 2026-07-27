@@ -160,6 +160,64 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
     }
 }
 
+/// Whether walking `ancestor` with [`hash_py_file_mtimes`] also reaches
+/// `descendant`.
+///
+/// A lexical prefix is insufficient: the walk deliberately prunes dot
+/// directories, `venv`, and `__pycache__`, and does not follow symlinked
+/// directories. An explicitly configured source root below one of those
+/// boundaries still needs its own walk.
+fn fingerprint_walk_covers(ancestor: &Path, descendant: &Path) -> bool {
+    let Ok(relative) = descendant.strip_prefix(ancestor) else {
+        return false;
+    };
+    let mut current = ancestor.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "venv" || name == "__pycache__" {
+            return false;
+        }
+        if current
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reduce first-party fingerprint roots to the non-overlapping walks needed to
+/// cover them. Shallower roots come first so an ordinary configured `src/`
+/// below `project_root` is recognized as already covered.
+fn fingerprint_walk_roots(project_root: &Path, first_party_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(first_party_roots.len() + 1);
+    candidates.push(project_root.to_path_buf());
+    candidates.extend(first_party_roots.iter().cloned());
+    candidates.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    candidates.dedup();
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for candidate in candidates {
+        if !roots
+            .iter()
+            .any(|root| fingerprint_walk_covers(root, &candidate))
+        {
+            roots.push(candidate);
+        }
+    }
+    roots
+}
+
 /// Compute the global fingerprint that captures everything outside a single
 /// file that could affect the checker's output.
 ///
@@ -214,25 +272,23 @@ pub fn compute_global_fingerprint(
     // `ty` binary path + mtime.
     hash_ty_binary(&mut h);
 
-    // All first-party `.py`/`.pyi` files under `project_root`, sorted by
-    // path, each contributing path bytes + mtime.  Mtime-based hashing keeps
-    // this to stat(2) calls (cheap) rather than full file reads (expensive).
-    hash_py_file_mtimes(project_root, &mut h);
-    for root in first_party_roots {
-        if root != project_root {
-            h.write_bytes(root.as_os_str().as_encoded_bytes());
-            hash_py_file_mtimes(root, &mut h);
-        }
+    // All first-party `.py`/`.pyi` files, sorted within each non-overlapping
+    // walk root, each contributing path bytes + mtime. Configured source roots
+    // nested under the project are already reached by the project walk; avoid
+    // traversing and statting those trees twice.
+    for root in fingerprint_walk_roots(project_root, first_party_roots) {
+        h.write_bytes(root.as_os_str().as_encoded_bytes());
+        hash_py_file_mtimes(&root, &mut h);
     }
 
     // Third-party modules and stubs can change resolution just like
     // first-party source. The project walk intentionally prunes `.venv`, so
-    // fingerprint each site-packages root separately. Include both the
-    // resolver's automatic environments and the explicit `--python` target.
-    let mut site_packages = discover_site_packages(project_root);
-    if let Some(env_path) = python_env {
-        site_packages.extend(discover_site_packages_in_environment(env_path));
-    }
+    // fingerprint each site-packages root separately. Match the resolver:
+    // `--python` replaces automatic environment discovery when supplied.
+    let mut site_packages = python_env.map_or_else(
+        || discover_site_packages(project_root),
+        discover_site_packages_in_environment,
+    );
     site_packages.sort();
     site_packages.dedup();
     for root in site_packages {
@@ -580,5 +636,50 @@ mod tests {
         let after = compute_global_fingerprint(project.path(), "{}", None, &roots);
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn fingerprint_walk_roots_drop_reachable_nested_roots() {
+        let project = tempdir().expect("project tempdir");
+        let src = project.path().join("src");
+        let nested = src.join("pkg");
+        std::fs::create_dir_all(&nested).expect("create nested source root");
+
+        let roots =
+            fingerprint_walk_roots(project.path(), &[src, nested, project.path().to_path_buf()]);
+
+        assert_eq!(roots, [project.path()]);
+    }
+
+    #[test]
+    fn fingerprint_walk_roots_keep_nested_roots_below_pruned_directories() {
+        let project = tempdir().expect("project tempdir");
+        let hidden = project.path().join(".generated");
+        let venv = project.path().join("venv/src");
+        std::fs::create_dir_all(&hidden).expect("create hidden source root");
+        std::fs::create_dir_all(&venv).expect("create venv source root");
+
+        let roots = fingerprint_walk_roots(project.path(), &[hidden.clone(), venv.clone()]);
+
+        assert!(roots.contains(&project.path().to_path_buf()));
+        assert!(roots.contains(&hidden));
+        assert!(roots.contains(&venv));
+    }
+
+    #[test]
+    fn explicit_environment_fingerprint_ignores_project_venv() {
+        let project = tempdir().expect("project tempdir");
+        let default_site_packages = project.path().join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&default_site_packages).expect("create default site-packages");
+        let explicit = tempdir().expect("explicit environment tempdir");
+        std::fs::create_dir_all(explicit.path().join("lib/python3.12/site-packages"))
+            .expect("create explicit site-packages");
+
+        let before = compute_global_fingerprint(project.path(), "{}", Some(explicit.path()), &[]);
+        std::fs::write(default_site_packages.join("unused.pyi"), "def f(): ...\n")
+            .expect("write unused default-environment stub");
+        let after = compute_global_fingerprint(project.path(), "{}", Some(explicit.path()), &[]);
+
+        assert_eq!(before, after);
     }
 }
