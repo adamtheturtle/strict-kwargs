@@ -706,6 +706,104 @@ fn check_cached(root: &Path, cache_dir: &Path) -> usize {
         .len()
 }
 
+/// Run `check_paths` for one explicit file with a cache and optional Python
+/// environment. Keeping the checked set to one file makes the benchmarks below
+/// isolate global-fingerprint traversal rather than cache-entry I/O.
+fn check_file_cached(
+    root: &Path,
+    path: &Path,
+    python_env: Option<&Path>,
+    cache_dir: &Path,
+) -> usize {
+    let config = Config::load(root).expect("valid benchmark-fixture config");
+    check_paths(
+        root,
+        &[path.to_path_buf()],
+        &config,
+        python_env,
+        Some(cache_dir),
+    )
+    .expect("check_paths must succeed")
+    .len()
+}
+
+/// Number of dependency files in each fingerprint-focused fixture. Large
+/// enough for duplicate directory walks to dominate, while setup happens once
+/// outside measurement.
+const FINGERPRINT_FILES: usize = 5_000;
+
+/// Project whose configured `src/` root is nested under the project root.
+/// Fingerprinting the project already visits every file below `src/`; walking
+/// the configured root separately repeats all of that work.
+fn nested_src_fingerprint_project() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create nested-src fingerprint fixture");
+            let root = temp.path();
+            std::fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"nested-src-fingerprint\"\nversion = \"0\"\n\
+                 [tool.strict_kwargs]\nsrc = [\"src\"]\n",
+            )
+            .expect("write pyproject.toml");
+            std::fs::write(root.join("app.py"), "def f(a, b): ...\nf(1, 2)\n")
+                .expect("write app.py");
+            let src = root.join("src");
+            std::fs::create_dir_all(&src).expect("create src");
+            for index in 0..FINGERPRINT_FILES {
+                std::fs::write(src.join(format!("dep_{index:04}.py")), "")
+                    .expect("write dependency");
+            }
+            temp
+        })
+        .path()
+}
+
+struct ExplicitEnvironmentFingerprintProject {
+    project: TempDir,
+    explicit_environment: TempDir,
+}
+
+/// Project with a large fallback `.venv` plus a separate explicit environment.
+/// Resolution with `--python` uses only the explicit environment, so scanning
+/// the project `.venv` is avoidable fingerprint work.
+fn explicit_environment_fingerprint_project() -> (&'static Path, &'static Path) {
+    static PROJECT: OnceLock<ExplicitEnvironmentFingerprintProject> = OnceLock::new();
+    let fixture = PROJECT.get_or_init(|| {
+        let project = tempfile::tempdir().expect("create explicit-env project");
+        std::fs::write(
+            project.path().join("pyproject.toml"),
+            "[project]\nname = \"explicit-env-fingerprint\"\nversion = \"0\"\n",
+        )
+        .expect("write pyproject.toml");
+        std::fs::write(project.path().join("app.py"), "def f(a, b): ...\nf(1, 2)\n")
+            .expect("write app.py");
+        let fallback_site_packages = project.path().join(".venv/lib/python3.13/site-packages");
+        std::fs::create_dir_all(&fallback_site_packages).expect("create fallback site-packages");
+        for index in 0..FINGERPRINT_FILES {
+            std::fs::write(
+                fallback_site_packages.join(format!("unused_{index:04}.pyi")),
+                "",
+            )
+            .expect("write fallback environment dependency");
+        }
+
+        let explicit_environment = tempfile::tempdir().expect("create explicit Python environment");
+        std::fs::create_dir_all(
+            explicit_environment
+                .path()
+                .join("lib/python3.13/site-packages"),
+        )
+        .expect("create explicit site-packages");
+        ExplicitEnvironmentFingerprintProject {
+            project,
+            explicit_environment,
+        }
+    });
+    (fixture.project.path(), fixture.explicit_environment.path())
+}
+
 /// First-party closure — cold run with cache infrastructure enabled (measures
 /// global-fingerprint + key-computation overhead on top of the normal scan).
 #[divan::bench]
@@ -766,4 +864,26 @@ fn large_project_cache_warm(bencher: divan::Bencher) {
     let cache = tempfile::tempdir().expect("tempdir");
     check_cached(root, cache.path());
     bencher.bench(|| check_cached(root, cache.path()));
+}
+
+/// Warm-cache fingerprinting with a configured source root nested beneath the
+/// already-walked project root.
+#[divan::bench]
+fn nested_src_fingerprint_cache_warm(bencher: divan::Bencher) {
+    let root = nested_src_fingerprint_project();
+    let path = root.join("app.py");
+    let cache = tempfile::tempdir().expect("tempdir");
+    check_file_cached(root, &path, None, cache.path());
+    bencher.bench(|| check_file_cached(root, &path, None, cache.path()));
+}
+
+/// Warm-cache fingerprinting with `--python` selecting a small explicit
+/// environment while an unused large project `.venv` is present.
+#[divan::bench]
+fn explicit_environment_fingerprint_cache_warm(bencher: divan::Bencher) {
+    let (root, python_env) = explicit_environment_fingerprint_project();
+    let path = root.join("app.py");
+    let cache = tempfile::tempdir().expect("tempdir");
+    check_file_cached(root, &path, Some(python_env), cache.path());
+    bencher.bench(|| check_file_cached(root, &path, Some(python_env), cache.path()));
 }
