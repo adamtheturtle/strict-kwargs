@@ -1,13 +1,17 @@
 //! Persistent on-disk diagnostic cache (issue #68).
 //!
-//! Each cached result is stored as `{cache_dir}/{key:016x}.json`, where the
-//! key is an FNV-1a 64-bit hash mixing the file's content with a
-//! *global fingerprint* that captures everything that could affect the
-//! checker's output (tool version, config, Python environment, ty binary, and
-//! all first-party source files).
+//! Cached results are stored together in `{cache_dir}/diagnostics.json`.
+//! The manifest records the *global fingerprint* that captures everything
+//! that could affect the checker's output (tool version, config, Python
+//! environment, ty binary, and all first-party source files). A changed
+//! fingerprint invalidates the whole manifest, matching the dependency model
+//! without one filesystem operation per checked file.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
+
+use serde::{Deserialize, Serialize};
 
 use crate::check::is_prunable_dir;
 use crate::diagnostic::Diagnostic;
@@ -175,15 +179,12 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
 /// - every `.py`/`.pyi` file in automatically discovered or explicitly
 ///   selected `site-packages`
 ///
-/// Using mtime rather than content for the dependency files keeps the
-/// fingerprint computation to `stat(2)` calls — one per file — avoiding the
-/// O(N × file-size) sequential reads that content-hashing all first-party
-/// sources would add on every invocation.  The per-file cache key
-/// ([`file_cache_key`]) still uses a content hash for the *checked* file
-/// itself, so any content change there is detected exactly.  A first-party
-/// dependency change will change its mtime in all normal workflows (editors,
-/// `git checkout`, `cp`, etc.); a mtime-preserving change (e.g. `touch -t`)
-/// would at worst produce a stale cache hit, the same trade-off accepted by
+/// Using mtime rather than content keeps the fingerprint computation to
+/// `stat(2)` calls — one per file — avoiding the O(N × file-size) sequential
+/// reads that content-hashing all first-party sources would add on every
+/// invocation. A first-party change updates its mtime in normal workflows
+/// (editors, `git checkout`, `cp`, etc.); a deliberately mtime-preserving
+/// change could produce a stale cache hit, the same trade-off accepted by
 /// `make`, Cargo, and most build systems.
 ///
 /// The walk uses the same pruning logic as the main checker
@@ -243,39 +244,37 @@ pub fn compute_global_fingerprint(
     h.finish()
 }
 
-/// Compute the per-file cache key by mixing the file's canonical path with
-/// the global fingerprint.
-///
-/// The global fingerprint already captures each first-party file's mtime, so
-/// a content change to any project file (including `path`) will update its
-/// mtime, which changes the global fingerprint, which changes this key.
-/// Using the path rather than the file's content avoids reading every checked
-/// file on every warm run: the warm path needs only `stat(2)` calls (for the
-/// fingerprint) and small cache-entry reads.
-///
-/// Trade-off: the key is mtime-based (via the global fingerprint), not
-/// content-based.  A mtime-preserving content change (e.g. `touch -t`) could
-/// produce a stale cache hit, the same trade-off accepted by `make`, Cargo,
-/// and most build systems.
-pub fn file_cache_key(path: &Path, global_fp: u64) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_bytes(path.as_os_str().as_encoded_bytes());
-    h.write_bytes(&global_fp.to_le_bytes());
-    h.finish()
-}
-
 // ---------------------------------------------------------------------------
 // DiagnosticCache
 // ---------------------------------------------------------------------------
 
-/// Persistent on-disk diagnostic cache.
+const MANIFEST_NAME: &str = "diagnostics.json";
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Deserialize, Serialize)]
+struct CacheManifest {
+    global_fingerprint: u64,
+    files_fingerprint: u64,
+    diagnostics: Vec<Diagnostic>,
+}
+
+fn files_fingerprint(files: &[PathBuf]) -> u64 {
+    let mut h = FnvHasher::new();
+    for path in files {
+        h.write_bytes(path.as_os_str().as_encoded_bytes());
+    }
+    h.finish()
+}
+
+/// Persistent bounded on-disk diagnostic cache.
 ///
-/// Each entry is stored as `{dir}/{key:016x}.json` and contains the
-/// `Vec<Diagnostic>` for one file.  The cache is append-only: entries are
-/// written atomically via a temp-file + rename and read back on subsequent
-/// runs.  There is no automatic eviction; users clear the directory manually.
+/// The complete manifest is read at most once and written at most once per
+/// invocation. Replacing the single manifest naturally evicts results made
+/// obsolete by a changed global fingerprint.
 pub struct DiagnosticCache {
     dir: PathBuf,
+    global_fingerprint: u64,
+    manifest: Option<CacheManifest>,
 }
 
 impl DiagnosticCache {
@@ -287,66 +286,67 @@ impl DiagnosticCache {
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the directory cannot be created.
-    pub fn open(dir: &Path) -> Result<Self, std::io::Error> {
+    pub fn open(dir: &Path, global_fingerprint: u64) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(dir)?;
+        let manifest = std::fs::read(dir.join(MANIFEST_NAME))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok())
+            .filter(|manifest| manifest.global_fingerprint == global_fingerprint);
         Ok(Self {
             dir: dir.to_path_buf(),
+            global_fingerprint,
+            manifest,
         })
     }
 
-    /// Return the path for cache entry `key`.
-    fn entry_path(&self, key: u64) -> PathBuf {
-        self.dir.join(format!("{key:016x}.json"))
+    /// Return cached diagnostics when the ordered checked-file set matches.
+    pub fn get_all(&self, files: &[PathBuf]) -> Option<Vec<Diagnostic>> {
+        let manifest = self.manifest.as_ref()?;
+        (manifest.files_fingerprint == files_fingerprint(files))
+            .then(|| manifest.diagnostics.clone())
     }
 
-    /// Look up `key` in the cache.
+    /// Replace checked-file results and write the manifest once.
     ///
-    /// Returns `Some(diagnostics)` on a hit, `None` on a miss or any read /
-    /// deserialisation error (errors are silently ignored so a corrupted entry
-    /// just causes a cold re-computation).
-    pub fn get(&self, key: u64) -> Option<Vec<Diagnostic>> {
-        let bytes = std::fs::read(self.entry_path(key)).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    /// Store `diagnostics` under `key`.
-    ///
-    /// Writes atomically: first to a sibling temp file, then renames into
-    /// place.  Errors are silently ignored — a failed write degrades gracefully
-    /// to a cold re-computation on the next run.
-    ///
-    /// Excluded from the coverage gate: `serde_json::to_vec` on a
-    /// [`Diagnostic`] (all `String`/`usize`/`PathBuf` fields, writing to a
-    /// `Vec<u8>`) is infallible in practice, so the `Err` arm of the `if let`
-    /// is a structurally dead branch that cannot be reached in tests; and the
-    /// write itself is delegated to `write_entry_atomic`, which is already
-    /// excluded for I/O-failure reasons.
+    /// Errors are silently ignored: a failed cache write only causes a cold
+    /// recomputation on the next run.
     #[cfg_attr(coverage, coverage(off))]
-    pub fn put(&self, key: u64, diagnostics: &[Diagnostic]) {
-        // to_vec cannot fail: Diagnostic's fields are all simple serialisable
-        // types (String, PathBuf, usize).
-        if let Ok(json) = serde_json::to_vec(diagnostics) {
-            self.write_entry_atomic(key, &json);
+    pub fn put_all(&mut self, files: &[PathBuf], diagnostics: &[Diagnostic]) {
+        if files.is_empty() {
+            return;
+        }
+        let manifest = CacheManifest {
+            global_fingerprint: self.global_fingerprint,
+            files_fingerprint: files_fingerprint(files),
+            diagnostics: diagnostics.to_vec(),
+        };
+        if let Ok(json) = serde_json::to_vec(&manifest) {
+            self.write_manifest_atomic(&json);
+            self.manifest = Some(manifest);
         }
     }
 
-    /// Write `json` atomically to the cache entry for `key`.
-    ///
-    /// First writes to a temp file, then renames into place (both in the same
-    /// directory, so the rename is a single filesystem operation).  Errors at
-    /// any step are silently swallowed — the caller degrades to a cold run.
-    ///
-    /// Excluded from the coverage gate: triggering a write or rename failure
-    /// deterministically (e.g. read-only filesystem, concurrent writer) would
-    /// require environment manipulation that is not practical in unit tests.
+    /// Write a same-directory temporary file, then replace the manifest.
     #[cfg_attr(coverage, coverage(off))]
-    fn write_entry_atomic(&self, key: u64, json: &[u8]) {
-        let tmp_path = self.dir.join(format!("{key:016x}.tmp"));
+    fn write_manifest_atomic(&self, json: &[u8]) {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = self.dir.join(format!(
+            ".diagnostics-{}-{sequence}.tmp",
+            std::process::id()
+        ));
         if std::fs::write(&tmp_path, json).is_err() {
             return;
         }
-        // Ignore rename errors (e.g. a concurrent writer already finished).
-        let _ = std::fs::rename(&tmp_path, self.entry_path(key));
+        let manifest_path = self.dir.join(MANIFEST_NAME);
+        #[cfg(windows)]
+        if manifest_path.exists() {
+            // Windows `rename` does not replace an existing destination. A
+            // reader in this brief window sees a cache miss, never partial JSON.
+            let _ = std::fs::remove_file(&manifest_path);
+        }
+        if std::fs::rename(&tmp_path, manifest_path).is_err() {
+            let _ = std::fs::remove_file(tmp_path);
+        }
     }
 }
 
@@ -415,31 +415,6 @@ mod tests {
         assert_ne!(a.finish(), b.finish());
     }
 
-    // ---- file_cache_key -----------------------------------------------------
-
-    #[test]
-    fn file_cache_key_is_consistent() {
-        let path = PathBuf::from("pkg/mod.py");
-        let k1 = file_cache_key(&path, 42);
-        let k2 = file_cache_key(&path, 42);
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn file_cache_key_sensitive_to_path() {
-        let k1 = file_cache_key(&PathBuf::from("pkg/a.py"), 42);
-        let k2 = file_cache_key(&PathBuf::from("pkg/b.py"), 42);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn file_cache_key_sensitive_to_fingerprint() {
-        let path = PathBuf::from("pkg/mod.py");
-        let k1 = file_cache_key(&path, 1);
-        let k2 = file_cache_key(&path, 2);
-        assert_ne!(k1, k2);
-    }
-
     // ---- mtime_nanos --------------------------------------------------------
 
     #[test]
@@ -459,45 +434,89 @@ mod tests {
     fn cache_open_creates_directory() {
         let base = tempdir().expect("tempdir");
         let cache_dir = base.path().join("nested").join("cache");
-        let _cache = DiagnosticCache::open(&cache_dir).expect("open");
+        let _cache = DiagnosticCache::open(&cache_dir, 1).expect("open");
         assert!(cache_dir.is_dir());
     }
 
     #[test]
     fn cache_miss_returns_none() {
         let dir = tempdir().expect("tempdir");
-        let cache = DiagnosticCache::open(dir.path()).expect("open");
-        assert!(cache.get(0xdead_beef_u64).is_none());
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        assert!(cache.get_all(&[PathBuf::from("missing.py")]).is_none());
     }
 
     #[test]
-    fn cache_put_get_roundtrip() {
+    fn cache_put_all_get_roundtrip() {
         let dir = tempdir().expect("tempdir");
-        let cache = DiagnosticCache::open(dir.path()).expect("open");
-        let diags = vec![sample_diagnostic()];
-        cache.put(0x1234_u64, &diags);
-        let got = cache.get(0x1234_u64).expect("cache hit");
+        let path = PathBuf::from("pkg/mod.py");
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        cache.put_all(std::slice::from_ref(&path), &[sample_diagnostic()]);
+
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let got = cache
+            .get_all(std::slice::from_ref(&path))
+            .expect("cache hit");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].callee, "pkg.mod.func");
     }
 
     #[test]
-    fn cache_put_get_empty_diagnostics() {
+    fn cache_put_all_records_clean_files() {
         let dir = tempdir().expect("tempdir");
-        let cache = DiagnosticCache::open(dir.path()).expect("open");
-        cache.put(0xaaaa_u64, &[]);
-        let got = cache.get(0xaaaa_u64).expect("cache hit");
+        let path = PathBuf::from("clean.py");
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        cache.put_all(std::slice::from_ref(&path), &[]);
+
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let got = cache
+            .get_all(std::slice::from_ref(&path))
+            .expect("cache hit");
         assert!(got.is_empty());
     }
 
     #[test]
     fn cache_get_corrupt_returns_none() {
         let dir = tempdir().expect("tempdir");
-        let cache = DiagnosticCache::open(dir.path()).expect("open");
-        // Write garbage bytes for the key.
-        let entry = dir.path().join(format!("{:016x}.json", 0x9999_u64));
-        std::fs::write(&entry, b"not json").expect("write");
-        assert!(cache.get(0x9999_u64).is_none());
+        std::fs::write(dir.path().join(MANIFEST_NAME), b"not json").expect("write");
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        assert!(cache.get_all(&[PathBuf::from("mod.py")]).is_none());
+    }
+
+    #[test]
+    fn cache_fingerprint_mismatch_invalidates_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let path = PathBuf::from("pkg/mod.py");
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        cache.put_all(std::slice::from_ref(&path), &[sample_diagnostic()]);
+
+        let cache = DiagnosticCache::open(dir.path(), 2).expect("reopen");
+        assert!(cache.get_all(&[path]).is_none());
+    }
+
+    #[test]
+    fn cache_file_selection_mismatch_is_a_miss() {
+        let dir = tempdir().expect("tempdir");
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        cache.put_all(&[PathBuf::from("a.py")], &[]);
+
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        assert!(cache.get_all(&[PathBuf::from("b.py")]).is_none());
+    }
+
+    #[test]
+    fn cache_replacement_keeps_storage_bounded() {
+        let dir = tempdir().expect("tempdir");
+        for fingerprint in 0..20 {
+            let mut cache = DiagnosticCache::open(dir.path(), fingerprint).expect("open");
+            cache.put_all(&[PathBuf::from("mod.py")], &[sample_diagnostic()]);
+        }
+
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read cache directory")
+            .collect::<Result<_, _>>()
+            .expect("read entries");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name(), MANIFEST_NAME);
     }
 
     // ---- compute_global_fingerprint -----------------------------------------
