@@ -174,7 +174,7 @@ fn fingerprint_walk_covers(ancestor: &Path, descendant: &Path) -> bool {
     let mut current = ancestor.to_path_buf();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
-            continue;
+            return false;
         };
         current.push(name);
         let name = name.to_string_lossy();
@@ -656,14 +656,41 @@ mod tests {
         let project = tempdir().expect("project tempdir");
         let hidden = project.path().join(".generated");
         let venv = project.path().join("venv/src");
+        let pycache = project.path().join("__pycache__/generated");
         std::fs::create_dir_all(&hidden).expect("create hidden source root");
         std::fs::create_dir_all(&venv).expect("create venv source root");
+        std::fs::create_dir_all(&pycache).expect("create pycache source root");
 
-        let roots = fingerprint_walk_roots(project.path(), &[hidden.clone(), venv.clone()]);
+        let roots = fingerprint_walk_roots(
+            project.path(),
+            &[hidden.clone(), venv.clone(), pycache.clone()],
+        );
 
         assert!(roots.contains(&project.path().to_path_buf()));
         assert!(roots.contains(&hidden));
         assert!(roots.contains(&venv));
+        assert!(roots.contains(&pycache));
+    }
+
+    #[test]
+    fn fingerprint_walk_does_not_cover_a_parent_directory_escape() {
+        let project = tempdir().expect("project tempdir");
+        let escaped = project.path().join("src/../../external");
+
+        assert!(!fingerprint_walk_covers(project.path(), &escaped));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_walk_does_not_cover_a_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempdir().expect("project tempdir");
+        let external = tempdir().expect("external tempdir");
+        let linked = project.path().join("linked");
+        symlink(external.path(), &linked).expect("create directory symlink");
+
+        assert!(!fingerprint_walk_covers(project.path(), &linked));
     }
 
     #[test]
