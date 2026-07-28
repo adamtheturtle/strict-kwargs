@@ -6,7 +6,7 @@
 # Repository: https://github.com/sphinx-doc/sphinx.git
 # Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c
 # Python: 3.13
-# ty: 0.0.44
+# ty: 0.0.64
 alabaster==1.0.0
 Babel==2.18.0
 certifi==2026.5.20

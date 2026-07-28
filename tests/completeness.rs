@@ -13,7 +13,7 @@ use std::process::Command;
 use insta::assert_snapshot;
 use strict_kwargs::{check_paths, Config, Diagnostic};
 
-const TY_VERSION: &str = "0.0.44";
+const TY_VERSION: &str = "0.0.64";
 const SPHINX_LINUX_SNAPSHOT_RELATIVE_PATH: &str =
     "tests/snapshots/completeness__pinned_repository_diagnostics.snap";
 const SPHINX_MACOS_SNAPSHOT_RELATIVE_PATH: &str =
