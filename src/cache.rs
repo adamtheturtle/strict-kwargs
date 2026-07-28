@@ -413,8 +413,44 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Deserialize, Serialize)]
 struct CacheEntry {
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<CachedDiagnostic>,
     semantic_fingerprint: Option<u64>,
+}
+
+/// On-disk diagnostic fields shared with the containing entry's path.
+///
+/// A large project can have hundreds of diagnostics per file, so storing the
+/// path once in the entry avoids repeating the same absolute string in every
+/// diagnostic. Tuple fields are line, column, callee, positional count, and
+/// maximum positional count, in that order.
+#[derive(Clone, Deserialize, Serialize)]
+struct CachedDiagnostic(usize, usize, String, usize, usize);
+
+impl CachedDiagnostic {
+    fn from_diagnostic(diagnostic: Diagnostic) -> Self {
+        Self(
+            diagnostic.line,
+            diagnostic.column,
+            diagnostic.callee,
+            diagnostic.positional_count,
+            diagnostic.max_positional,
+        )
+    }
+
+    fn into_diagnostic(self, path: &Path) -> Diagnostic {
+        Diagnostic {
+            path: path.to_path_buf(),
+            line: self.0,
+            column: self.1,
+            callee: self.2,
+            positional_count: self.3,
+            max_positional: self.4,
+        }
+    }
+
+    fn to_diagnostic(&self, path: &Path) -> Diagnostic {
+        self.clone().into_diagnostic(path)
+    }
 }
 
 #[derive(Deserialize)]
@@ -462,7 +498,7 @@ impl DiagnosticCache {
             .filter(|manifest| {
                 manifest.project_fingerprint == fingerprints.project || project_files.is_some()
             })
-            .and_then(|manifest| {
+            .map(|manifest| {
                 let CacheManifest {
                     dependency_fingerprint: _,
                     project_fingerprint,
@@ -472,22 +508,13 @@ impl DiagnosticCache {
                 let entries = entries
                     .into_iter()
                     .map(|(path, mut entry)| {
-                        if entry
+                        entry
                             .diagnostics
-                            .iter()
-                            .any(|diagnostic| diagnostic.path != path)
-                        {
-                            return None;
-                        }
-                        entry.diagnostics.sort_by(|left, right| {
-                            left.line
-                                .cmp(&right.line)
-                                .then(left.column.cmp(&right.column))
-                        });
-                        Some((path, entry))
+                            .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+                        (path, entry)
                     })
-                    .collect::<Option<BTreeMap<_, _>>>()?;
-                Some((project_fingerprint, previous_project_files, entries))
+                    .collect::<BTreeMap<_, _>>();
+                (project_fingerprint, previous_project_files, entries)
             });
         let (entries, previous_project_files, needs_project_validation) = manifest.map_or_else(
             || (BTreeMap::new(), None, false),
@@ -581,9 +608,13 @@ impl DiagnosticCache {
 
     /// Return cached diagnostics for one successfully checked file.
     pub fn get(&self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries
-            .get(path)
-            .map(|entry| entry.diagnostics.clone())
+        self.entries.get(path).map(|entry| {
+            entry
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.to_diagnostic(path))
+                .collect()
+        })
     }
 
     /// Whether `path` has a successfully checked cache entry.
@@ -596,7 +627,13 @@ impl DiagnosticCache {
     /// Used only by terminal warm-cache paths that will not rewrite the
     /// manifest, avoiding a clone of every diagnostic before returning.
     pub fn take(&mut self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries.remove(path).map(|entry| entry.diagnostics)
+        self.entries.remove(path).map(|entry| {
+            entry
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.into_diagnostic(path))
+                .collect()
+        })
     }
 
     /// Add successfully checked-file results and write the manifest once.
@@ -614,7 +651,10 @@ impl DiagnosticCache {
                 (
                     path,
                     CacheEntry {
-                        diagnostics,
+                        diagnostics: diagnostics
+                            .into_iter()
+                            .map(CachedDiagnostic::from_diagnostic)
+                            .collect(),
                         semantic_fingerprint,
                     },
                 )
@@ -864,14 +904,24 @@ mod tests {
     }
 
     #[test]
-    fn cache_rejects_diagnostic_stored_under_another_path() {
+    fn cache_stores_diagnostic_path_once_per_entry() {
         let dir = tempdir().expect("tempdir");
-        let wrong_key = PathBuf::from("other.py");
+        let path = PathBuf::from("pkg/mod.py");
         let mut cache = open_cache(dir.path(), 1);
-        cache.put_all(vec![(wrong_key.clone(), vec![sample_diagnostic()], None)]);
+        cache.put_all(vec![(
+            path.clone(),
+            vec![sample_diagnostic(), sample_diagnostic()],
+            None,
+        )]);
 
         let cache = open_cache(dir.path(), 1);
-        assert!(!cache.contains(&wrong_key));
+        let diagnostics = cache.get(&path).expect("cache hit");
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().all(|diagnostic| diagnostic.path == path));
+
+        let manifest =
+            std::fs::read_to_string(dir.path().join(MANIFEST_NAME)).expect("read manifest");
+        assert_eq!(manifest.matches("pkg/mod.py").count(), 1);
     }
 
     #[test]
