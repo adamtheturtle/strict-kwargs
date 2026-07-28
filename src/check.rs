@@ -504,6 +504,20 @@ fn skipped_cache_miss_warnings(
     Ok(Some(skip_warnings))
 }
 
+fn take_cached_diagnostics(
+    cache: &mut Option<DiagnosticCache>,
+    python_files: &[PathBuf],
+) -> Vec<Diagnostic> {
+    let Some(cache) = cache else {
+        return Vec::new();
+    };
+    python_files
+        .iter()
+        .filter_map(|path| cache.take(path))
+        .flatten()
+        .collect()
+}
+
 fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -544,25 +558,15 @@ fn check_paths_impl(
     // Partition files into cache hits and misses. A skipped file remains a
     // miss, while successfully checked neighbours can still use the manifest
     // on later runs.
-    let mut cached_results = Vec::with_capacity(python_files.len());
     let mut files_to_scan = Vec::new();
     for path in &python_files {
-        let hit = cache.as_ref().and_then(|cache| cache.get(path));
-        if hit.is_none() {
+        if !cache.as_ref().is_some_and(|cache| cache.contains(path)) {
             files_to_scan.push(path.clone());
         }
-        cached_results.push(hit);
     }
 
-    let mut diagnostics: Vec<Diagnostic> = cached_results.into_iter().flatten().flatten().collect();
     if files_to_scan.is_empty() {
-        diagnostics.sort_by(|left, right| {
-            left.path
-                .cmp(&right.path)
-                .then(left.line.cmp(&right.line))
-                .then(left.column.cmp(&right.column))
-        });
-        return Ok(diagnostics);
+        return Ok(take_cached_diagnostics(&mut cache, &python_files));
     }
 
     // A directory can contain files that are intentionally skipped because
@@ -579,15 +583,15 @@ fn check_paths_impl(
                     path.display()
                 );
             }
-            diagnostics.sort_by(|left, right| {
-                left.path
-                    .cmp(&right.path)
-                    .then(left.line.cmp(&right.line))
-                    .then(left.column.cmp(&right.column))
-            });
-            return Ok(diagnostics);
+            return Ok(take_cached_diagnostics(&mut cache, &python_files));
         }
     }
+
+    let mut diagnostics: Vec<Diagnostic> = python_files
+        .iter()
+        .filter_map(|path| cache.as_ref().and_then(|cache| cache.get(path)))
+        .flatten()
+        .collect();
 
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);

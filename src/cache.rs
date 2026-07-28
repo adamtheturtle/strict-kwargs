@@ -394,9 +394,24 @@ impl DiagnosticCache {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok())
             .filter(|manifest| manifest.global_fingerprint == global_fingerprint)
-            .map_or_else(BTreeMap::new, |manifest| {
-                manifest.entries.into_iter().collect()
-            });
+            .and_then(|manifest| {
+                manifest
+                    .entries
+                    .into_iter()
+                    .map(|(path, mut diagnostics)| {
+                        if diagnostics.iter().any(|diagnostic| diagnostic.path != path) {
+                            return None;
+                        }
+                        diagnostics.sort_by(|left, right| {
+                            left.line
+                                .cmp(&right.line)
+                                .then(left.column.cmp(&right.column))
+                        });
+                        Some((path, diagnostics))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             dir: dir.to_path_buf(),
             global_fingerprint,
@@ -407,6 +422,19 @@ impl DiagnosticCache {
     /// Return cached diagnostics for one successfully checked file.
     pub fn get(&self, path: &Path) -> Option<Vec<Diagnostic>> {
         self.entries.get(path).cloned()
+    }
+
+    /// Whether `path` has a successfully checked cache entry.
+    pub fn contains(&self, path: &Path) -> bool {
+        self.entries.contains_key(path)
+    }
+
+    /// Move one successfully checked entry out of this invocation's cache.
+    ///
+    /// Used only by terminal warm-cache paths that will not rewrite the
+    /// manifest, avoiding a clone of every diagnostic before returning.
+    pub fn take(&mut self, path: &Path) -> Option<Vec<Diagnostic>> {
+        self.entries.remove(path)
     }
 
     /// Add successfully checked-file results and write the manifest once.
@@ -590,13 +618,25 @@ mod tests {
     fn cache_put_all_get_roundtrip() {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("pkg/mod.py");
+        let mut later = sample_diagnostic();
+        later.line = 8;
+        let mut earlier = sample_diagnostic();
+        earlier.line = 2;
         let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(path.clone(), vec![sample_diagnostic()])]);
+        cache.put_all(vec![(path.clone(), vec![later, earlier])]);
 
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
-        let got = cache.get(&path).expect("cache hit");
-        assert_eq!(got.len(), 1);
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        assert!(cache.contains(&path));
+        let got = cache.take(&path).expect("cache hit");
+        assert_eq!(
+            got.iter()
+                .map(|diagnostic| diagnostic.line)
+                .collect::<Vec<_>>(),
+            [2, 8]
+        );
         assert_eq!(got[0].callee, "pkg.mod.func");
+        assert!(!cache.contains(&path));
+        assert!(cache.take(&path).is_none());
     }
 
     #[test]
@@ -617,6 +657,17 @@ mod tests {
         std::fs::write(dir.path().join(MANIFEST_NAME), b"not json").expect("write");
         let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
         assert!(cache.get(Path::new("mod.py")).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_diagnostic_stored_under_another_path() {
+        let dir = tempdir().expect("tempdir");
+        let wrong_key = PathBuf::from("other.py");
+        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        cache.put_all(vec![(wrong_key.clone(), vec![sample_diagnostic()])]);
+
+        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        assert!(!cache.contains(&wrong_key));
     }
 
     #[test]
