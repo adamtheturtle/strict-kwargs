@@ -523,10 +523,6 @@ impl DiagnosticCache {
         current_files: &[PathBuf],
         current_semantic_fingerprints: &BTreeMap<PathBuf, u64>,
     ) -> bool {
-        if !self.needs_project_validation {
-            return false;
-        }
-
         let current_metadata: BTreeMap<_, _> = self
             .project_files
             .as_deref()
@@ -930,6 +926,72 @@ mod tests {
             DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
         assert!(cache.contains(&safe));
         assert!(!cache.needs_project_validation());
+    }
+
+    #[test]
+    fn project_validation_discards_entries_when_project_paths_change() {
+        let dir = tempdir().expect("tempdir");
+        let old_path = PathBuf::from("old.py");
+        let old_files = vec![fingerprint_file("old.py", 1)];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![(old_path.clone(), Vec::new(), Some(100))]);
+
+        let new_path = PathBuf::from("new.py");
+        let new_files = vec![fingerprint_file("old.py", 1), fingerprint_file("new.py", 1)];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(!cache.validate_project(
+            &[old_path.clone(), new_path.clone()],
+            &BTreeMap::from([(old_path.clone(), 100), (new_path, 200)])
+        ));
+        assert!(!cache.contains(&old_path));
+    }
+
+    #[test]
+    fn project_validation_drops_entries_outside_current_selection() {
+        let dir = tempdir().expect("tempdir");
+        let selected = PathBuf::from("selected.py");
+        let unselected = PathBuf::from("unselected.py");
+        let old_files = vec![
+            fingerprint_file("selected.py", 1),
+            fingerprint_file("unselected.py", 1),
+        ];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![
+            (selected.clone(), Vec::new(), Some(100)),
+            (unselected.clone(), Vec::new(), Some(200)),
+        ]);
+
+        let new_files = vec![
+            fingerprint_file("selected.py", 2),
+            fingerprint_file("unselected.py", 1),
+        ];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(cache.validate_project(
+            std::slice::from_ref(&selected),
+            &BTreeMap::from([(selected.clone(), 100), (unselected.clone(), 200)])
+        ));
+        assert!(!cache.contains(&selected));
+        assert!(!cache.contains(&unselected));
     }
 
     #[test]

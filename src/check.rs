@@ -563,21 +563,18 @@ fn check_paths_impl(
         .transpose()?;
 
     let mut prepared_index = None;
-    if cache
-        .as_ref()
-        .is_some_and(DiagnosticCache::needs_project_validation)
-    {
-        let built =
-            build_index_with_sources(project_root, &python_files, &source_roots, python_env);
-        let semantic_fingerprints = built
-            .1
-            .iter()
-            .map(|(path, indexed)| (path.clone(), indexed.semantic_fingerprint()))
-            .collect();
-        if let Some(cache) = &mut cache {
+    if let Some(cache) = &mut cache {
+        if cache.needs_project_validation() {
+            let built =
+                build_index_with_sources(project_root, &python_files, &source_roots, python_env);
+            let semantic_fingerprints = built
+                .1
+                .iter()
+                .map(|(path, indexed)| (path.clone(), indexed.semantic_fingerprint()))
+                .collect();
             cache.validate_project(&python_files, &semantic_fingerprints);
+            prepared_index = Some(built);
         }
-        prepared_index = Some(built);
     }
 
     // Partition files into cache hits and misses. A skipped file remains a
