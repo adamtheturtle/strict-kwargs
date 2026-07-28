@@ -50,7 +50,11 @@ drift when transitive dependencies change their public type surface.
 To reuse an existing checkout, set
 `STRICT_KWARGS_COMPLETENESS_SPHINX_CHECKOUT=/path/to/sphinx` or
 `STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT=/path/to/cpython`; it must be at
-the pinned ref above. To reuse an existing Sphinx Python environment, set
+the pinned ref above. A reused CPython checkout is locally cloned into a
+system temporary directory before analysis. This prevents `ty` from
+discovering unrelated project metadata above the supplied path, so a nested
+worktree and a standalone clone produce the same oracle. To reuse an existing
+Sphinx Python environment, set
 `STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV=/path/to/venv`. Otherwise the
 script creates a venv with Python `3.13`, matching scheduled CI; set
 `STRICT_KWARGS_COMPLETENESS_PYTHON` to override the interpreter. To

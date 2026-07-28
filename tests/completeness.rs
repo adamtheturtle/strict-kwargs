@@ -206,6 +206,19 @@ fn pinned_checkout(repository: &PinnedRepository) -> Checkout {
         repository_env_os(repository.case, "CHECKOUT", CHECKOUT_ENV).map(PathBuf::from)
     {
         assert_pinned_ref(&root, repository);
+        // A caller-supplied CPython checkout may itself be nested below an
+        // unrelated pyproject.toml. ty discovers project metadata by walking
+        // above its workspace, so checking that path in place lets the
+        // checkout's location change thousands of hover answers. CPython has
+        // no editable-install coupling to its empty completeness venv, so
+        // isolate it with a cheap local clone under the system temp directory.
+        //
+        // Sphinx deliberately stays in place: its venv contains an editable
+        // install of this exact checkout, and its own pyproject.toml already
+        // provides the project boundary.
+        if repository.case.id == CPYTHON.id {
+            return isolate_reused_checkout(&root, repository);
+        }
         return Checkout { _temp: None, root };
     }
 
@@ -227,6 +240,36 @@ fn pinned_checkout(repository: &PinnedRepository) -> Checkout {
         ],
     );
     git(&root, &["checkout", "--detach", "--quiet", "FETCH_HEAD"]);
+    assert_pinned_ref(&root, repository);
+    Checkout {
+        _temp: Some(temp),
+        root,
+    }
+}
+
+fn isolate_reused_checkout(source: &Path, repository: &PinnedRepository) -> Checkout {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw-completeness-isolated-")
+        .tempdir()
+        .expect("create isolated completeness tempdir");
+    let root = temp.path().join(&repository.name);
+    let output = Command::new("git")
+        .args(["clone", "--quiet", "--no-hardlinks", "--no-checkout"])
+        .arg(source)
+        .arg(&root)
+        .output()
+        .expect("locally clone completeness checkout");
+    assert!(
+        output.status.success(),
+        "git clone of {} failed\nstdout:\n{}\nstderr:\n{}",
+        source.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(
+        &root,
+        &["checkout", "--detach", "--quiet", &repository.reference],
+    );
     assert_pinned_ref(&root, repository);
     Checkout {
         _temp: Some(temp),
@@ -429,8 +472,12 @@ fn canonical_callee(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_callee, collect_stable, DiagnosticKey};
+    use super::{
+        canonical_callee, collect_stable, git, git_output, isolate_reused_checkout, DiagnosticKey,
+        PinnedRepository, CPYTHON,
+    };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
 
     fn key(path: &str, line: usize) -> DiagnosticKey {
         DiagnosticKey {
@@ -464,6 +511,62 @@ mod tests {
         assert_eq!(
             canonical_callee("\"Self@preserve_original_messages\""),
             "\"preserve_original_messages\""
+        );
+    }
+
+    #[test]
+    fn reused_cpython_checkout_is_cloned_into_an_isolated_tempdir() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let parent = fixture.path().join("unrelated-parent");
+        let source = parent.join("nested-cpython");
+        fs::create_dir_all(&source).expect("create nested checkout");
+        fs::write(
+            parent.join("pyproject.toml"),
+            "[project]\nname = \"unrelated-parent\"\n",
+        )
+        .expect("write unrelated parent metadata");
+        git(&source, &["init", "--quiet"]);
+        fs::write(source.join("tracked.py"), "print('tracked')\n").expect("write tracked file");
+        git(&source, &["add", "tracked.py"]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Completeness Test",
+                "-c",
+                "user.email=completeness@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        let output = git_output(&source, &["rev-parse", "HEAD"]);
+        let reference = String::from_utf8(output.stdout)
+            .expect("git ref is utf8")
+            .trim()
+            .to_owned();
+        let repository = PinnedRepository {
+            case: CPYTHON,
+            name: "cpython-fixture".to_owned(),
+            url: "unused local fixture".to_owned(),
+            reference,
+        };
+
+        let checkout = isolate_reused_checkout(&source, &repository);
+
+        assert!(!checkout.root.starts_with(&parent));
+        let cloned_source =
+            fs::read_to_string(checkout.root.join("tracked.py")).expect("read cloned file");
+        assert_eq!(cloned_source.lines().next(), Some("print('tracked')"));
+        assert_eq!(cloned_source.lines().count(), 1);
+        assert!(!checkout.root.join("pyproject.toml").exists());
+        assert_eq!(
+            String::from_utf8(git_output(&checkout.root, &["rev-parse", "HEAD"]).stdout)
+                .expect("cloned git ref is utf8")
+                .trim(),
+            repository.reference
         );
     }
 }
