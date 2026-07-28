@@ -5208,6 +5208,7 @@ mod tests {
             .expect("tempdir");
         let generated = root.path().join("generated").join("api.py");
         let hidden = root.path().join(".generated.py");
+        let regular = root.path().join("src").join("real.py");
         let external_generated = other.path().join("generated").join("api.py");
         let config = Config {
             extend_exclude: vec!["generated".to_string()],
@@ -5220,6 +5221,10 @@ mod tests {
         assert!(selection.is_excluded(Path::new("generated/api.py"), false, false));
         assert!(selection.is_excluded(&hidden, false, false));
         assert!(!selection.is_excluded(&hidden, false, true));
+        // `tempfile` creates this project below a dot-prefixed directory on
+        // macOS. Built-in ignores apply inside the project, not to its
+        // ancestors, so ordinary project files must remain selectable.
+        assert!(!selection.is_excluded(&regular, false, false));
         assert!(!selection.is_excluded(&external_generated, false, false));
 
         let relative_selection = FileSelection::new(

@@ -1,0 +1,1 @@
+Scan projects normally when an ancestor of the project root is a dot-directory, including macOS temporary directories used by generated benchmarks.
