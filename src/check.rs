@@ -524,10 +524,6 @@ fn check_paths_impl(
         });
         return Ok(diagnostics);
     }
-    if python_files.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);
 
