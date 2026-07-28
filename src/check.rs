@@ -56,6 +56,8 @@ pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
 /// pipe round-trips (41.6s serial vs 44s with a 128-wide window).
 const TY_MAX_IN_FLIGHT: usize = 1;
 
+type SkipWarning = (usize, PathBuf, String);
+
 #[derive(Clone, Copy)]
 enum IfBranchTraversal {
     Module,
@@ -135,7 +137,7 @@ fn process_scan_outcome_for_ty(
     path: PathBuf,
     outcome: ScanOutcome,
     diagnostics: &mut Vec<Diagnostic>,
-    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+    skip_warnings: &mut Vec<SkipWarning>,
     ty_work: &mut Vec<PendingTyWork>,
 ) -> Result<(), CheckError> {
     match outcome {
@@ -202,7 +204,7 @@ fn pipeline_phases(
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
     diagnostics: &mut Vec<Diagnostic>,
-    skip_warnings: &mut Vec<(usize, PathBuf, String)>,
+    skip_warnings: &mut Vec<SkipWarning>,
 ) -> Result<(), CheckError> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
@@ -469,6 +471,37 @@ impl TyShardAssigner {
     }
 }
 
+/// Recheck a partial cache's misses before paying to rebuild the whole-project
+/// index. If every miss is still a file the normal scan would skip, return
+/// those warnings so the caller can finish from cached diagnostics alone.
+///
+/// A valid miss returns `None` and leaves the full pipeline to preserve the
+/// current cross-file analysis. Skipped files are deliberately not cached, so
+/// this preflight runs again and notices if one becomes valid later.
+fn skipped_cache_miss_warnings(
+    files_to_scan: &[PathBuf],
+    explicit_files: &FxHashSet<PathBuf>,
+) -> Result<Option<Vec<SkipWarning>>, CheckError> {
+    let mut skip_warnings = Vec::with_capacity(files_to_scan.len());
+    for (i, path) in files_to_scan.iter().enumerate() {
+        let source = match read_python_source(path)? {
+            Source::Decoded(source) => source,
+            Source::Undecodable(reason) => {
+                skip_warnings.push((i, path.clone(), reason));
+                continue;
+            }
+        };
+        match parse_module_guarded(&source) {
+            Ok(_) => return Ok(None),
+            Err(CheckError::Parse(error)) if !explicit_files.contains(path) => {
+                skip_warnings.push((i, path.clone(), format!("could not parse: {error}")));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(skip_warnings))
+}
+
 fn check_paths_impl(
     project_root: &Path,
     paths: &[PathBuf],
@@ -524,12 +557,37 @@ fn check_paths_impl(
         });
         return Ok(diagnostics);
     }
+
+    // A directory can contain files that are intentionally skipped because
+    // their encoding or syntax is unsupported. They remain cache misses so a
+    // later valid rewrite is noticed, but rebuilding the whole-project index
+    // merely to rediscover the same skips makes every warm run expensive.
+    // Recheck only a partial cache's misses first; cold/all-miss runs go
+    // directly to the normal pipeline, and any valid miss falls back to it.
+    if files_to_scan.len() < python_files.len() {
+        if let Some(skip_warnings) = skipped_cache_miss_warnings(&files_to_scan, &explicit_files)? {
+            for (_, path, reason) in &skip_warnings {
+                eprintln!(
+                    "strict-kwargs: warning: skipping {} ({reason})",
+                    path.display()
+                );
+            }
+            diagnostics.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then(left.line.cmp(&right.line))
+                    .then(left.column.cmp(&right.column))
+            });
+            return Ok(diagnostics);
+        }
+    }
+
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);
 
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
-    let mut skip_warnings: Vec<(usize, PathBuf, String)> = Vec::new();
+    let mut skip_warnings: Vec<SkipWarning> = Vec::new();
 
     // Run the pipeline (Phase 1 parallel built-in pass + Phase 2 sharded ty
     // fallback) for cache misses only. Files that need ty fallback stream to
@@ -5117,15 +5175,16 @@ mod tests {
         is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
         parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
         process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
-        signature_is_fully_named, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
-        without_leading_self, CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns,
-        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
-        TyFixes, TyShardAssigner,
+        signature_is_fully_named, skipped_cache_miss_warnings, strip_unbound_receiver,
+        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
+        FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy,
+        PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
     };
     use crate::config::Config;
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
+    use rustc_hash::FxHashSet;
     use std::path::Path;
 
     fn ty_work(path: &str, pending_calls: usize) -> PendingTyWork {
@@ -5143,6 +5202,48 @@ mod tests {
                 .collect(),
             pending_groups: vec![None; pending_calls],
         }
+    }
+
+    #[test]
+    fn skipped_cache_miss_preflight_classifies_files_and_preserves_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let valid = temp.path().join("valid.py");
+        let binary = temp.path().join("binary.py");
+        let broken = temp.path().join("broken.py");
+        let missing = temp.path().join("missing.py");
+        std::fs::write(&valid, "value = 1\n").expect("write valid");
+        std::fs::write(&binary, [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
+        std::fs::write(&broken, "match x:\n    case +1:\n        pass\n").expect("write broken");
+
+        let none_explicit = FxHashSet::default();
+        let empty = skipped_cache_miss_warnings(&[], &none_explicit)
+            .expect("empty preflight")
+            .expect("all empty misses are skipped");
+        assert!(empty.is_empty());
+        assert!(
+            skipped_cache_miss_warnings(std::slice::from_ref(&valid), &none_explicit)
+                .expect("valid preflight")
+                .is_none()
+        );
+
+        let skipped =
+            skipped_cache_miss_warnings(&[binary.clone(), broken.clone()], &none_explicit)
+                .expect("skipped preflight")
+                .expect("both files should be skipped");
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0].1, binary);
+        assert_eq!(skipped[1].1, broken);
+        assert!(skipped[1].2.starts_with("could not parse:"));
+
+        let explicit = FxHashSet::from_iter([broken.clone()]);
+        assert!(matches!(
+            skipped_cache_miss_warnings(std::slice::from_ref(&broken), &explicit),
+            Err(CheckError::Parse(_))
+        ));
+        assert!(matches!(
+            skipped_cache_miss_warnings(&[missing], &none_explicit),
+            Err(CheckError::Io(_))
+        ));
     }
 
     #[test]
