@@ -18,7 +18,7 @@ use crate::ast_util::{
     line_column, line_column_from_starts, line_starts, positional_argument_count,
     signature_from_parameters,
 };
-use crate::cache::{compute_global_fingerprint_with_project_files, DiagnosticCache};
+use crate::cache::{compute_cache_fingerprints_with_project_files, DiagnosticCache};
 use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
@@ -511,6 +511,7 @@ fn take_cached_diagnostics(
     let Some(cache) = cache else {
         return Vec::new();
     };
+    cache.flush();
     python_files
         .iter()
         .filter_map(|path| cache.take(path))
@@ -539,21 +540,45 @@ fn check_paths_impl(
     let explicit_files = explicit_python_files(paths);
     let source_roots = SourceRoots::from_config(project_root, config);
 
-    // Optional persistent cache: open it and compute the global fingerprint once.
+    // Optional persistent cache: dependency changes invalidate everything,
+    // while a project-only change may retain safe entries after the eager
+    // definition index proves its observable surface is unchanged.
     let mut cache: Option<DiagnosticCache> = cache_dir
         .map(|dir| -> Result<_, CheckError> {
             let config_json = serde_json::to_string(config).unwrap_or_default();
             let first_party_roots = source_roots.first_party_for_resolution();
-            let fp = compute_global_fingerprint_with_project_files(
+            let fingerprints = compute_cache_fingerprints_with_project_files(
                 project_root,
                 &config_json,
                 python_env,
                 &first_party_roots,
                 project_inventory.as_deref(),
             );
-            Ok(DiagnosticCache::open(dir, fp)?)
+            Ok(DiagnosticCache::open(
+                dir,
+                fingerprints,
+                project_inventory.as_deref(),
+            )?)
         })
         .transpose()?;
+
+    let mut prepared_index = None;
+    if cache
+        .as_ref()
+        .is_some_and(DiagnosticCache::needs_project_validation)
+    {
+        let built =
+            build_index_with_sources(project_root, &python_files, &source_roots, python_env);
+        let semantic_fingerprints = built
+            .1
+            .iter()
+            .map(|(path, indexed)| (path.clone(), indexed.semantic_fingerprint()))
+            .collect();
+        if let Some(cache) = &mut cache {
+            cache.validate_project(&python_files, &semantic_fingerprints);
+        }
+        prepared_index = Some(built);
+    }
 
     // Partition files into cache hits and misses. A skipped file remains a
     // miss, while successfully checked neighbours can still use the manifest
@@ -593,9 +618,9 @@ fn check_paths_impl(
         .flatten()
         .collect();
 
-    let (index, indexed_files) =
-        build_index_with_sources(project_root, &python_files, &source_roots, python_env);
-
+    let (index, indexed_files) = prepared_index.unwrap_or_else(|| {
+        build_index_with_sources(project_root, &python_files, &source_roots, python_env)
+    });
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<SkipWarning> = Vec::new();
@@ -659,6 +684,9 @@ fn check_paths_impl(
                     diagnostics_by_path
                         .remove(path.as_path())
                         .unwrap_or_default(),
+                    indexed_files
+                        .get(path)
+                        .map(IndexedFile::semantic_fingerprint),
                 )
             })
             .collect();
