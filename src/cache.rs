@@ -97,6 +97,34 @@ fn mtime_nanos(path: &Path) -> Option<[u8; 16]> {
     Some(nanos.to_le_bytes())
 }
 
+/// One project entry captured during file selection for reuse by the global
+/// fingerprint. The path may name any `.py`/`.pyi` entry, not only a regular
+/// file, matching [`hash_py_file_mtimes`]'s existing behavior.
+pub struct FingerprintFile {
+    path: PathBuf,
+    mtime: Option<[u8; 16]>,
+}
+
+impl FingerprintFile {
+    pub fn from_path(path: PathBuf) -> Self {
+        let mtime = mtime_nanos(&path);
+        Self { path, mtime }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn hash_fingerprint_files(files: &[FingerprintFile], h: &mut FnvHasher) {
+    for file in files {
+        h.write_bytes(file.path.as_os_str().as_encoded_bytes());
+        if let Some(mtime) = file.mtime {
+            h.write_bytes(&mtime);
+        }
+    }
+}
+
 /// Find the `ty` binary on `PATH`, returning its path if found.
 ///
 /// The result depends on the execution environment (whether `ty` is installed
@@ -250,11 +278,30 @@ fn fingerprint_walk_roots(project_root: &Path, first_party_roots: &[PathBuf]) ->
 /// The walk uses the same pruning logic as the main checker
 /// ([`is_prunable_dir`]), so the fingerprint is stable between runs that do
 /// not change any relevant file.
+#[cfg(test)]
 pub fn compute_global_fingerprint(
     project_root: &Path,
     config_json: &str,
     python_env: Option<&Path>,
     first_party_roots: &[PathBuf],
+) -> u64 {
+    compute_global_fingerprint_with_project_files(
+        project_root,
+        config_json,
+        python_env,
+        first_party_roots,
+        None,
+    )
+}
+
+/// Compute the global fingerprint, reusing an already sorted and complete
+/// inventory of the project root when file selection captured one.
+pub fn compute_global_fingerprint_with_project_files(
+    project_root: &Path,
+    config_json: &str,
+    python_env: Option<&Path>,
+    first_party_roots: &[PathBuf],
+    project_files: Option<&[FingerprintFile]>,
 ) -> u64 {
     let mut h = FnvHasher::new();
 
@@ -281,6 +328,12 @@ pub fn compute_global_fingerprint(
     // traversing and statting those trees twice.
     for root in fingerprint_walk_roots(project_root, first_party_roots) {
         h.write_bytes(root.as_os_str().as_encoded_bytes());
+        if root == project_root {
+            if let Some(project_files) = project_files {
+                hash_fingerprint_files(project_files, &mut h);
+                continue;
+            }
+        }
         hash_py_file_mtimes(&root, &mut h);
     }
 
