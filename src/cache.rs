@@ -7,11 +7,13 @@
 //! fingerprint invalidates the whole manifest, matching the dependency model
 //! without one filesystem operation per checked file.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
-use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::check::is_prunable_dir;
 use crate::diagnostic::Diagnostic;
@@ -307,19 +309,10 @@ pub fn compute_global_fingerprint(
 const MANIFEST_NAME: &str = "diagnostics.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct CacheManifest {
     global_fingerprint: u64,
-    files_fingerprint: u64,
-    diagnostics: Vec<Diagnostic>,
-}
-
-fn files_fingerprint(files: &[PathBuf]) -> u64 {
-    let mut h = FnvHasher::new();
-    for path in files {
-        h.write_bytes(path.as_os_str().as_encoded_bytes());
-    }
-    h.finish()
+    entries: Vec<(PathBuf, Vec<Diagnostic>)>,
 }
 
 /// Persistent bounded on-disk diagnostic cache.
@@ -330,7 +323,7 @@ fn files_fingerprint(files: &[PathBuf]) -> u64 {
 pub struct DiagnosticCache {
     dir: PathBuf,
     global_fingerprint: u64,
-    manifest: Option<CacheManifest>,
+    entries: BTreeMap<PathBuf, Vec<Diagnostic>>,
 }
 
 impl DiagnosticCache {
@@ -344,42 +337,64 @@ impl DiagnosticCache {
     /// Returns an [`std::io::Error`] if the directory cannot be created.
     pub fn open(dir: &Path, global_fingerprint: u64) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(dir)?;
-        let manifest = std::fs::read(dir.join(MANIFEST_NAME))
+        let entries = std::fs::read(dir.join(MANIFEST_NAME))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok())
-            .filter(|manifest| manifest.global_fingerprint == global_fingerprint);
+            .filter(|manifest| manifest.global_fingerprint == global_fingerprint)
+            .map_or_else(BTreeMap::new, |manifest| {
+                manifest.entries.into_iter().collect()
+            });
         Ok(Self {
             dir: dir.to_path_buf(),
             global_fingerprint,
-            manifest,
+            entries,
         })
     }
 
-    /// Return cached diagnostics when the ordered checked-file set matches.
-    pub fn get_all(&self, files: &[PathBuf]) -> Option<Vec<Diagnostic>> {
-        let manifest = self.manifest.as_ref()?;
-        (manifest.files_fingerprint == files_fingerprint(files))
-            .then(|| manifest.diagnostics.clone())
+    /// Return cached diagnostics for one successfully checked file.
+    pub fn get(&self, path: &Path) -> Option<Vec<Diagnostic>> {
+        self.entries.get(path).cloned()
     }
 
-    /// Replace checked-file results and write the manifest once.
+    /// Add successfully checked-file results and write the manifest once.
     ///
     /// Errors are silently ignored: a failed cache write only causes a cold
     /// recomputation on the next run.
     #[cfg_attr(coverage, coverage(off))]
-    pub fn put_all(&mut self, files: &[PathBuf], diagnostics: &[Diagnostic]) {
-        if files.is_empty() {
+    pub fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>)>) {
+        if entries.is_empty() {
             return;
         }
-        let manifest = CacheManifest {
-            global_fingerprint: self.global_fingerprint,
-            files_fingerprint: files_fingerprint(files),
-            diagnostics: diagnostics.to_vec(),
-        };
-        if let Ok(json) = serde_json::to_vec(&manifest) {
+        self.entries.extend(entries);
+        if let Some(json) = self.serialize_manifest() {
             self.write_manifest_atomic(&json);
-            self.manifest = Some(manifest);
         }
+    }
+
+    /// Serialize each per-file entry in parallel, then join the already-valid
+    /// JSON fragments into the single on-disk manifest.
+    #[cfg_attr(coverage, coverage(off))]
+    fn serialize_manifest(&self) -> Option<Vec<u8>> {
+        let entries: Vec<_> = self.entries.iter().collect();
+        let encoded: Vec<Vec<u8>> = entries
+            .par_iter()
+            .map(|(path, diagnostics)| serde_json::to_vec(&(path, diagnostics)))
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let payload_len: usize = encoded.iter().map(Vec::len).sum();
+        let fingerprint = self.global_fingerprint.to_string();
+        let mut json = Vec::with_capacity(payload_len + encoded.len() + fingerprint.len() + 40);
+        json.extend_from_slice(b"{\"global_fingerprint\":");
+        json.extend_from_slice(fingerprint.as_bytes());
+        json.extend_from_slice(b",\"entries\":[");
+        for (index, entry) in encoded.iter().enumerate() {
+            if index != 0 {
+                json.push(b',');
+            }
+            json.extend_from_slice(entry);
+        }
+        json.extend_from_slice(b"]}");
+        Some(json)
     }
 
     /// Write a same-directory temporary file, then replace the manifest.
@@ -498,7 +513,7 @@ mod tests {
     fn cache_miss_returns_none() {
         let dir = tempdir().expect("tempdir");
         let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        assert!(cache.get_all(&[PathBuf::from("missing.py")]).is_none());
+        assert!(cache.get(Path::new("missing.py")).is_none());
     }
 
     #[test]
@@ -506,12 +521,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("pkg/mod.py");
         let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(std::slice::from_ref(&path), &[sample_diagnostic()]);
+        cache.put_all(vec![(path.clone(), vec![sample_diagnostic()])]);
 
         let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
-        let got = cache
-            .get_all(std::slice::from_ref(&path))
-            .expect("cache hit");
+        let got = cache.get(&path).expect("cache hit");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].callee, "pkg.mod.func");
     }
@@ -521,12 +534,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("clean.py");
         let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(std::slice::from_ref(&path), &[]);
+        cache.put_all(vec![(path.clone(), Vec::new())]);
 
         let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
-        let got = cache
-            .get_all(std::slice::from_ref(&path))
-            .expect("cache hit");
+        let got = cache.get(&path).expect("cache hit");
         assert!(got.is_empty());
     }
 
@@ -535,7 +546,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         std::fs::write(dir.path().join(MANIFEST_NAME), b"not json").expect("write");
         let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        assert!(cache.get_all(&[PathBuf::from("mod.py")]).is_none());
+        assert!(cache.get(Path::new("mod.py")).is_none());
     }
 
     #[test]
@@ -543,20 +554,20 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("pkg/mod.py");
         let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(std::slice::from_ref(&path), &[sample_diagnostic()]);
+        cache.put_all(vec![(path.clone(), vec![sample_diagnostic()])]);
 
         let cache = DiagnosticCache::open(dir.path(), 2).expect("reopen");
-        assert!(cache.get_all(&[path]).is_none());
+        assert!(cache.get(&path).is_none());
     }
 
     #[test]
     fn cache_file_selection_mismatch_is_a_miss() {
         let dir = tempdir().expect("tempdir");
         let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(&[PathBuf::from("a.py")], &[]);
+        cache.put_all(vec![(PathBuf::from("a.py"), Vec::new())]);
 
         let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
-        assert!(cache.get_all(&[PathBuf::from("b.py")]).is_none());
+        assert!(cache.get(Path::new("b.py")).is_none());
     }
 
     #[test]
@@ -564,7 +575,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         for fingerprint in 0..20 {
             let mut cache = DiagnosticCache::open(dir.path(), fingerprint).expect("open");
-            cache.put_all(&[PathBuf::from("mod.py")], &[sample_diagnostic()]);
+            cache.put_all(vec![(PathBuf::from("mod.py"), vec![sample_diagnostic()])]);
         }
 
         let files: Vec<_> = std::fs::read_dir(dir.path())

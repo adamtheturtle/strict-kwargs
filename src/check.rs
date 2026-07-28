@@ -501,10 +501,21 @@ fn check_paths_impl(
         })
         .transpose()?;
 
-    if let Some(mut diagnostics) = cache
-        .as_ref()
-        .and_then(|cache| cache.get_all(&python_files))
-    {
+    // Partition files into cache hits and misses. A skipped file remains a
+    // miss, while successfully checked neighbours can still use the manifest
+    // on later runs.
+    let mut cached_results = Vec::with_capacity(python_files.len());
+    let mut files_to_scan = Vec::new();
+    for path in &python_files {
+        let hit = cache.as_ref().and_then(|cache| cache.get(path));
+        if hit.is_none() {
+            files_to_scan.push(path.clone());
+        }
+        cached_results.push(hit);
+    }
+
+    let mut diagnostics: Vec<Diagnostic> = cached_results.into_iter().flatten().flatten().collect();
+    if files_to_scan.is_empty() {
         diagnostics.sort_by(|left, right| {
             left.path
                 .cmp(&right.path)
@@ -519,7 +530,6 @@ fn check_paths_impl(
 
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);
-    let mut diagnostics = Vec::new();
 
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
@@ -538,7 +548,7 @@ fn check_paths_impl(
     // code) starts no server at all. `python_env` (the `--python` value)
     // also steers the built-in resolver's third-party discovery.
     pipeline_phases(
-        &python_files,
+        &files_to_scan,
         &python_files,
         &explicit_files,
         project_root,
@@ -560,19 +570,42 @@ fn check_paths_impl(
         );
     }
 
+    // A skipped file may become readable without changing its mtime, so leave
+    // it out of the manifest and check it again next time. Store every other
+    // miss in one manifest write, including clean files with no diagnostics.
+    if let Some(cache) = &mut cache {
+        let skipped_paths: FxHashSet<&Path> = skip_warnings
+            .iter()
+            .map(|(_, path, _)| path.as_path())
+            .collect();
+        let mut diagnostics_by_path: FxHashMap<&Path, Vec<Diagnostic>> = FxHashMap::default();
+        for diagnostic in &diagnostics {
+            diagnostics_by_path
+                .entry(&diagnostic.path)
+                .or_default()
+                .push(diagnostic.clone());
+        }
+        let new_entries = files_to_scan
+            .iter()
+            .filter(|path| !skipped_paths.contains(path.as_path()))
+            .map(|path| {
+                (
+                    path.clone(),
+                    diagnostics_by_path
+                        .remove(path.as_path())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        cache.put_all(new_entries);
+    }
+
     diagnostics.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
             .then(left.line.cmp(&right.line))
             .then(left.column.cmp(&right.column))
     });
-    // A skipped file may become readable without changing its mtime, and its
-    // warning must be emitted again. Cache only complete runs.
-    if skip_warnings.is_empty() {
-        if let Some(cache) = &mut cache {
-            cache.put_all(&python_files, &diagnostics);
-        }
-    }
     Ok(diagnostics)
 }
 

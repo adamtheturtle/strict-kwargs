@@ -2940,6 +2940,63 @@ fn cache_does_not_cache_skipped_file() {
     );
 }
 
+/// A skipped neighbour must not prevent successfully checked files from using
+/// the shared manifest on the next run.
+#[test]
+fn cache_keeps_successful_entries_when_another_file_is_skipped() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let valid_file = root.join("valid.py");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(1, 2)\n").expect("write valid");
+    std::fs::write(root.join("binary.py"), [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
+
+    let config = Config::load(&root).expect("config");
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(cold.len(), 1);
+
+    // Preserve the accepted mtime-based fingerprint while changing the valid
+    // source. A warm hit therefore returns the cached diagnostic; if the
+    // skipped neighbour had suppressed the manifest, this would return none.
+    let modified = std::fs::metadata(&valid_file)
+        .expect("valid metadata")
+        .modified()
+        .expect("valid mtime");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\n").expect("rewrite valid");
+    std::fs::File::options()
+        .write(true)
+        .open(&valid_file)
+        .expect("open valid")
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("restore valid mtime");
+
+    let warm = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check");
+    assert_eq!(warm, cold);
+}
+
 /// If the cache-dir path already exists as a regular file, opening the cache
 /// fails and `check_paths` propagates the I/O error.
 #[test]
