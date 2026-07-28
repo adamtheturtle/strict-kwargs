@@ -1,0 +1,1 @@
+Store warm-cache diagnostics in one bounded manifest, avoiding one cache-file read and write per checked Python file.

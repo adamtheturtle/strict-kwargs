@@ -847,6 +847,25 @@ fn whole_project_cache_warm(bencher: divan::Bencher) {
     bencher.bench(|| check_cached(root, cache.path()));
 }
 
+/// Large-project directory — cold run with cache infrastructure enabled.
+#[divan::bench]
+fn large_project_cache_cold(bencher: divan::Bencher) {
+    let root = large_project_dir();
+    bencher.bench(|| {
+        let cache = tempfile::tempdir().expect("tempdir");
+        check_cached(root, cache.path())
+    });
+}
+
+/// Large-project directory — warm run with all results in cache.
+#[divan::bench]
+fn large_project_cache_warm(bencher: divan::Bencher) {
+    let root = large_project_dir();
+    let cache = tempfile::tempdir().expect("tempdir");
+    check_cached(root, cache.path());
+    bencher.bench(|| check_cached(root, cache.path()));
+}
+
 /// Warm-cache fingerprinting with a configured source root nested beneath the
 /// already-walked project root.
 #[divan::bench]

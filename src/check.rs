@@ -18,7 +18,7 @@ use crate::ast_util::{
     line_column, line_column_from_starts, line_starts, positional_argument_count,
     signature_from_parameters,
 };
-use crate::cache::{compute_global_fingerprint, file_cache_key, DiagnosticCache};
+use crate::cache::{compute_global_fingerprint, DiagnosticCache};
 use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
@@ -122,14 +122,6 @@ pub fn check_paths(
     run_with_large_stack(move || {
         check_paths_impl(project_root, paths, config, python_env, cache_dir)
     })
-}
-
-/// Per-file entry used in `check_paths_impl` to track cache state.
-///
-/// Populated before the parallel scan pass: cache hits carry the previously
-/// stored diagnostics; misses are fed to the pipeline.
-struct FileEntry {
-    cache_hit: Option<Vec<Diagnostic>>,
 }
 
 /// Phase 2 processing for one completed file: route the [`ScanOutcome`] to
@@ -495,7 +487,7 @@ fn check_paths_impl(
     let source_roots = SourceRoots::from_config(project_root, config);
 
     // Optional persistent cache: open it and compute the global fingerprint once.
-    let cache_and_fp: Option<(DiagnosticCache, u64)> = cache_dir
+    let mut cache: Option<DiagnosticCache> = cache_dir
         .map(|dir| -> Result<_, CheckError> {
             let config_json = serde_json::to_string(config).unwrap_or_default();
             let first_party_roots = source_roots.first_party_for_resolution();
@@ -505,50 +497,24 @@ fn check_paths_impl(
                 python_env,
                 &first_party_roots,
             );
-            Ok((DiagnosticCache::open(dir)?, fp))
+            Ok(DiagnosticCache::open(dir, fp)?)
         })
         .transpose()?;
 
-    // Partition files into cache hits and misses. Hits bypass the pipeline;
-    // misses are queued for scanning. `files_to_scan` preserves the order of
-    // misses so the pipeline's file indices map consistently to skip_warnings.
-    // `cache_miss_keys` pairs each miss with its cache key for writing back
-    // after the pipeline; stored separately so the write loop needs no Option.
-    let mut entries: Vec<FileEntry> = Vec::with_capacity(python_files.len());
-    let mut files_to_scan: Vec<PathBuf> = Vec::new();
-    let mut cache_miss_keys: Vec<(u64, PathBuf)> = Vec::new();
-
+    // Partition files into cache hits and misses. A skipped file remains a
+    // miss, while successfully checked neighbours can still use the manifest
+    // on later runs.
+    let mut cached_results = Vec::with_capacity(python_files.len());
+    let mut files_to_scan = Vec::new();
     for path in &python_files {
-        if let Some((ref cache, fp)) = cache_and_fp {
-            // The cache key is derived from the path and the global
-            // fingerprint. The global fingerprint already includes every
-            // first-party file's mtime, so any content change (which updates
-            // the mtime) changes the fingerprint and therefore this key.
-            // This avoids reading the file twice (once here, once in
-            // scan_file); warm runs need only stat(2) calls + cache reads.
-            let key = file_cache_key(path, fp);
-            let hit = cache.get(key);
-            let is_hit = hit.is_some();
-            entries.push(FileEntry { cache_hit: hit });
-            if !is_hit {
-                files_to_scan.push(path.clone());
-                cache_miss_keys.push((key, path.clone()));
-            }
-        } else {
-            entries.push(FileEntry { cache_hit: None });
+        let hit = cache.as_ref().and_then(|cache| cache.get(path));
+        if hit.is_none() {
             files_to_scan.push(path.clone());
         }
+        cached_results.push(hit);
     }
 
-    let mut diagnostics = Vec::new();
-
-    // Cache hits bypass the pipeline; their diagnostics are added directly.
-    for entry in &entries {
-        if let Some(cached) = &entry.cache_hit {
-            diagnostics.extend_from_slice(cached);
-        }
-    }
-
+    let mut diagnostics: Vec<Diagnostic> = cached_results.into_iter().flatten().flatten().collect();
     if files_to_scan.is_empty() {
         diagnostics.sort_by(|left, right| {
             left.path
@@ -558,7 +524,6 @@ fn check_paths_impl(
         });
         return Ok(diagnostics);
     }
-
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);
 
@@ -601,28 +566,34 @@ fn check_paths_impl(
         );
     }
 
-    // Store miss results in cache after the pipeline completes. Attribute each
-    // file's diagnostics by path (Diagnostic::path is always the source file).
-    // Skipped files are excluded — the skip reason may be transient.
-    if let Some((ref cache, _)) = cache_and_fp {
-        let skipped_paths: FxHashSet<PathBuf> = skip_warnings
+    // A skipped file may become readable without changing its mtime, so leave
+    // it out of the manifest and check it again next time. Store every other
+    // miss in one manifest write, including clean files with no diagnostics.
+    if let Some(cache) = &mut cache {
+        let skipped_paths: FxHashSet<&Path> = skip_warnings
             .iter()
-            .map(|(_, path, _)| path.clone())
+            .map(|(_, path, _)| path.as_path())
             .collect();
-        let mut diagnostics_by_path: FxHashMap<PathBuf, Vec<Diagnostic>> = FxHashMap::default();
+        let mut diagnostics_by_path: FxHashMap<&Path, Vec<Diagnostic>> = FxHashMap::default();
         for diagnostic in &diagnostics {
             diagnostics_by_path
-                .entry(diagnostic.path.clone())
+                .entry(&diagnostic.path)
                 .or_default()
                 .push(diagnostic.clone());
         }
-        cache_miss_keys
-            .par_iter()
-            .filter(|(_, path)| !skipped_paths.contains(path))
-            .for_each(|(key, path)| {
-                let file_diags = diagnostics_by_path.get(path).map_or(&[][..], Vec::as_slice);
-                cache.put(*key, file_diags);
-            });
+        let new_entries = files_to_scan
+            .iter()
+            .filter(|path| !skipped_paths.contains(path.as_path()))
+            .map(|path| {
+                (
+                    path.clone(),
+                    diagnostics_by_path
+                        .remove(path.as_path())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        cache.put_all(new_entries);
     }
 
     diagnostics.sort_by(|left, right| {
