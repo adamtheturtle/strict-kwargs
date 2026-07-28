@@ -2957,7 +2957,7 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
     )
     .expect("write pyproject");
     let valid_file = root.join("valid.py");
-    std::fs::write(&valid_file, "def f(a, b): ...\nf(1, 2)\n").expect("write valid");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(1, 2)\nf(3, 4)\n").expect("write valid");
     std::fs::write(root.join("binary.py"), [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
 
     let config = Config::load(&root).expect("config");
@@ -2969,7 +2969,7 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
         Some(&cache_dir),
     )
     .expect("cold check");
-    assert_eq!(cold.len(), 1);
+    assert_eq!(cold.len(), 2);
 
     // Preserve the accepted mtime-based fingerprint while changing the valid
     // source. A warm hit therefore returns the cached diagnostic; if the
@@ -2978,7 +2978,8 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
         .expect("valid metadata")
         .modified()
         .expect("valid mtime");
-    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\n").expect("rewrite valid");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\nf(a=3, b=4)\n")
+        .expect("rewrite valid");
     std::fs::File::options()
         .write(true)
         .open(&valid_file)
