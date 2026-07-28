@@ -116,7 +116,8 @@ impl FileSelection {
         if explicit && !self.force_exclude {
             return false;
         }
-        if is_ignored_path(path) {
+        let project_relative = path.strip_prefix(&self.project_root).unwrap_or(path);
+        if is_ignored_path(project_relative) {
             return true;
         }
         if self.project_root.is_absolute()
