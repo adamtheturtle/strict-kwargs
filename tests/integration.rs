@@ -2795,6 +2795,58 @@ fn cache_all_hit_fast_path_sorts_multiple_diagnostics() {
     assert_eq!(warm.len(), 2);
 }
 
+/// Moving per-file cache entries directly into output must preserve the same
+/// path ordering as the cold whole-project run.
+#[test]
+fn cache_all_hit_fast_path_preserves_cross_file_order() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    for name in ["z.py", "a.py"] {
+        std::fs::write(
+            root.join(name),
+            "def f(a, b): ...\n\
+             f(1, 2)\n",
+        )
+        .expect("write source");
+    }
+
+    let config = Config::load(&root).expect("config");
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    let warm = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check");
+
+    assert_eq!(warm, cold);
+    assert_eq!(
+        warm.iter()
+            .map(|diagnostic| diagnostic.path.as_path())
+            .collect::<Vec<_>>(),
+        [root.join("a.py").as_path(), root.join("z.py").as_path()]
+    );
+}
+
 /// Modifying a checked file invalidates the cache entry.
 #[test]
 fn cache_invalidated_on_file_change() {
