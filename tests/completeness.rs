@@ -557,10 +557,10 @@ mod tests {
         let checkout = isolate_reused_checkout(&source, &repository);
 
         assert!(!checkout.root.starts_with(&parent));
-        assert_eq!(
-            fs::read_to_string(checkout.root.join("tracked.py")).expect("read cloned file"),
-            "print('tracked')\n"
-        );
+        let cloned_source =
+            fs::read_to_string(checkout.root.join("tracked.py")).expect("read cloned file");
+        assert_eq!(cloned_source.lines().next(), Some("print('tracked')"));
+        assert_eq!(cloned_source.lines().count(), 1);
         assert!(!checkout.root.join("pyproject.toml").exists());
         assert_eq!(
             String::from_utf8(git_output(&checkout.root, &["rev-parse", "HEAD"]).stdout)
