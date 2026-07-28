@@ -370,6 +370,32 @@ fn large_project_dir() -> &'static Path {
         .path()
 }
 
+/// The large generated project plus one undecodable Python file. The valid
+/// files populate the cache, while the skipped file deliberately remains a
+/// miss; this mirrors real trees such as `CPython` and `Sphinx` that contain
+/// parser/encoding fixtures.
+fn large_project_with_skipped_file_dir() -> &'static Path {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create skipped-file fixture tempdir");
+            write_project_fixture(
+                temp.path(),
+                "large-project-with-skipped-file-fixture",
+                LARGE_PROJECT_PKGS,
+                LARGE_PROJECT_MODS_PER_PKG,
+                LARGE_PROJECT_FUNCS_PER_MOD,
+            );
+            std::fs::write(
+                temp.path().join("unsupported_encoding.py"),
+                [0x80u8, 0x90, 0xa0, 0xff],
+            )
+            .expect("write undecodable Python fixture");
+            temp
+        })
+        .path()
+}
+
 /// A deterministic project whose calls intentionally go through the `ty`
 /// fallback. Calls through `make_worker().configure(...)` are not direct
 /// constructor receivers the built-in resolver tracks, but `ty` can infer the
@@ -861,6 +887,17 @@ fn large_project_cache_cold(bencher: divan::Bencher) {
 #[divan::bench]
 fn large_project_cache_warm(bencher: divan::Bencher) {
     let root = large_project_dir();
+    let cache = tempfile::tempdir().expect("tempdir");
+    check_cached(root, cache.path());
+    bencher.bench(|| check_cached(root, cache.path()));
+}
+
+/// Large-project warm cache with one intentionally skipped file. The skipped
+/// file stays a miss and is rechecked on every run; the cached neighbours
+/// should not force a whole-project index rebuild.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn large_project_skipped_file_cache_warm(bencher: divan::Bencher) {
+    let root = large_project_with_skipped_file_dir();
     let cache = tempfile::tempdir().expect("tempdir");
     check_cached(root, cache.path());
     bencher.bench(|| check_cached(root, cache.path()));

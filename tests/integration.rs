@@ -2957,7 +2957,7 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
     )
     .expect("write pyproject");
     let valid_file = root.join("valid.py");
-    std::fs::write(&valid_file, "def f(a, b): ...\nf(1, 2)\n").expect("write valid");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(1, 2)\nf(3, 4)\n").expect("write valid");
     std::fs::write(root.join("binary.py"), [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
 
     let config = Config::load(&root).expect("config");
@@ -2969,7 +2969,7 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
         Some(&cache_dir),
     )
     .expect("cold check");
-    assert_eq!(cold.len(), 1);
+    assert_eq!(cold.len(), 2);
 
     // Preserve the accepted mtime-based fingerprint while changing the valid
     // source. A warm hit therefore returns the cached diagnostic; if the
@@ -2978,7 +2978,8 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
         .expect("valid metadata")
         .modified()
         .expect("valid mtime");
-    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\n").expect("rewrite valid");
+    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\nf(a=3, b=4)\n")
+        .expect("rewrite valid");
     std::fs::File::options()
         .write(true)
         .open(&valid_file)
@@ -2995,6 +2996,67 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
     )
     .expect("warm check");
     assert_eq!(warm, cold);
+}
+
+/// A skipped cache miss is re-read on every warm run. If it becomes valid
+/// without changing its mtime, the skip-only fast path must fall back to the
+/// full pipeline rather than returning only its neighbours' cached results.
+#[test]
+fn cache_notices_when_skipped_file_becomes_valid_with_same_mtime() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let cached_file = root.join("cached.py");
+    let skipped_file = root.join("binary.py");
+    std::fs::write(&cached_file, "def f(a, b): ...\nf(1, 2)\n").expect("write cached");
+    std::fs::write(&skipped_file, [0x80u8, 0x90, 0xa0, 0xff]).expect("write binary");
+
+    let config = Config::load(&root).expect("config");
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(cold.len(), 1);
+
+    let modified = std::fs::metadata(&skipped_file)
+        .expect("skipped metadata")
+        .modified()
+        .expect("skipped mtime");
+    std::fs::write(&skipped_file, "def g(a, b): ...\ng(1, 2)\n").expect("rewrite skipped");
+    std::fs::File::options()
+        .write(true)
+        .open(&skipped_file)
+        .expect("open rewritten file")
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("restore skipped mtime");
+
+    let warm = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("warm check");
+    assert_eq!(warm.len(), 2, "rewritten skipped file must be analysed");
+    assert!(
+        warm.iter()
+            .any(|diagnostic| diagnostic.path == skipped_file),
+        "expected a diagnostic from the newly valid file: {warm:?}"
+    );
 }
 
 /// If the cache-dir path already exists as a regular file, opening the cache
