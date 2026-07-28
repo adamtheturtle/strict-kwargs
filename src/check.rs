@@ -5449,6 +5449,20 @@ mod tests {
             inventory.as_deref(),
         );
         assert_eq!(shared_fingerprint, walked);
+
+        symlink("missing", root.path().join("broken")).expect("broken symlink");
+        assert!(collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .is_err());
+        assert!(collect_python_files_with_project_inventory(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .is_err());
     }
 
     #[test]

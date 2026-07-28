@@ -552,6 +552,23 @@ mod tests {
         assert!(mtime_nanos(dir.path()).is_some());
     }
 
+    #[test]
+    fn fingerprint_files_allow_an_entry_without_mtime() {
+        let path = PathBuf::from("missing.py");
+        let mut actual = FnvHasher::new();
+        hash_fingerprint_files(
+            &[FingerprintFile {
+                path: path.clone(),
+                mtime: None,
+            }],
+            &mut actual,
+        );
+
+        let mut expected = FnvHasher::new();
+        expected.write_bytes(path.as_os_str().as_encoded_bytes());
+        assert_eq!(actual.finish(), expected.finish());
+    }
+
     // ---- DiagnosticCache ----------------------------------------------------
 
     #[test]

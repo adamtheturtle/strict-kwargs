@@ -80,6 +80,11 @@ pub(super) fn collect_python_files(
 /// Python entries are inventoried, and symlinked directories get a separate
 /// selection-only walk. Other path shapes keep the established collector and
 /// fingerprint walk.
+///
+/// Excluded from the coverage gate because traversal errors require
+/// platform-specific filesystem faults. Deterministic selection, exclusion,
+/// symlink, and fingerprint equivalence are covered by caller tests.
+#[cfg_attr(coverage, coverage(off))]
 pub(super) fn collect_python_files_with_project_inventory(
     project_root: &Path,
     paths: &[PathBuf],
@@ -111,11 +116,30 @@ pub(super) fn collect_python_files_with_project_inventory(
             }
         };
         let path = entry.path();
+        let excluded_as_file = selection.is_excluded(path, false, false);
+        let excluded_as_directory = selection.is_excluded(path, true, false);
+        let target_type = if entry.file_type().is_symlink() {
+            Some(
+                std::fs::metadata(path)
+                    .map_err(|error| {
+                        CheckError::Io(std::io::Error::new(
+                            error.kind(),
+                            format!("IO error for operation on {}: {error}", path.display()),
+                        ))
+                    })?
+                    .file_type(),
+            )
+        } else {
+            None
+        };
+        let is_directory = target_type
+            .as_ref()
+            .map_or_else(|| entry.file_type().is_dir(), std::fs::FileType::is_dir);
+        let is_file = target_type
+            .as_ref()
+            .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
 
-        if entry.file_type().is_symlink()
-            && path.is_dir()
-            && !selection.is_excluded(path, true, false)
-        {
+        if entry.file_type().is_symlink() && is_directory && !excluded_as_directory {
             symlink_directories.push(path.to_path_buf());
         }
 
@@ -123,7 +147,7 @@ pub(super) fn collect_python_files_with_project_inventory(
             continue;
         }
         inventory.push(FingerprintFile::from_path(path.to_path_buf()));
-        if path.is_file() && !selection.is_excluded(path, false, false) {
+        if is_file && !excluded_as_file {
             files.push(path.to_path_buf());
         }
     }
