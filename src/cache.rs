@@ -1,11 +1,12 @@
 //! Persistent on-disk diagnostic cache (issue #68).
 //!
 //! Cached results are stored together in `{cache_dir}/diagnostics.json`.
-//! The manifest records the *global fingerprint* that captures everything
-//! that could affect the checker's output (tool version, config, Python
-//! environment, ty binary, and all first-party source files). A changed
-//! fingerprint invalidates the whole manifest, matching the dependency model
-//! without one filesystem operation per checked file.
+//! The manifest records separate dependency and project fingerprints covering
+//! everything that could affect the checker's output (tool version, config,
+//! Python environment, ty binary, and all first-party source files).
+//! Dependency changes invalidate the whole manifest. Project-only changes may
+//! reuse entries after validating that every changed file's semantic token
+//! stream is unchanged.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::check::is_prunable_dir;
 use crate::diagnostic::Diagnostic;
@@ -28,7 +29,7 @@ use crate::resolve::{discover_site_packages, discover_site_packages_in_environme
 /// Uses the standard FNV-1a basis and prime so the hashes are stable across
 /// process restarts and platforms (no randomisation, fixed endianness via
 /// `to_le_bytes`).
-struct FnvHasher {
+pub struct FnvHasher {
     state: u64,
 }
 
@@ -39,7 +40,7 @@ impl FnvHasher {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
     /// Create a new hasher seeded with the FNV-1a 64-bit offset basis.
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { state: Self::BASIS }
     }
 
@@ -51,7 +52,7 @@ impl FnvHasher {
 
     /// Mix a byte slice into the hash, length-prefixed to prevent
     /// `("ab","c")` colliding with `("a","bc")`.
-    fn write_bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
         // 8-byte LE length prefix disambiguates differently-split inputs.
         for b in (bytes.len() as u64).to_le_bytes() {
             self.write_byte(b);
@@ -62,13 +63,13 @@ impl FnvHasher {
     }
 
     /// Return the current hash value.
-    const fn finish(self) -> u64 {
+    pub(crate) const fn finish(self) -> u64 {
         self.state
     }
 }
 
 // ---------------------------------------------------------------------------
-// Global fingerprint
+// Cache fingerprints
 // ---------------------------------------------------------------------------
 
 /// The name of the `ty` binary (platform-aware).
@@ -100,6 +101,7 @@ fn mtime_nanos(path: &Path) -> Option<[u8; 16]> {
 /// One project entry captured during file selection for reuse by the global
 /// fingerprint. The path may name any `.py`/`.pyi` entry, not only a regular
 /// file, matching [`hash_py_file_mtimes`]'s existing behavior.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FingerprintFile {
     path: PathBuf,
     mtime: Option<[u8; 16]>,
@@ -113,6 +115,27 @@ impl FingerprintFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Independent cache-invalidation domains.
+///
+/// A dependency change can alter every result and always invalidates the
+/// manifest. A project-only change may retain entries when every changed file
+/// has the same semantic token stream as before.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheFingerprints {
+    dependency: u64,
+    project: u64,
+}
+
+impl CacheFingerprints {
+    #[cfg(test)]
+    fn combined(self) -> u64 {
+        let mut h = FnvHasher::new();
+        h.write_bytes(&self.dependency.to_le_bytes());
+        h.write_bytes(&self.project.to_le_bytes());
+        h.finish()
     }
 }
 
@@ -296,6 +319,7 @@ pub fn compute_global_fingerprint(
 
 /// Compute the global fingerprint, reusing an already sorted and complete
 /// inventory of the project root when file selection captured one.
+#[cfg(test)]
 pub fn compute_global_fingerprint_with_project_files(
     project_root: &Path,
     config_json: &str,
@@ -303,38 +327,60 @@ pub fn compute_global_fingerprint_with_project_files(
     first_party_roots: &[PathBuf],
     project_files: Option<&[FingerprintFile]>,
 ) -> u64 {
-    let mut h = FnvHasher::new();
+    compute_cache_fingerprints_with_project_files(
+        project_root,
+        config_json,
+        python_env,
+        first_party_roots,
+        project_files,
+    )
+    .combined()
+}
+
+/// Compute dependency and project fingerprints separately so a project-only
+/// change can be validated against the previous semantic token streams.
+pub fn compute_cache_fingerprints_with_project_files(
+    project_root: &Path,
+    config_json: &str,
+    python_env: Option<&Path>,
+    first_party_roots: &[PathBuf],
+    project_files: Option<&[FingerprintFile]>,
+) -> CacheFingerprints {
+    let mut dependency = FnvHasher::new();
 
     // Tool version — changing the binary invalidates all cached results.
-    h.write_bytes(env!("CARGO_PKG_VERSION").as_bytes());
+    dependency.write_bytes(env!("CARGO_PKG_VERSION").as_bytes());
 
     // Serialised config.
-    h.write_bytes(config_json.as_bytes());
+    dependency.write_bytes(config_json.as_bytes());
 
     // Python environment path + mtime.
     if let Some(env_path) = python_env {
-        h.write_bytes(env_path.as_os_str().as_encoded_bytes());
+        dependency.write_bytes(env_path.as_os_str().as_encoded_bytes());
         if let Some(mtime) = mtime_nanos(env_path) {
-            h.write_bytes(&mtime);
+            dependency.write_bytes(&mtime);
         }
     }
 
     // `ty` binary path + mtime.
-    hash_ty_binary(&mut h);
+    hash_ty_binary(&mut dependency);
 
-    // All first-party `.py`/`.pyi` files, sorted within each non-overlapping
-    // walk root, each contributing path bytes + mtime. Configured source roots
-    // nested under the project are already reached by the project walk; avoid
-    // traversing and statting those trees twice.
+    let mut project = FnvHasher::new();
     for root in fingerprint_walk_roots(project_root, first_party_roots) {
-        h.write_bytes(root.as_os_str().as_encoded_bytes());
         if root == project_root {
+            project.write_bytes(root.as_os_str().as_encoded_bytes());
             if let Some(project_files) = project_files {
-                hash_fingerprint_files(project_files, &mut h);
+                hash_fingerprint_files(project_files, &mut project);
                 continue;
             }
+            hash_py_file_mtimes(&root, &mut project);
+            continue;
         }
-        hash_py_file_mtimes(&root, &mut h);
+        // A configured root outside the ordinary project walk behaves like a
+        // dependency: it is not necessarily among the checked files whose
+        // entries can be selectively refreshed.
+        dependency.write_bytes(root.as_os_str().as_encoded_bytes());
+        hash_py_file_mtimes(&root, &mut dependency);
     }
 
     // Third-party modules and stubs can change resolution just like
@@ -348,11 +394,14 @@ pub fn compute_global_fingerprint_with_project_files(
     site_packages.sort();
     site_packages.dedup();
     for root in site_packages {
-        h.write_bytes(root.as_os_str().as_encoded_bytes());
-        hash_py_file_mtimes(&root, &mut h);
+        dependency.write_bytes(root.as_os_str().as_encoded_bytes());
+        hash_py_file_mtimes(&root, &mut dependency);
     }
 
-    h.finish()
+    CacheFingerprints {
+        dependency: dependency.finish(),
+        project: project.finish(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,21 +411,33 @@ pub fn compute_global_fingerprint_with_project_files(
 const MANIFEST_NAME: &str = "diagnostics.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Deserialize, Serialize)]
+struct CacheEntry {
+    diagnostics: Vec<Diagnostic>,
+    semantic_fingerprint: Option<u64>,
+}
+
 #[derive(Deserialize)]
 struct CacheManifest {
-    global_fingerprint: u64,
-    entries: Vec<(PathBuf, Vec<Diagnostic>)>,
+    dependency_fingerprint: u64,
+    project_fingerprint: u64,
+    project_files: Option<Vec<FingerprintFile>>,
+    entries: Vec<(PathBuf, CacheEntry)>,
 }
 
 /// Persistent bounded on-disk diagnostic cache.
 ///
 /// The complete manifest is read at most once and written at most once per
 /// invocation. Replacing the single manifest naturally evicts results made
-/// obsolete by a changed global fingerprint.
+/// obsolete by changed dependency or project fingerprints.
 pub struct DiagnosticCache {
     dir: PathBuf,
-    global_fingerprint: u64,
-    entries: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    fingerprints: CacheFingerprints,
+    project_files: Option<Vec<FingerprintFile>>,
+    previous_project_files: Option<Vec<FingerprintFile>>,
+    entries: BTreeMap<PathBuf, CacheEntry>,
+    needs_project_validation: bool,
+    dirty: bool,
 }
 
 impl DiagnosticCache {
@@ -388,40 +449,141 @@ impl DiagnosticCache {
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the directory cannot be created.
-    pub fn open(dir: &Path, global_fingerprint: u64) -> Result<Self, std::io::Error> {
+    pub fn open(
+        dir: &Path,
+        fingerprints: CacheFingerprints,
+        project_files: Option<&[FingerprintFile]>,
+    ) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(dir)?;
-        let entries = std::fs::read(dir.join(MANIFEST_NAME))
+        let manifest = std::fs::read(dir.join(MANIFEST_NAME))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok())
-            .filter(|manifest| manifest.global_fingerprint == global_fingerprint)
+            .filter(|manifest| manifest.dependency_fingerprint == fingerprints.dependency)
+            .filter(|manifest| {
+                manifest.project_fingerprint == fingerprints.project || project_files.is_some()
+            })
             .and_then(|manifest| {
-                manifest
-                    .entries
+                let CacheManifest {
+                    dependency_fingerprint: _,
+                    project_fingerprint,
+                    project_files: previous_project_files,
+                    entries,
+                } = manifest;
+                let entries = entries
                     .into_iter()
-                    .map(|(path, mut diagnostics)| {
-                        if diagnostics.iter().any(|diagnostic| diagnostic.path != path) {
+                    .map(|(path, mut entry)| {
+                        if entry
+                            .diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.path != path)
+                        {
                             return None;
                         }
-                        diagnostics.sort_by(|left, right| {
+                        entry.diagnostics.sort_by(|left, right| {
                             left.line
                                 .cmp(&right.line)
                                 .then(left.column.cmp(&right.column))
                         });
-                        Some((path, diagnostics))
+                        Some((path, entry))
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect::<Option<BTreeMap<_, _>>>()?;
+                Some((project_fingerprint, previous_project_files, entries))
+            });
+        let (entries, previous_project_files, needs_project_validation) = manifest.map_or_else(
+            || (BTreeMap::new(), None, false),
+            |(project_fingerprint, previous_project_files, entries)| {
+                let changed = project_fingerprint != fingerprints.project;
+                (entries, previous_project_files, changed)
+            },
+        );
         Ok(Self {
             dir: dir.to_path_buf(),
-            global_fingerprint,
+            fingerprints,
+            project_files: project_files.map(<[FingerprintFile]>::to_vec),
+            previous_project_files,
             entries,
+            needs_project_validation,
+            dirty: false,
         })
+    }
+
+    /// Whether project sources changed while tool/config/dependency inputs
+    /// stayed stable, allowing reparsed token streams to validate reuse.
+    pub const fn needs_project_validation(&self) -> bool {
+        self.needs_project_validation
+    }
+
+    /// Validate stale project entries against the rebuilt project's tokens.
+    ///
+    /// Entries are reusable only when every changed existing file has the same
+    /// semantic token stream as before. Changed files themselves are rescanned
+    /// so layout-sensitive diagnostic positions stay current.
+    pub fn validate_project(
+        &mut self,
+        current_files: &[PathBuf],
+        current_semantic_fingerprints: &BTreeMap<PathBuf, u64>,
+    ) -> bool {
+        let current_metadata: BTreeMap<_, _> = self
+            .project_files
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|file| (file.path.clone(), file.mtime))
+            .collect();
+        let old_metadata: BTreeMap<_, _> = self
+            .previous_project_files
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|file| (file.path.clone(), file.mtime))
+            .collect();
+        let same_paths = old_metadata.len() == current_metadata.len()
+            && old_metadata
+                .keys()
+                .all(|path| current_metadata.contains_key(path));
+        let semantically_unchanged = same_paths
+            && current_metadata.iter().all(|(path, mtime)| {
+                old_metadata.get(path) == Some(mtime)
+                    || self.entries.get(path).is_some_and(|entry| {
+                        entry.semantic_fingerprint
+                            == current_semantic_fingerprints.get(path).copied()
+                    })
+            });
+        let reusable = semantically_unchanged;
+        if reusable {
+            let current_paths: std::collections::BTreeSet<_> =
+                current_files.iter().map(PathBuf::as_path).collect();
+            self.entries.retain(|path, _entry| {
+                current_paths.contains(path.as_path())
+                    && old_metadata.get(path) == current_metadata.get(path)
+            });
+        } else {
+            self.entries.clear();
+        }
+        self.previous_project_files = self.project_files.clone();
+        self.needs_project_validation = false;
+        self.dirty = true;
+        reusable
+    }
+
+    /// Persist metadata-only refreshes when a validated project change leaves
+    /// no files to scan.
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn flush(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        if let Some(json) = self.serialize_manifest() {
+            self.write_manifest_atomic(&json);
+            self.dirty = false;
+        }
     }
 
     /// Return cached diagnostics for one successfully checked file.
     pub fn get(&self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries.get(path).cloned()
+        self.entries
+            .get(path)
+            .map(|entry| entry.diagnostics.clone())
     }
 
     /// Whether `path` has a successfully checked cache entry.
@@ -434,7 +596,7 @@ impl DiagnosticCache {
     /// Used only by terminal warm-cache paths that will not rewrite the
     /// manifest, avoiding a clone of every diagnostic before returning.
     pub fn take(&mut self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries.remove(path)
+        self.entries.remove(path).map(|entry| entry.diagnostics)
     }
 
     /// Add successfully checked-file results and write the manifest once.
@@ -442,14 +604,24 @@ impl DiagnosticCache {
     /// Errors are silently ignored: a failed cache write only causes a cold
     /// recomputation on the next run.
     #[cfg_attr(coverage, coverage(off))]
-    pub fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>)>) {
+    pub fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>, Option<u64>)>) {
         if entries.is_empty() {
+            self.flush();
             return;
         }
-        self.entries.extend(entries);
-        if let Some(json) = self.serialize_manifest() {
-            self.write_manifest_atomic(&json);
-        }
+        self.entries.extend(entries.into_iter().map(
+            |(path, diagnostics, semantic_fingerprint)| {
+                (
+                    path,
+                    CacheEntry {
+                        diagnostics,
+                        semantic_fingerprint,
+                    },
+                )
+            },
+        ));
+        self.dirty = true;
+        self.flush();
     }
 
     /// Serialize each per-file entry in parallel, then join the already-valid
@@ -459,14 +631,27 @@ impl DiagnosticCache {
         let entries: Vec<_> = self.entries.iter().collect();
         let encoded: Vec<Vec<u8>> = entries
             .par_iter()
-            .map(|(path, diagnostics)| serde_json::to_vec(&(path, diagnostics)))
+            .map(|(path, entry)| serde_json::to_vec(&(path, entry)))
             .collect::<Result<_, _>>()
             .ok()?;
+        let project_files = serde_json::to_vec(&self.project_files).ok()?;
         let payload_len: usize = encoded.iter().map(Vec::len).sum();
-        let fingerprint = self.global_fingerprint.to_string();
-        let mut json = Vec::with_capacity(payload_len + encoded.len() + fingerprint.len() + 40);
-        json.extend_from_slice(b"{\"global_fingerprint\":");
-        json.extend_from_slice(fingerprint.as_bytes());
+        let dependency_fingerprint = self.fingerprints.dependency.to_string();
+        let project_fingerprint = self.fingerprints.project.to_string();
+        let mut json = Vec::with_capacity(
+            payload_len
+                + encoded.len()
+                + project_files.len()
+                + dependency_fingerprint.len()
+                + project_fingerprint.len()
+                + 100,
+        );
+        json.extend_from_slice(b"{\"dependency_fingerprint\":");
+        json.extend_from_slice(dependency_fingerprint.as_bytes());
+        json.extend_from_slice(b",\"project_fingerprint\":");
+        json.extend_from_slice(project_fingerprint.as_bytes());
+        json.extend_from_slice(b",\"project_files\":");
+        json.extend_from_slice(&project_files);
         json.extend_from_slice(b",\"entries\":[");
         for (index, entry) in encoded.iter().enumerate() {
             if index != 0 {
@@ -524,6 +709,25 @@ mod tests {
             callee: "pkg.mod.func".to_string(),
             positional_count: 3,
             max_positional: 1,
+        }
+    }
+
+    fn open_cache(dir: &Path, fingerprint: u64) -> DiagnosticCache {
+        DiagnosticCache::open(
+            dir,
+            CacheFingerprints {
+                dependency: fingerprint,
+                project: fingerprint,
+            },
+            None,
+        )
+        .expect("open cache")
+    }
+
+    fn fingerprint_file(path: &str, marker: u8) -> FingerprintFile {
+        FingerprintFile {
+            path: PathBuf::from(path),
+            mtime: Some([marker; 16]),
         }
     }
 
@@ -603,14 +807,14 @@ mod tests {
     fn cache_open_creates_directory() {
         let base = tempdir().expect("tempdir");
         let cache_dir = base.path().join("nested").join("cache");
-        let _cache = DiagnosticCache::open(&cache_dir, 1).expect("open");
+        let _cache = open_cache(&cache_dir, 1);
         assert!(cache_dir.is_dir());
     }
 
     #[test]
     fn cache_miss_returns_none() {
         let dir = tempdir().expect("tempdir");
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        let cache = open_cache(dir.path(), 1);
         assert!(cache.get(Path::new("missing.py")).is_none());
     }
 
@@ -622,10 +826,10 @@ mod tests {
         later.line = 8;
         let mut earlier = sample_diagnostic();
         earlier.line = 2;
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(path.clone(), vec![later, earlier])]);
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![(path.clone(), vec![later, earlier], None)]);
 
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let mut cache = open_cache(dir.path(), 1);
         assert!(cache.contains(&path));
         let got = cache.take(&path).expect("cache hit");
         assert_eq!(
@@ -643,10 +847,10 @@ mod tests {
     fn cache_put_all_records_clean_files() {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("clean.py");
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(path.clone(), Vec::new())]);
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![(path.clone(), Vec::new(), None)]);
 
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let cache = open_cache(dir.path(), 1);
         let got = cache.get(&path).expect("cache hit");
         assert!(got.is_empty());
     }
@@ -655,7 +859,7 @@ mod tests {
     fn cache_get_corrupt_returns_none() {
         let dir = tempdir().expect("tempdir");
         std::fs::write(dir.path().join(MANIFEST_NAME), b"not json").expect("write");
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("open");
+        let cache = open_cache(dir.path(), 1);
         assert!(cache.get(Path::new("mod.py")).is_none());
     }
 
@@ -663,10 +867,10 @@ mod tests {
     fn cache_rejects_diagnostic_stored_under_another_path() {
         let dir = tempdir().expect("tempdir");
         let wrong_key = PathBuf::from("other.py");
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(wrong_key.clone(), vec![sample_diagnostic()])]);
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![(wrong_key.clone(), vec![sample_diagnostic()], None)]);
 
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let cache = open_cache(dir.path(), 1);
         assert!(!cache.contains(&wrong_key));
     }
 
@@ -674,20 +878,156 @@ mod tests {
     fn cache_fingerprint_mismatch_invalidates_manifest() {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("pkg/mod.py");
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(path.clone(), vec![sample_diagnostic()])]);
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![(path.clone(), vec![sample_diagnostic()], None)]);
 
-        let cache = DiagnosticCache::open(dir.path(), 2).expect("reopen");
+        let cache = open_cache(dir.path(), 2);
         assert!(cache.get(&path).is_none());
+    }
+
+    #[test]
+    fn project_validation_keeps_entries_after_semantically_unchanged_edit() {
+        let dir = tempdir().expect("tempdir");
+        let safe = PathBuf::from("safe.py");
+        let changed = PathBuf::from("changed.py");
+        let old_files = vec![
+            fingerprint_file("changed.py", 1),
+            fingerprint_file("safe.py", 1),
+        ];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![
+            (safe.clone(), Vec::new(), Some(100)),
+            (changed.clone(), Vec::new(), Some(200)),
+        ]);
+
+        let new_files = vec![
+            fingerprint_file("changed.py", 2),
+            fingerprint_file("safe.py", 1),
+        ];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(cache.needs_project_validation());
+        let current_semantics = BTreeMap::from([(safe.clone(), 100), (changed.clone(), 200)]);
+        assert!(cache.validate_project(&[safe.clone(), changed.clone()], &current_semantics));
+        assert!(cache.contains(&safe));
+        assert!(!cache.contains(&changed));
+
+        cache.flush();
+        let cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(cache.contains(&safe));
+        assert!(!cache.needs_project_validation());
+    }
+
+    #[test]
+    fn project_validation_discards_entries_when_project_paths_change() {
+        let dir = tempdir().expect("tempdir");
+        let old_path = PathBuf::from("old.py");
+        let old_files = vec![fingerprint_file("old.py", 1)];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![(old_path.clone(), Vec::new(), Some(100))]);
+
+        let new_path = PathBuf::from("new.py");
+        let new_files = vec![fingerprint_file("old.py", 1), fingerprint_file("new.py", 1)];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(!cache.validate_project(
+            &[old_path.clone(), new_path.clone()],
+            &BTreeMap::from([(old_path.clone(), 100), (new_path, 200)])
+        ));
+        assert!(!cache.contains(&old_path));
+    }
+
+    #[test]
+    fn project_validation_drops_entries_outside_current_selection() {
+        let dir = tempdir().expect("tempdir");
+        let selected = PathBuf::from("selected.py");
+        let unselected = PathBuf::from("unselected.py");
+        let old_files = vec![
+            fingerprint_file("selected.py", 1),
+            fingerprint_file("unselected.py", 1),
+        ];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![
+            (selected.clone(), Vec::new(), Some(100)),
+            (unselected.clone(), Vec::new(), Some(200)),
+        ]);
+
+        let new_files = vec![
+            fingerprint_file("selected.py", 2),
+            fingerprint_file("unselected.py", 1),
+        ];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(cache.validate_project(
+            std::slice::from_ref(&selected),
+            &BTreeMap::from([(selected.clone(), 100), (unselected.clone(), 200)])
+        ));
+        assert!(!cache.contains(&selected));
+        assert!(!cache.contains(&unselected));
+    }
+
+    #[test]
+    fn semantic_source_change_discards_every_project_entry() {
+        let dir = tempdir().expect("tempdir");
+        let path = PathBuf::from("mod.py");
+        let old_files = vec![fingerprint_file("mod.py", 1)];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![(path.clone(), Vec::new(), Some(100))]);
+
+        let new_files = vec![fingerprint_file("mod.py", 2)];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        assert!(!cache.validate_project(
+            std::slice::from_ref(&path),
+            &BTreeMap::from([(path.clone(), 101)])
+        ));
+        assert!(!cache.contains(&path));
     }
 
     #[test]
     fn cache_file_selection_mismatch_is_a_miss() {
         let dir = tempdir().expect("tempdir");
-        let mut cache = DiagnosticCache::open(dir.path(), 1).expect("open");
-        cache.put_all(vec![(PathBuf::from("a.py"), Vec::new())]);
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![(PathBuf::from("a.py"), Vec::new(), None)]);
 
-        let cache = DiagnosticCache::open(dir.path(), 1).expect("reopen");
+        let cache = open_cache(dir.path(), 1);
         assert!(cache.get(Path::new("b.py")).is_none());
     }
 
@@ -695,8 +1035,12 @@ mod tests {
     fn cache_replacement_keeps_storage_bounded() {
         let dir = tempdir().expect("tempdir");
         for fingerprint in 0..20 {
-            let mut cache = DiagnosticCache::open(dir.path(), fingerprint).expect("open");
-            cache.put_all(vec![(PathBuf::from("mod.py"), vec![sample_diagnostic()])]);
+            let mut cache = open_cache(dir.path(), fingerprint);
+            cache.put_all(vec![(
+                PathBuf::from("mod.py"),
+                vec![sample_diagnostic()],
+                None,
+            )]);
         }
 
         let files: Vec<_> = std::fs::read_dir(dir.path())

@@ -3,12 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
+use ruff_text_size::Ranged;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
+use crate::cache::FnvHasher;
 use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
@@ -293,6 +296,45 @@ pub struct DefinitionIndex {
 pub struct IndexedFile {
     pub source: String,
     pub parsed: Parsed<ModModule>,
+}
+
+impl IndexedFile {
+    /// Fingerprint Python tokens while ignoring layout between them.
+    ///
+    /// Token kinds preserve statement/indentation structure. Text is mixed
+    /// only for value-bearing tokens, so ordinary spacing and indentation
+    /// width changes compare equal while names and literals do not. Comments
+    /// remain value-bearing because type comments and checker directives can
+    /// affect analysis.
+    pub(crate) fn semantic_fingerprint(&self) -> u64 {
+        let mut h = FnvHasher::new();
+        for token in self.parsed.tokens() {
+            let kind = token.kind();
+            if kind == TokenKind::NonLogicalNewline {
+                continue;
+            }
+            h.write_bytes(&(kind as u16).to_le_bytes());
+            if matches!(
+                kind,
+                TokenKind::Name
+                    | TokenKind::Int
+                    | TokenKind::Float
+                    | TokenKind::Complex
+                    | TokenKind::String
+                    | TokenKind::FStringStart
+                    | TokenKind::FStringMiddle
+                    | TokenKind::FStringEnd
+                    | TokenKind::TStringStart
+                    | TokenKind::TStringMiddle
+                    | TokenKind::TStringEnd
+                    | TokenKind::IpyEscapeCommand
+                    | TokenKind::Comment
+            ) {
+                h.write_bytes(self.source[token.range()].as_bytes());
+            }
+        }
+        h.finish()
+    }
 }
 
 struct ModuleIndexClaim<'a> {
@@ -2441,7 +2483,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        extend_unique, index_module, resolve_reference, DefinitionIndex, ModuleState, Store,
+        extend_unique, index_module, resolve_reference, DefinitionIndex, IndexedFile, ModuleState,
+        Store,
     };
     use crate::config::{Config, SourceRoots};
     use crate::resolve::ModuleResolver;
@@ -2491,6 +2534,31 @@ mod tests {
         let mut store = Store::default();
         index_module(&mut store, "main", false, parsed.suite(), true);
         store
+    }
+
+    fn semantic_fingerprint(source: &str) -> u64 {
+        let parsed = parse_module(source).expect("parse");
+        IndexedFile {
+            source: source.to_string(),
+            parsed,
+        }
+        .semantic_fingerprint()
+    }
+
+    #[test]
+    fn semantic_fingerprint_ignores_layout_only_changes() {
+        let before = semantic_fingerprint("def f(a, b):\n    return a + b\n");
+        let after = semantic_fingerprint("\n\ndef f( a,b ):\n  return a+b\n");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn semantic_fingerprint_changes_with_body_or_comment() {
+        let before = semantic_fingerprint("def f():\n    return 1\n");
+        let body_change = semantic_fingerprint("def f():\n    return 2\n");
+        let comment_change = semantic_fingerprint("def f():\n    return 1  # type: ignore\n");
+        assert_ne!(before, body_change);
+        assert_ne!(before, comment_change);
     }
 
     fn parameter_names(store: &Store, fullname: &str) -> Vec<Option<String>> {

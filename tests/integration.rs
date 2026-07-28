@@ -2893,6 +2893,127 @@ fn cache_invalidated_on_file_change() {
     );
 }
 
+#[test]
+fn cache_reuses_unaffected_results_after_layout_only_edit() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache_layout_edit")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let unchanged = root.join("a.py");
+    let edited = root.join("b.py");
+    std::fs::write(&unchanged, "def f(a, b): ...\nf(1, 2)\n").expect("write unchanged");
+    std::fs::write(&edited, "def g(a, b): ...\ng(1, 2)\n").expect("write edited");
+
+    let config = Config::load(&root).expect("config");
+    let cold = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(cold.len(), 2);
+
+    std::fs::write(&edited, "\n\ndef g( a,b ) : ...\ng( 1,2 )\n").expect("rewrite edited");
+    std::fs::File::options()
+        .write(true)
+        .open(&edited)
+        .expect("open edited")
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)),
+        )
+        .expect("advance edited mtime");
+
+    let after = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("check after layout edit");
+    assert_eq!(after.len(), 2);
+    let unchanged_diagnostic = after
+        .iter()
+        .find(|diagnostic| diagnostic.path == unchanged)
+        .expect("unchanged diagnostic");
+    let edited_diagnostic = after
+        .iter()
+        .find(|diagnostic| diagnostic.path == edited)
+        .expect("edited diagnostic");
+    assert_eq!(unchanged_diagnostic.line, 2);
+    assert_eq!(
+        edited_diagnostic.line, 4,
+        "the edited file must be rescanned so shifted locations are refreshed"
+    );
+}
+
+#[test]
+fn cache_invalidates_cross_file_results_when_signature_changes() {
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw_cache_signature_edit")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let cache_dir = root.join(".cache");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let definitions = root.join("definitions.py");
+    std::fs::write(&definitions, "def f(a, b): ...\n").expect("write definitions");
+    std::fs::write(
+        root.join("calls.py"),
+        "from definitions import f\nf(1, 2)\n",
+    )
+    .expect("write calls");
+
+    let config = Config::load(&root).expect("config");
+    let before = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("cold check");
+    assert_eq!(before.len(), 1);
+
+    std::fs::write(&definitions, "def f(a, b, /): ...\n").expect("rewrite definitions");
+    std::fs::File::options()
+        .write(true)
+        .open(&definitions)
+        .expect("open definitions")
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)),
+        )
+        .expect("advance definitions mtime");
+
+    let after = check_paths(
+        &root,
+        std::slice::from_ref(&root),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect("check after signature edit");
+    assert!(
+        after.is_empty(),
+        "signature changes must invalidate dependent cached diagnostics: {after:?}"
+    );
+}
+
 /// Issue #253: project-local environment dependencies participate in the
 /// global fingerprint even though the first-party walk prunes `.venv`.
 #[test]
