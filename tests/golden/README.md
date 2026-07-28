@@ -26,7 +26,7 @@ The current pinned repositories are:
   `tests/golden/completeness-requirements-constraints.txt`
 - CPython repository: `https://github.com/python/cpython.git`
 - CPython ref: `8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a`
-- `ty`: `0.0.44`
+- `ty`: `0.0.64`
 
 Regenerate a snapshot with:
 
@@ -39,7 +39,7 @@ By default the script runs strict-kwargs over the pinned checkout three times,
 with Sphinx installed editable into a temporary virtual environment. CPython is
 checked directly from its checkout because it does not need an editable install
 for first-party resolution. The script runs the checker through a temporary
-`ty==0.0.44` wrapper so the oracle does not drift when a newer `ty` release
+`ty==0.0.64` wrapper so the oracle does not drift when a newer `ty` release
 changes hover display details. The script sets
 `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to
 refresh the committed snapshot for the current platform directly. The Sphinx
