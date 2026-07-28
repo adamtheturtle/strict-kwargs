@@ -3,9 +3,10 @@
 //! then the environment's site-packages (PEP 561).
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use include_dir::{include_dir, Dir};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::config::SourceRoots;
 use crate::source::read_python_source_lossy;
@@ -13,6 +14,28 @@ use crate::source::read_python_source_lossy;
 /// Vendored typeshed `stdlib/` stubs, embedded at the pinned commit recorded
 /// in `vendored/typeshed/COMMIT`.
 static TYPESHED_STDLIB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/vendored/typeshed/stdlib");
+/// Direct path lookup for the embedded typeshed files.
+///
+/// `include_dir::Dir::get_file` recursively scans every entry, which makes
+/// repeated resolution proportional to the entire vendored stdlib. Build the
+/// small index on first use so each module lookup is constant-time instead.
+static TYPESHED_STDLIB_FILES: LazyLock<
+    FxHashMap<&'static Path, &'static include_dir::File<'static>>,
+> = LazyLock::new(|| {
+    fn add_files(
+        dir: &'static Dir<'static>,
+        files: &mut FxHashMap<&'static Path, &'static include_dir::File<'static>>,
+    ) {
+        files.extend(dir.files().map(|file| (file.path(), file)));
+        for child in dir.dirs() {
+            add_files(child, files);
+        }
+    }
+
+    let mut files = FxHashMap::default();
+    add_files(&TYPESHED_STDLIB, &mut files);
+    files
+});
 
 pub struct ModuleResolver {
     /// First-party search roots (the project itself).
@@ -70,15 +93,15 @@ impl ModuleResolver {
         // 2. Vendored typeshed stdlib (`.pyi` only). Typeshed is all valid
         // UTF-8, so folding `contents_utf8()` into the same `Option` keeps
         // the (unreachable) non-UTF-8 case from being a separate branch.
-        if let Some(text) = TYPESHED_STDLIB
-            .get_file(format!("{rel}.pyi"))
-            .and_then(include_dir::File::contents_utf8)
+        if let Some(text) = TYPESHED_STDLIB_FILES
+            .get(Path::new(&format!("{rel}.pyi")))
+            .and_then(|file| file.contents_utf8())
         {
             return Some(ResolvedModule::stdlib_module(text));
         }
-        if let Some(text) = TYPESHED_STDLIB
-            .get_file(format!("{rel}/__init__.pyi"))
-            .and_then(include_dir::File::contents_utf8)
+        if let Some(text) = TYPESHED_STDLIB_FILES
+            .get(Path::new(&format!("{rel}/__init__.pyi")))
+            .and_then(|file| file.contents_utf8())
         {
             return Some(ResolvedModule::stdlib_package(text));
         }
@@ -296,6 +319,14 @@ mod tests {
         let pkg = resolver.resolve("os").expect("stdlib package");
         assert!(pkg.is_package);
         assert!(!pkg.source.is_empty());
+
+        // Nested vendored module: confirms the recursive index includes files
+        // below more than one embedded directory level.
+        let nested = resolver
+            .resolve("xml.etree.ElementTree")
+            .expect("nested stdlib module");
+        assert!(!nested.is_package);
+        assert!(!nested.source.is_empty());
 
         // Nothing resolves: unknown name.
         assert!(resolver.resolve("this_module_does_not_exist_xyz").is_none());
