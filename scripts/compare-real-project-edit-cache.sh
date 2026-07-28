@@ -162,8 +162,11 @@ candidate_command="$(check_command "$candidate_binary" "$candidate_cache")"
 baseline_command+=" >/dev/null 2>/dev/null; status=\$?; test \"\$status\" -le 1"
 candidate_command+=" >/dev/null 2>/dev/null; status=\$?; test \"\$status\" -le 1"
 
+# Hyperfine runs this string in a fresh shell. Errexit ensures a failed
+# restore, cache prime, or mutation cannot be hidden by a later successful
+# command.
 printf -v prepare_command \
-  '%q %q %q; %q check --project-root %q --cache-dir %q --output-format json ' \
+  'set -e; %q %q %q; %q check --project-root %q --cache-dir %q --output-format json ' \
   cp "$original_file" "$edit_target" \
   "$baseline_binary" "$project_root" "$baseline_cache"
 if [ -n "$python_env" ]; then
