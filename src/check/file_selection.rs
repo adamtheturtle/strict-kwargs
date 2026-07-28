@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rustc_hash::FxHashSet;
 
+use crate::cache::FingerprintFile;
 use crate::config::Config;
 use crate::error::CheckError;
 
@@ -68,6 +69,109 @@ pub(super) fn collect_python_files(
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+/// Collect a whole project while also capturing the broader file inventory
+/// used by cache invalidation.
+///
+/// Selection normally follows symlinked directories and prunes configured
+/// exclusions, while fingerprinting intentionally does neither. A no-follow
+/// project walk can serve both purposes: selected entries are filtered, all
+/// Python entries are inventoried, and symlinked directories get a separate
+/// selection-only walk. Other path shapes keep the established collector and
+/// fingerprint walk.
+///
+/// Excluded from the coverage gate because traversal errors require
+/// platform-specific filesystem faults. Deterministic selection, exclusion,
+/// symlink, and fingerprint equivalence are covered by caller tests.
+#[cfg_attr(coverage, coverage(off))]
+pub(super) fn collect_python_files_with_project_inventory(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<(Vec<PathBuf>, Option<Vec<FingerprintFile>>), CheckError> {
+    if paths.len() != 1 || paths[0] != project_root {
+        return collect_python_files(project_root, paths, config).map(|files| (files, None));
+    }
+
+    let selection = FileSelection::new(project_root, config)?;
+    let mut files = Vec::new();
+    let mut inventory = Vec::new();
+    let mut symlink_directories = Vec::new();
+    let walk = walkdir::WalkDir::new(project_root)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || !is_prunable_dir(entry));
+
+    for entry in walk {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if error
+                    .path()
+                    .is_some_and(|path| selection.is_excluded(path, path.is_dir(), false))
+                {
+                    continue;
+                }
+                return Err(walk_error(error));
+            }
+        };
+        let path = entry.path();
+        let excluded_as_file = selection.is_excluded(path, false, false);
+        let excluded_as_directory = selection.is_excluded(path, true, false);
+        let target_type = if entry.file_type().is_symlink() {
+            Some(
+                std::fs::metadata(path)
+                    .map_err(|error| {
+                        CheckError::Io(std::io::Error::new(
+                            error.kind(),
+                            format!("IO error for operation on {}: {error}", path.display()),
+                        ))
+                    })?
+                    .file_type(),
+            )
+        } else {
+            None
+        };
+        let is_directory = target_type
+            .as_ref()
+            .map_or_else(|| entry.file_type().is_dir(), std::fs::FileType::is_dir);
+        let is_file = target_type
+            .as_ref()
+            .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
+
+        if entry.file_type().is_symlink() && is_directory && !excluded_as_directory {
+            symlink_directories.push(path.to_path_buf());
+        }
+
+        if !is_python_file(path) {
+            continue;
+        }
+        inventory.push(FingerprintFile::from_path(path.to_path_buf()));
+        if is_file && !excluded_as_file {
+            files.push(path.to_path_buf());
+        }
+    }
+
+    for directory in symlink_directories {
+        let walk = walkdir::WalkDir::new(directory)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
+            });
+        for entry in walk {
+            let entry = entry.map_err(walk_error)?;
+            if entry.file_type().is_file() && is_python_file(entry.path()) {
+                files.push(entry.path().to_path_buf());
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    inventory.sort_by(|left, right| left.path().cmp(right.path()));
+    Ok((files, Some(inventory)))
 }
 
 fn walk_error(error: walkdir::Error) -> CheckError {

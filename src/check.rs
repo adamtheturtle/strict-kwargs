@@ -18,7 +18,7 @@ use crate::ast_util::{
     line_column, line_column_from_starts, line_starts, positional_argument_count,
     signature_from_parameters,
 };
-use crate::cache::{compute_global_fingerprint, DiagnosticCache};
+use crate::cache::{compute_global_fingerprint_with_project_files, DiagnosticCache};
 use crate::config::{Config, SourceRoots};
 use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
@@ -40,7 +40,9 @@ mod file_selection;
 mod fix_runner;
 
 pub use file_selection::is_prunable_dir;
-use file_selection::{collect_python_files, explicit_python_files};
+use file_selection::{
+    collect_python_files, collect_python_files_with_project_inventory, explicit_python_files,
+};
 #[cfg(test)]
 use file_selection::{is_ignored_path, FileSelection};
 pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
@@ -515,7 +517,11 @@ fn check_paths_impl(
     // errors if `ty` is missing, so the same source can never resolve fewer
     // calls on a machine that merely lacks `ty`.
     require_ty_present()?;
-    let python_files = collect_python_files(project_root, paths, config)?;
+    let (python_files, project_inventory) = if cache_dir.is_some() {
+        collect_python_files_with_project_inventory(project_root, paths, config)?
+    } else {
+        (collect_python_files(project_root, paths, config)?, None)
+    };
     let explicit_files = explicit_python_files(paths);
     let source_roots = SourceRoots::from_config(project_root, config);
 
@@ -524,11 +530,12 @@ fn check_paths_impl(
         .map(|dir| -> Result<_, CheckError> {
             let config_json = serde_json::to_string(config).unwrap_or_default();
             let first_party_roots = source_roots.first_party_for_resolution();
-            let fp = compute_global_fingerprint(
+            let fp = compute_global_fingerprint_with_project_files(
                 project_root,
                 &config_json,
                 python_env,
                 &first_party_roots,
+                project_inventory.as_deref(),
             );
             Ok(DiagnosticCache::open(dir, fp)?)
         })
@@ -5170,7 +5177,8 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        bound_import_name, call_shape_fingerprint, collect_python_files, decorator_tail,
+        bound_import_name, call_shape_fingerprint, collect_python_files,
+        collect_python_files_with_project_inventory, decorator_tail,
         has_staticmethod_or_classmethod_decorator, is_ignored_path,
         is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
         parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
@@ -5362,17 +5370,32 @@ mod tests {
             std::fs::write(&file, "").expect("write");
         }
 
-        let files = collect_python_files(
-            root.path(),
-            &[root.path().to_path_buf()],
-            &Config {
-                extend_exclude: vec!["src/generated.py".to_string()],
-                ..Config::default()
-            },
-        )
-        .expect("collect");
+        let config = Config {
+            extend_exclude: vec!["src/generated.py".to_string()],
+            ..Config::default()
+        };
+        let files = collect_python_files(root.path(), &[root.path().to_path_buf()], &config)
+            .expect("collect");
 
         assert_eq!(files, vec![root.path().join("src/real.py")]);
+
+        let (shared_files, inventory) = collect_python_files_with_project_inventory(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &config,
+        )
+        .expect("collect with inventory");
+        assert_eq!(shared_files, files);
+
+        let walked = crate::cache::compute_global_fingerprint(root.path(), "{}", None, &[]);
+        let shared = crate::cache::compute_global_fingerprint_with_project_files(
+            root.path(),
+            "{}",
+            None,
+            &[],
+            inventory.as_deref(),
+        );
+        assert_eq!(shared, walked);
     }
 
     #[cfg(unix)]
@@ -5402,6 +5425,44 @@ mod tests {
                 root.path().join("scan/linked.py"),
             ]
         );
+
+        let expected = collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .expect("collect whole project");
+        let (shared, inventory) = collect_python_files_with_project_inventory(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .expect("collect whole project with inventory");
+        assert_eq!(shared, expected);
+
+        let walked = crate::cache::compute_global_fingerprint(root.path(), "{}", None, &[]);
+        let shared_fingerprint = crate::cache::compute_global_fingerprint_with_project_files(
+            root.path(),
+            "{}",
+            None,
+            &[],
+            inventory.as_deref(),
+        );
+        assert_eq!(shared_fingerprint, walked);
+
+        symlink("missing", root.path().join("broken")).expect("broken symlink");
+        assert!(collect_python_files(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .is_err());
+        assert!(collect_python_files_with_project_inventory(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .is_err());
     }
 
     #[test]
