@@ -393,11 +393,10 @@ fn pipeline_phases(
 /// in determines which `ty server` answers its queries, and ty's answers for
 /// multi-location symbols depend on which files that server saw earlier. A
 /// machine-dependent shard count would make diagnostics differ across
-/// machines. Four shards: measured sweet spot — each extra server pays a
-/// fixed project-indexing cost on start, so a wider fan-out stops paying for
-/// itself (issue #46 measurements), while four still hides most of ty's
-/// serial per-query inference time on large projects.
-const TY_SHARD_COUNT: usize = 4;
+/// machines. Eight shards are the measured sweet spot with current ty: they
+/// expose more parallelism in its serial request stream without paying the
+/// startup and project-indexing overhead observed at twelve shards.
+const TY_SHARD_COUNT: usize = 8;
 
 /// How many times a single file's ty fallback is attempted before a still-off
 /// backend is treated as fatal. A transient timeout/disconnect under shard
