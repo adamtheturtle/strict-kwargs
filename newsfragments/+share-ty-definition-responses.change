@@ -1,0 +1,1 @@
+Share cached ty definition responses between grouped calls instead of deep-cloning their JSON trees.
