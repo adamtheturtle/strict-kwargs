@@ -427,6 +427,7 @@ struct CacheEntry {
 struct CachedDiagnostic(usize, usize, String, usize, usize);
 
 impl CachedDiagnostic {
+    #[cfg(test)]
     fn from_diagnostic(diagnostic: Diagnostic) -> Self {
         Self(
             diagnostic.line,
@@ -451,6 +452,31 @@ impl CachedDiagnostic {
     fn to_diagnostic(&self, path: &Path) -> Diagnostic {
         self.clone().into_diagnostic(path)
     }
+}
+
+/// A diagnostic serialized straight from the final result vector.
+///
+/// The cache write is terminal, so borrowing the callee avoids cloning every
+/// string merely to encode it and then immediately drop the clone.
+#[derive(Serialize)]
+struct BorrowedCachedDiagnostic<'a>(usize, usize, &'a str, usize, usize);
+
+impl<'a> From<&'a Diagnostic> for BorrowedCachedDiagnostic<'a> {
+    fn from(diagnostic: &'a Diagnostic) -> Self {
+        Self(
+            diagnostic.line,
+            diagnostic.column,
+            &diagnostic.callee,
+            diagnostic.positional_count,
+            diagnostic.max_positional,
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct BorrowedCacheEntry<'a> {
+    diagnostics: Vec<BorrowedCachedDiagnostic<'a>>,
+    semantic_fingerprint: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -641,6 +667,7 @@ impl DiagnosticCache {
     /// Errors are silently ignored: a failed cache write only causes a cold
     /// recomputation on the next run.
     #[cfg_attr(coverage, coverage(off))]
+    #[cfg(test)]
     pub fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>, Option<u64>)>) {
         if entries.is_empty() {
             self.flush();
@@ -664,6 +691,59 @@ impl DiagnosticCache {
         self.flush();
     }
 
+    /// Write new results by borrowing the caller's final diagnostic vector.
+    ///
+    /// This terminal fast path does not retain the new entries in memory.
+    /// Existing hits are included in the replacement manifest, while new
+    /// diagnostic strings are serialized without first cloning them into
+    /// cache-owned entries.
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn put_all_borrowed(&mut self, entries: &[(PathBuf, Vec<&Diagnostic>, Option<u64>)]) {
+        if entries.is_empty() {
+            self.flush();
+            return;
+        }
+
+        let mut encoded: Vec<(PathBuf, Vec<u8>)> = self
+            .entries
+            .par_iter()
+            .filter_map(|(path, entry)| {
+                serde_json::to_vec(&(path, entry))
+                    .ok()
+                    .map(|json| (path.clone(), json))
+            })
+            .collect();
+        let mut new_encoded: Vec<(PathBuf, Vec<u8>)> = entries
+            .par_iter()
+            .filter_map(|(path, diagnostics, semantic_fingerprint)| {
+                let entry = BorrowedCacheEntry {
+                    diagnostics: diagnostics
+                        .iter()
+                        .copied()
+                        .map(BorrowedCachedDiagnostic::from)
+                        .collect(),
+                    semantic_fingerprint: *semantic_fingerprint,
+                };
+                serde_json::to_vec(&(path, entry))
+                    .ok()
+                    .map(|json| (path.clone(), json))
+            })
+            .collect();
+        if new_encoded.len() != entries.len() || encoded.len() != self.entries.len() {
+            return;
+        }
+        encoded.append(&mut new_encoded);
+        encoded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let encoded = encoded
+            .into_iter()
+            .map(|(_path, json)| json)
+            .collect::<Vec<_>>();
+        if let Some(json) = self.serialize_encoded_manifest(&encoded) {
+            self.write_manifest_atomic(&json);
+            self.dirty = false;
+        }
+    }
+
     /// Serialize each per-file entry in parallel, then join the already-valid
     /// JSON fragments into the single on-disk manifest.
     #[cfg_attr(coverage, coverage(off))]
@@ -674,6 +754,10 @@ impl DiagnosticCache {
             .map(|(path, entry)| serde_json::to_vec(&(path, entry)))
             .collect::<Result<_, _>>()
             .ok()?;
+        self.serialize_encoded_manifest(&encoded)
+    }
+
+    fn serialize_encoded_manifest(&self, encoded: &[Vec<u8>]) -> Option<Vec<u8>> {
         let project_files = serde_json::to_vec(&self.project_files).ok()?;
         let payload_len: usize = encoded.iter().map(Vec::len).sum();
         let dependency_fingerprint = self.fingerprints.dependency.to_string();
@@ -881,6 +965,46 @@ mod tests {
         assert_eq!(got[0].callee, "pkg.mod.func");
         assert!(!cache.contains(&path));
         assert!(cache.take(&path).is_none());
+    }
+
+    #[test]
+    fn borrowed_cache_write_matches_owned_manifest() {
+        let owned_dir = tempdir().expect("owned tempdir");
+        let borrowed_dir = tempdir().expect("borrowed tempdir");
+        let path = PathBuf::from("pkg/mod.py");
+        let mut later = sample_diagnostic();
+        later.line = 8;
+        let mut earlier = sample_diagnostic();
+        earlier.line = 2;
+        let diagnostics = vec![later, earlier];
+
+        let mut owned = open_cache(owned_dir.path(), 1);
+        owned.put_all(vec![(path.clone(), diagnostics.clone(), Some(42))]);
+        let mut borrowed = open_cache(borrowed_dir.path(), 1);
+        borrowed.put_all_borrowed(&[(path, diagnostics.iter().collect(), Some(42))]);
+
+        let owned_manifest =
+            std::fs::read(owned_dir.path().join(MANIFEST_NAME)).expect("read owned manifest");
+        let borrowed_manifest =
+            std::fs::read(borrowed_dir.path().join(MANIFEST_NAME)).expect("read borrowed manifest");
+        assert_eq!(borrowed_manifest, owned_manifest);
+    }
+
+    #[test]
+    fn borrowed_cache_write_preserves_existing_entries() {
+        let dir = tempdir().expect("tempdir");
+        let old_path = PathBuf::from("old.py");
+        let new_path = PathBuf::from("new.py");
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all_borrowed(&[(old_path.clone(), Vec::new(), Some(10))]);
+
+        let new_diagnostics = [sample_diagnostic()];
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all_borrowed(&[(new_path.clone(), new_diagnostics.iter().collect(), Some(20))]);
+
+        let cache = open_cache(dir.path(), 1);
+        assert!(cache.contains(&old_path));
+        assert_eq!(cache.get(&new_path).expect("new cache entry").len(), 1);
     }
 
     #[test]

@@ -664,14 +664,14 @@ fn check_paths_impl(
             .iter()
             .map(|(_, path, _)| path.as_path())
             .collect();
-        let mut diagnostics_by_path: FxHashMap<&Path, Vec<Diagnostic>> = FxHashMap::default();
+        let mut diagnostics_by_path: FxHashMap<&Path, Vec<&Diagnostic>> = FxHashMap::default();
         for diagnostic in &diagnostics {
             diagnostics_by_path
                 .entry(&diagnostic.path)
                 .or_default()
-                .push(diagnostic.clone());
+                .push(diagnostic);
         }
-        let new_entries = files_to_scan
+        let new_entries: Vec<_> = files_to_scan
             .iter()
             .filter(|path| !skipped_paths.contains(path.as_path()))
             .map(|path| {
@@ -686,7 +686,7 @@ fn check_paths_impl(
                 )
             })
             .collect();
-        cache.put_all(new_entries);
+        cache.put_all_borrowed(&new_entries);
     }
 
     diagnostics.sort_by(|left, right| {
