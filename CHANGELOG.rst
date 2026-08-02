@@ -31,14 +31,17 @@ Changelog
   lost on either completeness oracle.
 
   The whole-project pipeline now also streams: files needing the ``ty``
-  fallback are dispatched to the four shard servers in sorted order as soon as
+  fallback are dispatched to the eight shard servers in sorted order as soon as
   the parallel built-in pass finishes each file, so the servers work
   concurrently with the scan instead of idling until it drains, and a shard
   that never receives a query no longer starts a server at all. The
   first-party index build reads and parses candidate files in parallel as
   well (about 1.1s to 0.5s on a CPython checkout). Each server's request
-  stream is byte-identical to the previous scan-then-shard pipeline's, so
-  diagnostics are unchanged.
+  order remains deterministic, and the fixed shard count keeps the partition
+  independent of the host's core count. The new partition also stops emitting
+  three dynamic-call false positives that the completeness floors previously
+  required (one Sphinx ``node.__class__`` call and two CPython loop-variable
+  calls).
 
 - Fix a regression in ``ty`` hover-answer reuse that dropped real diagnostics
   for calls grouped across a platform-specific branch. When a group's earliest
