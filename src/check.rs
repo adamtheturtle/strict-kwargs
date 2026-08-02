@@ -689,7 +689,9 @@ fn check_paths_impl(
         cache.put_all(new_entries);
     }
 
-    diagnostics.sort_by(|left, right| {
+    // Rayon preserves the stable ordering of diagnostics at the same source
+    // location while spreading large repository result sets across cores.
+    diagnostics.par_sort_by(|left, right| {
         left.path
             .cmp(&right.path)
             .then(left.line.cmp(&right.line))
