@@ -1,6 +1,7 @@
 //! Check Python sources for positional calls that should use keywords.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use ruff_python_ast::token::{parenthesized_range, Tokens};
@@ -4884,7 +4885,7 @@ fn resolve_pending_with_ty(
     // the (sorted) work list, so reproducibility is unaffected.
     let group_of = |i: usize| pending_groups.get(i).copied().flatten();
     let mut group_hover: FxHashMap<u32, Option<String>> = FxHashMap::default();
-    let mut group_def: FxHashMap<u32, Option<serde_json::Value>> = FxHashMap::default();
+    let mut group_def: FxHashMap<u32, Arc<serde_json::Value>> = FxHashMap::default();
 
     // Phase A: pipeline hover requests in bounded batches, then collect.
     let mut needs_def: Vec<usize> = Vec::new();
@@ -5107,15 +5108,15 @@ fn resolve_pending_with_ty(
         for (i, id) in def_ids {
             let group = group_of(i);
             let cached = group.and_then(|g| group_def.get(&g).cloned());
-            let raw_def = if let Some(cached) = cached {
+            let raw_def = if cached.is_some() {
                 cached
             } else {
-                let raw = id.and_then(|id| ty.take(id));
+                let raw = id.and_then(|id| ty.take(id)).map(Arc::new);
                 // Only a positive answer is group-consistent; see the matching
                 // note in the hover phase. A definition miss at an unreachable
                 // member must not suppress live members of the same group.
-                if let (Some(g), Some(_)) = (group, raw.as_ref()) {
-                    group_def.insert(g, raw.clone());
+                if let (Some(g), Some(raw)) = (group, raw.as_ref()) {
+                    group_def.insert(g, Arc::clone(raw));
                 }
                 raw
             };
@@ -5128,7 +5129,7 @@ fn resolve_pending_with_ty(
             // have crashed the old unguarded call. A response whose every
             // location is too deep or unparsable is silently skipped, same
             // fail-closed behaviour as before.
-            if let Some((fullname, sigs)) = raw_def.as_ref().and_then(|response| {
+            if let Some((fullname, sigs)) = raw_def.as_deref().and_then(|response| {
                 resolve_first_def_location(
                     path,
                     source,
