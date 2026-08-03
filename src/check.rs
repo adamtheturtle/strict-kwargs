@@ -4366,15 +4366,12 @@ fn record_ty_fix(
 
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
-fn hover_text(value: &serde_json::Value) -> Option<String> {
+fn hover_text(value: &serde_json::Value) -> Option<&str> {
     let contents = value.get("contents")?;
     if let Some(s) = contents.as_str() {
-        return Some(s.to_string());
+        return Some(s);
     }
-    contents
-        .get("value")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+    contents.get("value").and_then(serde_json::Value::as_str)
 }
 
 /// Fail unless a usable `ty` executable is on `PATH`.
@@ -4636,15 +4633,13 @@ fn resolve_overload_fixes_with_ty(
             .collect();
 
         for (item, hover_id) in chunk.iter().zip(hover_ids) {
-            let raw = hover_id
-                .and_then(|id| ty.take(id))
-                .as_ref()
-                .and_then(hover_text);
+            let response = hover_id.and_then(|id| ty.take(id));
+            let raw = response.as_ref().and_then(hover_text);
             let Some(raw) = raw else {
                 record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
                 continue;
             };
-            record_selected_overload_fix(&mut fixes, index, fix_ast, item, &raw);
+            record_selected_overload_fix(&mut fixes, index, fix_ast, item, raw);
         }
     }
 }
@@ -4886,7 +4881,7 @@ fn resolve_pending_with_ty(
     // round-trip per method. The request stream stays a pure function of
     // the (sorted) work list, so reproducibility is unaffected.
     let group_of = |i: usize| pending_groups.get(i).copied().flatten();
-    let mut group_hover: FxHashMap<u32, Option<String>> = FxHashMap::default();
+    let mut group_hover: FxHashMap<u32, Arc<str>> = FxHashMap::default();
     let mut group_def: FxHashMap<u32, Arc<serde_json::Value>> = FxHashMap::default();
 
     // Phase A: pipeline hover requests in bounded batches, then collect.
@@ -4908,13 +4903,15 @@ fn resolve_pending_with_ty(
             let p = &pending[i];
             let group = group_of(i);
             let cached = group.and_then(|g| group_hover.get(&g).cloned());
-            let raw = if let Some(cached) = cached {
-                cached
+            let response = if cached.is_some() {
+                None
             } else {
-                let raw = hover_id
-                    .and_then(|id| ty.take(id))
-                    .as_ref()
-                    .and_then(hover_text);
+                hover_id.and_then(|id| ty.take(id))
+            };
+            let raw = cached
+                .as_deref()
+                .or_else(|| response.as_ref().and_then(hover_text));
+            if cached.is_none() {
                 // Only a usable callable signature is group-consistent. ty
                 // answers a member sitting in code it deems unreachable — e.g.
                 // a `sys.platform`-guarded branch live on one OS but dead on
@@ -4925,23 +4922,19 @@ fn resolve_pending_with_ty(
                 // each remaining member falls back to its own hover; the first
                 // member that yields a real signature re-seeds the shared
                 // answer for the rest.
-                if let Some(g) = group {
-                    if raw
-                        .as_deref()
-                        .is_some_and(|raw| parse_hover_signature(raw).is_some())
-                    {
-                        group_hover.insert(g, raw.clone());
+                if let (Some(g), Some(raw)) = (group, raw) {
+                    if parse_hover_signature(raw).is_some() {
+                        group_hover.insert(g, Arc::from(raw));
                     }
                 }
-                raw
-            };
+            }
             let Some(raw) = raw else {
                 needs_def.push(i);
                 continue;
             };
 
             // `def …`/`bound method …` display: a single, named signature.
-            if let Some(sig) = parse_hover_signature(&raw) {
+            if let Some(sig) = parse_hover_signature(raw) {
                 let Some(signature) =
                     signature_from_param_text_cached(&sig.params, &mut def_caches.param_signatures)
                 else {
@@ -5033,7 +5026,7 @@ fn resolve_pending_with_ty(
             // directly rather than falling through to goto-definition, which on
             // an inferred stdlib receiver lands on runtime `.py` source whose
             // signatures drop `/` and yield false positives (issue #14).
-            let overloads: Vec<Signature> = parse_callable_type_overloads(&raw)
+            let overloads: Vec<Signature> = parse_callable_type_overloads(raw)
                 .iter()
                 .filter_map(|params| {
                     signature_from_param_text_cached(params, &mut def_caches.param_signatures)
@@ -6128,13 +6121,10 @@ while cond:
         use serde_json::json;
 
         // `contents` is a bare string.
-        assert_eq!(
-            hover_text(&json!({"contents": "plain"})).as_deref(),
-            Some("plain")
-        );
+        assert_eq!(hover_text(&json!({"contents": "plain"})), Some("plain"));
         // `contents.value` (MarkupContent form).
         assert_eq!(
-            hover_text(&json!({"contents": {"value": "marked"}})).as_deref(),
+            hover_text(&json!({"contents": {"value": "marked"}})),
             Some("marked")
         );
         // No `contents` at all.
