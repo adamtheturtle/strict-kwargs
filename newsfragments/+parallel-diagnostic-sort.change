@@ -1,0 +1,1 @@
+Sort whole-project diagnostic results in parallel, cutting cold-check medians by about 8% on CPython and 11% on Sphinx in the pinned repository benchmarks.
