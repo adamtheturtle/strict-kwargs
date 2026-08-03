@@ -11,8 +11,131 @@ use crate::ty_resolver::TyResolver;
 use super::{
     collect_python_files, explicit_python_files, plan_rewrite_insertions, require_ty_present,
     resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix,
-    ScanOutcome, TyDefCaches, TyFixes,
+    ScanOutcome, TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
 };
+
+/// Minimum deferred-call count that justifies starting multiple ty servers.
+/// Below this, server initialization costs more than parallel query handling;
+/// this keeps Sphinx on one server while `CPython` uses the sharded path.
+const PARALLEL_FIX_TY_THRESHOLD: usize = 20_000;
+
+const fn should_parallelize_fix_ty(deferred_calls: usize) -> bool {
+    deferred_calls >= PARALLEL_FIX_TY_THRESHOLD
+}
+
+#[derive(Default)]
+struct FixTyState {
+    ty: Option<TyResolver>,
+    start_attempted: bool,
+    file_cache: FxHashMap<PathBuf, Option<String>>,
+    def_caches: TyDefCaches,
+}
+
+struct ResolvedFixFile {
+    order: usize,
+    warning: Option<(PathBuf, String)>,
+    file: Option<FileFix>,
+    diagnostics: usize,
+    fixed: usize,
+    declined_reasons: Vec<crate::fix::DeclinedFixReason>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one independently resolved fix file shares immutable project state"
+)]
+#[cfg_attr(coverage, coverage(off))]
+fn resolve_fix_scan(
+    order: usize,
+    project_root: &Path,
+    python_files: &[PathBuf],
+    index: &crate::index::DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, crate::index::IndexedFile>,
+    python_env: Option<&Path>,
+    config: &Config,
+    path: PathBuf,
+    outcome: ScanOutcome,
+    ty_state: &mut FixTyState,
+) -> Result<ResolvedFixFile, CheckError> {
+    let scan = match outcome {
+        ScanOutcome::Skipped(reason) => {
+            return Ok(ResolvedFixFile {
+                order,
+                warning: Some((path, reason)),
+                file: None,
+                diagnostics: 0,
+                fixed: 0,
+                declined_reasons: Vec::new(),
+            });
+        }
+        ScanOutcome::Scanned(scan) => scan,
+    };
+    let Some(source) = scan.source else {
+        return Err(CheckError::Io(std::io::Error::other(
+            "internal error: fix scan did not retain source",
+        )));
+    };
+    let mut diagnostics = scan.diagnostics;
+    let mut declined_reasons = scan.declined_fix_reasons;
+    let mut insertions = scan.fixes;
+    let mut fixed = scan.fixed_calls;
+    resolve_file_with_ty(
+        &mut ty_state.ty,
+        &mut ty_state.start_attempted,
+        project_root,
+        python_files,
+        index,
+        indexed_files,
+        python_env,
+        &path,
+        &source,
+        &scan.pending,
+        &scan.pending_groups,
+        config,
+        &mut ty_state.file_cache,
+        &mut ty_state.def_caches,
+        &mut diagnostics,
+        Some(TyFixes {
+            insertions: &mut insertions,
+            fixed_calls: &mut fixed,
+            declined_fix_reasons: &mut declined_reasons,
+        }),
+    )?;
+    resolve_overload_fixes_with_ty(
+        &mut ty_state.ty,
+        &mut ty_state.start_attempted,
+        project_root,
+        python_files,
+        index,
+        python_env,
+        &path,
+        &source,
+        &scan.overload_fix_pending,
+        Some(TyFixes {
+            insertions: &mut insertions,
+            fixed_calls: &mut fixed,
+            declined_fix_reasons: &mut declined_reasons,
+        }),
+    );
+    let file = plan_rewrite_insertions(&path, &source, &insertions)?.map(|fixed_source| FileFix {
+        path,
+        original: source,
+        fixed: fixed_source,
+        count: fixed,
+    });
+    debug_assert_eq!(
+        declined_reasons.len(),
+        diagnostics.len().saturating_sub(fixed)
+    );
+    Ok(ResolvedFixFile {
+        order,
+        warning: None,
+        file,
+        diagnostics: diagnostics.len(),
+        fixed,
+        declined_reasons,
+    })
+}
 
 /// Rewrite positional call arguments to keyword arguments for every fixable
 /// violation reachable from `paths`.
@@ -118,89 +241,112 @@ fn fix_paths_impl(
         fix_opt_ins,
     )?;
 
-    let mut ty: Option<TyResolver> = None;
-    let mut ty_start_attempted = false;
-    let mut ty_file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
-    let mut ty_def_caches = TyDefCaches::default();
+    let deferred_calls = scans
+        .iter()
+        .map(|(_, outcome)| match outcome {
+            ScanOutcome::Scanned(scan) => scan.pending.len() + scan.overload_fix_pending.len(),
+            ScanOutcome::Skipped(_) => 0,
+        })
+        .sum::<usize>();
+
+    let mut resolved_files = if should_parallelize_fix_ty(deferred_calls) {
+        // Match the checker's deterministic, load-balanced ty ownership. Each
+        // server sees only its files, while final results are restored to the
+        // sorted input order before warnings and rewrites are emitted.
+        let mut partitions: Vec<Vec<(usize, PathBuf, ScanOutcome)>> =
+            (0..TY_SHARD_COUNT).map(|_| Vec::new()).collect();
+        let mut assigner = TyShardAssigner::new(TY_SHARD_COUNT);
+        for (order, (path, outcome)) in scans.into_iter().enumerate() {
+            let weight = match &outcome {
+                ScanOutcome::Scanned(scan) => scan.pending.len() + scan.overload_fix_pending.len(),
+                ScanOutcome::Skipped(_) => 0,
+            };
+            let owner = assigner.assign(weight);
+            partitions[owner].push((order, path, outcome));
+        }
+
+        std::thread::scope(|scope| -> Result<Vec<ResolvedFixFile>, CheckError> {
+            let mut handles = Vec::with_capacity(TY_SHARD_COUNT);
+            for partition in partitions {
+                let handle = std::thread::Builder::new()
+                    .stack_size(crate::limits::STACK_SIZE)
+                    .spawn_scoped(scope, || -> Result<Vec<ResolvedFixFile>, CheckError> {
+                        let mut ty_state = FixTyState::default();
+                        partition
+                            .into_iter()
+                            .map(|(order, path, outcome)| {
+                                resolve_fix_scan(
+                                    order,
+                                    project_root,
+                                    &python_files,
+                                    &index,
+                                    &indexed_files,
+                                    python_env,
+                                    config,
+                                    path,
+                                    outcome,
+                                    &mut ty_state,
+                                )
+                            })
+                            .collect()
+                    })
+                    .map_err(CheckError::Io)?;
+                handles.push(handle);
+            }
+            let mut resolved = Vec::with_capacity(python_files.len());
+            for handle in handles {
+                let shard = match handle.join() {
+                    Ok(result) => result,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }?;
+                resolved.extend(shard);
+            }
+            Ok(resolved)
+        })?
+    } else {
+        // Starting several language servers costs more than it saves for
+        // small projects, so retain the original one-server path there.
+        let mut ty_state = FixTyState::default();
+        scans
+            .into_iter()
+            .enumerate()
+            .map(|(order, (path, outcome))| {
+                resolve_fix_scan(
+                    order,
+                    project_root,
+                    &python_files,
+                    &index,
+                    &indexed_files,
+                    python_env,
+                    config,
+                    path,
+                    outcome,
+                    &mut ty_state,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    resolved_files.sort_by_key(|resolved| resolved.order);
+
     // Every violation the checker would report, across all files (built-in
     // and ty-resolved). Used for the declined count; ty may also append safe
     // hover-derived insertions to the built-in rewrite plan.
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = 0usize;
     let mut declined_fix_reasons = Vec::new();
     let mut fixed_total = 0usize;
     let mut results = Vec::new();
-    for (path, outcome) in scans {
-        // Warn (deterministically, see `check_paths`) and skip an undecodable
-        // file; it produces no fix and no diagnostics (issue #53).
-        let scan = match outcome {
-            ScanOutcome::Skipped(reason) => {
-                eprintln!(
-                    "strict-kwargs: warning: skipping {} ({reason})",
-                    path.display()
-                );
-                continue;
-            }
-            ScanOutcome::Scanned(scan) => scan,
-        };
-        diagnostics.extend(scan.diagnostics);
-        declined_fix_reasons.extend(scan.declined_fix_reasons);
-        let Some(source) = scan.source else {
-            return Err(CheckError::Io(std::io::Error::other(
-                "internal error: fix scan did not retain source",
-            )));
-        };
-        let mut insertions = scan.fixes;
-        let mut fixed_calls = scan.fixed_calls;
-        // The ty fallback adds diagnostics, and for a single concrete named
-        // hover signature can now add the same conservative `name=` insertions
-        // as the built-in resolver. Ambiguous ty displays remain diagnostics
-        // only, so the declined count still matches a following `check`.
-        resolve_file_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            &python_files,
-            &index,
-            &indexed_files,
-            python_env,
-            &path,
-            &source,
-            &scan.pending,
-            &scan.pending_groups,
-            config,
-            &mut ty_file_cache,
-            &mut ty_def_caches,
-            &mut diagnostics,
-            Some(TyFixes {
-                insertions: &mut insertions,
-                fixed_calls: &mut fixed_calls,
-                declined_fix_reasons: &mut declined_fix_reasons,
-            }),
-        )?;
-        resolve_overload_fixes_with_ty(
-            &mut ty,
-            &mut ty_start_attempted,
-            project_root,
-            &python_files,
-            &index,
-            python_env,
-            &path,
-            &source,
-            &scan.overload_fix_pending,
-            Some(TyFixes {
-                insertions: &mut insertions,
-                fixed_calls: &mut fixed_calls,
-                declined_fix_reasons: &mut declined_fix_reasons,
-            }),
-        );
-        if let Some(fixed) = plan_rewrite_insertions(&path, &source, &insertions)? {
-            fixed_total += fixed_calls;
-            results.push(FileFix {
-                path,
-                original: source,
-                fixed,
-                count: fixed_calls,
-            });
+    for resolved in resolved_files {
+        if let Some((path, reason)) = resolved.warning {
+            eprintln!(
+                "strict-kwargs: warning: skipping {} ({reason})",
+                path.display()
+            );
+        }
+        diagnostics += resolved.diagnostics;
+        declined_fix_reasons.extend(resolved.declined_reasons);
+        fixed_total += resolved.fixed;
+        if let Some(file) = resolved.file {
+            results.push(file);
         }
     }
     results.sort_by_key(|fix| fix.path.clone());
@@ -209,11 +355,22 @@ fn fix_paths_impl(
     // is the total detected minus the total rewritten. `saturating_sub` is
     // defensive -- `fixed_total` can never exceed the diagnostic count.
     let declined = declined_fix_reasons.len();
-    debug_assert_eq!(declined, diagnostics.len().saturating_sub(fixed_total));
+    debug_assert_eq!(declined, diagnostics.saturating_sub(fixed_total));
     let declined_reasons = declined_fix_reason_counts(&declined_fix_reasons);
     Ok(FixOutcome {
         files: results,
         declined,
         declined_reasons,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_parallelize_fix_ty, PARALLEL_FIX_TY_THRESHOLD};
+
+    #[test]
+    fn parallel_fix_ty_threshold_is_inclusive() {
+        assert!(!should_parallelize_fix_ty(PARALLEL_FIX_TY_THRESHOLD - 1));
+        assert!(should_parallelize_fix_ty(PARALLEL_FIX_TY_THRESHOLD));
+    }
 }
