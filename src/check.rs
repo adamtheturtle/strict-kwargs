@@ -163,6 +163,7 @@ fn process_scan_outcome_for_ty(
                     source,
                     pending: scan.pending,
                     pending_groups: scan.pending_groups,
+                    balancing_hover_requests: scan.balancing_hover_requests,
                 });
             }
         }
@@ -347,7 +348,7 @@ fn pipeline_phases(
                 }
                 if let (Some(senders), Some(work)) = (&shard_senders, staged.pop()) {
                     let weight = if request_aware_balancing {
-                        estimated_hover_requests(work.pending.len(), &work.pending_groups)
+                        work.balancing_hover_requests
                     } else {
                         work.pending.len()
                     };
@@ -783,6 +784,7 @@ fn scan_file(
         diagnostics,
         pending,
         pending_groups,
+        balancing_hover_requests,
         overload_fix_pending,
         fixes,
         fixed_calls,
@@ -802,11 +804,12 @@ fn scan_file(
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
         }
-        let pending_groups = checker.take_pending_hover_groups();
+        let (pending_groups, balancing_hover_requests) = checker.take_pending_hover_groups();
         (
             std::mem::take(&mut checker.diagnostics),
             std::mem::take(&mut checker.ty_pending),
             pending_groups,
+            balancing_hover_requests,
             std::mem::take(&mut checker.ty_overload_fix_pending),
             std::mem::take(&mut checker.fixes),
             checker.fixed_calls,
@@ -829,6 +832,7 @@ fn scan_file(
         diagnostics,
         pending,
         pending_groups,
+        balancing_hover_requests,
         overload_fix_pending,
         fixes,
         fixed_calls,
@@ -857,6 +861,8 @@ struct FileScan {
     /// Hover group of each `pending` entry (parallel vector): calls proven
     /// to hover identically share a group so the ty fallback asks once.
     pending_groups: Vec<Option<u32>>,
+    /// Pre-localization request estimate used to preserve shard ownership.
+    balancing_hover_requests: usize,
     overload_fix_pending: Vec<PendingTyOverloadFix>,
     fixes: Vec<Insertion>,
     fixed_calls: usize,
@@ -869,6 +875,7 @@ struct PendingTyWork {
     pending: Vec<PendingTy>,
     /// Hover group of each `pending` entry (see [`FileScan::pending_groups`]).
     pending_groups: Vec<Option<u32>>,
+    balancing_hover_requests: usize,
 }
 
 /// Apply `insertions` to `source` and validate that the result remains valid
@@ -1067,6 +1074,9 @@ struct CallChecker<'a> {
     /// (assignment to the name, the bare name escaping into a call, a
     /// `match` statement, ...). Groups in these contexts are dropped.
     poisoned_hover_ctxs: FxHashSet<u32>,
+    /// Shared class contexts whose poison must retain the pre-localization
+    /// weight for deterministic shard balancing.
+    balancing_poisoned_hover_ctxs: FxHashSet<u32>,
     /// (binding context, attribute) keys whose attribute may have been
     /// rebound or narrowed (any non-callee mention of `recv.attr`).
     poisoned_hover_keys: FxHashSet<(u32, String)>,
@@ -1102,6 +1112,8 @@ struct HoverGroupFrame {
     shared_ctx: Option<u32>,
     name: String,
     scope_id: u32,
+    /// First deferred-call index owned by the binding's lexical scope.
+    scope_pending_start: usize,
     in_class_scope: bool,
     binding_offset: usize,
 }
@@ -1332,6 +1344,7 @@ impl<'a> CallChecker<'a> {
             hover_groups: FxHashMap::default(),
             hover_group_of_pending: Vec::new(),
             poisoned_hover_ctxs: FxHashSet::default(),
+            balancing_poisoned_hover_ctxs: FxHashSet::default(),
             poisoned_hover_keys: FxHashSet::default(),
             hover_retro_poisons: Vec::new(),
             callee_exprs: FxHashSet::default(),
@@ -2529,6 +2542,25 @@ impl<'a> CallChecker<'a> {
         self.hover_group_frames[index].shared_ctx = Some(shared_ctx);
     }
 
+    /// Stop sharing the current receiver binding without invalidating the
+    /// other methods that use the same class-wide context.
+    ///
+    /// Calls already recorded in this lexical scope used `shared_ctx`, so
+    /// strip only this scope's slice from that group. Later calls use the
+    /// frame-local context, which is marked poisoned and therefore remains
+    /// ungrouped. This keeps a narrowing or escape in one method from
+    /// discarding safe hover reuse in every other method of the class.
+    fn poison_hover_frame(&mut self, index: usize) {
+        let start = self.hover_group_frames[index].scope_pending_start;
+        let end = self.hover_group_of_pending.len();
+        let frame = &mut self.hover_group_frames[index];
+        self.poisoned_hover_ctxs.insert(frame.ctx);
+        if let Some(shared_ctx) = frame.shared_ctx.take() {
+            self.balancing_poisoned_hover_ctxs.insert(shared_ctx);
+            self.hover_retro_poisons.push((shared_ctx, start, end));
+        }
+    }
+
     /// Record a binding of `name` in the current scope (an import, a
     /// `def`/`class` statement, a parameter, or a `Store`-context name).
     ///
@@ -2544,12 +2576,7 @@ impl<'a> CallChecker<'a> {
             Some(index)
                 if self.hover_group_frames[index].scope_id == self.current_hover_scope().id =>
             {
-                let frame = &self.hover_group_frames[index];
-                let (ctx, shared_ctx) = (frame.ctx, frame.shared_ctx);
-                self.poisoned_hover_ctxs.insert(ctx);
-                if let Some(shared_ctx) = shared_ctx {
-                    self.poisoned_hover_ctxs.insert(shared_ctx);
-                }
+                self.poison_hover_frame(index);
             }
             shadowed => {
                 if let Some(index) = shadowed {
@@ -2567,7 +2594,8 @@ impl<'a> CallChecker<'a> {
                 let ctx = self.next_hover_ctx;
                 self.next_hover_ctx += 1;
                 let scope = self.current_hover_scope();
-                let (scope_id, in_class_scope) = (scope.id, scope.is_class);
+                let (scope_id, scope_pending_start, in_class_scope) =
+                    (scope.id, scope.pending_start, scope.is_class);
                 self.hover_frame_index
                     .entry(name.to_owned())
                     .or_default()
@@ -2577,6 +2605,7 @@ impl<'a> CallChecker<'a> {
                     shared_ctx: None,
                     name: name.to_owned(),
                     scope_id,
+                    scope_pending_start,
                     in_class_scope,
                     binding_offset: offset,
                 });
@@ -2588,11 +2617,7 @@ impl<'a> CallChecker<'a> {
     /// narrowed, or escaped where this checker cannot follow).
     fn poison_hover_ctx_for(&mut self, name: &str) {
         if let Some(index) = self.visible_hover_frame_index(name) {
-            let frame = &self.hover_group_frames[index];
-            self.poisoned_hover_ctxs.insert(frame.ctx);
-            if let Some(shared_ctx) = frame.shared_ctx {
-                self.poisoned_hover_ctxs.insert(shared_ctx);
-            }
+            self.poison_hover_frame(index);
         }
     }
 
@@ -2809,7 +2834,7 @@ impl<'a> CallChecker<'a> {
     /// The hover group of each `ty_pending` entry, with groups whose binding
     /// or attribute was poisoned anywhere in the file dropped (poison may be
     /// discovered after a group's earlier call sites were recorded).
-    fn take_pending_hover_groups(&mut self) -> Vec<Option<u32>> {
+    fn take_pending_hover_groups(&mut self) -> (Vec<Option<u32>>, usize) {
         let dropped: FxHashSet<u32> = self
             .hover_groups
             .iter()
@@ -2842,7 +2867,32 @@ impl<'a> CallChecker<'a> {
                 }
             }
         }
-        groups
+        // Keep shard ownership identical to the pre-localization behavior:
+        // a class context poisoned anywhere used to lose every group. Runtime
+        // reuse stays method-local, but changing the balancing weights can
+        // move expensive files between ty servers and lengthen the critical
+        // path even when the total request count falls.
+        let balancing_groups = if self.balancing_poisoned_hover_ctxs.is_empty() {
+            groups.clone()
+        } else {
+            let ctx_of_group: FxHashMap<u32, u32> = self
+                .hover_groups
+                .iter()
+                .map(|(key, &group)| (group, key.ctx))
+                .collect();
+            groups
+                .iter()
+                .map(|group| {
+                    group.filter(|group| {
+                        ctx_of_group
+                            .get(group)
+                            .is_none_or(|ctx| !self.balancing_poisoned_hover_ctxs.contains(ctx))
+                    })
+                })
+                .collect()
+        };
+        let balancing_hover_requests = estimated_hover_requests(groups.len(), &balancing_groups);
+        (groups, balancing_hover_requests)
     }
 
     /// Queue an already-diagnosed overload violation for fix-only ty hover
@@ -5326,6 +5376,7 @@ mod tests {
                 })
                 .collect(),
             pending_groups: vec![None; pending_calls],
+            balancing_hover_requests: pending_calls,
         }
     }
 
@@ -6280,6 +6331,10 @@ while cond:
 
     /// The hover group of every deferred call in `source`, in deferral order.
     fn pending_hover_groups(source: &str) -> Vec<Option<u32>> {
+        pending_hover_groups_and_balance(source).0
+    }
+
+    fn pending_hover_groups_and_balance(source: &str) -> (Vec<Option<u32>>, usize) {
         let index = DefinitionIndex::for_test();
         let config = Config::default();
         let parsed = parse_module(source).expect("parse source");
@@ -6357,18 +6412,27 @@ class C:
     }
 
     #[test]
-    fn hover_groups_drop_shared_self_context_when_any_method_poisons_it() {
-        let groups = pending_hover_groups(
+    fn hover_groups_keep_shared_self_context_for_unaffected_methods() {
+        let (groups, balancing_hover_requests) = pending_hover_groups_and_balance(
             "\
 class C:
-    def stable(self):
+    def stable_before(self):
         self.f(1)
     def poisoned(self):
         self.f(2)
         check(self)
+    def stable_after(self):
+        self.f(1)
 ",
         );
-        assert!(groups.iter().all(Option::is_none), "got {groups:?}");
+        let [stable_before, poisoned, check, stable_after] = groups.as_slice() else {
+            panic!("expected four deferred calls, got {groups:?}");
+        };
+        assert!(stable_before.is_some());
+        assert_eq!(stable_before, stable_after);
+        assert!(poisoned.is_none());
+        assert!(check.is_none());
+        assert_eq!(balancing_hover_requests, 4);
     }
 
     #[test]
@@ -7168,6 +7232,7 @@ registry['k'](1, 2)
                     fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
+                balancing_hover_requests: 1,
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,
@@ -7231,6 +7296,7 @@ registry['k'](1, 2)
                 diagnostics: Vec::new(),
                 pending: Vec::new(),
                 pending_groups: Vec::new(),
+                balancing_hover_requests: 0,
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,
@@ -7257,6 +7323,7 @@ registry['k'](1, 2)
                     fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
+                balancing_hover_requests: 1,
                 overload_fix_pending: Vec::new(),
                 fixes: Vec::new(),
                 fixed_calls: 0,
