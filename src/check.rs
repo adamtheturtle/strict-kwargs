@@ -153,7 +153,11 @@ fn process_scan_outcome_for_ty(
         ScanOutcome::Scanned(scan) => {
             diagnostics.extend(scan.diagnostics);
             if !scan.pending.is_empty() {
-                let source = retained_source_for_pending_scan(scan.source.as_deref())?.to_owned();
+                let source = scan.ty_source.ok_or_else(|| {
+                    CheckError::Io(std::io::Error::other(
+                        "internal error: scan with ty pending did not retain shared source",
+                    ))
+                })?;
                 ty_work.push(PendingTyWork {
                     path,
                     source,
@@ -164,15 +168,6 @@ fn process_scan_outcome_for_ty(
         }
     }
     Ok(())
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn retained_source_for_pending_scan(source: Option<&str>) -> Result<&str, CheckError> {
-    source.ok_or_else(|| {
-        CheckError::Io(std::io::Error::other(
-            "internal error: scan with ty pending did not retain source",
-        ))
-    })
 }
 
 /// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
@@ -735,7 +730,7 @@ fn scan_file(
         (&indexed_file.source, &indexed_file.parsed)
     } else {
         source_owned = match read_python_source(path)? {
-            Source::Decoded(source) => source,
+            Source::Decoded(source) => Arc::new(source),
             Source::Undecodable(reason) => return Ok(ScanOutcome::Skipped(reason)),
         };
         parsed_owned = match parse_module_guarded(&source_owned) {
@@ -747,6 +742,7 @@ fn scan_file(
         };
         (&source_owned, &parsed_owned)
     };
+    let source_text: &str = source;
     let module_name = module_name_for_path(source_roots, path);
     // Scope the checker so its borrows of `source`/`parsed` end before
     // `source` is moved into the returned `FileScan`.
@@ -763,7 +759,7 @@ fn scan_file(
             path.to_path_buf(),
             module_name,
             is_package_init(path),
-            source,
+            source_text,
             parsed.tokens(),
             index,
             config,
@@ -784,14 +780,19 @@ fn scan_file(
             std::mem::take(&mut checker.declined_fix_reasons),
         )
     };
-    let retain_source = plan_fixes | !pending.is_empty() | !overload_fix_pending.is_empty();
-    let retained_source = if retain_source {
-        Some(source.to_owned())
+    let ty_source = if plan_fixes || pending.is_empty() {
+        None
+    } else {
+        Some(Arc::clone(source))
+    };
+    let retained_source = if plan_fixes {
+        Some(source_text.to_owned())
     } else {
         None
     };
     Ok(ScanOutcome::Scanned(FileScan {
         source: retained_source,
+        ty_source,
         diagnostics,
         pending,
         pending_groups,
@@ -816,6 +817,8 @@ enum ScanOutcome {
 /// the main thread.
 struct FileScan {
     source: Option<String>,
+    /// Shared index-owned source used by no-fix ty fallback work.
+    ty_source: Option<Arc<String>>,
     diagnostics: Vec<Diagnostic>,
     pending: Vec<PendingTy>,
     /// Hover group of each `pending` entry (parallel vector): calls proven
@@ -829,7 +832,7 @@ struct FileScan {
 
 struct PendingTyWork {
     path: PathBuf,
-    source: String,
+    source: Arc<String>,
     pending: Vec<PendingTy>,
     /// Hover group of each `pending` entry (see [`FileScan::pending_groups`]).
     pending_groups: Vec<Option<u32>>,
@@ -5218,11 +5221,12 @@ mod tests {
     use crate::signature::{Parameter, ParameterKind, Signature};
     use rustc_hash::FxHashSet;
     use std::path::Path;
+    use std::sync::Arc;
 
     fn ty_work(path: &str, pending_calls: usize) -> PendingTyWork {
         PendingTyWork {
             path: Path::new(path).to_path_buf(),
-            source: String::new(),
+            source: Arc::new(String::new()),
             pending: (0..pending_calls)
                 .map(|_| PendingTy {
                     callee_offset: 0,
@@ -6978,7 +6982,7 @@ registry['k'](1, 2)
     }
 
     #[test]
-    fn ty_pending_scan_without_retained_source_is_reported() {
+    fn ty_pending_scan_without_shared_source_is_reported() {
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
@@ -6987,6 +6991,7 @@ registry['k'](1, 2)
             PathBuf::from("test.py"),
             ScanOutcome::Scanned(FileScan {
                 source: None,
+                ty_source: None,
                 diagnostics: Vec::new(),
                 pending: vec![PendingTy {
                     callee_offset: 0,
@@ -7005,11 +7010,11 @@ registry['k'](1, 2)
             &mut skip_warnings,
             &mut ty_work,
         )
-        .expect_err("missing retained source should be reported");
+        .expect_err("missing shared source should be reported");
 
         assert!(error
             .to_string()
-            .contains("scan with ty pending did not retain source"));
+            .contains("scan with ty pending did not retain shared source"));
         assert!(diagnostics.is_empty());
         assert!(skip_warnings.is_empty());
         assert!(ty_work.is_empty());
@@ -7044,16 +7049,18 @@ registry['k'](1, 2)
     }
 
     #[test]
-    fn ty_scan_source_retention_is_only_required_for_pending_queries() {
+    fn ty_scan_queues_pending_queries_with_shared_source() {
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
+        let shared_source = Arc::new("f(1)\n".to_owned());
 
         process_scan_outcome_for_ty(
             0,
             PathBuf::from("empty.py"),
             ScanOutcome::Scanned(FileScan {
                 source: None,
+                ty_source: None,
                 diagnostics: Vec::new(),
                 pending: Vec::new(),
                 pending_groups: Vec::new(),
@@ -7066,13 +7073,14 @@ registry['k'](1, 2)
             &mut skip_warnings,
             &mut ty_work,
         )
-        .expect("empty pending scan does not need retained source");
+        .expect("empty pending scan does not need a shared source");
 
         process_scan_outcome_for_ty(
             1,
             PathBuf::from("pending.py"),
             ScanOutcome::Scanned(FileScan {
-                source: Some("f(1)\n".to_string()),
+                source: None,
+                ty_source: Some(Arc::clone(&shared_source)),
                 diagnostics: Vec::new(),
                 pending: vec![PendingTy {
                     callee_offset: 0,
@@ -7091,13 +7099,13 @@ registry['k'](1, 2)
             &mut skip_warnings,
             &mut ty_work,
         )
-        .expect("pending scan with retained source is valid");
+        .expect("pending scan keeps a shared source");
 
         assert!(diagnostics.is_empty());
         assert!(skip_warnings.is_empty());
         assert_eq!(ty_work.len(), 1);
         assert_eq!(ty_work[0].path, PathBuf::from("pending.py"));
-        assert_eq!(ty_work[0].source, "f(1)\n");
+        assert!(Arc::ptr_eq(&ty_work[0].source, &shared_source));
         assert_eq!(ty_work[0].pending.len(), 1);
     }
 

@@ -294,7 +294,7 @@ pub struct DefinitionIndex {
 /// absent so the scan phase preserves its existing user-facing skip/error
 /// behavior.
 pub struct IndexedFile {
-    pub source: String,
+    pub source: Arc<String>,
     pub parsed: Parsed<ModModule>,
 }
 
@@ -1101,7 +1101,13 @@ pub fn build_index_with_sources(
         index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
-        indexed_files.insert(path.clone(), IndexedFile { source, parsed });
+        indexed_files.insert(
+            path.clone(),
+            IndexedFile {
+                source: Arc::new(source),
+                parsed,
+            },
+        );
     }
 
     (index, indexed_files)
@@ -2539,7 +2545,7 @@ mod tests {
     fn semantic_fingerprint(source: &str) -> u64 {
         let parsed = parse_module(source).expect("parse");
         IndexedFile {
-            source: source.to_string(),
+            source: Arc::new(source.to_owned()),
             parsed,
         }
         .semantic_fingerprint()
