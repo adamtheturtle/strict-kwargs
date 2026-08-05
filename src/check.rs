@@ -2509,6 +2509,10 @@ impl<'a> CallChecker<'a> {
 
     /// Mark the current plain method's unannotated `self` binding with the
     /// class-wide context used to reuse identical hovers across methods.
+    #[allow(
+        clippy::expect_used,
+        reason = "called only after the plain self parameter's hover frame is bound"
+    )]
     fn share_method_self_hover_context(&mut self, class_fullname: &str) {
         let shared_ctx = if let Some(&ctx) = self.class_self_hover_ctxs.get(class_fullname) {
             ctx
@@ -2519,9 +2523,10 @@ impl<'a> CallChecker<'a> {
                 .insert(class_fullname.to_owned(), ctx);
             ctx
         };
-        if let Some(index) = self.visible_hover_frame_index("self") {
-            self.hover_group_frames[index].shared_ctx = Some(shared_ctx);
-        }
+        let index = self
+            .visible_hover_frame_index("self")
+            .expect("plain self parameter has a hover frame");
+        self.hover_group_frames[index].shared_ctx = Some(shared_ctx);
     }
 
     /// Record a binding of `name` in the current scope (an import, a
@@ -6364,6 +6369,26 @@ class C:
 ",
         );
         assert!(groups.iter().all(Option::is_none), "got {groups:?}");
+    }
+
+    #[test]
+    fn hover_groups_retro_poison_nested_use_of_shared_self_context() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def stable(self):
+        self.f(1)
+    def with_nested_local(self):
+        def inner():
+            self.f(2)
+            self = 1
+",
+        );
+        let [stable, nested] = groups.as_slice() else {
+            panic!("expected two deferred calls, got {groups:?}");
+        };
+        assert!(stable.is_some());
+        assert!(nested.is_none());
     }
 
     #[test]
