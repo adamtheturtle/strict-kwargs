@@ -107,7 +107,7 @@ repos:
         pass_filenames: false
 
   - repo: https://github.com/adamtheturtle/no-defaults
-    rev: v1.0.0
+    rev: v1.0.1
     hooks:
       - id: no-defaults
         exclude: ^vendored/typeshed/
