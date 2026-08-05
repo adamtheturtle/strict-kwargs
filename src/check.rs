@@ -208,6 +208,7 @@ fn pipeline_phases(
     let mut consumer_err: Option<CheckError> = None;
     let mut released_pending_files = 0usize;
 
+    let request_aware_balancing = should_balance_grouped_ty(files_to_scan.len());
     let shard_results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
         // Phase 1 (parallel, background): the built-in pass over every
         // file. Each file is an independent, pure-CPU unit of work
@@ -345,7 +346,12 @@ fn pipeline_phases(
                     break;
                 }
                 if let (Some(senders), Some(work)) = (&shard_senders, staged.pop()) {
-                    let owner = assigner.assign(work.pending.len());
+                    let weight = if request_aware_balancing {
+                        estimated_hover_requests(work.pending.len(), &work.pending_groups)
+                    } else {
+                        work.pending.len()
+                    };
+                    let owner = assigner.assign(weight);
                     let _ = senders[owner].send((released_pending_files, work));
                     released_pending_files += 1;
                 }
@@ -394,6 +400,17 @@ fn pipeline_phases(
 /// startup and project-indexing overhead observed at twelve shards.
 const TY_SHARD_COUNT: usize = 8;
 
+/// Minimum scanned-file count for balancing shards by requests remaining
+/// after hover-group reuse. On smaller projects, startup and project-indexing
+/// costs dominate and the established raw-call partition is faster; large
+/// projects are dominated by fallback queries and benefit from the closer
+/// request-work estimate.
+const REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD: usize = 2_000;
+
+const fn should_balance_grouped_ty(files: usize) -> bool {
+    files >= REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD
+}
+
 /// How many times a single file's ty fallback is attempted before a still-off
 /// backend is treated as fatal. A transient timeout/disconnect under shard
 /// contention is retried on the same warm server; a persistent failure after
@@ -436,12 +453,28 @@ impl<T> InOrderReleaser<T> {
     }
 }
 
+/// Estimate the hover requests a file will send after same-group reuse.
+///
+/// Every ungrouped pending call needs its own request, while each distinct
+/// group normally needs one. A group can need more when its first members are
+/// unreachable and return no usable signature, but this lower bound is still
+/// a closer proxy for ty work than the raw pending-call count. Missing group
+/// entries are conservatively counted as ungrouped.
+fn estimated_hover_requests(pending: usize, groups: &[Option<u32>]) -> usize {
+    let mut seen = FxHashSet::default();
+    let prefix_requests = groups
+        .iter()
+        .filter(|group| group.is_none_or(|group| seen.insert(group)))
+        .count();
+    prefix_requests + pending.saturating_sub(groups.len())
+}
+
 /// Greedy shard assignment for sorted ty work: each file (in sorted-path
-/// order) goes to the shard with the fewest pending calls so far (ties:
-/// lowest shard index). Pending-call count is the best static proxy for a
-/// file's ty cost, and the greedy rule is a pure function of the sorted work
-/// prefix, so the partition — and therefore each ty server's request stream
-/// — is reproducible everywhere and can be computed while files stream in.
+/// order) goes to the shard with the least estimated request work so far
+/// (ties: lowest shard index). The estimate accounts for hover-group reuse,
+/// and the greedy rule is a pure function of the sorted work prefix, so the
+/// partition — and therefore each ty server's request stream — is
+/// reproducible everywhere and can be computed while files stream in.
 struct TyShardAssigner {
     loads: Vec<usize>,
 }
@@ -5205,15 +5238,16 @@ fn resolve_pending_with_ty(
 mod tests {
     use super::{
         bound_import_name, call_shape_fingerprint, collect_python_files,
-        collect_python_files_with_project_inventory, decorator_tail,
+        collect_python_files_with_project_inventory, decorator_tail, estimated_hover_requests,
         has_staticmethod_or_classmethod_decorator, is_ignored_path,
         is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
         parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
         process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
-        signature_is_fully_named, skipped_cache_miss_warnings, strip_unbound_receiver,
-        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy,
-        PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
+        should_balance_grouped_ty, signature_is_fully_named, skipped_cache_miss_warnings,
+        strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
+        CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns, IfBranchTraversal,
+        InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
+        REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::error::CheckError;
@@ -5299,6 +5333,24 @@ mod tests {
             .map(|w| assigner.assign(w.pending.len()))
             .collect();
         assert_eq!(owners, vec![0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn estimated_hover_requests_counts_each_group_once() {
+        assert_eq!(
+            estimated_hover_requests(8, &[Some(0), Some(0), None, Some(1), Some(1), Some(0)],),
+            5
+        );
+    }
+
+    #[test]
+    fn request_aware_ty_balancing_threshold_is_inclusive() {
+        assert!(!should_balance_grouped_ty(
+            REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD - 1
+        ));
+        assert!(should_balance_grouped_ty(
+            REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD
+        ));
     }
 
     #[test]
