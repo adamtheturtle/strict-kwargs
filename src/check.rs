@@ -1055,6 +1055,10 @@ struct CallChecker<'a> {
     next_hover_scope_id: u32,
     /// Next fresh hover-binding context id for this file.
     next_hover_ctx: u32,
+    /// Shared receiver context for ordinary methods in each class. A plain,
+    /// unannotated `self` has the same static type in every such method, so
+    /// identical calls can reuse one hover response across method bodies.
+    class_self_hover_ctxs: FxHashMap<String, u32>,
     /// (binding context, attribute, call shape) -> hover group id.
     hover_groups: FxHashMap<HoverGroupKey, u32>,
     /// Hover group of each entry in `ty_pending` (parallel vector).
@@ -1094,6 +1098,8 @@ struct CallChecker<'a> {
 /// never join the frame's groups.
 struct HoverGroupFrame {
     ctx: u32,
+    /// Class-wide context for a plain method `self`, if this binding is one.
+    shared_ctx: Option<u32>,
     name: String,
     scope_id: u32,
     in_class_scope: bool,
@@ -1322,6 +1328,7 @@ impl<'a> CallChecker<'a> {
             }],
             next_hover_scope_id: 1,
             next_hover_ctx: 0,
+            class_self_hover_ctxs: FxHashMap::default(),
             hover_groups: FxHashMap::default(),
             hover_group_of_pending: Vec::new(),
             poisoned_hover_ctxs: FxHashSet::default(),
@@ -2494,8 +2501,27 @@ impl<'a> CallChecker<'a> {
 
     /// The innermost visible hover-binding context for a bare name, if any.
     fn hover_ctx_for(&self, name: &str) -> Option<u32> {
-        self.visible_hover_frame_index(name)
-            .map(|index| self.hover_group_frames[index].ctx)
+        self.visible_hover_frame_index(name).map(|index| {
+            let frame = &self.hover_group_frames[index];
+            frame.shared_ctx.unwrap_or(frame.ctx)
+        })
+    }
+
+    /// Mark the current plain method's unannotated `self` binding with the
+    /// class-wide context used to reuse identical hovers across methods.
+    fn share_method_self_hover_context(&mut self, class_fullname: &str) {
+        let shared_ctx = if let Some(&ctx) = self.class_self_hover_ctxs.get(class_fullname) {
+            ctx
+        } else {
+            let ctx = self.next_hover_ctx;
+            self.next_hover_ctx += 1;
+            self.class_self_hover_ctxs
+                .insert(class_fullname.to_owned(), ctx);
+            ctx
+        };
+        if let Some(index) = self.visible_hover_frame_index("self") {
+            self.hover_group_frames[index].shared_ctx = Some(shared_ctx);
+        }
     }
 
     /// Record a binding of `name` in the current scope (an import, a
@@ -2513,16 +2539,24 @@ impl<'a> CallChecker<'a> {
             Some(index)
                 if self.hover_group_frames[index].scope_id == self.current_hover_scope().id =>
             {
-                let ctx = self.hover_group_frames[index].ctx;
+                let frame = &self.hover_group_frames[index];
+                let (ctx, shared_ctx) = (frame.ctx, frame.shared_ctx);
                 self.poisoned_hover_ctxs.insert(ctx);
+                if let Some(shared_ctx) = shared_ctx {
+                    self.poisoned_hover_ctxs.insert(shared_ctx);
+                }
             }
             shadowed => {
                 if let Some(index) = shadowed {
-                    let ctx = self.hover_group_frames[index].ctx;
+                    let frame = &self.hover_group_frames[index];
+                    let (ctx, shared_ctx) = (frame.ctx, frame.shared_ctx);
                     let start = self.current_hover_scope().pending_start;
                     let end = self.hover_group_of_pending.len();
                     if end > start {
                         self.hover_retro_poisons.push((ctx, start, end));
+                        if let Some(shared_ctx) = shared_ctx {
+                            self.hover_retro_poisons.push((shared_ctx, start, end));
+                        }
                     }
                 }
                 let ctx = self.next_hover_ctx;
@@ -2535,6 +2569,7 @@ impl<'a> CallChecker<'a> {
                     .push(self.hover_group_frames.len());
                 self.hover_group_frames.push(HoverGroupFrame {
                     ctx,
+                    shared_ctx: None,
                     name: name.to_owned(),
                     scope_id,
                     in_class_scope,
@@ -2547,8 +2582,12 @@ impl<'a> CallChecker<'a> {
     /// Mark a receiver binding as unsafe for hover grouping (rebound,
     /// narrowed, or escaped where this checker cannot follow).
     fn poison_hover_ctx_for(&mut self, name: &str) {
-        if let Some(ctx) = self.hover_ctx_for(name) {
-            self.poisoned_hover_ctxs.insert(ctx);
+        if let Some(index) = self.visible_hover_frame_index(name) {
+            let frame = &self.hover_group_frames[index];
+            self.poisoned_hover_ctxs.insert(frame.ctx);
+            if let Some(shared_ctx) = frame.shared_ctx {
+                self.poisoned_hover_ctxs.insert(shared_ctx);
+            }
         }
     }
 
@@ -2746,7 +2785,7 @@ impl<'a> CallChecker<'a> {
         if name.range().start().to_usize() < frame.binding_offset {
             return None;
         }
-        let ctx = frame.ctx;
+        let ctx = frame.shared_ctx.unwrap_or(frame.ctx);
         // Group ids are per-file and bounded by the file's call count, so
         // the conversion cannot overflow; saturate rather than branch.
         let next_id = u32::try_from(self.hover_groups.len()).unwrap_or(u32::MAX);
@@ -3028,6 +3067,17 @@ impl<'a> CallChecker<'a> {
         self.bind_method_parameters(parameters, &class_fullname, binds_instance_self);
         self.enter_hover_scope(false);
         self.bind_parameter_hover_frames(parameters, parameters.range().start().to_usize());
+        let plain_self = parameters
+            .posonlyargs
+            .iter()
+            .chain(&parameters.args)
+            .next()
+            .is_some_and(|param| {
+                param.parameter.name.id.as_str() == "self" && param.parameter.annotation.is_none()
+            });
+        if binds_instance_self && plain_self {
+            self.share_method_self_hover_context(&class_fullname);
+        }
 
         let class_body_depth = self.class_body_depth;
         self.class_body_depth = 0;
@@ -6271,9 +6321,49 @@ class C:
         // A different attribute never shares a group.
         assert!(other_attr.is_some());
         assert_ne!(first, other_attr);
-        // A different method is a different `self` binding.
+        // Plain `self` has the same class type in every ordinary method.
         assert!(other_method.is_some());
-        assert_ne!(first, other_method);
+        assert_eq!(first, other_method);
+    }
+
+    #[test]
+    fn hover_groups_do_not_share_annotated_or_non_instance_self_across_methods() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def plain(self):
+        self.f(1)
+    def annotated(self: Other):
+        self.f(1)
+    @staticmethod
+    def static(self):
+        self.f(1)
+",
+        );
+        let [plain, annotated, static_method] = groups.as_slice() else {
+            panic!("expected three deferred calls, got {groups:?}");
+        };
+        assert!(plain.is_some());
+        assert!(annotated.is_some());
+        assert!(static_method.is_some());
+        assert_ne!(plain, annotated);
+        assert_ne!(plain, static_method);
+        assert_ne!(annotated, static_method);
+    }
+
+    #[test]
+    fn hover_groups_drop_shared_self_context_when_any_method_poisons_it() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def stable(self):
+        self.f(1)
+    def poisoned(self):
+        self.f(2)
+        check(self)
+",
+        );
+        assert!(groups.iter().all(Option::is_none), "got {groups:?}");
     }
 
     #[test]
