@@ -56,7 +56,7 @@ repos:
         stages: [pre-commit]
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.46.2
+    rev: v1.48.0
     hooks:
       - id: typos
         stages: [pre-commit]
