@@ -73,3 +73,7 @@ type = [
 
 [tool.strict_kwargs]
 ignore_names = []
+
+[tool.no_defaults]
+private_only = true
+per_file_enforcement."tests/**" = "all"
