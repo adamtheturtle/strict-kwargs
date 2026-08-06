@@ -115,3 +115,30 @@ repos:
         types: [python]
         exclude: ^vendored/typeshed/
         stages: [pre-commit]
+
+      # Vale enforces prose style rules, such as banning em dashes, in
+      # reStructuredText files.
+      # The rules come from the ``ClearProse`` package pinned in ``.vale.ini``,
+      # which ``vale sync`` downloads into the (gitignored) ``styles``
+      # directory.
+      # ``vale sync`` also runs when ``.vale.ini`` changes, so a package
+      # bump takes effect without waiting for the next reStructuredText
+      # change.
+      # Vale needs ``rst2html`` from Docutils on the ``PATH`` to parse
+      # reStructuredText, hence ``--with docutils``.  ``uvx`` rather than
+      # ``uv run`` for the reason given above.
+      - id: vale-sync
+        name: vale sync
+        entry: uvx --with docutils vale@3.13.0.0 sync
+        language: system
+        files: (\.rst$|^\.vale\.ini$)
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: vale
+        name: vale
+        entry: uvx --with docutils vale@3.13.0.0
+        language: system
+        types_or: [rst]
+        require_serial: true
+        stages: [pre-commit]
