@@ -79,6 +79,11 @@ struct CheckArgs {
     /// Python environment for the `ty` inference fallback.
     #[arg(long, value_name = "PATH")]
     python: Option<PathBuf>,
+
+    /// Report a `KW002` error for every `# noqa: KW001` that suppressed
+    /// nothing.
+    #[arg(long, conflicts_with_all = ["fix", "diff"])]
+    error_on_unused_noqa: bool,
 }
 
 fn main() -> ExitCode {
@@ -159,7 +164,10 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
         return run_check_fix(args);
     }
     let project_root = project_root_for(args.project_root, &args.paths)?;
-    let config = Config::load(&project_root)?;
+    let mut config = Config::load(&project_root)?;
+    // The flag turns the rule on; it never turns a configured one off.
+    config.error_on_unused_noqa |= args.error_on_unused_noqa;
+    let config = config;
     let output_format = args.output_format.unwrap_or(config.output_format);
     let python_env = resolve_python_env(args.python);
     let cache_dir = effective_cache_dir(args.cache_dir, &config, &project_root);
@@ -184,7 +192,9 @@ struct JsonDiagnostic<'a> {
     filename: String,
     location: JsonLocation,
     message: String,
-    callee: &'a str,
+    /// Omitted for rules that name no callee (`KW002`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callee: Option<&'a str>,
 }
 
 #[derive(serde::Serialize)]
@@ -196,14 +206,14 @@ struct JsonLocation {
 impl<'a> From<&'a Diagnostic> for JsonDiagnostic<'a> {
     fn from(diagnostic: &'a Diagnostic) -> Self {
         Self {
-            code: Diagnostic::CODE,
+            code: diagnostic.code(),
             filename: diagnostic.path.display().to_string(),
             location: JsonLocation {
                 row: diagnostic.line,
                 column: diagnostic.column,
             },
             message: diagnostic.message(),
-            callee: &diagnostic.callee,
+            callee: diagnostic.callee(),
         }
     }
 }
@@ -283,7 +293,7 @@ fn display_diagnostic(diagnostic: &Diagnostic, color: bool) -> String {
     format!(
         "{}: {} {}",
         location.bold(),
-        Diagnostic::CODE.red().bold(),
+        diagnostic.code().red().bold(),
         diagnostic.message()
     )
 }
@@ -500,14 +510,14 @@ mod tests {
 
     #[test]
     fn colored_diagnostic_contains_ansi_escape_sequences() {
-        let diagnostic = Diagnostic {
-            path: PathBuf::from("main.py"),
-            line: 2,
-            column: 1,
-            callee: "\"f\"".to_owned(),
-            positional_count: 1,
-            max_positional: 0,
-        };
+        let diagnostic = Diagnostic::too_many_positional(
+            PathBuf::from("main.py"),
+            2,
+            1,
+            "\"f\"".to_owned(),
+            1,
+            0,
+        );
         let rendered = display_diagnostic(&diagnostic, true);
         assert!(rendered.contains("\u{1b}["));
         assert!(rendered.contains("KW001"));
@@ -516,14 +526,14 @@ mod tests {
 
     #[test]
     fn plain_diagnostic_matches_library_display() {
-        let diagnostic = Diagnostic {
-            path: PathBuf::from("main.py"),
-            line: 2,
-            column: 1,
-            callee: "\"f\"".to_owned(),
-            positional_count: 1,
-            max_positional: 0,
-        };
+        let diagnostic = Diagnostic::too_many_positional(
+            PathBuf::from("main.py"),
+            2,
+            1,
+            "\"f\"".to_owned(),
+            1,
+            0,
+        );
         assert_eq!(
             display_diagnostic(&diagnostic, false),
             diagnostic.display_path()

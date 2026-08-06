@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::check::is_prunable_dir;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::resolve::{discover_site_packages, discover_site_packages_in_environment};
 
 // ---------------------------------------------------------------------------
@@ -414,10 +414,55 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Deserialize, Serialize)]
 struct CacheEntry {
     diagnostics: Vec<CachedDiagnostic>,
+    /// `(line, column)` of each `KW002` unused-directive diagnostic. Kept in
+    /// its own list so the far more common `KW001` entries stay a flat tuple,
+    /// and so a manifest written before `KW002` existed still loads.
+    #[serde(default)]
+    unused_noqa: Vec<(usize, usize)>,
     semantic_fingerprint: Option<u64>,
 }
 
-/// On-disk diagnostic fields shared with the containing entry's path.
+impl CacheEntry {
+    fn to_diagnostics(&self, path: &Path) -> Vec<Diagnostic> {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.to_diagnostic(path))
+            .chain(unused_noqa_diagnostics(path, &self.unused_noqa))
+            .collect()
+    }
+
+    fn into_diagnostics(self, path: &Path) -> Vec<Diagnostic> {
+        self.diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.into_diagnostic(path))
+            .chain(unused_noqa_diagnostics(path, &self.unused_noqa))
+            .collect()
+    }
+}
+
+/// Rebuild one file's `KW002` diagnostics from their cached positions.
+fn unused_noqa_diagnostics<'a>(
+    path: &'a Path,
+    positions: &'a [(usize, usize)],
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    positions
+        .iter()
+        .map(|&(line, column)| Diagnostic::unused_noqa(path.to_path_buf(), line, column))
+}
+
+/// The positions of one file's `KW002` diagnostics, which the entry stores
+/// apart from its `KW001` ones.
+fn unused_noqa_positions<'a>(
+    diagnostics: impl IntoIterator<Item = &'a Diagnostic>,
+) -> Vec<(usize, usize)> {
+    diagnostics
+        .into_iter()
+        .filter(|diagnostic| matches!(diagnostic.kind, DiagnosticKind::UnusedNoqa))
+        .map(|diagnostic| (diagnostic.line, diagnostic.column))
+        .collect()
+}
+
+/// On-disk `KW001` diagnostic fields shared with the containing entry's path.
 ///
 /// A large project can have hundreds of diagnostics per file, so storing the
 /// path once in the entry avoids repeating the same absolute string in every
@@ -427,26 +472,23 @@ struct CacheEntry {
 struct CachedDiagnostic(usize, usize, String, usize, usize);
 
 impl CachedDiagnostic {
+    /// The cacheable form of a `KW001` diagnostic; `None` for other rules,
+    /// which the entry stores in their own list.
     #[cfg(test)]
-    fn from_diagnostic(diagnostic: Diagnostic) -> Self {
-        Self(
-            diagnostic.line,
-            diagnostic.column,
-            diagnostic.callee,
-            diagnostic.positional_count,
-            diagnostic.max_positional,
-        )
+    fn from_diagnostic(diagnostic: &Diagnostic) -> Option<Self> {
+        BorrowedCachedDiagnostic::from_diagnostic(diagnostic).map(|borrowed| {
+            Self(
+                borrowed.0,
+                borrowed.1,
+                borrowed.2.to_owned(),
+                borrowed.3,
+                borrowed.4,
+            )
+        })
     }
 
     fn into_diagnostic(self, path: &Path) -> Diagnostic {
-        Diagnostic {
-            path: path.to_path_buf(),
-            line: self.0,
-            column: self.1,
-            callee: self.2,
-            positional_count: self.3,
-            max_positional: self.4,
-        }
+        Diagnostic::too_many_positional(path.to_path_buf(), self.0, self.1, self.2, self.3, self.4)
     }
 
     fn to_diagnostic(&self, path: &Path) -> Diagnostic {
@@ -461,21 +503,31 @@ impl CachedDiagnostic {
 #[derive(Serialize)]
 struct BorrowedCachedDiagnostic<'a>(usize, usize, &'a str, usize, usize);
 
-impl<'a> From<&'a Diagnostic> for BorrowedCachedDiagnostic<'a> {
-    fn from(diagnostic: &'a Diagnostic) -> Self {
-        Self(
-            diagnostic.line,
-            diagnostic.column,
-            &diagnostic.callee,
-            diagnostic.positional_count,
-            diagnostic.max_positional,
-        )
+impl<'a> BorrowedCachedDiagnostic<'a> {
+    /// The cacheable form of a `KW001` diagnostic; `None` for other rules,
+    /// which are stored in their own list.
+    fn from_diagnostic(diagnostic: &'a Diagnostic) -> Option<Self> {
+        match &diagnostic.kind {
+            DiagnosticKind::TooManyPositional {
+                callee,
+                positional_count,
+                max_positional,
+            } => Some(Self(
+                diagnostic.line,
+                diagnostic.column,
+                callee,
+                *positional_count,
+                *max_positional,
+            )),
+            DiagnosticKind::UnusedNoqa => None,
+        }
     }
 }
 
 #[derive(Serialize)]
 struct BorrowedCacheEntry<'a> {
     diagnostics: Vec<BorrowedCachedDiagnostic<'a>>,
+    unused_noqa: Vec<(usize, usize)>,
     semantic_fingerprint: Option<u64>,
 }
 
@@ -634,13 +686,9 @@ impl DiagnosticCache {
 
     /// Return cached diagnostics for one successfully checked file.
     pub fn get(&self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries.get(path).map(|entry| {
-            entry
-                .diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.to_diagnostic(path))
-                .collect()
-        })
+        self.entries
+            .get(path)
+            .map(|entry| entry.to_diagnostics(path))
     }
 
     /// Whether `path` has a successfully checked cache entry.
@@ -653,13 +701,9 @@ impl DiagnosticCache {
     /// Used only by terminal warm-cache paths that will not rewrite the
     /// manifest, avoiding a clone of every diagnostic before returning.
     pub fn take(&mut self, path: &Path) -> Option<Vec<Diagnostic>> {
-        self.entries.remove(path).map(|entry| {
-            entry
-                .diagnostics
-                .into_iter()
-                .map(|diagnostic| diagnostic.into_diagnostic(path))
-                .collect()
-        })
+        self.entries
+            .remove(path)
+            .map(|entry| entry.into_diagnostics(path))
     }
 
     /// Add successfully checked-file results and write the manifest once.
@@ -675,16 +719,15 @@ impl DiagnosticCache {
         }
         self.entries.extend(entries.into_iter().map(
             |(path, diagnostics, semantic_fingerprint)| {
-                (
-                    path,
-                    CacheEntry {
-                        diagnostics: diagnostics
-                            .into_iter()
-                            .map(CachedDiagnostic::from_diagnostic)
-                            .collect(),
-                        semantic_fingerprint,
-                    },
-                )
+                let entry = CacheEntry {
+                    diagnostics: diagnostics
+                        .iter()
+                        .filter_map(CachedDiagnostic::from_diagnostic)
+                        .collect(),
+                    unused_noqa: unused_noqa_positions(&diagnostics),
+                    semantic_fingerprint,
+                };
+                (path, entry)
             },
         ));
         self.dirty = true;
@@ -720,8 +763,9 @@ impl DiagnosticCache {
                     diagnostics: diagnostics
                         .iter()
                         .copied()
-                        .map(BorrowedCachedDiagnostic::from)
+                        .filter_map(BorrowedCachedDiagnostic::from_diagnostic)
                         .collect(),
+                    unused_noqa: unused_noqa_positions(diagnostics.iter().copied()),
                     semantic_fingerprint: *semantic_fingerprint,
                 };
                 serde_json::to_vec(&(path, entry))
@@ -826,14 +870,14 @@ mod tests {
     use crate::diagnostic::Diagnostic;
 
     fn sample_diagnostic() -> Diagnostic {
-        Diagnostic {
-            path: PathBuf::from("pkg/mod.py"),
-            line: 3,
-            column: 1,
-            callee: "pkg.mod.func".to_string(),
-            positional_count: 3,
-            max_positional: 1,
-        }
+        Diagnostic::too_many_positional(
+            PathBuf::from("pkg/mod.py"),
+            3,
+            1,
+            "pkg.mod.func".to_string(),
+            3,
+            1,
+        )
     }
 
     fn open_cache(dir: &Path, fingerprint: u64) -> DiagnosticCache {
@@ -962,7 +1006,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 8]
         );
-        assert_eq!(got[0].callee, "pkg.mod.func");
+        assert_eq!(got[0].callee(), Some("pkg.mod.func"));
         assert!(!cache.contains(&path));
         assert!(cache.take(&path).is_none());
     }

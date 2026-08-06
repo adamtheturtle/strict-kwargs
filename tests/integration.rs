@@ -3332,6 +3332,140 @@ func(  # noqa: KW001
     );
 }
 
+// Unused `# noqa: KW001` reporting (`KW002`), off unless opted into.
+
+const UNUSED_NOQA_PYPROJECT: &str = "[project]\nname = \"t\"\nversion = \"0\"\n\n\
+     [tool.strict_kwargs]\nerror_on_unused_noqa = true\n";
+
+/// Diagnostics for `main.py` with `error_on_unused_noqa` enabled, formatted
+/// `main:<line>:<column>: <code> <message>`.
+fn check_source_with_unused_noqa(source: &str) -> Vec<String> {
+    let project = TestProject::new()
+        .pyproject(UNUSED_NOQA_PYPROJECT)
+        .main(source);
+    let main = project.main_path();
+    check_paths(
+        &project.root,
+        std::slice::from_ref(&main),
+        &project.config(),
+        None,
+        None,
+    )
+    .expect("check")
+    .iter()
+    .map(|d| format!("main:{}:{}: {} {}", d.line, d.column, d.code(), d.message()))
+    .collect()
+}
+
+#[test]
+fn unused_coded_noqa_is_reported_at_the_directive() {
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(a=1)  # noqa: KW001
+",
+    );
+    assert_eq!(
+        messages,
+        ["main:3:12: KW002 Unused `noqa` directive (unused: `KW001`)"]
+    );
+}
+
+#[test]
+fn used_coded_noqa_is_not_reported() {
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa: KW001
+",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn unused_noqa_is_not_reported_unless_enabled() {
+    let messages = check_source(
+        r"
+def func(a: int) -> None: ...
+func(a=1)  # noqa: KW001
+",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn unused_blanket_or_foreign_noqa_is_left_alone() {
+    // A bare `# noqa` or one naming only another tool's codes may well be
+    // suppressing a finding this tool cannot see, so neither is reported.
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(a=1)  # noqa
+func(a=2)  # noqa: E501
+func(a=3)  # noqa:
+",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn one_used_directive_does_not_excuse_another() {
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa: KW001
+func(a=2)  # noqa: KW001
+",
+    );
+    assert_eq!(
+        messages,
+        ["main:4:12: KW002 Unused `noqa` directive (unused: `KW001`)"]
+    );
+}
+
+#[test]
+fn a_directive_shared_with_another_tool_still_counts_as_used() {
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(1)  # noqa: E501, KW001
+",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn multiline_call_directive_on_the_first_line_counts_as_used() {
+    let messages = check_source_with_unused_noqa(
+        "
+def func(a: int, b: int) -> None: ...
+func(  # noqa: KW001
+    1,
+    2,
+)
+",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn unused_noqa_and_a_real_violation_are_both_reported() {
+    let messages = check_source_with_unused_noqa(
+        r"
+def func(a: int) -> None: ...
+func(1)
+func(a=2)  # noqa: KW001
+",
+    );
+    assert_eq!(
+        messages,
+        [
+            "main:3:1: KW001 Too many positional arguments for \"func\" (got 1, maximum 0)",
+            "main:4:12: KW002 Unused `noqa` directive (unused: `KW001`)",
+        ]
+    );
+}
+
 #[test]
 fn noqa_in_string_does_not_suppress() {
     assert_error(

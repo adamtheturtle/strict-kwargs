@@ -142,6 +142,7 @@ fn process_scan_outcome_for_ty(
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<SkipWarning>,
     ty_work: &mut Vec<PendingTyWork>,
+    noqa_files: &mut Vec<(PathBuf, FileNoqa)>,
 ) -> Result<(), CheckError> {
     match outcome {
         ScanOutcome::Skipped(reason) => {
@@ -152,6 +153,9 @@ fn process_scan_outcome_for_ty(
         }
         ScanOutcome::Scanned(scan) => {
             diagnostics.extend(scan.diagnostics);
+            if let Some(noqa) = scan.noqa {
+                noqa_files.push((path.clone(), *noqa));
+            }
             if !scan.pending.is_empty() {
                 let source = scan.ty_source.ok_or_else(|| {
                     CheckError::Io(std::io::Error::other(
@@ -208,6 +212,7 @@ fn pipeline_phases(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
     let mut released_pending_files = 0usize;
+    let mut noqa_files: Vec<(PathBuf, FileNoqa)> = Vec::new();
 
     let request_aware_balancing = should_balance_grouped_ty(files_to_scan.len());
     let shard_results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
@@ -341,6 +346,7 @@ fn pipeline_phases(
                     diagnostics,
                     skip_warnings,
                     &mut staged,
+                    &mut noqa_files,
                 ) {
                     consumer_err = Some(e);
                     shard_senders = None;
@@ -388,6 +394,10 @@ fn pipeline_phases(
     for slot in slots.into_iter().flatten() {
         diagnostics.extend(slot);
     }
+    // Deferred `# noqa` suppression runs last: only now is every diagnostic
+    // for these files — built-in and ty-resolved alike — in hand, so a
+    // directive can be judged used or unused.
+    apply_unused_noqa(diagnostics, &noqa_files);
     Ok(())
 }
 
@@ -789,6 +799,7 @@ fn scan_file(
         fixes,
         fixed_calls,
         declined_fix_reasons,
+        noqa,
     ) = {
         let mut checker = CallChecker::new(
             path.to_path_buf(),
@@ -805,6 +816,13 @@ fn scan_file(
             checker.visit_stmt(stmt);
         }
         let (pending_groups, balancing_hover_requests) = checker.take_pending_hover_groups();
+        // Suppression is deferred (and so must be applied later) exactly when
+        // the walk did not apply it itself.
+        let noqa = if checker.suppress_noqa {
+            None
+        } else {
+            Some(Box::new(FileNoqa::new(&checker.noqa, source_text)))
+        };
         (
             std::mem::take(&mut checker.diagnostics),
             std::mem::take(&mut checker.ty_pending),
@@ -814,6 +832,7 @@ fn scan_file(
             std::mem::take(&mut checker.fixes),
             checker.fixed_calls,
             std::mem::take(&mut checker.declined_fix_reasons),
+            noqa,
         )
     };
     let ty_source = if plan_fixes || pending.is_empty() {
@@ -837,6 +856,7 @@ fn scan_file(
         fixes,
         fixed_calls,
         declined_fix_reasons,
+        noqa,
     }))
 }
 
@@ -867,6 +887,67 @@ struct FileScan {
     fixes: Vec<Insertion>,
     fixed_calls: usize,
     declined_fix_reasons: Vec<DeclinedFixReason>,
+    /// This file's deferred `# noqa` work, present only when
+    /// `error_on_unused_noqa` made the walk report suppressed calls so their
+    /// directives could be judged used or unused (see [`apply_unused_noqa`]).
+    /// Boxed to keep the common `None` from widening every scan result.
+    noqa: Option<Box<FileNoqa>>,
+}
+
+/// One file's deferred `# noqa` bookkeeping, reduced at scan time to just what
+/// [`apply_unused_noqa`] needs so the directives themselves need not outlive
+/// the file's source.
+struct FileNoqa {
+    /// Lines whose directive suppresses `KW001`, blanket or coded.
+    suppressed_lines: FxHashSet<usize>,
+    /// Reportable `(line, column)` of each directive that names `KW001`
+    /// explicitly — the only directives an unused-directive error can name.
+    explicit_positions: Vec<(usize, usize)>,
+}
+
+impl FileNoqa {
+    fn new(noqa: &NoqaDirectives, source: &str) -> Self {
+        Self {
+            suppressed_lines: noqa.suppressed_lines(Diagnostic::CODE),
+            explicit_positions: noqa.explicit_code_directive_positions(source, Diagnostic::CODE),
+        }
+    }
+}
+
+/// Apply deferred `# noqa` suppression and report the directives it did not
+/// need.
+///
+/// Runs after the ty fallback, so a violation only ty can see still counts as
+/// a directive's justification. Every `KW001` diagnostic on a suppressed line
+/// is dropped; a `# noqa: KW001` that dropped nothing becomes a `KW002`.
+fn apply_unused_noqa(diagnostics: &mut Vec<Diagnostic>, files: &[(PathBuf, FileNoqa)]) {
+    if files.is_empty() {
+        return;
+    }
+    let by_path: FxHashMap<&Path, &FileNoqa> = files
+        .iter()
+        .map(|(path, noqa)| (path.as_path(), noqa))
+        .collect();
+    // Keyed by the paths owned by `files`, so the borrow outlives the retain.
+    let mut used: FxHashMap<&Path, FxHashSet<usize>> = FxHashMap::default();
+    diagnostics.retain(|diagnostic| {
+        let Some((path, noqa)) = by_path.get_key_value(diagnostic.path.as_path()) else {
+            return true;
+        };
+        if !noqa.suppressed_lines.contains(&diagnostic.line) {
+            return true;
+        }
+        used.entry(path).or_default().insert(diagnostic.line);
+        false
+    });
+    for (path, noqa) in files {
+        let used_lines = used.get(path.as_path());
+        for &(line, column) in &noqa.explicit_positions {
+            if !used_lines.is_some_and(|lines| lines.contains(&line)) {
+                diagnostics.push(Diagnostic::unused_noqa(path.clone(), line, column));
+            }
+        }
+    }
 }
 
 struct PendingTyWork {
@@ -1044,6 +1125,12 @@ struct CallChecker<'a> {
     /// `# noqa`/`# noqa: KW001` on a violating call's line suppresses both the
     /// diagnostic and any auto-fix for that call (issue #185).
     noqa: NoqaDirectives,
+    /// Whether the walk itself drops suppressed calls. Normally it does, which
+    /// also lets a suppressed call skip the ty fallback entirely. When
+    /// `error_on_unused_noqa` is set the walk must instead find out whether
+    /// each suppressed call really violates `KW001`, so suppression is
+    /// deferred to [`apply_unused_noqa`] after the ty phase.
+    suppress_noqa: bool,
     /// Stack of name bindings currently in scope (parameters, imports,
     /// `def`/`class` statements, single assignments), used to group deferred
     /// `recv.m(...)` and bare `f(...)` calls that must hover identically
@@ -1330,6 +1417,7 @@ impl<'a> CallChecker<'a> {
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
             noqa: NoqaDirectives::from_source(source, tokens),
+            suppress_noqa: plan_fixes || !config.error_on_unused_noqa,
             hover_group_frames: Vec::new(),
             hover_frame_index: FxHashMap::default(),
             hover_scope_stack: vec![HoverScope {
@@ -2020,9 +2108,12 @@ impl<'a> CallChecker<'a> {
         // auto-fix — and lets us skip the ty fallback for that call entirely
         // (issue #185). The diagnostic position uses the same `call.start()`
         // line, so the comment lands where the `path:line:col` output points.
-        if self
-            .noqa
-            .suppresses(call.start().to_usize(), Diagnostic::CODE)
+        // Under `error_on_unused_noqa` the call is checked anyway: proving a
+        // directive redundant means knowing whether it suppressed anything.
+        if self.suppress_noqa
+            && self
+                .noqa
+                .suppresses(call.start().to_usize(), Diagnostic::CODE)
         {
             return;
         }
@@ -2167,14 +2258,14 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(0)
             .max(constructor_positional_allowance);
         let (line, column) = self.diagnostic_position(call.start());
-        self.diagnostics.push(Diagnostic {
-            path: self.path.clone(),
+        self.diagnostics.push(Diagnostic::too_many_positional(
+            self.path.clone(),
             line,
             column,
-            callee: format_callee_display(&callee_fullname),
-            positional_count: effective_count,
+            format_callee_display(&callee_fullname),
+            effective_count,
             max_positional,
-        });
+        ));
         self.plan_builtin_fix_for_violation(
             call,
             &callee_fullname,
@@ -4335,14 +4426,14 @@ fn emit_if_violation_with_signature_fullname(
         || line_column(source, offset),
         |starts| line_column_from_starts(source, starts, offset),
     );
-    diagnostics.push(Diagnostic {
-        path: path.to_path_buf(),
+    diagnostics.push(Diagnostic::too_many_positional(
+        path.to_path_buf(),
         line,
         column,
-        callee: format_callee_display(diagnostic_fullname),
+        format_callee_display(diagnostic_fullname),
         positional_count,
         max_positional,
-    });
+    ));
     Some(max_positional)
 }
 
@@ -5342,7 +5433,7 @@ fn resolve_pending_with_ty(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::{
-        bound_import_name, call_shape_fingerprint, collect_python_files,
+        apply_unused_noqa, bound_import_name, call_shape_fingerprint, collect_python_files,
         collect_python_files_with_project_inventory, decorator_tail, estimated_hover_requests,
         has_staticmethod_or_classmethod_decorator, is_ignored_path,
         is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
@@ -5350,11 +5441,12 @@ mod tests {
         process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
         should_balance_grouped_ty, signature_is_fully_named, skipped_cache_miss_warnings,
         strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
-        CallAtStart, DeclinedFixReason, FileScan, FileSelection, FixOptIns, IfBranchTraversal,
-        InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst, TyFixes, TyShardAssigner,
-        REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection, FixOptIns,
+        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
+        TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
@@ -6257,9 +6349,14 @@ while cond:
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].line, 1);
         assert_eq!(d[0].column, 1);
-        assert_eq!(d[0].callee, "\"f\"");
-        assert_eq!(d[0].positional_count, 2);
-        assert_eq!(d[0].max_positional, 0);
+        assert_eq!(
+            d[0].kind,
+            DiagnosticKind::TooManyPositional {
+                callee: "\"f\"".to_owned(),
+                positional_count: 2,
+                max_positional: 0,
+            }
+        );
 
         // Ignored callables are suppressed even when the positional count
         // would otherwise exceed the limit.
@@ -7213,10 +7310,63 @@ registry['k'](1, 2)
     }
 
     #[test]
+    fn unused_noqa_drops_suppressed_diagnostics_and_reports_the_rest() {
+        let scanned = PathBuf::from("scanned.py");
+        let cached = PathBuf::from("cached.py");
+        let files = vec![(
+            scanned.clone(),
+            FileNoqa {
+                // Line 3 carries `# noqa: KW001`, line 5 a bare `# noqa`,
+                // line 9 a `# noqa: KW001` with nothing to suppress.
+                suppressed_lines: [3, 5, 9].into_iter().collect(),
+                explicit_positions: vec![(3, 10), (9, 10)],
+            },
+        )];
+        let diagnostic = |path: &PathBuf, line| {
+            Diagnostic::too_many_positional(path.clone(), line, 1, "f".to_owned(), 1, 0)
+        };
+        let mut diagnostics = vec![
+            diagnostic(&scanned, 3),
+            diagnostic(&scanned, 4),
+            diagnostic(&scanned, 5),
+            // A cached file's diagnostics were suppressed when it was
+            // scanned, so this pass must leave them alone.
+            diagnostic(&cached, 3),
+        ];
+
+        apply_unused_noqa(&mut diagnostics, &files);
+
+        assert_eq!(
+            diagnostics,
+            vec![
+                diagnostic(&scanned, 4),
+                diagnostic(&cached, 3),
+                Diagnostic::unused_noqa(scanned, 9, 10),
+            ]
+        );
+    }
+
+    #[test]
+    fn unused_noqa_leaves_diagnostics_alone_without_deferred_files() {
+        let mut diagnostics = vec![Diagnostic::too_many_positional(
+            PathBuf::from("main.py"),
+            2,
+            1,
+            "f".to_owned(),
+            1,
+            0,
+        )];
+        let expected = diagnostics.clone();
+        apply_unused_noqa(&mut diagnostics, &[]);
+        assert_eq!(diagnostics, expected);
+    }
+
+    #[test]
     fn ty_pending_scan_without_shared_source_is_reported() {
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
+        let mut noqa_files = Vec::new();
         let error = process_scan_outcome_for_ty(
             0,
             PathBuf::from("test.py"),
@@ -7237,10 +7387,12 @@ registry['k'](1, 2)
                 fixes: Vec::new(),
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
+                noqa: None,
             }),
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
+            &mut noqa_files,
         )
         .expect_err("missing shared source should be reported");
 
@@ -7257,6 +7409,7 @@ registry['k'](1, 2)
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
+        let mut noqa_files = Vec::new();
 
         process_scan_outcome_for_ty(
             7,
@@ -7265,6 +7418,7 @@ registry['k'](1, 2)
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
+            &mut noqa_files,
         )
         .expect("skipped scan records a warning");
 
@@ -7285,6 +7439,7 @@ registry['k'](1, 2)
         let mut diagnostics = Vec::new();
         let mut skip_warnings = Vec::new();
         let mut ty_work = Vec::new();
+        let mut noqa_files = Vec::new();
         let shared_source = Arc::new("f(1)\n".to_owned());
 
         process_scan_outcome_for_ty(
@@ -7301,10 +7456,12 @@ registry['k'](1, 2)
                 fixes: Vec::new(),
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
+                noqa: None,
             }),
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
+            &mut noqa_files,
         )
         .expect("empty pending scan does not need a shared source");
 
@@ -7328,10 +7485,17 @@ registry['k'](1, 2)
                 fixes: Vec::new(),
                 fixed_calls: 0,
                 declined_fix_reasons: Vec::new(),
+                // A scan with `error_on_unused_noqa` enabled hands its
+                // deferred directives on for the post-ty pass.
+                noqa: Some(Box::new(FileNoqa {
+                    suppressed_lines: std::iter::once(1).collect(),
+                    explicit_positions: vec![(1, 9)],
+                })),
             }),
             &mut diagnostics,
             &mut skip_warnings,
             &mut ty_work,
+            &mut noqa_files,
         )
         .expect("pending scan keeps a shared source");
 
@@ -7341,6 +7505,9 @@ registry['k'](1, 2)
         assert_eq!(ty_work[0].path, PathBuf::from("pending.py"));
         assert!(Arc::ptr_eq(&ty_work[0].source, &shared_source));
         assert_eq!(ty_work[0].pending.len(), 1);
+        assert_eq!(noqa_files.len(), 1);
+        assert_eq!(noqa_files[0].0, PathBuf::from("pending.py"));
+        assert_eq!(noqa_files[0].1.explicit_positions, vec![(1, 9)]);
     }
 
     #[test]
@@ -8089,9 +8256,13 @@ class C:
             &mut diagnostics,
         ));
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].callee, "\"K\"");
+        assert_eq!(diagnostics[0].callee(), Some("\"K\""));
 
-        diagnostics[0].callee = "\"__class__\" of \"object\"".to_string();
+        diagnostics[0].kind = DiagnosticKind::TooManyPositional {
+            callee: "\"__class__\" of \"object\"".to_owned(),
+            positional_count: 1,
+            max_positional: 0,
+        };
         assert!(normalize_static_ty_fallback(
             &index,
             &config,
@@ -8102,7 +8273,7 @@ class C:
             &mut diagnostics,
         ));
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].callee, "\"K\"");
+        assert_eq!(diagnostics[0].callee(), Some("\"K\""));
 
         let mut no_fallback = pending;
         no_fallback.fallback_fullname = None;

@@ -119,6 +119,7 @@ extend_exclude = ["generated", "vendor"]
 force_exclude = true
 cache_dir = ".strict-kwargs-cache"
 fix_synthesized_constructors = true
+error_on_unused_noqa = true
 output_format = "full"  # or "json", "github"
 ```
 
@@ -154,6 +155,21 @@ func(  # noqa: KW001
     3,
 )
 ```
+
+#### Finding `# noqa` comments that are no longer needed
+
+Set `error_on_unused_noqa = true` (or pass `--error-on-unused-noqa`) to report a `KW002` error for every `# noqa: KW001` directive that suppressed nothing:
+
+```text
+main.py:3:12: KW002 Unused `noqa` directive (unused: `KW001`)
+```
+
+Only directives that name `KW001` explicitly are reported.
+A bare `# noqa`, or one naming only other tools' codes, is left alone: `strict-kwargs` sees only its own rule, so it cannot tell whether such a directive is suppressing someone else's finding.
+
+`KW002` errors count towards the exit code of `check`.
+They belong to checking rather than fixing: `--error-on-unused-noqa` cannot be combined with `--fix` or `--diff`, and those modes neither report nor remove unused directives even when the rule is enabled in `pyproject.toml`.
+Enabling the rule makes suppressed calls cost a full check (including the `ty` fallback), so a run with many `# noqa` comments is somewhat slower.
 
 #### Using `# noqa` alongside Ruff
 
