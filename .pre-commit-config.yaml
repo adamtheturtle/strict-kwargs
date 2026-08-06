@@ -106,9 +106,12 @@ repos:
         types: [rust]
         pass_filenames: false
 
-  - repo: https://github.com/adamtheturtle/no-defaults
-    rev: v1.0.1
-    hooks:
+      # ``uvx`` rather than ``uv run``: this project is a maturin build, and
+      # ``uv run`` would compile the Rust crate before every commit.
       - id: no-defaults
+        name: no-defaults
+        entry: uvx no-defaults@1.0.1
+        language: system
+        types: [python]
         exclude: ^vendored/typeshed/
         stages: [pre-commit]
