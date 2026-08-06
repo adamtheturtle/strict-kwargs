@@ -1,0 +1,1 @@
+Add ``error_on_unused_noqa`` (and ``--error-on-unused-noqa``), which reports a new ``KW002`` error for every ``# noqa: KW001`` comment that suppressed nothing. Blanket ``# noqa`` comments, and comments naming only other tools' codes, are never reported.

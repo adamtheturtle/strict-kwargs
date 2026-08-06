@@ -34,6 +34,10 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Resolved `[tool.strict_kwargs]` configuration.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent on/off keys read straight from `[tool.strict_kwargs]`"
+)]
 pub struct Config {
     /// Required `strict-kwargs` version specifier for this project.
     #[serde(default)]
@@ -71,6 +75,13 @@ pub struct Config {
     /// were synthesized from class fields.
     #[serde(default)]
     pub fix_synthesized_constructors: bool,
+    /// Report a `KW002` error for every `# noqa: KW001` directive that
+    /// suppressed nothing.
+    ///
+    /// This changes which diagnostics are found, so it takes part in cache
+    /// fingerprints.
+    #[serde(default)]
+    pub error_on_unused_noqa: bool,
     /// Diagnostic output format for `strict-kwargs check`.
     ///
     /// This affects how diagnostics are reported, not which diagnostics are
@@ -358,6 +369,7 @@ mod tests {
       cache_dir = ".strict-kwargs-cache"
       debug = true
       fix_synthesized_constructors = true
+      error_on_unused_noqa = true
       output_format = "json"
       "#,
         )
@@ -388,6 +400,13 @@ mod tests {
         );
         assert!(config.debug);
         assert!(config.fix_synthesized_constructors);
+        assert!(config.error_on_unused_noqa);
+        // The rule changes which diagnostics are found, so it must reach the
+        // cache fingerprint.
+        assert!(
+            json.contains(r#""error_on_unused_noqa":true"#),
+            "json: {json}"
+        );
         assert_eq!(config.output_format, OutputFormat::Json);
     }
 

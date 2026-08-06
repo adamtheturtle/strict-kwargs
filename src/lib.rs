@@ -44,7 +44,7 @@ mod ty_resolver;
 
 pub use check::{check_paths, fix_paths, fix_paths_with_opt_ins};
 pub use config::{find_project_root, Config, OutputFormat};
-pub use diagnostic::Diagnostic;
+pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::CheckError;
 pub use fix::{
     unified_diff, write_all_preserving_encoding, DeclinedFixReason, DeclinedFixReasonCount,

@@ -325,6 +325,82 @@ fn check_json_output_writes_structured_diagnostics_to_stdout() {
 }
 
 #[test]
+fn error_on_unused_noqa_flag_reports_kw002_and_fails() {
+    let project = Project::new().write(
+        "main.py",
+        "def f(a: int) -> None: ...\nf(a=1)  # noqa: KW001\n",
+    );
+    assert_eq!(code(&project.run(&["check", "main.py"])), 0);
+
+    let output = project.run(&["check", "--error-on-unused-noqa", "main.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains("main.py:2:9: KW002 Unused `noqa` directive (unused: `KW001`)"),
+        "stdout: {out}"
+    );
+    assert!(out.contains("Found 1 error."), "stdout: {out}");
+}
+
+#[test]
+fn error_on_unused_noqa_can_be_enabled_by_config() {
+    let project = Project::new()
+        .write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\nversion = \"0\"\n\
+             [tool.strict_kwargs]\nerror_on_unused_noqa = true\n",
+        )
+        .write(
+            "main.py",
+            "def f(a: int) -> None: ...\nf(a=1)  # noqa: KW001\n",
+        );
+    let output = project.run(&["check", "--output-format", "json", "main.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json output");
+    let diagnostic = json.as_array().expect("diagnostic array")[0].clone();
+    assert_eq!(diagnostic["code"], "KW002");
+    assert_eq!(diagnostic["location"]["row"], 2);
+    assert_eq!(diagnostic["location"]["column"], 9);
+    assert_eq!(
+        diagnostic["message"],
+        "Unused `noqa` directive (unused: `KW001`)"
+    );
+    // The rule names no callee, so the field is absent rather than empty.
+    assert_eq!(diagnostic.get("callee"), None);
+}
+
+#[test]
+fn error_on_unused_noqa_is_rejected_with_fix() {
+    let project = Project::new().write(
+        "main.py",
+        "def f(a: int) -> None: ...\nf(a=1)  # noqa: KW001\n",
+    );
+    let output = project.run(&["check", "--fix", "--error-on-unused-noqa", "main.py"]);
+    assert_eq!(code(&output), 2);
+    let err = combined_output(&output);
+    assert!(err.contains("--error-on-unused-noqa"), "stderr: {err}");
+    // The file is left untouched by a rejected invocation.
+    assert!(project.read("main.py").contains("# noqa: KW001"));
+}
+
+#[test]
+fn unused_noqa_errors_survive_a_warm_cache_run() {
+    let project = Project::new().write(
+        "main.py",
+        "def f(a: int) -> None: ...\nf(a=1)  # noqa: KW001\n",
+    );
+    let cache_dir = project.root.join("cache");
+    let args = ["check", "--error-on-unused-noqa", "main.py"];
+    let cold = project.run_with_cache_env(&args, &cache_dir);
+    let warm = project.run_with_cache_env(&args, &cache_dir);
+    assert_eq!(code(&cold), 1, "stderr: {}", stderr(&cold));
+    assert_eq!(code(&warm), 1, "stderr: {}", stderr(&warm));
+    assert_eq!(stdout(&warm), stdout(&cold));
+    assert!(stdout(&warm).contains("KW002"), "stdout: {}", stdout(&warm));
+}
+
+#[test]
 fn check_github_output_writes_annotations_to_stdout() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["check", "--output-format", "github", "main.py"]);

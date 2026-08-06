@@ -434,7 +434,7 @@ impl DiagnosticKey {
             path: relative.to_string_lossy().replace('\\', "/"),
             line: diagnostic.line,
             column: diagnostic.column,
-            callee: canonical_callee(&diagnostic.callee),
+            callee: canonical_callee(diagnostic.callee().unwrap_or_default()),
         }
     }
 
