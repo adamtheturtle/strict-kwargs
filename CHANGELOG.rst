@@ -67,7 +67,7 @@ Changelog
   LSP/hover integration is now verified against. The full test suite (including
   the hover and goto-definition goldens) passes unchanged on ``0.0.52``, so the
   hover/LSP surface this project parses is unaffected. On the completeness
-  oracles the new ``ty`` is effectively neutral versus ``0.0.46`` — a handful of
+  oracles the new ``ty`` is effectively neutral versus ``0.0.46``: a handful of
   diagnostics churn either way, the only systematic change being ty's
   ``dict.pop`` overload fix, which drops three ``pop`` call sites that are no
   longer flagged.
@@ -79,10 +79,10 @@ Changelog
   roughly 40% on method-call-heavy projects (CPython completeness benchmark:
   ~24s to ~14.5s ty phase, ~29s to ~18s end to end; Sphinx: ~4s to ~2.1s).
   The built-in scan groups deferred calls that are proven to hover
-  identically — the same un-rebound ``self``/``cls`` parameter binding, the
+  identically: the same un-rebound ``self``/``cls`` parameter binding, the
   same attribute, and the same call shape (argument arity, coarse argument
   kinds, keyword names; ty's hover is call-site sensitive for overloads and
-  generics, so shape is part of the key) — and the ty fallback asks once per
+  generics, so shape is part of the key).  The ty fallback asks once per
   group. Grouping is dropped conservatively whenever the receiver could be
   rebound or narrowed (assignment to the name, the bare name escaping into a
   call such as ``isinstance(self, T)``, a comparison/truthiness test, a
@@ -111,7 +111,7 @@ Changelog
   server's open/query history, and the leading entry is often a local binding
   the definition parser cannot use. Trying each location makes the outcome
   independent of that ordering and recovers definitions a first-entry-only
-  read silently dropped — roughly 200 new true positives on the CPython
+  read silently dropped: roughly 200 new true positives on the CPython
   completeness oracle (``mock.patch.dict``, ``inspect.signature``, ``ctypes``
   constructors) and a handful on Sphinx, with no entries lost; one CPython
   call site is now attributed to the resolved class constructor instead of
@@ -121,7 +121,7 @@ Changelog
 - Speed up the ``ty`` inference fallback dramatically on large projects and
   make its results reproducible. The LSP client now advertises
   pull-diagnostics support, so ``ty`` no longer eagerly type-checks (and
-  pushes diagnostics for) every file the fallback opens — hover and definition
+  pushes diagnostics for) every file the fallback opens: hover and definition
   answers are computed on demand instead. The full CPython completeness run
   drops from ~42 minutes to ~42 seconds. Requests sent to ``ty`` also always
   carry absolute ``file://`` URIs now: a relative CLI path (``strict-kwargs
@@ -268,15 +268,15 @@ No significant changes.
 
 - Whole-project and directory runs are faster (issue #46). The per-file
   built-in pass (read, parse, AST walk) now runs in parallel across files
-  instead of sequentially — on a multicore machine it is the bulk of
+  instead of sequentially: on a multicore machine it is the bulk of
   whole-project runtime once ignored directories are pruned. The ``ty``
   fallback still runs serially against a single shared server, and output
   is byte-identical and deterministic regardless of how the work is
   scheduled.
 
 - A deeply nested file no longer crashes the process with a stack
-  overflow (issue #54). ``f(f(f(…f(1)…)))`` thousands of levels deep —
-  machine-generated code, a huge data literal, or hostile input — used to
+  overflow (issue #54). ``f(f(f(…f(1)…)))`` thousands of levels deep
+  (machine-generated code, a huge data literal, or hostile input) used to
   abort the whole run with ``SIGABRT`` (exit 134), taking every other file
   in a directory or pre-commit run down with it; the vendored Ruff parser
   fork enforces no recursion limit. The analysis now runs on a large
@@ -290,15 +290,15 @@ No significant changes.
   Previously a mistyped path made the run report "clean" (exit 0), a
   malformed or wrong-typed ``[tool.strict_kwargs]`` was ignored and the run
   proceeded with defaults, and an invalid ``--python`` silently disabled the
-  explicit environment — each a false pass or a silent downgrade in exactly
+  explicit environment: each a false pass or a silent downgrade in exactly
   the automated contexts this tool targets. Now: a path that does not exist
   is a hard error (exit 2), like ``ruff``, instead of being skipped (an
   existing non-Python file passed directly is still a deliberate selection
   and is skipped); a ``pyproject.toml`` that exists but cannot be read or
   parsed, or whose ``[tool.strict_kwargs]`` has the wrong shape or value
   types (e.g. ``ignore_names`` not a list), is a hard error (exit 2) rather
-  than a silent fall back to defaults — a missing ``pyproject.toml`` or one
-  without the table is still fine; and a nonexistent ``--python`` is
+  than a silent fall back to defaults (a missing ``pyproject.toml`` or one
+  without the table is still fine); and a nonexistent ``--python`` is
   reported on stderr and dropped, so the run falls back to ``ty``'s own
   environment discovery instead of degrading detection with no signal. The
   library ``Config::load`` now returns ``Result<Config, CheckError>`` and
@@ -316,9 +316,9 @@ No significant changes.
   declaration in the first two lines are now honored, so legacy-encoded but
   valid Python (``latin-1``/``iso-8859-1``, ``ascii``, explicit ``utf-8``)
   is decoded and checked rather than rejected. Any other *declared* encoding
-  degrades to the same graceful skip (still no crash, no masking — just not
+  degrades to the same graceful skip (still no crash, no masking, just not
   analysed); no third-party codec dependency is added. A genuine filesystem
-  error (missing file, permission denied) is still fatal — that is a real
+  error (missing file, permission denied) is still fatal: that is a real
   error, not a stray file.
 
 2026.5.18
@@ -326,9 +326,9 @@ No significant changes.
 
 - Fix a false negative where a call in **decorator** position was never
   analyzed (issue #51). Decorator-factory calls with surplus positional
-  arguments — ``@retry(3, 0.5)``, ``@functools.lru_cache(128)``,
+  arguments (``@retry(3, 0.5)``, ``@functools.lru_cache(128)``,
   ``@app.route("/x", 200)``, including attribute-chain and method
-  decorators — are now flagged exactly like the same call in statement
+  decorators) are now flagged exactly like the same call in statement
   position, and ``fix`` rewrites them (``@retry(times=3, delay=0.5)``)
   with the same conservative rules. The call-site walker previously
   descended only into function/class bodies and skipped their decorator
@@ -346,8 +346,8 @@ No significant changes.
   closed (a miss, never a wrong diagnostic).
 
 - ``strict-kwargs fix`` no longer silently disagrees with ``check``
-  (issue #42). It now runs the same detection — the built-in resolver
-  *and* the ``ty`` fallback — and accepts ``--python`` (mirroring
+  (issue #42). It now runs the same detection (the built-in resolver
+  *and* the ``ty`` fallback) and accepts ``--python`` (mirroring
   ``check``) to steer that fallback. The rewrite stays conservative and, by
   design (issue #7), still never edits an overloaded, synthesized, or
   ``ty``-only-resolved call (a wrong parameter name would corrupt source,
@@ -373,14 +373,14 @@ No significant changes.
   (``numpy``/``torch``/``scipy``/``PIL``) is now checked in milliseconds
   instead of timing out (issue #39, follow-up to #31/#36). The eager
   re-export expansion is gone; the ``DefinitionIndex`` now resolves modules
-  *and* re-export aliases lazily and on demand — only the modules a queried
+  *and* re-export aliases lazily and on demand: only the modules a queried
   name's actual re-export path traverses are parsed, instead of the whole
   transitive import closure. Re-export edges are indexed by destination
   (O(name-depth) per hop, not O(total edges)), a self-referential
   ``from pkg.sub import *`` web resolves via single-segment hops without the
   unbounded ``pkg.sub.sub…`` blow-up, and per-query module/step backstops
   keep an unforeseen pathology fail-closed (defers to ``ty``; never a false
-  positive). Resolution is otherwise unchanged — all existing behavior tests
+  positive). Resolution is otherwise unchanged: all existing behavior tests
   pass. A ``reexport_closure`` benchmark covers this shape (issue #30).
 
 - Fix a false positive on the explicit receiver of a first-party
@@ -399,7 +399,7 @@ No significant changes.
   longer take many seconds. Re-export expansion was super-quadratic in the
   index size; it now scans only each alias's prefix range, with identical
   output (issue #31).
-- Performance: ``ty server`` is started lazily — only when a file has calls
+- Performance: ``ty server`` is started lazily, only when a file has calls
   the built-in resolver could not resolve. Runs the built-in resolver fully
   handles (the common editor-on-save / pre-commit case on first-party code)
   no longer pay ty's project-indexing startup cost (issue #31).
@@ -409,7 +409,7 @@ No significant changes.
   generated first-party closure, plus the auto-fixer. A non-gating CI job
   reports an instruction-count delta against ``main`` on every PR.
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to
-  keyword arguments (``--diff`` to preview). Conservative — only calls that
+  keyword arguments (``--diff`` to preview). Conservative: only calls that
   resolve to a single known signature are rewritten (project code and the
   embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs``
   unpacking, and ty-only resolutions are left untouched. The implicit
