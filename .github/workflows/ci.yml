@@ -146,7 +146,7 @@ jobs:
 
       - name: Run the benchmarks
         if: ${{ github.event_name != 'pull_request' }}
-        uses: CodSpeedHQ/action@v5.0.1
+        uses: CodSpeedHQ/action@v5.0.2
         env:
           STRICT_KWARGS_BENCH_CPYTHON_CHECKOUT: ${{ github.event_name == 'workflow_dispatch' && inputs.include-cpython-benchmark && format('{0}/external/cpython', runner.temp) || '' }}
         with:
