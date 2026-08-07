@@ -146,7 +146,7 @@ func(1, 2, 3)  # noqa: KW001
 - A bare `# noqa` suppresses every finding on the line, matching Ruff.
 - Suppressed calls are skipped by `--fix` too, so a `# noqa` call is never rewritten.
 
-For a call spanning multiple lines, put the comment on the first line — the line the `path:line:col` output points at:
+For a call spanning multiple lines, put the comment on the first line, the line the `path:line:col` output points at:
 
 ```python
 func(  # noqa: KW001
