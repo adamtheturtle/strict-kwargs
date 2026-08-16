@@ -1,1 +1,0 @@
-Index the embedded typeshed files once, speeding up no-cache checks that resolve many standard-library calls.

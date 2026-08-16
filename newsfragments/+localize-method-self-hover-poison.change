@@ -1,1 +1,0 @@
-Keep safe ``self`` hover reuse in unaffected methods when another method narrows or escapes its receiver, reducing no-cache ``ty`` fallback work.

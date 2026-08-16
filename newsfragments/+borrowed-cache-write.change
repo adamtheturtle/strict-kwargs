@@ -1,1 +1,0 @@
-Serialize newly computed cache diagnostics without cloning their strings into a second in-memory representation, cutting cold-cache population medians by about 5% on the pinned Sphinx and CPython benchmarks.

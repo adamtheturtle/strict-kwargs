@@ -1,1 +1,0 @@
-Reuse identical ``self`` hover responses across ordinary methods of the same class, reducing no-cache ``ty`` fallback work on test-heavy projects.

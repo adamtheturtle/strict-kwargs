@@ -1,1 +1,0 @@
-Use eight deterministic ``ty server`` shards for uncached whole-project checks. In balanced ``ty`` 0.0.64 benchmarks with a fresh strict-kwargs cache, median wall time fell by about 6% on Sphinx and 16% on CPython. The new partition also stops emitting three dynamic-call false positives from the completeness floors.

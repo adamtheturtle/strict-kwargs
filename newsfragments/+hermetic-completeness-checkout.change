@@ -1,1 +1,0 @@
-Isolate reused CPython completeness checkouts so parent project metadata cannot change the golden oracle.

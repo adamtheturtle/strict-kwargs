@@ -3,6 +3,41 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.16
+---------
+
+- Avoid redundant cache-fingerprint walks for nested source roots and unused default Python environments.
+
+- Add ``error_on_unused_noqa`` (and ``--error-on-unused-noqa``), which reports a new ``KW002`` error for every ``# noqa: KW001`` comment that suppressed nothing. Blanket ``# noqa`` comments, and comments naming only other tools' codes, are never reported.
+
+- Avoid copying every ty-bound source file during no-cache checks.
+
+- Avoid copying ty hover payloads and share cached group responses, reducing cold-check time on repositories with many inferred calls.
+
+- Balance large no-cache checks by the ``ty`` hover requests remaining after grouped-answer reuse, reducing whole-repository fallback time.
+
+- Index the embedded typeshed files once, speeding up no-cache checks that resolve many standard-library calls.
+
+- Isolate reused CPython completeness checkouts so parent project metadata cannot change the golden oracle.
+
+- Keep safe ``self`` hover reuse in unaffected methods when another method narrows or escapes its receiver, reducing no-cache ``ty`` fallback work.
+
+- Reuse identical ``self`` hover responses across ordinary methods of the same class, reducing no-cache ``ty`` fallback work on test-heavy projects.
+
+- Run large no-cache fix and diff passes across deterministic ``ty server`` shards, substantially reducing whole-repository runtime while keeping smaller projects on the lower-overhead serial path.
+
+- Scan projects normally when an ancestor of the project root is a dot-directory, including macOS temporary directories used by generated benchmarks.
+
+- Serialize newly computed cache diagnostics without cloning their strings into a second in-memory representation, cutting cold-cache population medians by about 5% on the pinned Sphinx and CPython benchmarks.
+
+- Share cached ty definition responses between grouped calls instead of deep-cloning their JSON trees.
+
+- Sort whole-project diagnostic results in parallel, cutting cold-check medians by about 8% on CPython and 11% on Sphinx in the pinned repository benchmarks.
+
+- Store warm-cache diagnostics in one bounded manifest, avoiding one cache-file read and write per checked Python file.
+
+- Use eight deterministic ``ty server`` shards for uncached whole-project checks. In balanced ``ty`` 0.0.64 benchmarks with a fresh strict-kwargs cache, median wall time fell by about 6% on Sphinx and 16% on CPython. The new partition also stops emitting three dynamic-call false positives from the completeness floors.
+
 2026.7.24
 ---------
 

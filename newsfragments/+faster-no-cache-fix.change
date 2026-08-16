@@ -1,1 +1,0 @@
-Run large no-cache fix and diff passes across deterministic ``ty server`` shards, substantially reducing whole-repository runtime while keeping smaller projects on the lower-overhead serial path.

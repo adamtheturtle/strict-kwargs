@@ -1,1 +1,0 @@
-Balance large no-cache checks by the ``ty`` hover requests remaining after grouped-answer reuse, reducing whole-repository fallback time.
