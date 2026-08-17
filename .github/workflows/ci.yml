@@ -121,7 +121,7 @@ jobs:
         run: cargo metadata --locked --format-version 1
 
       - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2.85.11
+        uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-codspeed
 
