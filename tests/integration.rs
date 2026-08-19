@@ -2110,6 +2110,30 @@ Point(f).call(1)
 }
 
 #[test]
+fn record_replacements_preserve_callable_field_signatures() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass, replace
+from collections.abc import Callable
+from typing import NamedTuple
+@dataclass
+class D: call: Callable[[int], None]
+class N(NamedTuple): call: Callable[[int], None]
+def f(value: int) -> None: ...
+replace(D(call=f)).call(1)
+N(call=f)._replace().call(1)
+",
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(messages
+        .iter()
+        .any(|message| message.starts_with("main:9:")));
+    assert!(messages
+        .iter()
+        .any(|message| message.starts_with("main:10:")));
+}
+
+#[test]
 fn decorator_factory_call_flagged() {
     // Issue #51: a call in decorator position is a call like any other and
     // its surplus positional arguments must be flagged.

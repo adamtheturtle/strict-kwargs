@@ -2058,6 +2058,22 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn class_from_record_replacement(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        if let Expr::Attribute(method) = call.func.as_ref() {
+            if method.attr.as_str() == "_replace" {
+                return self.class_from_constructor(&method.value);
+            }
+        }
+        let fullname = self.resolve_callee(&call.func)?;
+        if fullname != "dataclasses.replace" {
+            return None;
+        }
+        self.class_from_constructor(call.arguments.args.first()?)
+    }
+
     const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
         match expr {
             Expr::StringLiteral(_) => Some("builtins.str"),
@@ -3258,6 +3274,9 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                if let Some(class_fullname) = self.class_from_record_replacement(value) {
+                    return Some(self.resolve_instance_method(&class_fullname, attr_name));
+                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;
