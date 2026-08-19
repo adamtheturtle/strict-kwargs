@@ -1103,6 +1103,8 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
+    /// Local asyncio Queue item bindings with a concrete callable item.
+    callable_queue_items: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1411,6 +1413,7 @@ impl<'a> CallChecker<'a> {
             class_stack: Vec::new(),
             function_stack: Vec::new(),
             callable_iterator_items: FxHashMap::default(),
+            callable_queue_items: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2121,16 +2124,22 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.next_result_signature(&call.func) {
-            Some(LocalFunction {
-                fullname: "next() result".to_string(),
-                signature,
-            })
-        } else if self.local_function_scope_count == 0 {
-            None
-        } else {
-            self.resolve_local_function_call(&call.func)
-        };
+        let local_function =
+            if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+                Some(LocalFunction {
+                    fullname: "asyncio.Queue.get() result".to_string(),
+                    signature,
+                })
+            } else if let Some(signature) = self.next_result_signature(&call.func) {
+                Some(LocalFunction {
+                    fullname: "next() result".to_string(),
+                    signature,
+                })
+            } else if self.local_function_scope_count == 0 {
+                None
+            } else {
+                self.resolve_local_function_call(&call.func)
+            };
         let callee_fullname = if let Some(local_function) = &local_function {
             local_function.fullname.clone()
         } else {
@@ -3166,6 +3175,37 @@ impl<'a> CallChecker<'a> {
         Self::callable_annotation_signature(item)
     }
 
+    fn queue_item_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        (Self::dotted_path(value)?.rsplit('.').next() == Some("Queue"))
+            .then(|| Self::callable_annotation_signature(slice))
+            .flatten()
+    }
+
+    fn awaited_queue_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Await(awaited) = func else {
+            return None;
+        };
+        let Expr::Call(get_call) = awaited.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(queue) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || !get_call.arguments.args.is_empty()
+            || !get_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.callable_queue_items.get(queue.id.as_str()).cloned()
+    }
+
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(next_call) = func else {
             return None;
@@ -3538,6 +3578,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    if let Some(signature) = Self::queue_item_callable_signature(annotation) {
+                        self.callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
                     self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
@@ -3556,6 +3600,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }) => {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    if let Some(signature) = Self::queue_item_callable_signature(annotation) {
+                        self.callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
                     self.mark_opaque_local(name.id.as_str());
                     self.define_annotation(name.id.as_str(), annotation);
                 }
