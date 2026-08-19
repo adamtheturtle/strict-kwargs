@@ -171,6 +171,23 @@ def f(value: int) -> None: ...
     );
 }
 
+/// A boolean expression whose operands are the same callable has an
+/// unambiguous signature (issue #363).
+#[test]
+fn boolean_expression_callee_resolves_matching_operands() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(f or f)(1)
+(f and f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "f") && has_error_at(&messages, 4, "f"),
+        "expected both boolean-expression violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
