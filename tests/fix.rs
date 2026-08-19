@@ -115,6 +115,14 @@ fn rewrites_functools_partial_result_call() {
 }
 
 #[test]
+fn rewrites_match_capture_alias_call() {
+    assert_fixed(
+        "def f(value): ...\nmatch f:\n    case alias:\n        alias(1)\n",
+        "def f(value): ...\nmatch f:\n    case alias:\n        alias(value=1)\n",
+    );
+}
+
+#[test]
 fn stale_function_signature_after_rebinding_is_not_used() {
     assert_unchanged(
         "def f(value):\n    return value\n\nf = lambda value, /: value\n\nassert f(1) == 1\n",
