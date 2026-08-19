@@ -2023,6 +2023,14 @@ fn index_stmt(
                 }
             }
         }
+        Stmt::Expr(ast::StmtExpr { value, .. }) => {
+            if let Expr::Named(named) = value.as_ref() {
+                if let Expr::Name(name) = named.target.as_ref() {
+                    store.exclude(format!("{scope_name}.{}", name.id));
+                }
+                exclude_assigned_attribute(store, scope_name, &named.target, Some(bindings));
+            }
+        }
         Stmt::AugAssign(ast::StmtAugAssign { target, .. }) => {
             if let Expr::Name(name) = target.as_ref() {
                 store.exclude(format!("{scope_name}.{}", name.id));
@@ -2191,6 +2199,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 if scope_name == module_name {
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
+            }
+        }
+        Stmt::Expr(ast::StmtExpr { value, .. }) => {
+            if let Expr::Named(named) = value.as_ref() {
+                if let Expr::Name(name) = named.target.as_ref() {
+                    store.exclude(format!("{scope_name}.{}", name.id));
+                }
+                exclude_assigned_attribute(store, scope_name, &named.target, None);
             }
         }
         Stmt::AugAssign(ast::StmtAugAssign { target, .. }) => {

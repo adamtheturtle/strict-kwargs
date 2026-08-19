@@ -3696,6 +3696,22 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         match expr {
+            Expr::Named(named) => {
+                self.visit_expr(&named.value);
+                if let Expr::Name(name) = named.target.as_ref() {
+                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                        scope.functions.contains_key(name.id.as_str())
+                            || scope.names.contains_key(name.id.as_str())
+                    });
+                    self.mark_opaque_local(name.id.as_str());
+                    if was_known_callable {
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.id.to_string());
+                    }
+                }
+                return;
+            }
             Expr::Call(call) => {
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);

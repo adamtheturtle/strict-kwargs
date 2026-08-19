@@ -252,6 +252,20 @@ f(1)
     assert!(messages.is_empty(), "stale match capture: {messages:?}");
 }
 
+/// A named expression replaces an earlier function binding with its new
+/// value (issue #419).
+#[test]
+fn walrus_rebinding_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(f := lambda *args: None)
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale walrus binding: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
