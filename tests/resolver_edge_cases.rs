@@ -177,6 +177,24 @@ f(1)
     );
 }
 
+/// Deleting a name inside a conditional branch is not a definite invalidation.
+#[test]
+fn conditional_delete_preserves_indexed_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+if condition:
+    del f
+f(1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains(r#"for "f" (got 1, maximum 0)"#),
+        "got: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
