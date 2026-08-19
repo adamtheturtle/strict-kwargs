@@ -3563,6 +3563,43 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn itertools_tuple_item_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let Expr::Call(next_call) = subscript.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iterator)] = &*next_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = iterator.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_module(module.id.as_str()).as_deref() != Some("itertools")
+            || !matches!(
+                attribute.attr.as_str(),
+                "pairwise" | "product" | "permutations" | "combinations" | "zip_longest"
+            )
+        {
+            return None;
+        }
+        let first = self.homogeneous_callable_sequence(iterator.arguments.args.first()?)?;
+        let all_sequences_match = match attribute.attr.as_str() {
+            "product" | "zip_longest" => iterator.arguments.args.iter().all(|sequence| {
+                self.homogeneous_callable_sequence(sequence).as_deref() == Some(first.as_str())
+            }),
+            _ => true,
+        };
+        all_sequences_match.then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
         let Expr::Call(call) = subscript.value.as_ref() else {
             return None;
@@ -3656,7 +3693,8 @@ impl<'a> CallChecker<'a> {
             Expr::Subscript(subscript) => self
                 .resolve_literal_container_item(&subscript.value, &subscript.slice)
                 .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
-                .or_else(|| self.random_sample_element_callable(subscript)),
+                .or_else(|| self.random_sample_element_callable(subscript))
+                .or_else(|| self.itertools_tuple_item_callable(subscript)),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
