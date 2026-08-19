@@ -3158,9 +3158,8 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn resolve_literal_subscript(&self, subscript: &ast::ExprSubscript) -> Option<String> {
-        let ast::ExprSubscript { value, slice, .. } = subscript;
-        match value.as_ref() {
+    fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
@@ -3181,6 +3180,29 @@ impl<'a> CallChecker<'a> {
                 .and_then(|item| self.resolve_callee(&item.value)),
             _ => None,
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn operator_getitem_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "getitem"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("operator")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [value, slice] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_literal_container_item(value, slice)
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
@@ -3209,7 +3231,9 @@ impl<'a> CallChecker<'a> {
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
             }
-            Expr::Subscript(subscript) => self.resolve_literal_subscript(subscript),
+            Expr::Subscript(subscript) => {
+                self.resolve_literal_container_item(&subscript.value, &subscript.slice)
+            }
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
@@ -3277,6 +3301,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.operator_getitem_callable(func) {
+                    return Some(callable);
+                }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
                 let dunder_call = format!("{class_fullname}.__call__");
                 self.index

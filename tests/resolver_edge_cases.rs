@@ -209,6 +209,23 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// `operator.getitem` shares literal container selection semantics with a
+/// subscript expression (issue #394).
+#[test]
+fn operator_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+def f(value: int) -> None: ...
+operator.getitem([f], 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected operator.getitem violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
