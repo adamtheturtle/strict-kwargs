@@ -2006,9 +2006,14 @@ fn index_stmt(
             }
             store.conditional_depth -= 1;
         }
-        Stmt::While(ast::StmtWhile { body, .. })
-        | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => {
+        Stmt::For(ast::StmtFor { target, body, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.exclude(format!("{scope_name}.{}", name.id));
+            }
+            exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+        }
+        Stmt::While(ast::StmtWhile { body, .. }) | Stmt::With(ast::StmtWith { body, .. }) => {
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
         }
         Stmt::Try(ast::StmtTry {
@@ -2143,9 +2148,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
             store.conditional_depth -= 1;
         }
-        Stmt::While(ast::StmtWhile { body, .. })
-        | Stmt::For(ast::StmtFor { body, .. })
-        | Stmt::With(ast::StmtWith { body, .. }) => {
+        Stmt::For(ast::StmtFor { target, body, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.exclude(format!("{scope_name}.{}", name.id));
+            }
+            exclude_assigned_attribute(store, scope_name, target, None);
+            index_module_fast(store, module_name, scope_name, body);
+        }
+        Stmt::While(ast::StmtWhile { body, .. }) | Stmt::With(ast::StmtWith { body, .. }) => {
             index_module_fast(store, module_name, scope_name, body);
         }
         Stmt::Try(ast::StmtTry {

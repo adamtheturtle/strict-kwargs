@@ -162,6 +162,24 @@ C().method(1)
     );
 }
 
+/// A `for` target remains bound after the loop and invalidates an earlier
+/// function definition with the same name (issue #414).
+#[test]
+fn for_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+for f in [lambda *args: None]:
+    pass
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale loop-target function: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
