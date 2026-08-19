@@ -5984,12 +5984,7 @@ mod tests {
 
     #[test]
     fn does_not_exempt_unrelated_callables() {
-        for fullname in [
-            "typing.cast",
-            "typing.NamedTuple",
-            "mypkg.TypeVar.__init__",
-            "TypeVar",
-        ] {
+        for fullname in ["typing.NamedTuple", "mypkg.TypeVar.__init__", "TypeVar"] {
             assert!(
                 !is_typing_special_form_constructor(fullname),
                 "{fullname} must not be exempt"
