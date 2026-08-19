@@ -349,6 +349,22 @@ mapping.pop("call")(1)
     assert!(has_error_at(&messages, 9, "f"), "messages: {messages:?}");
 }
 
+/// Generic context-manager entry methods retain the wrapped callable's
+/// concrete signature (issue #444).
+#[test]
+fn context_manager_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+from contextlib import ExitStack, nullcontext
+def f(value: int) -> None: ...
+ExitStack().enter_context(nullcontext(f))(1)
+nullcontext(f).__enter__()(1)
+",
+    );
+    assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 5, "f"), "messages: {messages:?}");
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

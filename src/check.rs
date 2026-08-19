@@ -3473,6 +3473,63 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn resolved_reference_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Name(name) => self.resolve_local(name.id.as_str()),
+            Expr::Attribute(attribute) => {
+                let Expr::Name(module) = attribute.value.as_ref() else {
+                    return None;
+                };
+                self.resolve_module(module.id.as_str())
+                    .map(|module| format!("{module}.{}", attribute.attr))
+            }
+            _ => None,
+        }
+    }
+
+    fn nullcontext_value_callable(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        if self.resolved_reference_name(&call.func).as_deref() != Some("contextlib.nullcontext")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [value] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_manager_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match (method.attr.as_str(), &*call.arguments.args) {
+            ("__enter__", []) => self.nullcontext_value_callable(&method.value),
+            ("enter_context", [context]) => {
+                let Expr::Call(stack) = method.value.as_ref() else {
+                    return None;
+                };
+                (self.resolved_reference_name(&stack.func).as_deref()
+                    == Some("contextlib.ExitStack")
+                    && stack.arguments.args.is_empty()
+                    && stack.arguments.keywords.is_empty())
+                .then(|| self.nullcontext_value_callable(context))
+                .flatten()
+            }
+            _ => None,
+        }
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
         let Expr::Call(call) = subscript.value.as_ref() else {
@@ -3654,6 +3711,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.tracked_container_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.context_manager_result_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
