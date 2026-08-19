@@ -2160,7 +2160,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.generic_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.deque_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "deque result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.generic_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "generic result".to_string(),
                 signature,
@@ -3283,6 +3288,66 @@ impl<'a> CallChecker<'a> {
                 })?;
             let callable = self.resolve_callee(argument)?;
             let signatures = self.index.get(&callable)?;
+            let [signature] = signatures.as_ref() else {
+                return None;
+            };
+            let unnamed = Signature {
+                parameters: signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| crate::signature::Parameter {
+                        name: None,
+                        kind: parameter.kind,
+                    })
+                    .collect(),
+            };
+            if result.as_ref().is_some_and(|existing| existing != &unnamed) {
+                return None;
+            }
+            result = Some(unnamed);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(method_call) = func else {
+            return None;
+        };
+        if !method_call.arguments.args.is_empty() || !method_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = method_call.func.as_ref() else {
+            return None;
+        };
+        if !matches!(method.attr.as_str(), "pop" | "popleft") {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let constructor_name = self.resolve_callee(&constructor.func)?;
+        if !matches!(
+            constructor_name.as_str(),
+            "collections.deque" | "collections.deque.__init__" | "collections.deque.__new__"
+        ) {
+            return None;
+        }
+        let iterable = constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        let elements = match iterable {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let mut result = None;
+        for element in elements {
+            let fullname = self.resolve_callee(element)?;
+            let signatures = self.index.get(&fullname)?;
             let [signature] = signatures.as_ref() else {
                 return None;
             };
