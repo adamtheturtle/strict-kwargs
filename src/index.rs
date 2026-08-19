@@ -966,6 +966,16 @@ impl DefinitionIndex {
             .is_some_and(|model| model.kind == ClassDataKind::Dataclass)
     }
 
+    /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
+    /// model.
+    pub fn is_namedtuple(&self, fullname: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .is_some_and(|model| model.kind == ClassDataKind::NamedTuple)
+    }
+
     /// Whether `fullname` is a function that must be skipped entirely
     /// (see [`Store::excluded`]).
     pub fn is_excluded(&self, fullname: &str) -> bool {
