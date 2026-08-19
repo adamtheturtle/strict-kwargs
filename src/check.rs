@@ -1776,6 +1776,15 @@ impl<'a> CallChecker<'a> {
         false
     }
 
+    fn is_deleted_or_opaque_name(&self, name: &str) -> bool {
+        self.is_opaque_local(name)
+            || self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.deleted_names.contains(name))
+    }
+
     fn define_module(&mut self, local_name: &str, module_path: String) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
@@ -2319,6 +2328,11 @@ impl<'a> CallChecker<'a> {
             local_function.fullname.clone()
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+                if let Expr::Name(name) = call.func.as_ref() {
+                    if self.is_deleted_or_opaque_name(name.id.as_str()) {
+                        return;
+                    }
+                }
                 // Built-in resolver couldn't resolve: defer to a pipelined ty
                 // query (handled once per file after the walk).
                 self.record_ty_pending(call);
@@ -3289,6 +3303,9 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
+            if scope.deleted_names.contains(local) {
+                return None;
+            }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
             }
@@ -4439,6 +4456,14 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                if self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.deleted_names.contains(local))
+                {
+                    return None;
+                }
                 // A parameter or other opaque local cannot be resolved to a
                 // concrete indexed definition — skip it to avoid false
                 // positives from a same-named function elsewhere (issue #71).
@@ -4996,7 +5021,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
             }
             Stmt::Delete(ast::StmtDelete { targets, .. }) => {
-                walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
                         self.mark_opaque_local(name.id.as_str());
@@ -5005,6 +5029,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string());
                     }
                 }
+                walk_stmt(self, stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,

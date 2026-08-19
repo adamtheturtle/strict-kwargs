@@ -3070,6 +3070,13 @@ class Child(Base):
     }
 
     #[test]
+    fn delete_excludes_function_signature() {
+        let store = indexed_store("def f(value: int) -> None: ...\ndel f\n");
+        assert!(!store.signatures.contains_key("main.f"));
+        assert!(store.excluded.contains("main.f"));
+    }
+
+    #[test]
     fn assignment_removes_stale_function_signature() {
         let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
         assert!(!store.signatures.contains_key("main.f"));

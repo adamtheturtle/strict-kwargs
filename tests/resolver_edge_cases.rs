@@ -160,6 +160,23 @@ C().bound(1)
     );
 }
 
+/// `del f` removes a local callable binding so later calls are not resolved
+/// against the deleted definition.
+#[test]
+fn delete_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+del f
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "deleted function must not be resolved: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
