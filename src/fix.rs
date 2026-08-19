@@ -592,3 +592,33 @@ mod tests {
         assert!(diff.contains("-Y\n+Y1\n"));
     }
 }
+
+/// Exercises `unified_diff` newline branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`.
+#[cfg(test)]
+mod unified_diff_coverage {
+    use super::unified_diff;
+    use std::path::Path;
+
+    #[test]
+    fn unified_diff_colored_missing_final_newline_on_both_sides() {
+        let diff = unified_diff(Path::new("m.py"), "f(1)", "f(value=1)", true);
+        assert!(diff.contains("\x1b["));
+        assert_eq!(diff.matches("\\ No newline at end of file").count(), 2);
+    }
+
+    #[test]
+    fn unified_diff_colored_missing_newline_on_unchanged_context_line() {
+        let diff = unified_diff(
+            Path::new("m.py"),
+            "def f(a: int) -> None: ...\nf(1)\n# unchanged",
+            "def f(a: int) -> None: ...\nf(value=1)\n# unchanged",
+            true,
+        );
+        assert!(diff.contains("\x1b["));
+        assert!(
+            diff.contains(" # unchanged\n\\ No newline at end of file\n"),
+            "diff: {diff}"
+        );
+    }
+}
