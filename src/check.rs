@@ -1100,6 +1100,9 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    /// Fully-qualified callables replaced by precise dynamic mutations such
+    /// as `setattr(C, "method", value)` earlier in this file.
+    invalidated_fullnames: FxHashSet<String>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1410,6 +1413,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            invalidated_fullnames: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2153,6 +2157,9 @@ impl<'a> CallChecker<'a> {
             };
             callee_fullname
         };
+        if self.invalidated_fullnames.contains(&callee_fullname) {
+            return;
+        }
         // Functions whose first argument must stay positional at runtime
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
         // without deferring to ty.
@@ -2968,6 +2975,30 @@ impl<'a> CallChecker<'a> {
             self.mark_opaque_local(&name);
             self.current_scope().invalidated_callables.insert(name);
         }
+    }
+
+    fn literal_setattr_fullname(&self, call: &ast::ExprCall) -> Option<String> {
+        let Expr::Name(function) = call.func.as_ref() else {
+            return None;
+        };
+        if function.id.as_str() != "setattr"
+            || self.resolve_local("setattr").is_some()
+            || self.resolve_module("setattr").is_some()
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [owner, attribute, _value] = &*call.arguments.args else {
+            return None;
+        };
+        let Expr::Name(owner) = owner else {
+            return None;
+        };
+        let Expr::StringLiteral(attribute) = attribute else {
+            return None;
+        };
+        let owner = self.resolve_local(owner.id.as_str())?;
+        Some(format!("{owner}.{}", attribute.value.to_str()))
     }
 
     /// The hover group for a deferred call, if its callee is an attribute on
@@ -3787,6 +3818,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 return;
             }
             Expr::Call(call) => {
+                let setattr_fullname = self.literal_setattr_fullname(call);
                 let is_unshadowed_exec = matches!(call.func.as_ref(), Expr::Name(name) if name.id.as_str() == "exec")
                     && self.resolve_local("exec").is_none()
                     && self.resolve_module("exec").is_none();
@@ -3801,6 +3833,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if is_unshadowed_exec {
                     walk_expr(self, expr);
                     self.invalidate_all_current_callables();
+                    return;
+                }
+                if let Some(fullname) = setattr_fullname {
+                    walk_expr(self, expr);
+                    self.invalidated_fullnames.insert(fullname);
                     return;
                 }
             }

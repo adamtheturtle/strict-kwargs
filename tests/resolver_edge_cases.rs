@@ -320,6 +320,21 @@ g(1)
     assert!(messages.is_empty(), "stale dynamic globals: {messages:?}");
 }
 
+/// Literal `setattr` on an indexed class and method invalidates the old
+/// method signature (issue #423).
+#[test]
+fn literal_setattr_invalidates_prior_method_signature() {
+    let messages = check_source(
+        r#"
+class C:
+    def method(self, value: int) -> None: ...
+setattr(C, "method", lambda *args: None)
+C().method(1)
+"#,
+    );
+    assert!(messages.is_empty(), "stale setattr method: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
