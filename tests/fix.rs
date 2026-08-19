@@ -99,6 +99,14 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn rewrites_direct_lambda_invocation() {
+    assert_fixed(
+        "(lambda value: None)(1)\n",
+        "(lambda value: None)(value=1)\n",
+    );
+}
+
+#[test]
 fn stale_function_signature_after_rebinding_is_not_used() {
     assert_unchanged(
         "def f(value):\n    return value\n\nf = lambda value, /: value\n\nassert f(1) == 1\n",

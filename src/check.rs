@@ -2117,7 +2117,17 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if self.local_function_scope_count == 0 {
+        let local_function = if let Expr::Lambda(lambda) = call.func.as_ref() {
+            Some(LocalFunction {
+                fullname: format!("{}.<lambda>", self.current_lexical_scope()),
+                signature: lambda.parameters.as_deref().map_or_else(
+                    || Signature {
+                        parameters: Vec::new(),
+                    },
+                    signature_from_parameters,
+                ),
+            })
+        } else if self.local_function_scope_count == 0 {
             None
         } else {
             self.resolve_local_function_call(&call.func)

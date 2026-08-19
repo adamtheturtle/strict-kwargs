@@ -225,6 +225,17 @@ def f(value: int) -> None: ...
     );
 }
 
+/// Lambda parameters have ordinary positional-or-keyword semantics when the
+/// lambda expression is invoked directly (issue #366).
+#[test]
+fn direct_lambda_invocation_uses_lambda_signature() {
+    let messages = check_source("(lambda value: None)(1)\n");
+    assert!(
+        has_error_at(&messages, 1, "lambda"),
+        "expected direct lambda violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
