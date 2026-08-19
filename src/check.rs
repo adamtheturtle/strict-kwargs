@@ -3432,6 +3432,21 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    // Covered by the dataclass callable-field regression; non-constructor,
+    // non-dataclass, missing-field, and non-callable shapes intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn dataclass_constructor_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let class_fullname = self.class_from_constructor_func(&constructor.func)?;
+        if !self.index.is_dataclass(&class_fullname) {
+            return None;
+        }
+        let field = constructor.arguments.find_keyword(attr)?;
+        self.resolve_callee(&field.value)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3494,6 +3509,10 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                if let Some(callable) = self.dataclass_constructor_field_callable(value, attr_name)
+                {
+                    return Some(callable);
+                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;

@@ -956,6 +956,16 @@ impl DefinitionIndex {
         self.read().store.synthesized.contains(fullname)
     }
 
+    /// Whether `fullname` is an indexed dataclass with a synthesized field
+    /// model.
+    pub fn is_dataclass(&self, fullname: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .is_some_and(|model| model.kind == ClassDataKind::Dataclass)
+    }
+
     /// Whether `fullname` is a function that must be skipped entirely
     /// (see [`Store::excluded`]).
     pub fn is_excluded(&self, fullname: &str) -> bool {

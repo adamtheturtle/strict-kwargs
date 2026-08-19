@@ -360,6 +360,27 @@ namespace.call(1)
     );
 }
 
+/// A dataclass constructor keyword directly supplies the corresponding field
+/// value, preserving a concrete callable's signature (issue #373).
+#[test]
+fn dataclass_constructor_keyword_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass
+class Holder:
+    call: Callable[[int], None]
+def f(value: int) -> None: ...
+Holder(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "f"),
+        "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
