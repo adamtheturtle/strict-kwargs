@@ -663,6 +663,25 @@ weakref.ref(f)()(1)
     );
 }
 
+/// `copy.copy` and `copy.deepcopy` return their input type, preserving a
+/// concrete callable shape without preserving unsafe keyword names (#388).
+#[test]
+fn copy_results_propagate_callable_arguments() {
+    let messages = check_source(
+        r"
+import copy
+def f(value: int) -> None: ...
+copy.copy(x=f)(1)
+copy.deepcopy(x=f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result")
+            && has_error_at(&messages, 5, "generic result"),
+        "expected copy-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
