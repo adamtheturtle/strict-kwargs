@@ -329,6 +329,26 @@ secrets.choice([f])(1)
     }
 }
 
+/// Weak containers retain concrete callable element and value signatures
+/// through `pop` (issue #443).
+#[test]
+fn weak_container_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+import weakref
+from collections.abc import Callable
+def f(value: int) -> None: ...
+values = weakref.WeakSet([f])
+values.pop()(1)
+mapping: weakref.WeakValueDictionary[str, Callable[[int], None]] = weakref.WeakValueDictionary()
+mapping["call"] = f
+mapping.pop("call")(1)
+"#,
+    );
+    assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 9, "f"), "messages: {messages:?}");
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
