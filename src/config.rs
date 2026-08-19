@@ -349,17 +349,22 @@ fn dot_for_empty(path: PathBuf) -> PathBuf {
 /// Discover project root by walking up from ``start`` looking for ``pyproject.toml``.
 #[must_use]
 pub fn find_project_root(start: &Path) -> PathBuf {
-    let mut current = if start.is_file() {
+    // Falling back to the directory the walk began in, rather than to
+    // ``start`` itself, keeps every path in one directory agreeing on a root
+    // when no ``pyproject.toml`` is found. Falling back to a file path would
+    // also name a root that is not a directory.
+    let base = if start.is_file() {
         start.parent().unwrap_or(start).to_path_buf()
     } else {
         start.to_path_buf()
     };
+    let mut current = base.clone();
     loop {
         if current.join("pyproject.toml").is_file() {
             return dot_for_empty(current);
         }
         if !current.pop() {
-            return dot_for_empty(start.to_path_buf());
+            return dot_for_empty(base);
         }
     }
 }
