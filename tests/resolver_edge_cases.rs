@@ -365,6 +365,26 @@ nullcontext(f).__enter__()(1)
     assert!(has_error_at(&messages, 5, "f"), "messages: {messages:?}");
 }
 
+/// Element-preserving itertools constructors retain callable signatures
+/// through next (issue #448).
+#[test]
+fn itertools_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.accumulate([f]))(1)
+next(itertools.compress([f], [True]))(1)
+next(itertools.dropwhile(lambda _: False, [f]))(1)
+next(itertools.takewhile(lambda _: True, [f]))(1)
+next(itertools.islice([f], 1))(1)
+",
+    );
+    for line in 4..=8 {
+        assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

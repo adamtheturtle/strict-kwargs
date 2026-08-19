@@ -3531,6 +3531,38 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn itertools_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iterator)] = &*next_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = iterator.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_module(module.id.as_str()).as_deref() != Some("itertools") {
+            return None;
+        }
+        let (
+            ("accumulate" | "compress" | "islice", [sequence, ..])
+            | ("dropwhile" | "takewhile", [_, sequence, ..]),
+        ) = ((attribute.attr.as_str(), &*iterator.arguments.args),)
+        else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(sequence)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
         let Expr::Call(call) = subscript.value.as_ref() else {
             return None;
@@ -3714,6 +3746,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.context_manager_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.itertools_next_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
