@@ -3112,6 +3112,10 @@ impl<'a> CallChecker<'a> {
 
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
+            // A named expression evaluates to its value. Resolve the value
+            // directly so `(alias := f)(1)` has the same callable signature
+            // as `f(1)` (issue #361).
+            Expr::Named(ast::ExprNamed { value, .. }) => self.resolve_callee(value),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a

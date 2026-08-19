@@ -139,6 +139,22 @@ fn over_deep_relative_import_returns_none() {
 
 // --- Unusual callee expressions --------------------------------------------
 
+/// A named expression evaluates to its assigned value, so using one as the
+/// callee preserves the concrete function signature (issue #361).
+#[test]
+fn named_expression_callee_resolves_its_value() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(alias := f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "f"),
+        "expected named-expression violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
