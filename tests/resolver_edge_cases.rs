@@ -334,6 +334,32 @@ match f:
     );
 }
 
+/// Literal `SimpleNamespace` constructor keywords define concrete callable
+/// attributes on the assigned instance (issue #372).
+#[test]
+fn simple_namespace_keyword_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def f(value: int) -> None: ...
+namespace = SimpleNamespace(call=f)
+namespace.call(1)
+namespace = object()
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "f"),
+        "expected namespace callable violation, got: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "rebinding must clear synthesized attributes: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
