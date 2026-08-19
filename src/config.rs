@@ -117,10 +117,18 @@ impl Config {
                 path: pyproject.clone(),
                 message: format!("could not be read: {error}"),
             })?;
-        Self::from_pyproject_str(&contents).map_err(|message| CheckError::ConfigInvalid {
-            path: pyproject,
-            message,
-        })
+        let config =
+            Self::from_pyproject_str(&contents).map_err(|message| CheckError::ConfigInvalid {
+                path: pyproject,
+                message,
+            })?;
+        config
+            .validate_directory_settings(project_root)
+            .map_err(|message| CheckError::ConfigInvalid {
+                path: project_root.join("pyproject.toml"),
+                message,
+            })?;
+        Ok(config)
     }
 
     /// Parse configuration from the contents of a `pyproject.toml`.
@@ -166,6 +174,24 @@ impl Config {
     #[must_use]
     pub fn is_ignored(&self, fullname: &str) -> bool {
         self.ignore_names.iter().any(|name| name == fullname)
+    }
+
+    fn validate_directory_settings(&self, project_root: &Path) -> Result<(), String> {
+        for (setting, paths) in [
+            ("src", self.src.as_slice()),
+            ("namespace_packages", self.namespace_packages.as_slice()),
+        ] {
+            for configured in paths {
+                let resolved = resolve_configured_path(project_root, configured);
+                if !resolved.is_dir() {
+                    return Err(format!(
+                        "`[tool.strict_kwargs].{setting}` entry `{}` must be an existing directory",
+                        configured.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -811,6 +837,31 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
+    }
+
+    #[test]
+    fn load_rejects_invalid_directory_settings() {
+        for (setting, entry) in [
+            ("src", "missing-src"),
+            ("namespace_packages", "missing-namespace"),
+            ("src", "main.py"),
+            ("namespace_packages", "main.py"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
+            std::fs::write(
+                dir.path().join("pyproject.toml"),
+                format!("[tool.strict_kwargs]\n{setting} = [\"{entry}\"]\n"),
+            )
+            .expect("write");
+            let error = Config::load(dir.path()).expect_err("invalid directory must fail");
+            let CheckError::ConfigInvalid { message, .. } = error else {
+                panic!("expected ConfigInvalid, got {error:?}");
+            };
+            assert!(message.contains(setting), "message: {message}");
+            assert!(message.contains(entry), "message: {message}");
+            assert!(message.contains("existing directory"), "message: {message}");
+        }
     }
 
     #[test]
