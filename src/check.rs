@@ -1391,6 +1391,9 @@ struct Scope {
     callable_queue_items: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Local `ContextVar[Callable[...]]` bindings and the callable value
+    /// signature returned by their zero-argument `get()` method.
+    contextvar_callables: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -2290,6 +2293,11 @@ impl<'a> CallChecker<'a> {
         }
         let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
             Some(method)
+        } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "ContextVar.get() result".to_string(),
+                signature,
+            })
         } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "Generator.send() result".to_string(),
@@ -4102,6 +4110,47 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("ContextVar") {
+            return None;
+        }
+        Self::callable_annotation_signature(slice)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        if !get_call.arguments.args.is_empty() || !get_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(value) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get" {
+            return None;
+        }
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.contextvar_callables.get(value.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(value.id.as_str())
+                || scope.opaque_locals.contains(value.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn awaited_queue_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Await(awaited) = func else {
             return None;
@@ -5249,6 +5298,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .contextvar_callables
+                                .insert(name.id.to_string(), signature);
+                        }
+                    }
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {
