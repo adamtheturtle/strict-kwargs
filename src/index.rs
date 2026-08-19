@@ -284,6 +284,35 @@ fn is_exec_call(value: &Expr) -> bool {
     matches!(value, Expr::Call(call) if matches!(call.func.as_ref(), Expr::Name(name) if name.id.as_str() == "exec"))
 }
 
+fn literal_setattr_fullname(
+    value: &Expr,
+    scope_name: &str,
+    bindings: Option<&FxHashMap<String, String>>,
+) -> Option<String> {
+    let Expr::Call(call) = value else {
+        return None;
+    };
+    let Expr::Name(function) = call.func.as_ref() else {
+        return None;
+    };
+    if function.id.as_str() != "setattr" || !call.arguments.keywords.is_empty() {
+        return None;
+    }
+    let [owner, attribute, _value] = &*call.arguments.args else {
+        return None;
+    };
+    let Expr::Name(owner) = owner else {
+        return None;
+    };
+    let Expr::StringLiteral(attribute) = attribute else {
+        return None;
+    };
+    let owner = bindings
+        .and_then(|bindings| bindings.get(owner.id.as_str()).cloned())
+        .unwrap_or_else(|| format!("{scope_name}.{}", owner.id));
+    Some(format!("{owner}.{}", attribute.value.to_str()))
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_pattern_bindings(store: &mut Store, scope_name: &str, pattern: &ast::Pattern) {
     match pattern {
@@ -2093,6 +2122,9 @@ fn index_stmt(
             if is_exec_call(value) {
                 exclude_scope_callables(store, scope_name);
             }
+            if let Some(fullname) = literal_setattr_fullname(value, scope_name, Some(bindings)) {
+                store.exclude(fullname);
+            }
             if let Expr::Named(named) = value.as_ref() {
                 if let Expr::Name(name) = named.target.as_ref() {
                     store.exclude(format!("{scope_name}.{}", name.id));
@@ -2285,6 +2317,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::Expr(ast::StmtExpr { value, .. }) => {
             if is_exec_call(value) {
                 exclude_scope_callables(store, scope_name);
+            }
+            if let Some(fullname) = literal_setattr_fullname(value, scope_name, None) {
+                store.exclude(fullname);
             }
             if let Expr::Named(named) = value.as_ref() {
                 if let Expr::Name(name) = named.target.as_ref() {
