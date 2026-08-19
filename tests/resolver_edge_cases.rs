@@ -311,6 +311,24 @@ heapq.heapreplace(heap, f)(1)
     assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
 }
 
+/// Generic selectors in `random` and `secrets` retain their input element's
+/// concrete callable signature (issue #442).
+#[test]
+fn random_selector_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import random, secrets
+def f(value: int) -> None: ...
+random.choice([f])(1)
+random.sample([f], k=1)[0](1)
+secrets.choice([f])(1)
+",
+    );
+    for line in 4..=6 {
+        assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

@@ -1552,6 +1552,19 @@ impl<'a> CallChecker<'a> {
             .then_some(first)
     }
 
+    fn homogeneous_callable_sequence(&self, value: &Expr) -> Option<String> {
+        let elements = match value {
+            Expr::List(sequence) => &sequence.elts,
+            Expr::Tuple(sequence) => &sequence.elts,
+            _ => return None,
+        };
+        let mut elements = elements.iter();
+        let first = self.resolve_callee(elements.next()?)?;
+        elements
+            .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
     fn mark_param_opaque(&mut self, name: &str) {
         self.mark_opaque_local(name);
     }
@@ -3366,6 +3379,54 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn random_choice_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "choice"
+            || !call.arguments.keywords.is_empty()
+            || !matches!(
+                self.resolve_module(module.id.as_str()).as_deref(),
+                Some("random" | "secrets")
+            )
+        {
+            return None;
+        }
+        let [sequence] = &*call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(sequence)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "sample"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("random")
+        {
+            return None;
+        }
+        let [sequence] = &*call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(sequence)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -3436,7 +3497,8 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Subscript(subscript) => self
                 .resolve_literal_container_item(&subscript.value, &subscript.slice)
-                .or_else(|| self.ordered_dict_popitem_value_callable(subscript)),
+                .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
+                .or_else(|| self.random_sample_element_callable(subscript)),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
@@ -3517,6 +3579,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.random_choice_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
