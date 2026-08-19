@@ -405,6 +405,20 @@ next(itertools.zip_longest([f]))[0](1)
     }
 }
 
+/// A weak callable proxy retains the concrete referent signature (issue
+/// #450).
+#[test]
+fn weakref_proxy_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def f(value: int) -> None: ...
+weakref.proxy(f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
