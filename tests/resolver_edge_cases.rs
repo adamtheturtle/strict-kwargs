@@ -139,6 +139,25 @@ fn over_deep_relative_import_returns_none() {
 
 // --- Unusual callee expressions --------------------------------------------
 
+#[test]
+fn deleted_definitions_do_not_produce_diagnostics() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+del f
+f(1)
+class C:
+    def method(self, value: int) -> None: ...
+del C.method
+C().method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale deleted definitions: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

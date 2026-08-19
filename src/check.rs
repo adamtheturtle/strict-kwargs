@@ -1357,6 +1357,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Names explicitly removed by `del`; unlike other opaque bindings these
+    /// must not be sent to ty, which may still resolve the stale definition.
+    deleted_names: FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -1484,6 +1487,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.deleted_names.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1503,6 +1507,7 @@ impl<'a> CallChecker<'a> {
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.deleted_names.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -2116,6 +2121,16 @@ impl<'a> CallChecker<'a> {
                 .suppresses(call.start().to_usize(), Diagnostic::CODE)
         {
             return;
+        }
+        if let Expr::Name(name) = call.func.as_ref() {
+            if self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.deleted_names.contains(name.id.as_str()))
+            {
+                return;
+            }
         }
         let local_function = if self.local_function_scope_count == 0 {
             None
@@ -3555,6 +3570,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
+                    }
+                }
+            }
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                walk_stmt(self, stmt);
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        self.mark_opaque_local(name.id.as_str());
+                        self.current_scope()
+                            .deleted_names
+                            .insert(name.id.to_string());
                     }
                 }
             }

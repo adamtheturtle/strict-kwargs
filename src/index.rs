@@ -230,6 +230,15 @@ fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     }
 }
 
+fn exclude_deleted_name(store: &mut Store, scope_name: &str, target: &Expr) {
+    if store.conditional_depth > 0 {
+        return;
+    }
+    if let Expr::Name(name) = target {
+        store.exclude(format!("{scope_name}.{}", name.id));
+    }
+}
+
 // Covered through callable-instance integration tests. Excluded from the
 // coverage gate because llvm-cov reports branch holes for the duplicated
 // test-binary instantiations of this small binding shim.
@@ -1983,6 +1992,14 @@ fn index_stmt(
                 }
             }
         }
+        Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+            for target in targets {
+                exclude_deleted_name(store, scope_name, target);
+                if scope_name == module_name {
+                    exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+                }
+            }
+        }
         Stmt::AnnAssign(ast::StmtAnnAssign {
             target,
             value: Some(_),
@@ -2122,6 +2139,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
                 remove_assigned_name(store, scope_name, target);
+                if scope_name == module_name {
+                    exclude_assigned_attribute(store, scope_name, target, None);
+                }
+            }
+        }
+        Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+            for target in targets {
+                exclude_deleted_name(store, scope_name, target);
                 if scope_name == module_name {
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
