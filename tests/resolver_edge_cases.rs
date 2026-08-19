@@ -484,6 +484,26 @@ factory()(1)
     );
 }
 
+/// A descriptor's annotated `__get__` callable return becomes the signature
+/// of class attributes assigned from that descriptor (issue #379).
+#[test]
+fn descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected descriptor-return violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
