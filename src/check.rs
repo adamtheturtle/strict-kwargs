@@ -3604,6 +3604,13 @@ impl<'a> CallChecker<'a> {
                     .then_some(resolved)
             }
             Expr::Subscript(subscript) => {
+                if let Some(returned) = self
+                    .class_from_constructor(&subscript.value)
+                    .map(|class| format!("{class}.__getitem__.__return__"))
+                    .filter(|returned| self.index.get(returned).is_some())
+                {
+                    return Some(returned);
+                }
                 if let Expr::Call(sorted) = subscript.value.as_ref() {
                     self.preserving_builtin_result(sorted, &["builtins.sorted"])
                         .or_else(|| self.resolve_literal_subscript(subscript))
