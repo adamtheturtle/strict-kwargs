@@ -2655,11 +2655,17 @@ fn index_class_body(
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
+                if let (Expr::Name(name), Some(signature)) =
+                    (target.as_ref(), callable_annotation_signature(annotation))
+                {
+                    store.insert(format!("{class_name}.{}", name.id), signature);
+                }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
