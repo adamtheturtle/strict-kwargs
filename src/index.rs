@@ -16,7 +16,7 @@ use crate::config::SourceRoots;
 use crate::error::CheckError;
 use crate::limits::parse_module_guarded;
 use crate::resolve::ModuleResolver;
-use crate::signature::{ParameterKind, Signature};
+use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::read_python_source_lossy;
 
 mod data_model;
@@ -71,6 +71,12 @@ struct Store {
     /// Statically proven positional-only signatures returned by simple
     /// decorator functions.
     decorator_returns: FxHashMap<String, Signature>,
+    /// Descriptor class fullname -> concrete callable signature returned by
+    /// its annotated `__get__` method.
+    descriptor_get_returns: FxHashMap<String, Signature>,
+    /// Unqualified descriptor class names, used as a cheap assignment filter
+    /// before resolving a constructor reference.
+    descriptor_get_names: FxHashSet<String>,
     /// Modules supplied as check targets rather than loaded from vendored
     /// typeshed or lazily resolved dependencies.
     first_party_modules: FxHashSet<String>,
@@ -313,6 +319,68 @@ fn synthesize_partialmethod(
     store.signatures.insert(fullname.clone(), transformed);
     bind(bindings, target.id.as_str(), fullname);
     true
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
+    let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+        return None;
+    };
+    if callee_tail(value) != Some("Callable") {
+        return None;
+    }
+    let Expr::Tuple(tuple) = slice.as_ref() else {
+        return None;
+    };
+    let parameters = match tuple.elts.first()? {
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .map(|_| Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            })
+            .collect(),
+        Expr::EllipsisLiteral(_) => vec![Parameter {
+            name: None,
+            kind: ParameterKind::VarPositional,
+        }],
+        _ => return None,
+    };
+    Some(Signature { parameters })
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn synthesize_descriptor_attribute(
+    store: &mut Store,
+    module_name: &str,
+    class_name: &str,
+    target: &Expr,
+    value: &Expr,
+    bindings: &FxHashMap<String, String>,
+) {
+    let (Expr::Name(target), Expr::Call(constructor)) = (target, value) else {
+        return;
+    };
+    let Some(descriptor_class) = reference_path(&constructor.func)
+        .and_then(|path| resolve_reference(bindings, module_name, &path))
+    else {
+        return;
+    };
+    let Some(signature) = store.descriptor_get_returns.get(&descriptor_class).cloned() else {
+        return;
+    };
+    let fullname = format!("{class_name}.{}", target.id);
+    store.excluded.remove(&fullname);
+    store.signatures.insert(fullname, vec![signature]);
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn assignment_may_construct_descriptor(store: &Store, value: &Expr) -> bool {
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    callee_tail(&call.func).is_some_and(|name| store.descriptor_get_names.contains(name))
 }
 
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
@@ -2320,6 +2388,7 @@ fn index_class_body(
                 parameters,
                 decorator_list,
                 body,
+                returns,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
@@ -2344,6 +2413,18 @@ fn index_class_body(
                         signature,
                         has_overload_decorator(decorator_list),
                     );
+                }
+                if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
+                    if let Some(signature) =
+                        returns.as_deref().and_then(callable_annotation_signature)
+                    {
+                        store
+                            .descriptor_get_returns
+                            .insert(class_name.to_string(), signature);
+                        if let Some(name) = class_name.rsplit('.').next() {
+                            store.descriptor_get_names.insert(name.to_string());
+                        }
+                    }
                 }
                 if body_may_contain_indexed_def(body) {
                     let mut nested_bindings = bindings.clone();
@@ -2375,6 +2456,16 @@ fn index_class_body(
                 for target in targets {
                     if synthesize_partialmethod(store, class_name, target, value, bindings) {
                         continue;
+                    }
+                    if assignment_may_construct_descriptor(store, value) {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            bindings,
+                        );
                     }
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
@@ -2464,6 +2555,7 @@ fn index_class_body(
 
 #[cfg_attr(coverage, coverage(off))]
 fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str, body: &[Stmt]) {
+    let bindings = FxHashMap::default();
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -2471,6 +2563,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 parameters,
                 decorator_list,
                 body,
+                returns,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
@@ -2492,6 +2585,18 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         has_overload_decorator(decorator_list),
                     );
                 }
+                if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
+                    if let Some(signature) =
+                        returns.as_deref().and_then(callable_annotation_signature)
+                    {
+                        store
+                            .descriptor_get_returns
+                            .insert(class_name.to_string(), signature);
+                        if let Some(name) = class_name.rsplit('.').next() {
+                            store.descriptor_get_names.insert(name.to_string());
+                        }
+                    }
+                }
                 if body_may_contain_indexed_def(body) {
                     index_module_fast(store, module_name, &fullname, body);
                 }
@@ -2503,6 +2608,16 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
+                    if assignment_may_construct_descriptor(store, value) {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            &bindings,
+                        );
+                    }
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
