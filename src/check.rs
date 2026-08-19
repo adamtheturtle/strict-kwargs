@@ -3259,7 +3259,17 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let factory = self.resolve_callee(&call.func)?;
-        let generic = self.generic_returns.get(&factory)?;
+        let known_copy_return;
+        let generic = if let Some(generic) = self.generic_returns.get(&factory) {
+            generic
+        } else if matches!(factory.as_str(), "copy.copy" | "copy.deepcopy") {
+            known_copy_return = GenericReturn {
+                parameters: vec![(Some(0), "x".to_string())],
+            };
+            &known_copy_return
+        } else {
+            return None;
+        };
         let mut result: Option<Signature> = None;
         for (index, name) in &generic.parameters {
             let argument = index
