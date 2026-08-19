@@ -1105,6 +1105,8 @@ struct CallChecker<'a> {
     callable_iterator_items: FxHashMap<String, Signature>,
     /// Local asyncio Queue item bindings with a concrete callable item.
     callable_queue_items: FxHashMap<String, Signature>,
+    /// Local asyncio Task result bindings with a concrete callable result.
+    callable_task_results: FxHashMap<String, Signature>,
     /// Function fullname -> concrete callable returned by that function.
     callable_function_results: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
@@ -1416,6 +1418,7 @@ impl<'a> CallChecker<'a> {
             function_stack: Vec::new(),
             callable_iterator_items: FxHashMap::default(),
             callable_queue_items: FxHashMap::default(),
+            callable_task_results: FxHashMap::default(),
             callable_function_results: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
@@ -2127,27 +2130,31 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function =
-            if let Some(signature) = self.asyncio_combinator_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "asyncio result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "asyncio.Queue.get() result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.next_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "next() result".to_string(),
-                    signature,
-                })
-            } else if self.local_function_scope_count == 0 {
-                None
-            } else {
-                self.resolve_local_function_call(&call.func)
-            };
+        let local_function = if let Some(signature) = self.task_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.Task.result()".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.asyncio_combinator_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.Queue.get() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.next_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "next() result".to_string(),
+                signature,
+            })
+        } else if self.local_function_scope_count == 0 {
+            None
+        } else {
+            self.resolve_local_function_call(&call.func)
+        };
         let callee_fullname = if let Some(local_function) = &local_function {
             local_function.fullname.clone()
         } else {
@@ -3192,6 +3199,34 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    fn task_result_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        (Self::dotted_path(value)?.rsplit('.').next() == Some("Task"))
+            .then(|| Self::callable_annotation_signature(slice))
+            .flatten()
+    }
+
+    fn task_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(task) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "result"
+            || !call.arguments.args.is_empty()
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.callable_task_results.get(task.id.as_str()).cloned()
+    }
+
     fn awaited_queue_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Await(awaited) = func else {
             return None;
@@ -3641,6 +3676,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    if let Some(signature) = Self::task_result_callable_signature(annotation) {
+                        self.callable_task_results
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.callable_queue_items
                             .insert(name.id.to_string(), signature);
@@ -3663,6 +3702,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }) => {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
+                    if let Some(signature) = Self::task_result_callable_signature(annotation) {
+                        self.callable_task_results
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.callable_queue_items
                             .insert(name.id.to_string(), signature);

@@ -202,6 +202,24 @@ async def caller() -> None:
     }
 }
 
+/// An annotated asyncio Task result retains its callable signature
+/// (issue #447).
+#[test]
+fn annotated_asyncio_task_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+task: asyncio.Task[Callable[[int], None]]
+task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "result()"),
+        "expected task result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
