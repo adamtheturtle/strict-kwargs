@@ -248,6 +248,29 @@ def second(value: int) -> None: ...
     );
 }
 
+/// A literal dictionary's `setdefault` returns either its known existing
+/// value or the supplied default, preserving either callable signature
+/// (issue #439).
+#[test]
+fn literal_dict_setdefault_preserves_callable_signatures() {
+    let messages = check_source(
+        r#"
+def existing(value: int) -> None: ...
+def fallback(value: int) -> None: ...
+{"call": existing}.setdefault("call", fallback)(1)
+{}.setdefault("call", fallback)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "existing"),
+        "expected existing-value violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "fallback"),
+        "expected default-value violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
