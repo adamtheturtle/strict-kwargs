@@ -1035,6 +1035,19 @@ fn fix_and_diff_are_mutually_exclusive() {
 }
 
 #[test]
+fn unsafe_fixes_requires_fix_or_diff() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--unsafe-fixes", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--unsafe-fixes"), "stderr: {err}");
+    assert!(
+        err.contains("--fix") && err.contains("--diff"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
 fn fix_rejects_output_format() {
     let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
     let output = project.run(&["check", "--fix", "--output-format", "json", "main.py"]);

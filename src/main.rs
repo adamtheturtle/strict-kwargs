@@ -43,6 +43,11 @@ enum Command {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    clap::ArgGroup::new("fix_mode")
+        .args(["fix", "diff"])
+        .multiple(false)
+))]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "clap stores independent boolean flags directly"
@@ -65,7 +70,7 @@ struct CheckArgs {
     diff: bool,
 
     /// Include fixes that may change runtime behavior.
-    #[arg(long)]
+    #[arg(long, requires = "fix_mode")]
     unsafe_fixes: bool,
 
     /// Diagnostic output format.
