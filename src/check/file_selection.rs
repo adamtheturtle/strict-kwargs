@@ -352,3 +352,68 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
         _ => false,
     })
 }
+
+#[cfg(test)]
+mod file_selection_coverage {
+    use super::{collect_python_files, collect_python_files_for_fix};
+    use crate::config::Config;
+
+    #[test]
+    fn collect_python_files_for_fix_keeps_files_within_directory_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pkg = root.path().join("pkg");
+        std::fs::create_dir_all(&pkg).expect("mkdir");
+        std::fs::write(pkg.join("in_scope.py"), "").expect("write in scope");
+        std::fs::write(root.path().join("out_of_scope.py"), "").expect("write out of scope");
+
+        let files = collect_python_files_for_fix(
+            root.path(),
+            std::slice::from_ref(&pkg),
+            &Config::default(),
+        )
+        .expect("collect for fix");
+
+        assert_eq!(files, vec![pkg.join("in_scope.py")]);
+    }
+
+    #[test]
+    fn collect_python_files_for_fix_keeps_explicit_file_outside_directory_args() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("pkg")).expect("mkdir");
+        std::fs::write(root.path().join("pkg/in_scope.py"), "").expect("write in scope");
+        let explicit = root.path().join("explicit.py");
+        std::fs::write(&explicit, "").expect("write explicit");
+
+        let files = collect_python_files_for_fix(
+            root.path(),
+            &[root.path().join("pkg"), explicit.clone()],
+            &Config::default(),
+        )
+        .expect("collect for fix");
+
+        let mut expected = vec![root.path().join("pkg/in_scope.py"), explicit];
+        expected.sort();
+        let mut actual = files;
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn collect_python_files_for_fix_preserves_display_path_from_collection() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("main.py"), "").expect("write");
+        let collected = collect_python_files(
+            root.path(),
+            &[root.path().join("./main.py")],
+            &Config::default(),
+        )
+        .expect("collect");
+        let fixed = collect_python_files_for_fix(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .expect("collect for fix");
+        assert_eq!(fixed, collected);
+    }
+}
