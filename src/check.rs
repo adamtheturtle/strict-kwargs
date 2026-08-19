@@ -1111,6 +1111,11 @@ struct CallChecker<'a> {
     /// Callable values yielded by `@contextmanager` functions, keyed by the
     /// manager factory's fullname.
     callable_contextmanager_items: FxHashMap<String, Signature>,
+    /// Generic function fullname -> parameters whose type variable is also
+    /// returned, allowing concrete callable arguments to flow to the result.
+    generic_returns: FxHashMap<String, GenericReturn>,
+    /// Locally declared `TypeVar` names eligible for generic propagation.
+    type_vars: FxHashSet<String>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1380,6 +1385,11 @@ struct LocalFunction {
     signature: Signature,
 }
 
+#[derive(Debug, Clone)]
+struct GenericReturn {
+    parameters: Vec<(Option<usize>, String)>,
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn remove_function_binding(scope: &mut Scope, local_name: &str) {
     if scope.had_function_binding {
@@ -1422,6 +1432,8 @@ impl<'a> CallChecker<'a> {
             callable_iterator_items: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
+            generic_returns: FxHashMap::default(),
+            type_vars: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2148,7 +2160,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.anext_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.generic_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "generic result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.anext_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "anext() result".to_string(),
                 signature,
@@ -3202,6 +3219,82 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generic_return_from_parameters(
+        &self,
+        parameters: &ast::Parameters,
+        returns: Option<&Expr>,
+    ) -> Option<GenericReturn> {
+        let return_annotation = returns?;
+        let Expr::Name(return_name) = return_annotation else {
+            return None;
+        };
+        if !self.type_vars.contains(return_name.id.as_str()) {
+            return None;
+        }
+        let return_text = self.source[return_annotation.range()].trim();
+        let positional = parameters
+            .posonlyargs
+            .iter()
+            .chain(&parameters.args)
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                let annotation = parameter.parameter.annotation.as_deref()?;
+                (self.source[annotation.range()].trim() == return_text)
+                    .then(|| (Some(index), parameter.parameter.name.to_string()))
+            });
+        let keyword_only = parameters.kwonlyargs.iter().filter_map(|parameter| {
+            let annotation = parameter.parameter.annotation.as_deref()?;
+            (self.source[annotation.range()].trim() == return_text)
+                .then(|| (None, parameter.parameter.name.to_string()))
+        });
+        let matching = positional.chain(keyword_only).collect::<Vec<_>>();
+        (!matching.is_empty()).then_some(GenericReturn {
+            parameters: matching,
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generic_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let factory = self.resolve_callee(&call.func)?;
+        let generic = self.generic_returns.get(&factory)?;
+        let mut result: Option<Signature> = None;
+        for (index, name) in &generic.parameters {
+            let argument = index
+                .and_then(|index| call.arguments.args.get(index))
+                .filter(|argument| !argument.is_starred_expr())
+                .or_else(|| {
+                    call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name.as_str()))
+                            .then_some(&keyword.value)
+                    })
+                })?;
+            let callable = self.resolve_callee(argument)?;
+            let signatures = self.index.get(&callable)?;
+            let [signature] = signatures.as_ref() else {
+                return None;
+            };
+            let unnamed = Signature {
+                parameters: signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| crate::signature::Parameter {
+                        name: None,
+                        kind: parameter.kind,
+                    })
+                    .collect(),
+            };
+            if result.as_ref().is_some_and(|existing| existing != &unnamed) {
+                return None;
+            }
+            result = Some(unnamed);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_sequence_index(slice: &Expr, len: usize) -> Option<usize> {
         match slice {
             Expr::NumberLiteral(ast::ExprNumberLiteral {
@@ -4097,6 +4190,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_returns.insert(fullname.clone(), signature);
                 }
+                if let Some(generic) =
+                    self.generic_return_from_parameters(parameters, returns.as_deref())
+                {
+                    self.generic_returns.insert(fullname.clone(), generic);
+                }
                 if self.function_stack.is_empty() {
                     self.define(name, fullname.clone());
                 } else {
@@ -4151,6 +4249,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.class_stack.pop();
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
+                if let ([Expr::Name(target)], Expr::Call(call)) =
+                    (targets.as_slice(), value.as_ref())
+                {
+                    if decorator_tail(&call.func) == Some("TypeVar") {
+                        self.type_vars.insert(target.id.to_string());
+                    }
+                }
                 let class_fullname = self.class_from_obvious_instance(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
