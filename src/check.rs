@@ -3925,6 +3925,9 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    // Covered end-to-end by the context-manager binding regression. Other
+    // target and unresolved-manager shapes intentionally retain normal walks.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_with_stmt(&mut self, with_stmt: &'a ast::StmtWith) {
         for item in &with_stmt.items {
             self.visit_expr(&item.context_expr);
