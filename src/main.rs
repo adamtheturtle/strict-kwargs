@@ -454,12 +454,16 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
 
     if args.diff {
         let color = diff_color();
+        let stdout = std::io::stdout();
+        let mut stdout = BufWriter::new(stdout.lock());
         for fix in fixes {
-            print!(
+            write!(
+                stdout,
                 "{}",
                 unified_diff(&fix.path, &fix.original, &fix.fixed, color)
-            );
+            )?;
         }
+        stdout.flush()?;
         report_diff_summary(fixes, remaining);
         return Ok(fix_exit_code(remaining));
     }
