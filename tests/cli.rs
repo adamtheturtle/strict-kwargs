@@ -1141,6 +1141,40 @@ fn fix_diff_prints_patch_without_writing() {
 }
 
 #[test]
+fn fix_diff_marks_missing_final_newline() {
+    let project = Project::new();
+    std::fs::write(
+        project.root.join("main.py"),
+        b"def f(a: int) -> None: ...\nf(1)",
+    )
+    .expect("write source without trailing newline");
+    let output = project.run(&["check", "--diff", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let patch = stdout(&output);
+    assert!(
+        patch.contains("\\ No newline at end of file"),
+        "patch: {patch}"
+    );
+}
+
+#[test]
+fn fix_diff_marks_missing_newline_on_unchanged_context_line() {
+    let project = Project::new();
+    std::fs::write(
+        project.root.join("main.py"),
+        b"def f(a: int) -> None: ...\nf(1)\n# unchanged",
+    )
+    .expect("write source without trailing newline");
+    let output = project.run(&["check", "--diff", "main.py"]);
+    assert_eq!(code(&output), 0);
+    let patch = stdout(&output);
+    assert!(
+        patch.contains(" # unchanged\n\\ No newline at end of file\n"),
+        "patch: {patch}"
+    );
+}
+
+#[test]
 fn fix_diff_handles_closed_stdout_without_panicking() {
     let mut source = String::from("def f(value: int) -> None: ...\n");
     for _ in 0..5_000 {
