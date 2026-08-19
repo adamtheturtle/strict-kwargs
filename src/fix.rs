@@ -111,10 +111,11 @@ impl FileFix {
     /// # Errors
     ///
     /// Returns an I/O error if the original file cannot be read, the fixed
-    /// text cannot be represented in its original encoding, or the rewritten
-    /// bytes cannot be written.
+    /// text cannot be represented in its original encoding, the file changed
+    /// after this fix was planned, or the rewritten bytes cannot be written.
     pub fn write_preserving_encoding(&self) -> std::io::Result<()> {
         let original_bytes = std::fs::read(&self.path)?;
+        ensure_source_is_current(self, &original_bytes)?;
         let fixed_bytes = crate::source::encode_python_source(&original_bytes, &self.fixed)
             .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
         std::fs::write(&self.path, fixed_bytes)
@@ -136,6 +137,7 @@ pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
         .iter()
         .map(|fix| {
             let original = std::fs::read(&fix.path)?;
+            ensure_source_is_current(fix, &original)?;
             let fixed_bytes = crate::source::encode_python_source(&original, &fix.fixed)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
             Ok((fix.path.clone(), original, fixed_bytes))
@@ -153,6 +155,26 @@ pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
         written.push((path, original));
     }
     Ok(())
+}
+
+fn ensure_source_is_current(fix: &FileFix, bytes: &[u8]) -> std::io::Result<()> {
+    match crate::source::decode_python_source(bytes) {
+        crate::source::Source::Decoded(current) if current == fix.original => Ok(()),
+        crate::source::Source::Decoded(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to overwrite {}: source changed after fixes were planned",
+                fix.path.display()
+            ),
+        )),
+        crate::source::Source::Undecodable(reason) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to overwrite {}: current source cannot be decoded: {reason}",
+                fix.path.display()
+            ),
+        )),
+    }
 }
 
 /// What a fix run produced: the files it would rewrite plus the number of
@@ -323,6 +345,32 @@ mod tests {
     }
 
     #[test]
+    fn write_preserving_encoding_rejects_a_stale_fix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.py");
+        std::fs::write(&path, "edited independently\n").expect("write source");
+        let fix = FileFix {
+            path: path.clone(),
+            original: "analyzed source\n".to_owned(),
+            fixed: "fixed analyzed source\n".to_owned(),
+            count: 1,
+        };
+
+        let error = fix
+            .write_preserving_encoding()
+            .expect_err("stale fix must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("changed after fixes were planned"));
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read source"),
+            "edited independently\n"
+        );
+    }
+
+    #[test]
     fn write_all_preflights_every_file_before_changing_any() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.py");
@@ -369,6 +417,42 @@ mod tests {
         assert_eq!(
             std::fs::read(path).expect("read source"),
             b"# coding: ascii\nx = 1\n"
+        );
+    }
+
+    #[test]
+    fn write_all_rejects_a_stale_fix_before_writing_any_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.py");
+        let stale = dir.path().join("stale.py");
+        std::fs::write(&first, "first before\n").expect("write first");
+        std::fs::write(&stale, "independent edit\n").expect("write stale");
+        let fixes = [
+            FileFix {
+                path: first.clone(),
+                original: "first before\n".to_owned(),
+                fixed: "first after\n".to_owned(),
+                count: 1,
+            },
+            FileFix {
+                path: stale.clone(),
+                original: "stale before\n".to_owned(),
+                fixed: "stale after\n".to_owned(),
+                count: 1,
+            },
+        ];
+
+        let error = write_all_preserving_encoding(&fixes)
+            .expect_err("stale fix must fail during preflight");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_to_string(first).expect("read first"),
+            "first before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale).expect("read stale"),
+            "independent edit\n"
         );
     }
 
