@@ -139,22 +139,24 @@ fn over_deep_relative_import_returns_none() {
 
 // --- Unusual callee expressions --------------------------------------------
 
+/// `partialmethod` retains the wrapped method signature after removing
+/// arguments bound after the receiver (issue #377).
 #[test]
-fn deleted_definitions_do_not_produce_diagnostics() {
+fn partialmethod_preserves_remaining_method_signature() {
     let messages = check_source(
         r"
-def f(value: int) -> None: ...
-del f
-f(1)
+from functools import partialmethod
 class C:
-    def method(self, value: int) -> None: ...
-del C.method
-C().method(1)
+    def base(self, required: int, /, value: int) -> None: ...
+    method = partialmethod(base)
+    bound = partialmethod(base, 0)
+C().method(0, 1)
+C().bound(1)
 ",
     );
     assert!(
-        messages.is_empty(),
-        "stale deleted definitions: {messages:?}"
+        has_error_at(&messages, 7, "method") && has_error_at(&messages, 8, "bound"),
+        "expected both partialmethod violations, got: {messages:?}"
     );
 }
 
@@ -228,6 +230,26 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Generic builtins that select or sort elements preserve a homogeneous
+/// literal collection's concrete callable signature (issue #370).
+#[test]
+fn generic_builtin_results_preserve_literal_callable_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+min([f], key=id)(1)
+max((f,), key=id)(1)
+sorted({f}, key=id)[0](1)
+",
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "f"),
+            "expected generic-builtin violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
@@ -241,6 +263,638 @@ def f(value: int) -> None: ...
     assert!(
         has_error_at(&messages, 3, "f"),
         "expected direct lambda-result violation, got: {messages:?}"
+    );
+}
+
+/// Lambda parameters have ordinary positional-or-keyword semantics when the
+/// lambda expression is invoked directly (issue #366).
+#[test]
+fn direct_lambda_invocation_uses_lambda_signature() {
+    let messages = check_source("(lambda value: None)(1)\n");
+    assert!(
+        has_error_at(&messages, 1, "lambda"),
+        "expected direct lambda violation, got: {messages:?}"
+    );
+}
+
+/// `typing.cast` itself is exempt, while a cast to a concrete `Callable`
+/// supplies the result call's positional limit (issue #367).
+#[test]
+fn typing_cast_callable_result_is_checked_without_flagging_cast() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import cast
+def f(value: int) -> None: ...
+cast(Callable[[int], None], f)(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected only the result call: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "cast result"),
+        "expected cast-result violation, got: {messages:?}"
+    );
+}
+
+/// `functools.partial` exposes the wrapped callable after removing parameters
+/// consumed by bound positional arguments (issue #368).
+#[test]
+fn functools_partial_result_preserves_remaining_signature() {
+    let messages = check_source(
+        r"
+from functools import partial
+def f(required: int, /, value: int) -> None: ...
+partial(f)(0, 1)
+partial(f, 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "partial") && has_error_at(&messages, 5, "partial"),
+        "expected both partial-result violations, got: {messages:?}"
+    );
+}
+
+/// `next` returns the item type declared by local iterator and generator
+/// factories, including a concrete callable signature (issue #369).
+#[test]
+fn annotated_iterator_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator, Generator
+def iterator() -> Iterator[Callable[[int], None]]: ...
+def generator() -> Generator[Callable[[int], None], None, None]: ...
+next(iterator())(1)
+next(generator())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        "expected iterator and generator result violations, got: {messages:?}"
+    );
+}
+
+/// `iter(instance)` uses the concrete callable item type declared by the
+/// instance class's `__iter__` return annotation (issue #382).
+#[test]
+fn annotated_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+next(iter(C()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected __iter__ result violation, got: {messages:?}"
+    );
+}
+
+/// A single irrefutable capture aliases the match subject and therefore keeps
+/// its concrete callable signature (issue #371).
+#[test]
+fn match_capture_alias_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+match f:
+    case alias:
+        alias(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "f"),
+        "expected match-capture alias violation, got: {messages:?}"
+    );
+}
+
+/// Literal `SimpleNamespace` constructor keywords define concrete callable
+/// attributes on the assigned instance (issue #372).
+#[test]
+fn simple_namespace_keyword_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def f(value: int) -> None: ...
+namespace = SimpleNamespace(call=f)
+namespace.call(1)
+namespace = object()
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "f"),
+        "expected namespace callable violation, got: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "rebinding must clear synthesized attributes: {messages:?}"
+    );
+}
+
+/// A dataclass constructor keyword directly supplies the corresponding field
+/// value, preserving a concrete callable's signature (issue #373).
+#[test]
+fn dataclass_constructor_keyword_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass
+class Holder:
+    call: Callable[[int], None]
+def f(value: int) -> None: ...
+Holder(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "f"),
+        "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
+/// A `NamedTuple` constructor keyword directly supplies the corresponding
+/// callable field value (issue #374).
+#[test]
+fn namedtuple_constructor_keyword_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import NamedTuple
+class Holder(NamedTuple):
+    call: Callable[[int], None]
+def f(value: int) -> None: ...
+Holder(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "f"),
+        "expected NamedTuple field violation, got: {messages:?}"
+    );
+}
+
+/// A literal `operator.attrgetter` applied to a receiver with a known
+/// callable attribute preserves that attribute's signature (issue #375).
+#[test]
+fn attrgetter_result_preserves_known_callable_attribute() {
+    let messages = check_source(
+        r#"
+from operator import attrgetter
+from types import SimpleNamespace
+def f(value: int) -> None: ...
+holder = SimpleNamespace(call=f)
+attrgetter("call")(holder)(1)
+attrgetter("call")(SimpleNamespace(call=f))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "f") && has_error_at(&messages, 7, "f"),
+        "expected both attrgetter-result violations, got: {messages:?}"
+    );
+}
+
+/// `itemgetter` consumes its operand positionally but preserves a statically
+/// selected literal container element's callable signature (issue #376).
+#[test]
+fn itemgetter_operand_is_exempt_and_result_is_checked() {
+    let messages = check_source(
+        r"
+from operator import itemgetter
+def f(value: int) -> None: ...
+itemgetter(0)([f])(1)
+itemgetter(-1)((f,))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "only result calls should fail: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 4, "f") && has_error_at(&messages, 5, "f"),
+        "expected both itemgetter result violations, got: {messages:?}"
+    );
+}
+
+/// A local factory's return annotation identifies a callable instance class
+/// and therefore its concrete `__call__` signature (issue #378).
+#[test]
+fn typed_factory_result_preserves_callable_instance_signature() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def factory() -> C:
+    return C()
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "__call__"),
+        "expected typed factory-result violation, got: {messages:?}"
+    );
+}
+
+/// A descriptor's annotated `__get__` callable return becomes the signature
+/// of class attributes assigned from that descriptor (issue #379).
+#[test]
+fn descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// Callable-annotated instance fields retain the annotation's concrete
+/// signature when accessed on a newly constructed instance (issue #380).
+#[test]
+fn callable_instance_field_annotation_is_resolved() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+
+class C:
+    call: Callable[[int], None]
+    def __init__(self, call: Callable[[int], None]) -> None:
+        self.call = call
+
+def f(value: int) -> None: ...
+C(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "call"),
+        "expected callable-field violation, got: {messages:?}"
+    );
+}
+
+/// A concrete callable return annotation on `__getitem__` supplies the
+/// selected value's signature (issue #381).
+#[test]
+fn getitem_callable_return_is_resolved() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+
+class C:
+    def __getitem__(self, key: str) -> Callable[[int], None]:
+        def inner(value: int) -> None: ...
+        return inner
+
+C()["call"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "__return__"),
+        "expected getitem-result violation, got: {messages:?}"
+    );
+}
+
+/// Awaiting a local async factory preserves its concrete callable return
+/// annotation (issue #383).
+#[test]
+fn awaited_callable_result_preserves_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def caller() -> None:
+    (await factory())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "awaited result"),
+        "expected awaited-result violation, got: {messages:?}"
+    );
+}
+
+/// `anext` preserves callable item signatures declared by async iterator
+/// factories (issue #384).
+#[test]
+fn annotated_anext_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def functions() -> AsyncIterator[Callable[[int], None]]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected anext-result violation, got: {messages:?}"
+    );
+}
+
+/// A `@contextmanager` factory's callable iterator item becomes the concrete
+/// signature of its `with ... as` binding (issue #385).
+#[test]
+fn contextmanager_with_binding_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def manager() -> Iterator[Callable[[int], None]]: ...
+with manager() as call:
+    call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "context result"),
+        "expected context-manager binding violation, got: {messages:?}"
+    );
+}
+
+/// `reversed` preserves an annotated list's concrete callable item type when
+/// binding a simple loop target (issue #397).
+#[test]
+fn reversed_loop_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def f(value: int) -> None: ...
+calls: list[Callable[[int], None]] = [f]
+for call in reversed(calls):
+    call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "reversed item"),
+        "expected reversed-item violation, got: {messages:?}"
+    );
+}
+
+/// Generic functions that return the same `TypeVar` accepted by their
+/// arguments preserve an unambiguous concrete callable (issue #386).
+#[test]
+fn generic_return_propagates_callable_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def identity(value: T) -> T: ...
+def choose(first: T, second: T) -> T: ...
+def f(value: int) -> None: ...
+def g(other: int) -> None: ...
+identity(value=f)(1)
+choose(f, g)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result")
+            && has_error_at(&messages, 9, "generic result"),
+        "expected generic-result violations, got: {messages:?}"
+    );
+}
+
+/// An immediately constructed and dereferenced `weakref.ref` preserves its
+/// referent callable's signature (issue #387).
+#[test]
+fn weakref_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def f(value: int) -> None: ...
+weakref.ref(f)()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected weakref-result violation, got: {messages:?}"
+    );
+}
+
+/// `operator.getitem` shares literal container selection semantics with a
+/// subscript expression (issue #394).
+#[test]
+fn operator_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+def f(value: int) -> None: ...
+operator.getitem([f], 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected operator.getitem violation, got: {messages:?}"
+    );
+}
+
+/// `copy.copy` and `copy.deepcopy` return their input type, preserving a
+/// concrete callable shape without preserving unsafe keyword names (#388).
+#[test]
+fn copy_results_propagate_callable_arguments() {
+    let messages = check_source(
+        r"
+import copy
+def f(value: int) -> None: ...
+copy.copy(x=f)(1)
+copy.deepcopy(x=f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result")
+            && has_error_at(&messages, 5, "generic result"),
+        "expected copy-result violations, got: {messages:?}"
+    );
+}
+
+/// Type-preserving itertools recipes retain callable element shapes through
+/// `next`, including a selected iterator returned by `tee` (issue #389).
+#[test]
+fn itertools_results_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.repeat(object=f))(1)
+next(itertools.chain([f]))(1)
+next(itertools.cycle([f]))(1)
+next(itertools.tee([f])[0])(1)
+",
+    );
+    for line in 4..=7 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected itertools-result violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Generic builtins preserve literal callable elements at their documented
+/// output positions (issue #390).
+#[test]
+fn builtin_iterator_results_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+next(zip([f]))[0](1)
+next(map(lambda x: x, [f]))(1)
+next(filter(None, [f]))(1)
+next(enumerate([f]))[1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected builtin-iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// `pop`/`popleft` on an immediately constructed deque preserve a literal
+/// initializer's concrete callable element shape (issue #392).
+#[test]
+fn deque_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def f(value: int) -> None: ...
+deque(iterable=[f]).popleft()(1)
+deque([f]).pop()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result") && has_error_at(&messages, 5, "deque result"),
+        "expected deque-result violations, got: {messages:?}"
+    );
+}
+
+/// Iterating an immediate literal dictionary's values preserves a concrete
+/// callable value shape (issue #391).
+#[test]
+fn dict_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def f(value: int) -> None: ...
+next(iter({"call": f}.values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
+/// A queue's declared callable item type becomes the signature returned by
+/// `get` and `get_nowait` (issue #393).
+#[test]
+fn queue_get_preserves_declared_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from queue import Queue
+queue: Queue[Callable[[int], None]] = Queue()
+queue.get()(1)
+queue.get_nowait()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "queue result") && has_error_at(&messages, 6, "queue result"),
+        "expected queue-result violations, got: {messages:?}"
+    );
+}
+
+/// A constructed `operator.methodcaller` accepts its target positionally,
+/// while encoded `__call__` arguments are checked against that target (#395).
+#[test]
+fn methodcaller_checks_encoded_call_not_target_boundary() {
+    let messages = check_source(
+        r#"
+import operator
+def f(value: int) -> None: ...
+operator.methodcaller("__call__", 1)(f)
+"#,
+    );
+    assert_eq!(messages.len(), 1, "unexpected diagnostics: {messages:?}");
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected encoded f-call violation, got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("methodcaller")),
+        "methodcaller target boundary must stay positional: {messages:?}"
+    );
+}
+
+/// A literal argument uniquely selects an overload's concrete callable return
+/// signature (issue #396).
+#[test]
+fn overload_selection_preserves_callable_return_signature() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from typing import overload
+@overload
+def factory(kind: int) -> Callable[[int], None]: ...
+@overload
+def factory(kind: str) -> Callable[[str], None]: ...
+def factory(kind): ...
+factory(kind=1)(1)
+factory("text")("value")
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "overload result")
+            && has_error_at(&messages, 10, "overload result"),
+        "expected overload-result violations, got: {messages:?}"
+    );
+}
+
+/// Assigning the result of `pop` from an annotated list preserves the
+/// concrete callable item signature (issue #398).
+#[test]
+fn list_pop_assignment_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def f(value: int) -> None: ...
+calls: list[Callable[[int], None]] = [f]
+call = calls.pop()
+call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "list pop result"),
+        "expected list-pop violation, got: {messages:?}"
+    );
+}
+
+/// An operand-selecting `reduce` lambda preserves a literal sequence's
+/// concrete callable element shape (issue #399).
+#[test]
+fn reduce_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from functools import reduce
+def f(value: int) -> None: ...
+reduce(lambda left, right: left, [f, f])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "reduce result"),
+        "expected reduce-result violation, got: {messages:?}"
     );
 }
 

@@ -99,6 +99,54 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn rewrites_itemgetter_result_without_rewriting_operand() {
+    assert_fixed(
+        "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(1)\n",
+        "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(value=1)\n",
+    );
+}
+
+#[test]
+fn rewrites_partialmethod_remaining_argument() {
+    assert_fixed(
+        "from functools import partialmethod\nclass C:\n    def base(self, required, /, value): ...\n    method = partialmethod(base, 0)\nC().method(1)\n",
+        "from functools import partialmethod\nclass C:\n    def base(self, required, /, value): ...\n    method = partialmethod(base, 0)\nC().method(value=1)\n",
+    );
+}
+
+#[test]
+fn rewrites_typed_factory_callable_instance_result() {
+    assert_fixed(
+        "class C:\n    def __call__(self, value): ...\ndef factory() -> C:\n    return C()\nfactory()(1)\n",
+        "class C:\n    def __call__(self, value): ...\ndef factory() -> C:\n    return C()\nfactory()(value=1)\n",
+    );
+}
+
+#[test]
+fn rewrites_direct_lambda_invocation() {
+    assert_fixed(
+        "(lambda value: None)(1)\n",
+        "(lambda value: None)(value=1)\n",
+    );
+}
+
+#[test]
+fn rewrites_functools_partial_result_call() {
+    assert_fixed(
+        "from functools import partial\ndef f(required, /, value): ...\npartial(f, 0)(1)\n",
+        "from functools import partial\ndef f(required, /, value): ...\npartial(f, 0)(value=1)\n",
+    );
+}
+
+#[test]
+fn rewrites_match_capture_alias_call() {
+    assert_fixed(
+        "def f(value): ...\nmatch f:\n    case alias:\n        alias(1)\n",
+        "def f(value): ...\nmatch f:\n    case alias:\n        alias(value=1)\n",
+    );
+}
+
+#[test]
 fn stale_function_signature_after_rebinding_is_not_used() {
     assert_unchanged(
         "def f(value):\n    return value\n\nf = lambda value, /: value\n\nassert f(1) == 1\n",
