@@ -5000,6 +5000,41 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
             }
+            Stmt::For(ast::StmtFor { target, .. }) => {
+                if let Expr::Name(name) = target.as_ref() {
+                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                        scope.functions.contains_key(name.id.as_str())
+                            || scope.names.contains_key(name.id.as_str())
+                    });
+                    self.mark_opaque_local(name.id.as_str());
+                    if was_known_callable {
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.id.to_string());
+                    }
+                }
+                walk_stmt(self, stmt);
+            }
+            Stmt::With(ast::StmtWith { items, .. }) => {
+                for target in items
+                    .iter()
+                    .filter_map(|item| item.optional_vars.as_deref())
+                {
+                    if let Expr::Name(name) = target {
+                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                            scope.functions.contains_key(name.id.as_str())
+                                || scope.names.contains_key(name.id.as_str())
+                        });
+                        self.mark_opaque_local(name.id.as_str());
+                        if was_known_callable {
+                            self.current_scope()
+                                .invalidated_callables
+                                .insert(name.id.to_string());
+                        }
+                    }
+                }
+                walk_stmt(self, stmt);
+            }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
                 annotation,
