@@ -351,6 +351,25 @@ Child().method(1)
     assert!(messages.is_empty(), "stale inherited method: {messages:?}");
 }
 
+/// A nested function's `nonlocal` declaration makes the captured callable
+/// mutable and invalidates its earlier signature (issue #425).
+#[test]
+fn nested_nonlocal_mutation_invalidates_captured_function() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    def f(value: int) -> None: ...
+    def replace() -> None:
+        nonlocal f
+        f = lambda *args: None
+    replace()
+    f(1)
+outer()
+",
+    );
+    assert!(messages.is_empty(), "stale nonlocal function: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
