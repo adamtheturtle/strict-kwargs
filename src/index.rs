@@ -350,6 +350,7 @@ fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
 #[cfg_attr(coverage, coverage(off))]
 fn synthesize_descriptor_attribute(
     store: &mut Store,
+    module_name: &str,
     class_name: &str,
     target: &Expr,
     value: &Expr,
@@ -359,7 +360,7 @@ fn synthesize_descriptor_attribute(
         return;
     };
     let Some(descriptor_class) = reference_path(&constructor.func)
-        .and_then(|path| resolve_reference(bindings, class_name, &path))
+        .and_then(|path| resolve_reference(bindings, module_name, &path))
     else {
         return;
     };
@@ -654,8 +655,7 @@ impl DefinitionIndex {
         let track_bindings = collected.has_attribute_rebindings
             || track_data_constructors
             || collected.has_singledispatch_decorator_candidates
-            || collected.has_partialmethod_candidates
-            || collected.has_class_call_assignments;
+            || collected.has_partialmethod_candidates;
         index_module(
             &mut inner.store,
             module_name,
@@ -1226,7 +1226,6 @@ struct Collected {
     has_attribute_rebindings: bool,
     has_singledispatch_decorator_candidates: bool,
     has_partialmethod_candidates: bool,
-    has_class_call_assignments: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
     class_metaclasses: FxHashMap<String, String>,
@@ -1552,7 +1551,6 @@ fn collect_scoped(
                     value.as_ref(),
                     Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
                 );
-                out.has_class_call_assignments |= matches!(value.as_ref(), Expr::Call(_));
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -2445,7 +2443,14 @@ fn index_class_body(
                     if synthesize_partialmethod(store, class_name, target, value, bindings) {
                         continue;
                     }
-                    synthesize_descriptor_attribute(store, class_name, target, value, bindings);
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        bindings,
+                    );
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
@@ -2534,6 +2539,7 @@ fn index_class_body(
 
 #[cfg_attr(coverage, coverage(off))]
 fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str, body: &[Stmt]) {
+    let bindings = FxHashMap::default();
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -2541,6 +2547,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 parameters,
                 decorator_list,
                 body,
+                returns,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
@@ -2562,6 +2569,15 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         has_overload_decorator(decorator_list),
                     );
                 }
+                if name.as_str() == "__get__" {
+                    if let Some(signature) =
+                        returns.as_deref().and_then(callable_annotation_signature)
+                    {
+                        store
+                            .descriptor_get_returns
+                            .insert(class_name.to_string(), signature);
+                    }
+                }
                 if body_may_contain_indexed_def(body) {
                     index_module_fast(store, module_name, &fullname, body);
                 }
@@ -2573,6 +2589,14 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        &bindings,
+                    );
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
