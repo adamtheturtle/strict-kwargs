@@ -242,6 +242,48 @@ fn exclude_destructured_names(store: &mut Store, scope_name: &str, target: &Expr
     }
 }
 
+fn literal_globals_target(target: &Expr) -> Option<&str> {
+    let Expr::Subscript(subscript) = target else {
+        return None;
+    };
+    let Expr::Call(call) = subscript.value.as_ref() else {
+        return None;
+    };
+    let Expr::Name(function) = call.func.as_ref() else {
+        return None;
+    };
+    if function.id.as_str() != "globals"
+        || !call.arguments.args.is_empty()
+        || !call.arguments.keywords.is_empty()
+    {
+        return None;
+    }
+    let Expr::StringLiteral(name) = subscript.slice.as_ref() else {
+        return None;
+    };
+    Some(name.value.to_str())
+}
+
+fn exclude_scope_callables(store: &mut Store, scope_name: &str) {
+    let prefix = format!("{scope_name}.");
+    let names = store
+        .signatures
+        .keys()
+        .filter(|name| {
+            name.strip_prefix(&prefix)
+                .is_some_and(|suffix| !suffix.contains('.'))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        store.exclude(name);
+    }
+}
+
+fn is_exec_call(value: &Expr) -> bool {
+    matches!(value, Expr::Call(call) if matches!(call.func.as_ref(), Expr::Name(name) if name.id.as_str() == "exec"))
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_pattern_bindings(store: &mut Store, scope_name: &str, pattern: &ast::Pattern) {
     match pattern {
@@ -2037,6 +2079,9 @@ fn index_stmt(
                 if !matches!(target, Expr::Name(_)) {
                     exclude_destructured_names(store, scope_name, target);
                 }
+                if let Some(name) = literal_globals_target(target) {
+                    store.exclude(format!("{scope_name}.{name}"));
+                }
             }
             if scope_name == module_name {
                 for target in targets {
@@ -2045,6 +2090,9 @@ fn index_stmt(
             }
         }
         Stmt::Expr(ast::StmtExpr { value, .. }) => {
+            if is_exec_call(value) {
+                exclude_scope_callables(store, scope_name);
+            }
             if let Expr::Named(named) = value.as_ref() {
                 if let Expr::Name(name) = named.target.as_ref() {
                     store.exclude(format!("{scope_name}.{}", name.id));
@@ -2226,12 +2274,18 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 if !matches!(target, Expr::Name(_)) {
                     exclude_destructured_names(store, scope_name, target);
                 }
+                if let Some(name) = literal_globals_target(target) {
+                    store.exclude(format!("{scope_name}.{name}"));
+                }
                 if scope_name == module_name {
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
             }
         }
         Stmt::Expr(ast::StmtExpr { value, .. }) => {
+            if is_exec_call(value) {
+                exclude_scope_callables(store, scope_name);
+            }
             if let Expr::Named(named) = value.as_ref() {
                 if let Expr::Name(name) = named.target.as_ref() {
                     store.exclude(format!("{scope_name}.{}", name.id));

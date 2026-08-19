@@ -2931,6 +2931,45 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn literal_globals_target(target: &Expr) -> Option<&str> {
+        let Expr::Subscript(subscript) = target else {
+            return None;
+        };
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Name(function) = call.func.as_ref() else {
+            return None;
+        };
+        if function.id.as_str() != "globals"
+            || !call.arguments.args.is_empty()
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::StringLiteral(name) = subscript.slice.as_ref() else {
+            return None;
+        };
+        Some(name.value.to_str())
+    }
+
+    fn invalidate_all_current_callables(&mut self) {
+        let names = self.scopes.last().map_or_else(Vec::new, |scope| {
+            scope
+                .names
+                .keys()
+                .chain(scope.functions.keys())
+                .cloned()
+                .collect::<FxHashSet<_>>()
+                .into_iter()
+                .collect()
+        });
+        for name in names {
+            self.mark_opaque_local(&name);
+            self.current_scope().invalidated_callables.insert(name);
+        }
+    }
+
     /// The hover group for a deferred call, if its callee is an attribute on
     /// a bare in-scope binding (`recv.m(...)`) or a bare in-scope name
     /// (`f(...)`).
@@ -3620,6 +3659,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         }
                     } else {
                         self.invalidate_destructured_callables(target);
+                        if let Some(name) = Self::literal_globals_target(target) {
+                            self.invalidate_pattern_callable(name);
+                        }
                     }
                 }
             }
@@ -3745,6 +3787,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 return;
             }
             Expr::Call(call) => {
+                let is_unshadowed_exec = matches!(call.func.as_ref(), Expr::Name(name) if name.id.as_str() == "exec")
+                    && self.resolve_local("exec").is_none()
+                    && self.resolve_module("exec").is_none();
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);
                 }
@@ -3753,6 +3798,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // mention, and poison receivers escaping as call arguments.
                 self.callee_exprs.insert(expr_addr(&call.func));
                 self.poison_hover_call_args(&call.arguments);
+                if is_unshadowed_exec {
+                    walk_expr(self, expr);
+                    self.invalidate_all_current_callables();
+                    return;
+                }
             }
             Expr::Lambda(lambda) => {
                 self.enter_hover_scope(false);

@@ -303,6 +303,23 @@ g(1)
     );
 }
 
+/// Literal global namespace writes and `exec` invalidate callable bindings
+/// that may have been dynamically replaced (issue #422).
+#[test]
+fn dynamic_global_mutations_invalidate_prior_function_signatures() {
+    let messages = check_source(
+        r#"
+def f(value: int) -> None: ...
+globals()["f"] = lambda *args: None
+f(1)
+def g(value: int) -> None: ...
+exec("g = lambda *args: None")
+g(1)
+"#,
+    );
+    assert!(messages.is_empty(), "stale dynamic globals: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
