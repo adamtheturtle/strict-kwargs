@@ -2913,6 +2913,24 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn invalidate_destructured_callables(&mut self, target: &Expr) {
+        match target {
+            Expr::Name(name) => self.invalidate_pattern_callable(name.id.as_str()),
+            Expr::Tuple(tuple) => {
+                for element in &tuple.elts {
+                    self.invalidate_destructured_callables(element);
+                }
+            }
+            Expr::List(list) => {
+                for element in &list.elts {
+                    self.invalidate_destructured_callables(element);
+                }
+            }
+            Expr::Starred(starred) => self.invalidate_destructured_callables(&starred.value),
+            _ => {}
+        }
+    }
+
     /// The hover group for a deferred call, if its callee is an attribute on
     /// a bare in-scope binding (`recv.m(...)`) or a bare in-scope name
     /// (`f(...)`).
@@ -3600,6 +3618,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
+                    } else {
+                        self.invalidate_destructured_callables(target);
                     }
                 }
             }
