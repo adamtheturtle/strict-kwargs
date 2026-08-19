@@ -78,7 +78,7 @@ struct CheckArgs {
     output_format: Option<OutputFormat>,
 
     /// Directory for the persistent on-disk diagnostic cache.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["fix", "diff"])]
     cache_dir: Option<PathBuf>,
 
     /// Python environment for the `ty` inference fallback.

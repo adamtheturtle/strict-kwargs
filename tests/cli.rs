@@ -1068,6 +1068,19 @@ fn diff_rejects_output_format() {
 }
 
 #[test]
+fn fix_modes_reject_cache_dir() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    for mode in ["--fix", "--diff"] {
+        let output = project.run(&["check", mode, "--cache-dir", "cache", "main.py"]);
+        assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+        let err = stderr(&output);
+        assert!(err.contains(mode), "stderr: {err}");
+        assert!(err.contains("--cache-dir"), "stderr: {err}");
+    }
+    assert!(!project.root.join("cache").exists());
+}
+
+#[test]
 fn fix_diff_prints_patch_without_writing() {
     let source = "def f(a: int) -> None: ...\nf(1)\n";
     let project = Project::new().write("main.py", source);
