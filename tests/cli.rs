@@ -408,7 +408,7 @@ fn check_github_output_writes_annotations_to_stdout() {
     assert!(stderr(&output).is_empty());
     assert_eq!(
         stdout(&output),
-        "::error file=main.py,line=2,col=1::\
+        "::error file=main.py,line=2,col=1,title=KW001::\
          Too many positional arguments for \"f\" (got 1, maximum 0)\n"
     );
 }
