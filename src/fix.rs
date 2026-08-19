@@ -5,9 +5,26 @@
 //! applied in place or as a unified diff.
 
 use std::cmp::Reverse;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
+use serde::{Deserialize, Serialize};
+
+const FIX_JOURNAL_PREFIX: &str = ".strict-kwargs-fix-journal-";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FixJournal {
+    committed: bool,
+    entries: Vec<JournalEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalEntry {
+    destination: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+}
 
 /// Fix categories a caller may opt into explicitly.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -133,6 +150,7 @@ impl FileFix {
 /// Returns an I/O error when a source cannot be read or encoded, or when a
 /// destination cannot be written.
 pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
+    recover_fix_transactions(fixes)?;
     let prepared: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = fixes
         .iter()
         .map(|fix| {
@@ -144,17 +162,155 @@ pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
         })
         .collect::<std::io::Result<_>>()?;
 
-    let mut written = Vec::new();
-    for (path, original, fixed) in &prepared {
-        if let Err(error) = std::fs::write(path, fixed) {
-            for (path, original) in written.into_iter().rev() {
-                let _ = std::fs::write(path, original);
+    if prepared.is_empty() {
+        return Ok(());
+    }
+    commit_prepared_fixes(&prepared)
+}
+
+fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::Result<()> {
+    let transaction = format!("{}-{}", std::process::id(), unique_transaction_suffix());
+    let mut entries: Vec<JournalEntry> = Vec::with_capacity(prepared.len());
+    for (index, (destination, _, fixed)) in prepared.iter().enumerate() {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let staged = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.new"));
+        let backup = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.old"));
+        let stage_result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            file.write_all(fixed)?;
+            file.set_permissions(std::fs::metadata(destination)?.permissions())?;
+            file.sync_all()
+        })();
+        if let Err(error) = stage_result {
+            let _ = std::fs::remove_file(&staged);
+            for entry in &entries {
+                let _ = std::fs::remove_file(&entry.staged);
             }
             return Err(error);
         }
-        written.push((path, original));
+        entries.push(JournalEntry {
+            destination: destination.clone(),
+            staged,
+            backup,
+        });
+    }
+
+    let first_parent = prepared[0].0.parent().unwrap_or_else(|| Path::new("."));
+    let journal_path = first_parent.join(format!("{FIX_JOURNAL_PREFIX}{transaction}.json"));
+    let mut journal = FixJournal {
+        committed: false,
+        entries,
+    };
+    if let Err(error) = write_journal(&journal_path, &journal) {
+        for entry in &journal.entries {
+            let _ = std::fs::remove_file(&entry.staged);
+        }
+        return Err(error);
+    }
+
+    let result = (|| {
+        for entry in &journal.entries {
+            std::fs::rename(&entry.destination, &entry.backup)?;
+            std::fs::rename(&entry.staged, &entry.destination)?;
+            sync_parent(&entry.destination)?;
+        }
+        journal.committed = true;
+        write_journal(&journal_path, &journal)?;
+        cleanup_committed_transaction(&journal, &journal_path)
+    })();
+    if result.is_err() {
+        let _ = recover_journal(&journal_path);
+    }
+    result
+}
+
+fn unique_transaction_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(journal)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    sync_parent(path)
+}
+
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
+fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
+    let mut parents = fixes
+        .iter()
+        .map(|fix| {
+            fix.path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
+        for entry in std::fs::read_dir(parent)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(FIX_JOURNAL_PREFIX))
+            {
+                recover_journal(&path)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn recover_journal(path: &Path) -> std::io::Result<()> {
+    let journal: FixJournal = serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if journal.committed {
+        return cleanup_committed_transaction(&journal, path);
+    }
+    for entry in journal.entries.iter().rev() {
+        if entry.backup.exists() {
+            if entry.destination.exists() {
+                std::fs::remove_file(&entry.destination)?;
+            }
+            std::fs::rename(&entry.backup, &entry.destination)?;
+            sync_parent(&entry.destination)?;
+        }
+        if entry.staged.exists() {
+            std::fs::remove_file(&entry.staged)?;
+        }
+    }
+    std::fs::remove_file(path)?;
+    sync_parent(path)
+}
+
+fn cleanup_committed_transaction(journal: &FixJournal, path: &Path) -> std::io::Result<()> {
+    for entry in &journal.entries {
+        if entry.backup.exists() {
+            std::fs::remove_file(&entry.backup)?;
+        }
+        if entry.staged.exists() {
+            std::fs::remove_file(&entry.staged)?;
+        }
+    }
+    std::fs::remove_file(path)?;
+    sync_parent(path)
 }
 
 fn ensure_source_is_current(fix: &FileFix, bytes: &[u8]) -> std::io::Result<()> {
@@ -457,44 +613,32 @@ mod tests {
     }
 
     #[test]
-    fn write_all_restores_earlier_files_after_write_failure() {
+    fn recovery_rolls_back_an_interrupted_transaction() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let first = dir.path().join("first.py");
-        let read_only = dir.path().join("read_only.py");
-        std::fs::write(&first, "first before\n").expect("write first");
-        std::fs::write(&read_only, "second before\n").expect("write second");
-        let original_permissions = std::fs::metadata(&read_only)
-            .expect("second metadata")
-            .permissions();
-        let mut read_only_permissions = original_permissions.clone();
-        read_only_permissions.set_readonly(true);
-        std::fs::set_permissions(&read_only, read_only_permissions).expect("make read-only");
-        let fixes = vec![
-            FileFix {
-                path: first.clone(),
-                original: "first before\n".to_owned(),
-                fixed: "first after\n".to_owned(),
-                count: 1,
-            },
-            FileFix {
-                path: read_only.clone(),
-                original: "second before\n".to_owned(),
-                fixed: "second after\n".to_owned(),
-                count: 1,
-            },
-        ];
+        let destination = dir.path().join("source.py");
+        let staged = dir.path().join("source.new");
+        let backup = dir.path().join("source.old");
+        let journal_path = dir.path().join(".strict-kwargs-fix-journal-test.json");
+        std::fs::write(&destination, "fixed\n").expect("write partial replacement");
+        std::fs::write(&backup, "before\n").expect("write backup");
+        let journal = FixJournal {
+            committed: false,
+            entries: vec![JournalEntry {
+                destination: destination.clone(),
+                staged,
+                backup: backup.clone(),
+            }],
+        };
+        write_journal(&journal_path, &journal).expect("write journal");
 
-        let error = write_all_preserving_encoding(&fixes).expect_err("second write must fail");
-        std::fs::set_permissions(&read_only, original_permissions).expect("restore permissions");
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        recover_journal(&journal_path).expect("recover transaction");
+
         assert_eq!(
-            std::fs::read_to_string(first).expect("read first"),
-            "first before\n"
+            std::fs::read_to_string(destination).expect("read destination"),
+            "before\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(read_only).expect("read second"),
-            "second before\n"
-        );
+        assert!(!backup.exists());
+        assert!(!journal_path.exists());
     }
 
     #[test]
