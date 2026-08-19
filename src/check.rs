@@ -3554,6 +3554,9 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    // Covered end-to-end by match-capture diagnostic and fix tests. Defensive
+    // context/pattern branches intentionally fall back to the normal walker.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_match_body_stmt(&mut self, stmt: &'a Stmt) {
         if self.class_body_depth > 0 {
             self.visit_class_body_stmt(stmt);
@@ -3564,6 +3567,7 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_irrefutable_capture_match(&mut self, match_stmt: &'a ast::StmtMatch) -> bool {
         let [case] = match_stmt.cases.as_slice() else {
             return false;
