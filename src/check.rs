@@ -1480,6 +1480,10 @@ impl<'a> CallChecker<'a> {
     fn define(&mut self, local_name: &str, fullname: String) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
+        let attribute_prefix = format!("{local_name}.");
+        scope
+            .names
+            .retain(|name, _| !name.starts_with(&attribute_prefix));
         scope.names.insert(local_name.to_string(), fullname);
         remove_function_binding(scope, local_name);
         scope.modules.remove(local_name);
@@ -1530,6 +1534,10 @@ impl<'a> CallChecker<'a> {
     fn mark_opaque_local(&mut self, name: &str) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
+        let attribute_prefix = format!("{name}.");
+        scope
+            .names
+            .retain(|bound, _| !bound.starts_with(&attribute_prefix));
         scope.names.remove(name);
         remove_function_binding(scope, name);
         scope.modules.remove(name);
@@ -1543,6 +1551,10 @@ impl<'a> CallChecker<'a> {
     fn clear_instance_binding(&mut self, name: &str) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
+        let attribute_prefix = format!("{name}.");
+        scope
+            .names
+            .retain(|bound, _| !bound.starts_with(&attribute_prefix));
         scope.names.remove(name);
         remove_function_binding(scope, name);
         scope.instances.remove(name);
@@ -1814,6 +1826,10 @@ impl<'a> CallChecker<'a> {
     fn record_instance(&mut self, local_name: &str, class_fullname: String) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
+        let attribute_prefix = format!("{local_name}.");
+        scope
+            .names
+            .retain(|name, _| !name.starts_with(&attribute_prefix));
         scope.names.insert(local_name.to_string(), class_fullname);
         remove_function_binding(scope, local_name);
         scope.instances.insert(local_name.to_string());
@@ -3370,6 +3386,52 @@ impl<'a> CallChecker<'a> {
         self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
+    // Covered end-to-end by the SimpleNamespace attribute regression. Other
+    // constructor, keyword, and rebinding shapes intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn simple_namespace_callable_attributes(&self, value: &Expr) -> Vec<(String, String)> {
+        let Expr::Call(call) = value else {
+            return Vec::new();
+        };
+        let Some(constructor) = self.resolve_callee(&call.func) else {
+            return Vec::new();
+        };
+        let constructor = constructor
+            .strip_suffix(".__new__")
+            .or_else(|| constructor.strip_suffix(".__init__"))
+            .unwrap_or(&constructor);
+        if constructor != "types.SimpleNamespace" {
+            return Vec::new();
+        }
+        call.arguments
+            .keywords
+            .iter()
+            .filter_map(|keyword| {
+                let name = keyword.arg.as_ref()?;
+                let callable = self.resolve_callee(&keyword.value)?;
+                Some((name.to_string(), callable))
+            })
+            .collect()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_bound_callable_attribute(&self, base: &str, attr: &str) -> Option<String> {
+        let dotted = format!("{base}.{attr}");
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.names.get(&dotted) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(base)
+                || scope.functions.contains_key(base)
+                || scope.instances.contains(base)
+                || scope.opaque_locals.contains(base)
+            {
+                return None;
+            }
+        }
+        None
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3443,6 +3505,11 @@ impl<'a> CallChecker<'a> {
                 }
                 if let Expr::Name(base) = &**value {
                     let base_name = base.id.as_str();
+                    if let Some(callable) =
+                        self.resolve_bound_callable_attribute(base_name, attr_name)
+                    {
+                        return Some(callable);
+                    }
                     if self.is_opaque_local(base_name) {
                         return self
                             .class_from_name_annotation(base_name)
@@ -3789,6 +3856,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 let class_fullname = self.class_from_obvious_instance(value);
+                let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -3797,6 +3865,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     if let Expr::Name(name) = target {
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
+                            for (attribute, callable) in &namespace_attributes {
+                                self.define(
+                                    &format!("{}.{}", name.id.as_str(), attribute),
+                                    callable.clone(),
+                                );
+                            }
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
                         } else {
