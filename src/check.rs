@@ -3585,8 +3585,79 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn nonnegative_literal_index(expr: &Expr) -> Option<usize> {
+        let Expr::NumberLiteral(ast::ExprNumberLiteral {
+            value: Number::Int(value),
+            ..
+        }) = expr
+        else {
+            return None;
+        };
+        value.as_usize()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn builtin_iterator_item_signature(
+        &self,
+        expr: &Expr,
+        selected_index: Option<usize>,
+    ) -> Option<Signature> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let fullname = self.resolve_callee(&call.func)?;
+        match fullname.as_str() {
+            "builtins.zip" | "builtins.zip.__new__" => {
+                let index = selected_index?;
+                self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
+            }
+            "builtins.enumerate" | "builtins.enumerate.__new__" if selected_index == Some(1) => {
+                self.literal_iterable_callable_signature(call.arguments.args.first()?)
+            }
+            "builtins.filter" | "builtins.filter.__new__" if selected_index.is_none() => {
+                if !matches!(call.arguments.args.first(), Some(Expr::NoneLiteral(_))) {
+                    return None;
+                }
+                self.literal_iterable_callable_signature(call.arguments.args.get(1)?)
+            }
+            "builtins.map" | "builtins.map.__new__" if selected_index.is_none() => {
+                let Expr::Lambda(lambda) = call.arguments.args.first()? else {
+                    return None;
+                };
+                let parameters = lambda.parameters.as_deref()?;
+                let [parameter] = parameters.args.as_slice() else {
+                    return None;
+                };
+                if !parameters.posonlyargs.is_empty()
+                    || parameters.vararg.is_some()
+                    || !parameters.kwonlyargs.is_empty()
+                    || parameters.kwarg.is_some()
+                {
+                    return None;
+                }
+                let Expr::Name(body) = lambda.body.as_ref() else {
+                    return None;
+                };
+                if body.id.as_str() != parameter.parameter.name.as_str() {
+                    return None;
+                }
+                self.literal_iterable_callable_signature(call.arguments.args.get(1)?)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
-        let Expr::Call(next_call) = func else {
+        let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
+            (
+                subscript.value.as_ref(),
+                Some(Self::nonnegative_literal_index(&subscript.slice)?),
+            )
+        } else {
+            (func, None)
+        };
+        let Expr::Call(next_call) = next_expr else {
             return None;
         };
         let next_fullname = self.resolve_callee(&next_call.func)?;
@@ -3594,6 +3665,9 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
+            return Some(signature);
+        }
         if let Some(signature) = self.itertools_item_signature(iterator) {
             return Some(signature);
         }
