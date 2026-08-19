@@ -3236,6 +3236,44 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_setdefault_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "setdefault" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [key, default] = &*call.arguments.args else {
+            return None;
+        };
+        if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
+            return Some(existing);
+        }
+        let key_is_literal = matches!(
+            key,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NoneLiteral(_)
+        );
+        (key_is_literal
+            && dict.items.iter().all(|item| item.key.is_some())
+            && !dict.items.iter().any(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            }))
+        .then(|| self.resolve_callee(default))
+        .flatten()
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3336,6 +3374,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_setdefault_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
