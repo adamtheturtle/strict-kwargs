@@ -337,6 +337,24 @@ next(generator())(1)
     );
 }
 
+/// `iter(instance)` uses the concrete callable item type declared by the
+/// instance class's `__iter__` return annotation (issue #382).
+#[test]
+fn annotated_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+next(iter(C()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected __iter__ result violation, got: {messages:?}"
+    );
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]
