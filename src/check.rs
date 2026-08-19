@@ -1363,6 +1363,8 @@ struct Scope {
     annotations: FxHashMap<String, String>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
+    /// Local mapping name -> one concrete callable shared by assigned values.
+    callable_mapping_values: FxHashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1487,6 +1489,7 @@ impl<'a> CallChecker<'a> {
         }
         scope.opaque_locals.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.callable_mapping_values.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1507,6 +1510,7 @@ impl<'a> CallChecker<'a> {
             scope.instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.callable_list_elements.remove(local_name);
+            scope.callable_mapping_values.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -1541,6 +1545,28 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn record_callable_mapping_value(&mut self, name: &str, callable: Option<String>) {
+        let scope = self.current_scope();
+        match (scope.callable_mapping_values.get(name), callable) {
+            (None, Some(callable)) => {
+                scope
+                    .callable_mapping_values
+                    .insert(name.to_owned(), callable);
+            }
+            (Some(existing), Some(callable)) if existing == &callable => {}
+            _ => {
+                scope.callable_mapping_values.remove(name);
+            }
+        }
+    }
+
+    fn resolve_callable_mapping_value(&self, name: &str) -> Option<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.callable_mapping_values.get(name).cloned())
+    }
+
     fn homogeneous_callable_list(&self, value: &Expr) -> Option<String> {
         let Expr::List(list) = value else {
             return None;
@@ -1563,6 +1589,28 @@ impl<'a> CallChecker<'a> {
         elements
             .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
             .then_some(first)
+    }
+
+    fn weak_set_callable_element(&self, value: &Expr) -> Option<String> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "WeakSet"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("weakref")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [elements] = &*call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(elements)
     }
 
     fn mark_param_opaque(&mut self, name: &str) {
@@ -3405,6 +3453,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn tracked_container_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(container) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match &*call.arguments.args {
+            [] => self.resolve_callable_list_element(container.id.as_str()),
+            [_] => self.resolve_callable_mapping_value(container.id.as_str()),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
         let Expr::Call(call) = subscript.value.as_ref() else {
             return None;
@@ -3582,6 +3651,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.random_choice_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.tracked_container_pop_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
@@ -3839,7 +3911,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
-                let callable_list = self.homogeneous_callable_list(value);
+                let callable_list = self
+                    .homogeneous_callable_list(value)
+                    .or_else(|| self.weak_set_callable_element(value));
+                let callable_value = self.resolve_callee(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
@@ -3850,6 +3925,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.mark_opaque_local(name.id.as_str());
                         } else {
                             self.clear_instance_binding(name.id.as_str());
+                        }
+                    } else if let Expr::Subscript(subscript) = target {
+                        if let Expr::Name(mapping) = subscript.value.as_ref() {
+                            self.record_callable_mapping_value(
+                                mapping.id.as_str(),
+                                callable_value.clone(),
+                            );
                         }
                     }
                 }
