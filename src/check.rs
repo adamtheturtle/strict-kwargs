@@ -3137,6 +3137,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn homogeneous_literal_callable(&self, expr: &Expr) -> Option<String> {
+        let elements: &[Expr] = match expr {
+            Expr::List(list) => &list.elts,
+            Expr::Tuple(tuple) => &tuple.elts,
+            Expr::Set(set) => &set.elts,
+            _ => return None,
+        };
+        let mut elements = elements.iter();
+        let resolved = self.resolve_callee(elements.next()?)?;
+        elements
+            .all(|element| self.resolve_callee(element).as_deref() == Some(resolved.as_str()))
+            .then_some(resolved)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
+        let fullname = self.resolve_callee(&call.func)?;
+        names
+            .contains(&fullname.as_str())
+            .then(|| call.arguments.args.first())
+            .flatten()
+            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_sequence_index(slice: &Expr, len: usize) -> Option<usize> {
         match slice {
             Expr::NumberLiteral(ast::ExprNumberLiteral {
@@ -3371,7 +3396,14 @@ impl<'a> CallChecker<'a> {
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
             }
-            Expr::Subscript(subscript) => self.resolve_literal_subscript(subscript),
+            Expr::Subscript(subscript) => {
+                if let Expr::Call(sorted) = subscript.value.as_ref() {
+                    self.preserving_builtin_result(sorted, &["builtins.sorted"])
+                        .or_else(|| self.resolve_literal_subscript(subscript))
+                } else {
+                    self.resolve_literal_subscript(subscript)
+                }
+            }
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
@@ -3439,6 +3471,11 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(result) =
+                    self.preserving_builtin_result(constructor, &["builtins.min", "builtins.max"])
+                {
+                    return Some(result);
+                }
                 if constructor.arguments.is_empty() {
                     if let Expr::Lambda(ast::ExprLambda {
                         parameters, body, ..
