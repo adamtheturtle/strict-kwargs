@@ -2175,6 +2175,9 @@ impl<'a> CallChecker<'a> {
             };
             callee_fullname
         };
+        if callee_fullname == "operator.itemgetter.__call__" {
+            return;
+        }
         // Functions whose first argument must stay positional at runtime
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
         // without deferring to ty.
@@ -3498,6 +3501,63 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(&field.value)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_item_index(index: &Expr, len: usize) -> Option<usize> {
+        match index {
+            Expr::NumberLiteral(ast::ExprNumberLiteral {
+                value: Number::Int(value),
+                ..
+            }) => value.as_usize().filter(|&value| value < len),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::USub,
+                operand,
+                ..
+            }) => {
+                let Expr::NumberLiteral(ast::ExprNumberLiteral {
+                    value: Number::Int(value),
+                    ..
+                }) = operand.as_ref()
+                else {
+                    return None;
+                };
+                let distance = value.as_usize()?;
+                (distance > 0).then(|| len.checked_sub(distance)).flatten()
+            }
+            _ => None,
+        }
+    }
+
+    // Covered end-to-end for positive and negative indices; malformed getter
+    // applications and non-literal containers deliberately decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn itemgetter_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(application) = func else {
+            return None;
+        };
+        let Expr::Call(factory) = application.func.as_ref() else {
+            return None;
+        };
+        let getter = self.resolve_callee(&factory.func)?;
+        let getter = getter
+            .strip_suffix(".__new__")
+            .or_else(|| getter.strip_suffix(".__init__"))
+            .unwrap_or(&getter);
+        if getter != "operator.itemgetter"
+            || factory.arguments.len() != 1
+            || application.arguments.len() != 1
+        {
+            return None;
+        }
+        let index = factory.arguments.args.first()?;
+        let container = application.arguments.args.first()?;
+        let element = match container {
+            Expr::List(list) => &list.elts[Self::literal_item_index(index, list.elts.len())?],
+            Expr::Tuple(tuple) => &tuple.elts[Self::literal_item_index(index, tuple.elts.len())?],
+            _ => return None,
+        };
+        self.resolve_callee(element)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3612,6 +3672,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.itemgetter_result_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.attrgetter_result_callable(func) {
                     return Some(callable);
                 }

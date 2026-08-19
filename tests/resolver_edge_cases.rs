@@ -421,6 +421,29 @@ attrgetter("call")(SimpleNamespace(call=f))(1)
     );
 }
 
+/// `itemgetter` consumes its operand positionally but preserves a statically
+/// selected literal container element's callable signature (issue #376).
+#[test]
+fn itemgetter_operand_is_exempt_and_result_is_checked() {
+    let messages = check_source(
+        r"
+from operator import itemgetter
+def f(value: int) -> None: ...
+itemgetter(0)([f])(1)
+itemgetter(-1)((f,))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "only result calls should fail: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 4, "f") && has_error_at(&messages, 5, "f"),
+        "expected both itemgetter result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
