@@ -1109,6 +1109,8 @@ struct CallChecker<'a> {
     callable_task_results: FxHashMap<String, Signature>,
     /// Function fullname -> concrete callable returned by that function.
     callable_function_results: FxHashMap<String, Signature>,
+    /// Method fullname -> concrete callable returned by that method.
+    callable_method_results: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1420,6 +1422,7 @@ impl<'a> CallChecker<'a> {
             callable_queue_items: FxHashMap::default(),
             callable_task_results: FxHashMap::default(),
             callable_function_results: FxHashMap::default(),
+            callable_method_results: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -3402,6 +3405,7 @@ impl<'a> CallChecker<'a> {
             parameters,
             body,
             decorator_list,
+            returns,
             ..
         } = method_def;
         for decorator in decorator_list {
@@ -3409,6 +3413,13 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if let Some(signature) = returns
+            .as_deref()
+            .and_then(Self::callable_annotation_signature)
+        {
+            self.callable_method_results
+                .insert(method_fullname.clone(), signature);
+        }
         self.push_scope();
         self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
@@ -3495,10 +3506,33 @@ impl<'a> CallChecker<'a> {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody);
             }
+            Stmt::With(with_stmt) if with_stmt.is_async => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.bind_async_with_callable_targets(with_stmt);
+                walk_stmt(self, stmt);
+            }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
                 walk_stmt(self, stmt);
             }
+        }
+    }
+
+    fn bind_async_with_callable_targets(&mut self, with_stmt: &ast::StmtWith) {
+        for item in &with_stmt.items {
+            let (Expr::Name(receiver), Some(Expr::Name(target))) =
+                (&item.context_expr, item.optional_vars.as_deref())
+            else {
+                continue;
+            };
+            let Some(class) = self.class_from_name_annotation(receiver.id.as_str()) else {
+                continue;
+            };
+            let method = format!("{class}.__aenter__");
+            let Some(signature) = self.callable_method_results.get(&method).cloned() else {
+                continue;
+            };
+            self.define_function(target.id.as_str(), format!("{method} result"), signature);
         }
     }
 
