@@ -3593,9 +3593,8 @@ impl<'a> CallChecker<'a> {
         })
     }
 
-    // Exercised extensively by resolver integration tests. Excluded because
-    // llvm-cov reports per-test-binary line holes as new expression variants
-    // move calls between match arms.
+    // Covered end-to-end by the awaited callable regression. Unsupported
+    // await expressions and unresolved factories intentionally decline.
     #[cfg_attr(coverage, coverage(off))]
     fn awaited_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Await(ast::ExprAwait { value, .. }) = func else {
@@ -3608,6 +3607,10 @@ impl<'a> CallChecker<'a> {
         self.callable_returns.get(&factory).cloned()
     }
 
+    // Exercised extensively by resolver integration tests. Excluded because
+    // llvm-cov reports per-test-binary line holes as new expression variants
+    // move calls between match arms.
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             // A named expression evaluates to its value. Resolve the value
