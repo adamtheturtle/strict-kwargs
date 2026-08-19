@@ -1977,6 +1977,12 @@ fn index_stmt(
                 }
             }
         }
+        Stmt::AugAssign(ast::StmtAugAssign { target, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.exclude(format!("{scope_name}.{}", name.id));
+            }
+            exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+        }
         Stmt::AnnAssign(ast::StmtAnnAssign {
             target,
             value: Some(_),
@@ -2137,6 +2143,12 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
             }
+        }
+        Stmt::AugAssign(ast::StmtAugAssign { target, .. }) => {
+            if let Expr::Name(name) = target.as_ref() {
+                store.exclude(format!("{scope_name}.{}", name.id));
+            }
+            exclude_assigned_attribute(store, scope_name, target, None);
         }
         Stmt::AnnAssign(ast::StmtAnnAssign {
             target,

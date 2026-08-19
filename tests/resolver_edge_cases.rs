@@ -198,6 +198,27 @@ f(1)
     assert!(messages.is_empty(), "stale with-as function: {messages:?}");
 }
 
+/// Augmented assignment replaces an earlier function or method binding with
+/// an unknown result and invalidates its signature (issue #416).
+#[test]
+fn augmented_assignments_invalidate_prior_callable_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+f += replacement
+f(1)
+class C:
+    def method(self, value: int) -> None: ...
+C.method += replacement
+C().method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale augmented bindings: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
