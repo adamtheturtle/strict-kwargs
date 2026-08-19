@@ -7259,6 +7259,20 @@ match subj.value:
     }
 
     #[test]
+    fn literal_subscript_dispatch_resolves_in_library_tests() {
+        let parsed = parse_module("[f][0]").expect("parse subscript");
+        let [Stmt::Expr(statement)] = parsed.suite().as_slice() else {
+            panic!("expected expression statement");
+        };
+        with_empty_checker(false, |checker| {
+            assert_eq!(
+                checker.resolve_callee(&statement.value),
+                Some("test.f".into())
+            );
+        });
+    }
+
+    #[test]
     fn class_from_annotation_covers_invalid_builtin_and_dotted_shapes() {
         with_empty_checker(false, |checker| {
             for annotation in [
