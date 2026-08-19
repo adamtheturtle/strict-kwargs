@@ -2110,6 +2110,20 @@ Point(f).call(1)
 }
 
 #[test]
+fn collections_namedtuple_keyword_field_preserves_callable_signature() {
+    assert_error(
+        r#"
+from collections import namedtuple
+Point = namedtuple("Point", ["call"])
+def f(value: int) -> None: ...
+Point(call=f).call(1)
+"#,
+        5,
+        r#"for "f" (got 1, maximum 0)"#,
+    );
+}
+
+#[test]
 fn decorator_factory_call_flagged() {
     // Issue #51: a call in decorator position is a call like any other and
     // its surplus positional arguments must be flagged.
