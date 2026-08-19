@@ -840,6 +840,19 @@ mod tests {
     }
 
     #[test]
+    fn load_accepts_valid_directory_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("pkg")).expect("mkdir");
+        std::fs::create_dir(dir.path().join("ns")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\nsrc = [\"pkg\"]\nnamespace_packages = [\"ns\"]\n",
+        )
+        .expect("write");
+        Config::load(dir.path()).expect("valid directories must load");
+    }
+
+    #[test]
     fn load_rejects_invalid_directory_settings() {
         for (setting, entry) in [
             ("src", "missing-src"),
