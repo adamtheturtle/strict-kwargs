@@ -527,6 +527,28 @@ C(call=f).call(1)
     );
 }
 
+/// A concrete callable return annotation on `__getitem__` supplies the
+/// selected value's signature (issue #381).
+#[test]
+fn getitem_callable_return_is_resolved() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+
+class C:
+    def __getitem__(self, key: str) -> Callable[[int], None]:
+        def inner(value: int) -> None: ...
+        return inner
+
+C()["call"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "__return__"),
+        "expected getitem-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

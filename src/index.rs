@@ -392,6 +392,19 @@ fn index_callable_field(store: &mut Store, class_name: &str, target: &Expr, anno
     store.insert_definition(format!("{class_name}.{}", name.id), signature, false);
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn index_callable_method_return(
+    store: &mut Store,
+    class_name: &str,
+    method_name: &str,
+    returns: Option<&Expr>,
+) {
+    let Some(signature) = returns.and_then(callable_annotation_signature) else {
+        return;
+    };
+    store.insert(format!("{class_name}.{method_name}.__return__"), signature);
+}
+
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     if let Expr::Name(name) = target {
         let fullname = format!("{scope_name}.{}", name.id);
@@ -2435,6 +2448,14 @@ fn index_class_body(
                         }
                     }
                 }
+                if name.as_str() == "__getitem__" {
+                    index_callable_method_return(
+                        store,
+                        class_name,
+                        name.as_str(),
+                        returns.as_deref(),
+                    );
+                }
                 if body_may_contain_indexed_def(body) {
                     let mut nested_bindings = bindings.clone();
                     index_module_with_bindings(
@@ -2611,6 +2632,14 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                             store.descriptor_get_names.insert(name.to_string());
                         }
                     }
+                }
+                if name.as_str() == "__getitem__" {
+                    index_callable_method_return(
+                        store,
+                        class_name,
+                        name.as_str(),
+                        returns.as_deref(),
+                    );
                 }
                 if body_may_contain_indexed_def(body) {
                     index_module_fast(store, module_name, &fullname, body);
