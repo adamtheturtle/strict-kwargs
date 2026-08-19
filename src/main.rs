@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 use strict_kwargs::{
-    check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    Diagnostic, FileFix, FixOptIns, OutputFormat,
+    check_paths, find_project_root, fix_paths_with_opt_ins, is_python_environment, unified_diff,
+    CheckError, Config, Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
 
 const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
@@ -109,17 +109,22 @@ fn main() -> ExitCode {
 /// nonexistent path is reported on stderr and dropped, so the run falls
 /// back to `ty`'s own environment discovery (the same as if `--python`
 /// were unset) rather than silently degrading detection.
-fn resolve_python_env(python: Option<PathBuf>) -> Option<PathBuf> {
-    let path = python?;
+fn resolve_python_env(python: Option<PathBuf>) -> Result<Option<PathBuf>, CheckError> {
+    let Some(path) = python else {
+        return Ok(None);
+    };
     if path.exists() {
-        return Some(path);
+        if is_python_environment(&path) {
+            return Ok(Some(path));
+        }
+        return Err(CheckError::InvalidPythonEnvironment { path });
     }
     eprintln!(
         "warning: --python {} does not exist; ignoring it and falling back to \
          ty's own environment discovery",
         path.display()
     );
-    None
+    Ok(None)
 }
 
 fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<PathBuf, CheckError> {
@@ -184,7 +189,7 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     config.error_on_unused_noqa |= args.error_on_unused_noqa;
     let config = config;
     let output_format = args.output_format.unwrap_or(config.output_format);
-    let python_env = resolve_python_env(args.python);
+    let python_env = resolve_python_env(args.python)?;
     let cache_dir = effective_cache_dir(args.cache_dir, &config, &project_root);
     let diagnostics = check_paths(
         &project_root,
@@ -435,7 +440,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
         synthesized_constructors: config.fix_synthesized_constructors
             || args_fix_opt_ins.synthesized_constructors,
     };
-    let python_env = resolve_python_env(args.python);
+    let python_env = resolve_python_env(args.python)?;
     let outcome = fix_paths_with_opt_ins(
         &project_root,
         &args.paths,
@@ -519,14 +524,18 @@ mod tests {
 
     #[test]
     fn python_env_unset_stays_unset() {
-        assert_eq!(resolve_python_env(None), None);
+        assert_eq!(resolve_python_env(None).expect("valid"), None);
     }
 
     #[test]
     fn python_env_existing_path_is_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyvenv.cfg"), "").expect("write");
         let path = dir.path().to_path_buf();
-        assert_eq!(resolve_python_env(Some(path.clone())), Some(path));
+        assert_eq!(
+            resolve_python_env(Some(path.clone())).expect("valid"),
+            Some(path)
+        );
     }
 
     #[test]
@@ -535,7 +544,7 @@ mod tests {
         // discovery) rather than silently forwarded and ignored (issue #55).
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("no_such_python");
-        assert_eq!(resolve_python_env(Some(missing)), None);
+        assert_eq!(resolve_python_env(Some(missing)).expect("valid"), None);
     }
 
     #[test]

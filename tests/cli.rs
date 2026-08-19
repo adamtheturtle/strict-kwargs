@@ -1041,6 +1041,20 @@ fn check_invalid_python_warns_but_continues() {
 }
 
 #[test]
+fn check_existing_non_python_path_is_fatal_exit_two() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n")
+        .write("README.md", "not Python\n");
+    let output = project.run(&["check", "--python", "README.md", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--python"), "stderr: {err}");
+    assert!(err.contains("Python interpreter"), "stderr: {err}");
+    assert!(err.contains("README.md"), "stderr: {err}");
+}
+
+#[test]
 fn fix_reports_when_nothing_to_fix() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let output = project.run(&["check", "--fix", "main.py"]);
@@ -1282,7 +1296,9 @@ fn fix_accepts_python_flag() {
     // resolvable by the built-in resolver, so the ty fallback never starts
     // and the flag value is irrelevant to the result — the point is that the
     // argument parses and the rewrite still happens.
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let project = Project::new()
+        .write("pyvenv.cfg", "home = /usr/bin\n")
+        .write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["check", "--fix", "--python", ".", "main.py"]);
     assert_eq!(code(&output), 0);
     assert!(

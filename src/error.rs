@@ -51,6 +51,12 @@ pub enum CheckError {
         /// A different root discovered for a later path.
         second: PathBuf,
     },
+    /// An existing `--python` path is not recognizably an interpreter,
+    /// virtual environment, or installation prefix.
+    InvalidPythonEnvironment {
+        /// The rejected path as supplied on the command line.
+        path: PathBuf,
+    },
     /// `pyproject.toml` (or its `[tool.strict_kwargs]` table) could not be
     /// read or parsed, or has the wrong shape/value types. Reported instead
     /// of silently running with defaults, which would hide a misconfigured
@@ -125,6 +131,11 @@ impl std::fmt::Display for CheckError {
                 "paths span multiple project roots: {} and {}; run each project separately or pass --project-root explicitly",
                 first.display(),
                 second.display()
+            ),
+            Self::InvalidPythonEnvironment { path } => write!(
+                formatter,
+                "--python must point to a Python interpreter, virtual environment, or installation prefix: {}",
+                path.display()
             ),
             Self::ConfigInvalid { path, message } => {
                 write!(formatter, "{}: {message}", path.display())
@@ -235,6 +246,18 @@ mod tests {
         assert!(message.contains('b'));
         assert!(message.contains("separately"));
         assert!(format!("{error:?}").starts_with("MultipleProjectRoots"));
+    }
+
+    #[test]
+    fn invalid_python_environment_names_path_and_expected_shapes() {
+        let error = CheckError::InvalidPythonEnvironment {
+            path: PathBuf::from("README.md"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("--python"));
+        assert!(message.contains("Python interpreter"));
+        assert!(message.contains("README.md"));
+        assert!(format!("{error:?}").starts_with("InvalidPythonEnvironment"));
     }
 
     #[test]
