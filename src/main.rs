@@ -494,6 +494,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn project_root_uses_explicit_when_given() {
@@ -598,6 +599,51 @@ mod tests {
             display_diagnostic(&diagnostic, false),
             diagnostic.display_path()
         );
+    }
+
+    #[test]
+    fn diff_header_path_keeps_relative_paths() {
+        let root = PathBuf::from("/project");
+        assert_eq!(
+            diff_header_path(&root, Path::new("src/main.py")),
+            PathBuf::from("src/main.py")
+        );
+    }
+
+    #[test]
+    fn diff_header_path_strips_project_root_from_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let absolute = root.join("main.py");
+        assert_eq!(diff_header_path(&root, &absolute), PathBuf::from("main.py"));
+    }
+
+    #[test]
+    fn diff_header_path_canonicalizes_before_stripping_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let file = root.join("main.py");
+        std::fs::write(&file, "").expect("write file");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let absolute = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            diff_header_path(Path::new("proj"), &absolute),
+            PathBuf::from("main.py")
+        );
+        std::env::set_current_dir(previous).expect("restore cwd");
+    }
+
+    #[test]
+    fn diff_header_path_falls_back_to_file_name_outside_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let outside = dir.path().join("elsewhere").join("other.py");
+        std::fs::create_dir_all(outside.parent().unwrap()).expect("create parent");
+        std::fs::write(&outside, "").expect("write file");
+        assert_eq!(diff_header_path(&root, &outside), PathBuf::from("other.py"));
     }
 
     #[test]
