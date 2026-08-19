@@ -2285,6 +2285,11 @@ impl<'a> CallChecker<'a> {
                 fullname: "typing.cast result".to_string(),
                 signature,
             })
+        } else if let Some(signature) = self.reduce_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "reduce result".to_string(),
+                signature,
+            })
         } else if let Some(signature) = self.next_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "next() result".to_string(),
@@ -4033,6 +4038,40 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn reduce_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(reduce_call) = func else {
+            return None;
+        };
+        let reduce_fullname = self.resolve_callee(&reduce_call.func)?;
+        if reduce_fullname != "functools.reduce" || !reduce_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [Expr::Lambda(reducer), iterable] = &*reduce_call.arguments.args else {
+            return None;
+        };
+        let parameters = reducer.parameters.as_deref()?;
+        let [left, right] = parameters.args.as_slice() else {
+            return None;
+        };
+        if !parameters.posonlyargs.is_empty()
+            || parameters.vararg.is_some()
+            || !parameters.kwonlyargs.is_empty()
+            || parameters.kwarg.is_some()
+        {
+            return None;
+        }
+        let Expr::Name(result) = reducer.body.as_ref() else {
+            return None;
+        };
+        if result.id.as_str() != left.parameter.name.as_str()
+            && result.id.as_str() != right.parameter.name.as_str()
+        {
+            return None;
+        }
+        self.literal_iterable_callable_signature(iterable)
     }
 
     #[cfg_attr(coverage, coverage(off))]

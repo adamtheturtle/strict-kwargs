@@ -881,6 +881,23 @@ call(1)
     );
 }
 
+/// An operand-selecting `reduce` lambda preserves a literal sequence's
+/// concrete callable element shape (issue #399).
+#[test]
+fn reduce_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from functools import reduce
+def f(value: int) -> None: ...
+reduce(lambda left, right: left, [f, f])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "reduce result"),
+        "expected reduce-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
