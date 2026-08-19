@@ -465,6 +465,25 @@ itemgetter(-1)((f,))(1)
     );
 }
 
+/// A local factory's return annotation identifies a callable instance class
+/// and therefore its concrete `__call__` signature (issue #378).
+#[test]
+fn typed_factory_result_preserves_callable_instance_signature() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def factory() -> C:
+    return C()
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "__call__"),
+        "expected typed factory-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

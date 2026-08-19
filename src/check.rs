@@ -1100,6 +1100,9 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    /// Local factory fullname -> callable instance class declared by its
+    /// return annotation.
+    callable_factory_returns: FxHashMap<String, String>,
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
@@ -1410,6 +1413,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
@@ -3558,6 +3562,21 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(element)
     }
 
+    // Covered by the typed-factory resolver and fix regressions; unresolved
+    // annotations and non-callable return classes deliberately decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn factory_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(factory_call) = func else {
+            return None;
+        };
+        let factory = self.resolve_callee(&factory_call.func)?;
+        let class = self.callable_factory_returns.get(&factory)?;
+        self.index.resolve_method(class, "__call__").or_else(|| {
+            let candidate = format!("{class}.__call__");
+            self.index.get(&candidate).is_some().then_some(candidate)
+        })
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3672,6 +3691,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.factory_result_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.itemgetter_result_callable(func) {
                     return Some(callable);
                 }
@@ -3934,6 +3956,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_expr(&decorator.expression);
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                if let Some(class) = returns.as_deref().and_then(|annotation| {
+                    self.class_from_annotation(&self.source[annotation.range()])
+                }) {
+                    let dunder_call = format!("{class}.__call__");
+                    if self.index.resolve_method(&class, "__call__").is_some()
+                        || self.index.get(&dunder_call).is_some()
+                    {
+                        self.callable_factory_returns
+                            .insert(fullname.clone(), class);
+                    }
+                }
                 if let Some(signature) = returns
                     .as_deref()
                     .and_then(Self::iterator_item_callable_signature)
