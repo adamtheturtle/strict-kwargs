@@ -224,6 +224,52 @@ fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn exclude_pattern_bindings(store: &mut Store, scope_name: &str, pattern: &ast::Pattern) {
+    match pattern {
+        ast::Pattern::MatchValue(_) | ast::Pattern::MatchSingleton(_) => {}
+        ast::Pattern::MatchSequence(sequence) => {
+            for inner in &sequence.patterns {
+                exclude_pattern_bindings(store, scope_name, inner);
+            }
+        }
+        ast::Pattern::MatchMapping(mapping) => {
+            for inner in &mapping.patterns {
+                exclude_pattern_bindings(store, scope_name, inner);
+            }
+            if let Some(rest) = &mapping.rest {
+                store.exclude(format!("{scope_name}.{rest}"));
+            }
+        }
+        ast::Pattern::MatchClass(class_pattern) => {
+            for inner in &class_pattern.arguments.patterns {
+                exclude_pattern_bindings(store, scope_name, inner);
+            }
+            for keyword in &class_pattern.arguments.keywords {
+                exclude_pattern_bindings(store, scope_name, &keyword.pattern);
+            }
+        }
+        ast::Pattern::MatchStar(star) => {
+            if let Some(name) = &star.name {
+                store.exclude(format!("{scope_name}.{name}"));
+            }
+        }
+        ast::Pattern::MatchAs(as_pattern) => {
+            if let Some(inner) = &as_pattern.pattern {
+                exclude_pattern_bindings(store, scope_name, inner);
+            }
+            if let Some(name) = &as_pattern.name {
+                store.exclude(format!("{scope_name}.{name}"));
+            }
+        }
+        ast::Pattern::MatchOr(or_pattern) => {
+            for inner in &or_pattern.patterns {
+                exclude_pattern_bindings(store, scope_name, inner);
+            }
+        }
+    }
+}
+
 // Covered through callable-instance integration tests. Excluded from the
 // coverage gate because llvm-cov reports branch holes for the duplicated
 // test-binary instantiations of this small binding shim.
@@ -2073,6 +2119,9 @@ fn index_stmt(
             );
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
+            for case in cases {
+                exclude_pattern_bindings(store, scope_name, &case.pattern);
+            }
             store.conditional_depth += 1;
             for case in cases {
                 index_module_with_bindings(
@@ -2212,6 +2261,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             index_module_fast(store, module_name, scope_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
+            for case in cases {
+                exclude_pattern_bindings(store, scope_name, &case.pattern);
+            }
             store.conditional_depth += 1;
             for case in cases {
                 index_module_fast(store, module_name, scope_name, &case.body);

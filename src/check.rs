@@ -2867,6 +2867,7 @@ impl<'a> CallChecker<'a> {
                 }
                 if let Some(rest) = &mapping.rest {
                     self.poison_hover_ctx_for(rest.as_str());
+                    self.invalidate_pattern_callable(rest.as_str());
                 }
             }
             ast::Pattern::MatchClass(class_pattern) => {
@@ -2880,6 +2881,7 @@ impl<'a> CallChecker<'a> {
             ast::Pattern::MatchStar(star) => {
                 if let Some(name) = &star.name {
                     self.poison_hover_ctx_for(name.as_str());
+                    self.invalidate_pattern_callable(name.as_str());
                 }
             }
             ast::Pattern::MatchAs(as_pattern) => {
@@ -2888,6 +2890,7 @@ impl<'a> CallChecker<'a> {
                 }
                 if let Some(name) = &as_pattern.name {
                     self.poison_hover_ctx_for(name.as_str());
+                    self.invalidate_pattern_callable(name.as_str());
                 }
             }
             ast::Pattern::MatchOr(or_pattern) => {
@@ -2895,6 +2898,18 @@ impl<'a> CallChecker<'a> {
                     self.poison_hover_pattern_bindings(inner);
                 }
             }
+        }
+    }
+
+    fn invalidate_pattern_callable(&mut self, name: &str) {
+        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+            scope.functions.contains_key(name) || scope.names.contains_key(name)
+        });
+        if was_known_callable {
+            self.mark_opaque_local(name);
+            self.current_scope()
+                .invalidated_callables
+                .insert(name.to_string());
         }
     }
 

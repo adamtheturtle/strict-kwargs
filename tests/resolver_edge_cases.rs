@@ -236,6 +236,22 @@ target(1)
     );
 }
 
+/// An irrefutable match capture replaces an earlier function binding with the
+/// matched value (issue #418).
+#[test]
+fn match_capture_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+match (lambda *args: None):
+    case f:
+        pass
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale match capture: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
