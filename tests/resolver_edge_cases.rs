@@ -294,6 +294,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `heapq` functions returning a homogeneous list element retain its concrete
+/// callable signature (issue #441).
+#[test]
+fn heapq_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def f(value: int) -> None: ...
+heap = [f]
+heapq.heappop(heap)(1)
+heapq.heapreplace(heap, f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 5, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

@@ -1361,6 +1361,8 @@ struct Scope {
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
     annotations: FxHashMap<String, String>,
+    /// Local list name -> one concrete callable shared by every element.
+    callable_list_elements: FxHashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1484,6 +1486,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.callable_list_elements.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1503,6 +1506,7 @@ impl<'a> CallChecker<'a> {
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.callable_list_elements.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -1517,6 +1521,35 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    fn resolve_callable_list_element(&self, name: &str) -> Option<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.callable_list_elements.get(name).cloned())
+    }
+
+    fn record_callable_list(&mut self, name: &str, callable: Option<String>) {
+        let scope = self.current_scope();
+        if let Some(callable) = callable {
+            scope
+                .callable_list_elements
+                .insert(name.to_owned(), callable);
+        } else {
+            scope.callable_list_elements.remove(name);
+        }
+    }
+
+    fn homogeneous_callable_list(&self, value: &Expr) -> Option<String> {
+        let Expr::List(list) = value else {
+            return None;
+        };
+        let mut elements = list.elts.iter();
+        let first = self.resolve_callee(elements.next()?)?;
+        elements
+            .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            .then_some(first)
     }
 
     fn mark_param_opaque(&mut self, name: &str) {
@@ -3306,6 +3339,33 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn heapq_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_module(module.id.as_str()).as_deref() != Some("heapq")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match (attribute.attr.as_str(), &*call.arguments.args) {
+            ("heappop", [Expr::Name(heap)]) => self.resolve_callable_list_element(heap.id.as_str()),
+            ("heapreplace", [Expr::Name(heap), replacement]) => {
+                let element = self.resolve_callable_list_element(heap.id.as_str())?;
+                (self.resolve_callee(replacement).as_deref() == Some(element.as_str()))
+                    .then_some(element)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -3454,6 +3514,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.heapq_result_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
@@ -3711,9 +3774,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
+                let callable_list = self.homogeneous_callable_list(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
+                        self.record_callable_list(name.id.as_str(), callable_list.clone());
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
                         } else if is_callable_attribute_alias || is_lambda {
