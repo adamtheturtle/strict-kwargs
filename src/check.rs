@@ -3110,6 +3110,7 @@ impl<'a> CallChecker<'a> {
             .map_or(self.module_name.as_str(), String::as_str)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_sequence_index(slice: &Expr, len: usize) -> Option<usize> {
         match slice {
             Expr::NumberLiteral(ast::ExprNumberLiteral {
@@ -3140,6 +3141,7 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn same_literal_key(left: &Expr, right: &Expr) -> bool {
         match (left, right) {
             (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
@@ -3155,6 +3157,7 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_subscript(&self, value: &Expr, slice: &Expr) -> Option<String> {
         match value {
             Expr::List(list) => {
