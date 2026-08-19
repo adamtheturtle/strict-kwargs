@@ -9,7 +9,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_strict-kwargs");
 const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
@@ -408,7 +408,7 @@ fn check_github_output_writes_annotations_to_stdout() {
     assert!(stderr(&output).is_empty());
     assert_eq!(
         stdout(&output),
-        "::error file=main.py,line=2,col=1::\
+        "::error file=main.py,line=2,col=1,title=KW001::\
          Too many positional arguments for \"f\" (got 1, maximum 0)\n"
     );
 }
@@ -467,6 +467,33 @@ fn check_file_explicit_project_root_is_fatal_exit_two() {
     assert!(err.contains("--project-root"), "stderr: {err}");
     assert!(err.contains("existing directory"), "stderr: {err}");
     assert!(err.contains("not-a-directory"), "stderr: {err}");
+}
+
+#[test]
+fn check_paths_from_multiple_projects_are_rejected_in_any_order() {
+    let project = Project::new()
+        .write(
+            "a/pyproject.toml",
+            "[tool.strict_kwargs]\nignore_names = [\"file.function\"]\n",
+        )
+        .write("b/pyproject.toml", "[project]\nname = \"b\"\n")
+        .write(
+            "a/file.py",
+            "def function(value: int) -> None: ...\nfunction(1)\n",
+        )
+        .write(
+            "b/file.py",
+            "def function(value: int) -> None: ...\nfunction(1)\n",
+        );
+
+    for paths in [["a/file.py", "b/file.py"], ["b/file.py", "a/file.py"]] {
+        let output = project.run(&["check", paths[0], paths[1]]);
+        let err = stderr(&output);
+        assert_eq!(code(&output), 2, "stderr: {err}");
+        assert!(stdout(&output).is_empty());
+        assert!(err.contains("multiple project roots"), "stderr: {err}");
+        assert!(err.contains("separately"), "stderr: {err}");
+    }
 }
 
 #[test]
@@ -1014,6 +1041,20 @@ fn check_invalid_python_warns_but_continues() {
 }
 
 #[test]
+fn check_existing_non_python_path_is_fatal_exit_two() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n")
+        .write("README.md", "not Python\n");
+    let output = project.run(&["check", "--python", "README.md", "main.py"]);
+    let err = stderr(&output);
+    assert_eq!(code(&output), 2, "stderr: {err}");
+    assert!(stdout(&output).is_empty());
+    assert!(err.contains("--python"), "stderr: {err}");
+    assert!(err.contains("Python interpreter"), "stderr: {err}");
+    assert!(err.contains("README.md"), "stderr: {err}");
+}
+
+#[test]
 fn fix_reports_when_nothing_to_fix() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let output = project.run(&["check", "--fix", "main.py"]);
@@ -1032,6 +1073,19 @@ fn fix_and_diff_are_mutually_exclusive() {
     assert!(err.contains("--fix"), "stderr: {err}");
     assert!(err.contains("--diff"), "stderr: {err}");
     assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
+fn unsafe_fixes_requires_fix_or_diff() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    let output = project.run(&["check", "--unsafe-fixes", "main.py"]);
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("--unsafe-fixes"), "stderr: {err}");
+    assert!(
+        err.contains("--fix") && err.contains("--diff"),
+        "stderr: {err}"
+    );
 }
 
 #[test]
@@ -1055,6 +1109,19 @@ fn diff_rejects_output_format() {
 }
 
 #[test]
+fn fix_modes_reject_cache_dir() {
+    let project = Project::new().write("main.py", "def f(value): ...\nf(1)\n");
+    for mode in ["--fix", "--diff"] {
+        let output = project.run(&["check", mode, "--cache-dir", "cache", "main.py"]);
+        assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+        let err = stderr(&output);
+        assert!(err.contains(mode), "stderr: {err}");
+        assert!(err.contains("--cache-dir"), "stderr: {err}");
+    }
+    assert!(!project.root.join("cache").exists());
+}
+
+#[test]
 fn fix_diff_prints_patch_without_writing() {
     let source = "def f(a: int) -> None: ...\nf(1)\n";
     let project = Project::new().write("main.py", source);
@@ -1071,6 +1138,29 @@ fn fix_diff_prints_patch_without_writing() {
     );
     // `--diff` must not modify the file.
     assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
+fn fix_diff_handles_closed_stdout_without_panicking() {
+    let mut source = String::from("def f(value: int) -> None: ...\n");
+    for _ in 0..5_000 {
+        source.push_str("f(1)\n");
+    }
+    let project = Project::new().write("main.py", &source);
+    let mut child = Command::new(BIN)
+        .args(["check", "--diff", "main.py"])
+        .current_dir(&project.root)
+        .env_remove(CACHE_DIR_ENV_VAR)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn strict-kwargs");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait for strict-kwargs");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(!err.contains("panicked"), "stderr: {err}");
+    assert!(!err.contains("backtrace"), "stderr: {err}");
 }
 
 #[test]
@@ -1170,7 +1260,7 @@ fn fix_diff_reports_declined() {
         &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n"),
     );
     let output = project.run(&["check", "--diff", "main.py"]);
-    assert_eq!(code(&output), 0);
+    assert_eq!(code(&output), 1);
     let patch = stdout(&output);
     assert!(patch.contains("+f(a=1, b=2)"), "patch: {patch}");
     assert!(
@@ -1229,7 +1319,9 @@ fn fix_accepts_python_flag() {
     // resolvable by the built-in resolver, so the ty fallback never starts
     // and the flag value is irrelevant to the result — the point is that the
     // argument parses and the rewrite still happens.
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let project = Project::new()
+        .write("pyvenv.cfg", "home = /usr/bin\n")
+        .write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["check", "--fix", "--python", ".", "main.py"]);
     assert_eq!(code(&output), 0);
     assert!(

@@ -304,13 +304,26 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
 }
 
 fn minimum_required_version_is_satisfied(current: &Version, minimum: &Version) -> bool {
+    let same_base = current.major == minimum.major
+        && current.minor == minimum.minor
+        && current.patch == minimum.patch;
+    let minimum_is_post = minimum
+        .pre
+        .as_str()
+        .split('.')
+        .next()
+        .is_some_and(|identifier| identifier == "post");
+    // SemVer calls every prerelease older than its bare release, but this
+    // project documents `-post.N` as a post-release suffix. Apply that one
+    // ordering correction before the ordinary SemVer comparison.
+    if same_base && current.pre.is_empty() && minimum_is_post {
+        return false;
+    }
     if current >= minimum {
         return true;
     }
     minimum.pre.is_empty()
-        && current.major == minimum.major
-        && current.minor == minimum.minor
-        && current.patch == minimum.patch
+        && same_base
         && current
             .pre
             .as_str()
@@ -686,6 +699,13 @@ mod tests {
         assert!(message.contains("required_version"), "message: {message}");
         assert!(message.contains("not satisfied"), "message: {message}");
         assert!(message.contains("2026.5.19-post.3"), "message: {message}");
+    }
+
+    #[test]
+    fn base_release_does_not_satisfy_post_release_minimum() {
+        let message = validate_required_version(">=2026.8.16-post.1", "2026.8.16")
+            .expect_err("base release is older than its post release");
+        assert!(message.contains("not satisfied"), "message: {message}");
     }
 
     #[test]

@@ -50,3 +50,4 @@ pub use fix::{
     unified_diff, write_all_preserving_encoding, DeclinedFixReason, DeclinedFixReasonCount,
     FileFix, FixOptIns, FixOutcome,
 };
+pub use resolve::is_python_environment;

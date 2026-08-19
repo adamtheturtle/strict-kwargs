@@ -125,10 +125,11 @@ impl Diagnostic {
     #[must_use]
     pub fn github_annotation(&self) -> String {
         format!(
-            "::error file={},line={},col={}::{}",
+            "::error file={},line={},col={},title={}::{}",
             escape_github_property(&self.path.display().to_string()),
             self.line,
             self.column,
+            self.code(),
             escape_github_data(&self.message())
         )
     }
@@ -179,7 +180,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.github_annotation(),
-            "::error file=pkg/mod.py,line=7,col=3::\
+            "::error file=pkg/mod.py,line=7,col=3,title=KW001::\
              Too many positional arguments for pkg.mod.func (got 4, maximum 2)"
         );
     }
@@ -196,7 +197,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.github_annotation(),
-            "::error file=pkg/a%2Cb%25%3Amod.py,line=7,col=3::\
+            "::error file=pkg/a%2Cb%25%3Amod.py,line=7,col=3,title=KW001::\
              Too many positional arguments for pkg.mod.f%25%0A (got 4, maximum 2)"
         );
     }
@@ -216,7 +217,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.github_annotation(),
-            "::error file=pkg/mod.py,line=7,col=15::\
+            "::error file=pkg/mod.py,line=7,col=15,title=KW002::\
              Unused `noqa` directive (unused: `KW001`)"
         );
     }
