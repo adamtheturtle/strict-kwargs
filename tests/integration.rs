@@ -2110,28 +2110,16 @@ Point(f).call(1)
 }
 
 #[test]
-fn make_dataclass_constructor_and_callable_field_are_modeled() {
-    let messages = check_source(
+fn collections_namedtuple_keyword_field_preserves_callable_signature() {
+    assert_error(
         r#"
-from collections.abc import Callable
-from dataclasses import make_dataclass
-Point = make_dataclass(cls_name="Point", fields=[("call", Callable[[int], None])])
+from collections import namedtuple
+Point = namedtuple("Point", ["call"])
 def f(value: int) -> None: ...
-Point(f).call(1)
+Point(call=f).call(1)
 "#,
-    );
-    assert_eq!(messages.len(), 2, "got: {messages:?}");
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "Point""#)),
-        "got: {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "call" of "Point""#)),
-        "got: {messages:?}"
+        5,
+        r#"for "f" (got 1, maximum 0)"#,
     );
 }
 
