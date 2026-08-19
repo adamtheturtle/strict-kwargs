@@ -795,6 +795,30 @@ queue.get_nowait()(1)
     );
 }
 
+/// A constructed `operator.methodcaller` accepts its target positionally,
+/// while encoded `__call__` arguments are checked against that target (#395).
+#[test]
+fn methodcaller_checks_encoded_call_not_target_boundary() {
+    let messages = check_source(
+        r#"
+import operator
+def f(value: int) -> None: ...
+operator.methodcaller("__call__", 1)(f)
+"#,
+    );
+    assert_eq!(messages.len(), 1, "unexpected diagnostics: {messages:?}");
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected encoded f-call violation, got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("methodcaller")),
+        "methodcaller target boundary must stay positional: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
