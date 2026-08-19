@@ -7270,6 +7270,14 @@ match subj.value:
                 Some("test.f".into())
             );
         });
+
+        let parsed = parse_module("f + g").expect("parse unsupported callee");
+        let [Stmt::Expr(statement)] = parsed.suite().as_slice() else {
+            panic!("expected expression statement");
+        };
+        with_empty_checker(false, |checker| {
+            assert_eq!(checker.resolve_callee(&statement.value), None);
+        });
     }
 
     #[test]
