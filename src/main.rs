@@ -412,6 +412,22 @@ fn fix_exit_code(remaining: usize) -> ExitCode {
     }
 }
 
+fn diff_header_path(project_root: &std::path::Path, path: &std::path::Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Ok(relative) = path.strip_prefix(project_root) {
+        return relative.to_path_buf();
+    }
+    if let (Ok(root), Ok(canonical_path)) = (project_root.canonicalize(), path.canonicalize()) {
+        if let Ok(relative) = canonical_path.strip_prefix(root) {
+            return relative.to_path_buf();
+        }
+    }
+    path.file_name()
+        .map_or_else(|| PathBuf::from("file.py"), PathBuf::from)
+}
+
 fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths)?;
@@ -435,10 +451,8 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     if args.diff {
         let color = diff_color();
         for fix in fixes {
-            print!(
-                "{}",
-                unified_diff(&fix.path, &fix.original, &fix.fixed, color)
-            );
+            let path = diff_header_path(&project_root, &fix.path);
+            print!("{}", unified_diff(&path, &fix.original, &fix.fixed, color));
         }
         report_diff_summary(fixes, remaining);
         return Ok(ExitCode::from(0));

@@ -1074,6 +1074,17 @@ fn fix_diff_prints_patch_without_writing() {
 }
 
 #[test]
+fn fix_diff_uses_project_relative_headers_for_absolute_input() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let absolute = project.root.join("main.py").to_string_lossy().into_owned();
+    let output = project.run(&["check", "--diff", &absolute]);
+    let patch = stdout(&output);
+    assert!(patch.contains("--- a/main.py"), "patch: {patch}");
+    assert!(patch.contains("+++ b/main.py"), "patch: {patch}");
+    assert!(!patch.contains("a//"), "patch: {patch}");
+}
+
+#[test]
 fn fix_diff_plural_summary() {
     let project = Project::new()
         .write(
