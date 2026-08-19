@@ -182,6 +182,9 @@ fn exclude_assigned_attribute(
     target: &Expr,
     bindings: Option<&FxHashMap<String, String>>,
 ) {
+    if store.conditional_depth > 0 {
+        return;
+    }
     let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
         return;
     };
