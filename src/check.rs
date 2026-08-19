@@ -5000,8 +5000,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
             }
-            Stmt::For(ast::StmtFor { target, .. }) => {
-                if let Expr::Name(name) = target.as_ref() {
+            Stmt::For(for_stmt) => {
+                if let Expr::Name(name) = for_stmt.target.as_ref() {
                     let was_known_callable = self.scopes.last().is_some_and(|scope| {
                         scope.functions.contains_key(name.id.as_str())
                             || scope.names.contains_key(name.id.as_str())
@@ -5013,10 +5013,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string());
                     }
                 }
-                walk_stmt(self, stmt);
+                self.visit_for_stmt(for_stmt);
             }
-            Stmt::With(ast::StmtWith { items, .. }) => {
-                for target in items
+            Stmt::With(with_stmt) => {
+                for target in with_stmt
+                    .items
                     .iter()
                     .filter_map(|item| item.optional_vars.as_deref())
                 {
@@ -5033,7 +5034,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         }
                     }
                 }
-                walk_stmt(self, stmt);
+                self.visit_with_stmt(with_stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -5091,10 +5092,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
-            Stmt::With(with_stmt) => {
-                self.visit_with_stmt(with_stmt);
-            }
-            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
