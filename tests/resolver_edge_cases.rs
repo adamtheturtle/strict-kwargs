@@ -743,6 +743,22 @@ deque([f]).pop()(1)
     );
 }
 
+/// Iterating an immediate literal dictionary's values preserves a concrete
+/// callable value shape (issue #391).
+#[test]
+fn dict_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def f(value: int) -> None: ...
+next(iter({"call": f}.values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
