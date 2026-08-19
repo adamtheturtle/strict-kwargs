@@ -209,6 +209,26 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Generic builtins that select or sort elements preserve a homogeneous
+/// literal collection's concrete callable signature (issue #370).
+#[test]
+fn generic_builtin_results_preserve_literal_callable_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+min([f], key=id)(1)
+max((f,), key=id)(1)
+sorted({f}, key=id)[0](1)
+",
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "f"),
+            "expected generic-builtin violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
