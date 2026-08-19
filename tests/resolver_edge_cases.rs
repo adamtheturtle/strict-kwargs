@@ -370,6 +370,40 @@ outer()
     assert!(messages.is_empty(), "stale nonlocal function: {messages:?}");
 }
 
+/// Assignments in every `try` suite participate in callable invalidation,
+/// including a deterministic `finally` replacement (issue #426).
+#[test]
+fn try_else_and_finally_assignments_invalidate_prior_signatures() {
+    let messages = check_source(
+        r"
+def in_try(value: int) -> None: ...
+try:
+    in_try = lambda *args: None
+except Exception:
+    pass
+in_try(1)
+def in_else(value: int) -> None: ...
+try:
+    pass
+except Exception:
+    pass
+else:
+    in_else = lambda *args: None
+in_else(1)
+def in_finally(value: int) -> None: ...
+try:
+    pass
+finally:
+    in_finally = lambda *args: None
+in_finally(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale try-suite bindings: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
