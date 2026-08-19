@@ -401,6 +401,26 @@ Holder(call=f).call(1)
     );
 }
 
+/// A literal `operator.attrgetter` applied to a receiver with a known
+/// callable attribute preserves that attribute's signature (issue #375).
+#[test]
+fn attrgetter_result_preserves_known_callable_attribute() {
+    let messages = check_source(
+        r#"
+from operator import attrgetter
+from types import SimpleNamespace
+def f(value: int) -> None: ...
+holder = SimpleNamespace(call=f)
+attrgetter("call")(holder)(1)
+attrgetter("call")(SimpleNamespace(call=f))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "f") && has_error_at(&messages, 7, "f"),
+        "expected both attrgetter-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

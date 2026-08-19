@@ -3462,6 +3462,42 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(&field.value)
     }
 
+    // The end-to-end regression covers both tracked and inline receivers;
+    // malformed factories and unknown receiver shapes deliberately decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn attrgetter_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(getter_call) = func else {
+            return None;
+        };
+        let Expr::Call(getter_factory) = getter_call.func.as_ref() else {
+            return None;
+        };
+        let getter_fullname = self.resolve_callee(&getter_factory.func)?;
+        let getter_type = getter_fullname
+            .strip_suffix(".__new__")
+            .or_else(|| getter_fullname.strip_suffix(".__init__"))
+            .unwrap_or(&getter_fullname);
+        if getter_type != "operator.attrgetter"
+            || getter_factory.arguments.len() != 1
+            || getter_call.arguments.len() != 1
+        {
+            return None;
+        }
+        let Expr::StringLiteral(attribute) = getter_factory.arguments.args.first()? else {
+            return None;
+        };
+        let attribute = attribute.value.to_str();
+        let receiver = getter_call.arguments.args.first()?;
+        if let Expr::Name(receiver) = receiver {
+            return self.resolve_bound_callable_attribute(receiver.id.as_str(), attribute);
+        }
+        let Expr::Call(constructor) = receiver else {
+            return None;
+        };
+        let field = constructor.arguments.find_keyword(attribute)?;
+        self.resolve_callee(&field.value)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3576,6 +3612,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.attrgetter_result_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(result) =
                     self.preserving_builtin_result(constructor, &["builtins.min", "builtins.max"])
                 {
