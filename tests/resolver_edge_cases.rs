@@ -1748,3 +1748,20 @@ fn diagnostic_message_shape() {
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message().contains("Too many positional"));
 }
+
+/// atexit.register returns the registered callable unchanged (issue #478).
+#[test]
+fn atexit_register_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import atexit
+def target(value: int) -> int:
+    return value
+atexit.register(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
