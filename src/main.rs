@@ -131,7 +131,17 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<Path
     }
 
     let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-    Ok(find_project_root(&start))
+    let root = find_project_root(&start);
+    for path in paths.iter().skip(1) {
+        let other = find_project_root(path);
+        if other != root {
+            return Err(CheckError::MultipleProjectRoots {
+                first: root,
+                second: other,
+            });
+        }
+    }
+    Ok(root)
 }
 
 fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
@@ -482,6 +492,21 @@ mod tests {
             project_root_for(None, &[file]).expect("discovered project root"),
             dir.path()
         );
+    }
+
+    #[test]
+    fn project_root_rejects_paths_from_different_projects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("a");
+        let second = dir.path().join("b");
+        std::fs::create_dir_all(&first).expect("mkdir");
+        std::fs::create_dir_all(&second).expect("mkdir");
+        std::fs::write(first.join("pyproject.toml"), "[project]\n").expect("write");
+        std::fs::write(second.join("pyproject.toml"), "[project]\n").expect("write");
+
+        let error = project_root_for(None, &[first.join("m.py"), second.join("m.py")])
+            .expect_err("mixed roots must be rejected");
+        assert!(matches!(error, CheckError::MultipleProjectRoots { .. }));
     }
 
     #[test]

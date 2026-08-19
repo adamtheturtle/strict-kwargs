@@ -470,6 +470,33 @@ fn check_file_explicit_project_root_is_fatal_exit_two() {
 }
 
 #[test]
+fn check_paths_from_multiple_projects_are_rejected_in_any_order() {
+    let project = Project::new()
+        .write(
+            "a/pyproject.toml",
+            "[tool.strict_kwargs]\nignore_names = [\"file.function\"]\n",
+        )
+        .write("b/pyproject.toml", "[project]\nname = \"b\"\n")
+        .write(
+            "a/file.py",
+            "def function(value: int) -> None: ...\nfunction(1)\n",
+        )
+        .write(
+            "b/file.py",
+            "def function(value: int) -> None: ...\nfunction(1)\n",
+        );
+
+    for paths in [["a/file.py", "b/file.py"], ["b/file.py", "a/file.py"]] {
+        let output = project.run(&["check", paths[0], paths[1]]);
+        let err = stderr(&output);
+        assert_eq!(code(&output), 2, "stderr: {err}");
+        assert!(stdout(&output).is_empty());
+        assert!(err.contains("multiple project roots"), "stderr: {err}");
+        assert!(err.contains("separately"), "stderr: {err}");
+    }
+}
+
+#[test]
 fn check_required_version_mismatch_is_fatal_exit_two() {
     let project = Project::new()
         .write(
