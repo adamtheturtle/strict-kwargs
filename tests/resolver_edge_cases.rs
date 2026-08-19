@@ -814,6 +814,25 @@ queue.get_nowait()(1)
     );
 }
 
+/// Awaiting an asyncio Queue get retains a callable item annotation
+/// (issue #445).
+#[test]
+fn annotated_asyncio_queue_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+queue: asyncio.Queue[Callable[[int], None]] = asyncio.Queue()
+async def caller() -> None:
+    (await queue.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "get() result"),
+        "expected queue result violation, got: {messages:?}"
+    );
+}
+
 /// A constructed `operator.methodcaller` accepts its target positionally,
 /// while encoded `__call__` arguments are checked against that target (#395).
 #[test]

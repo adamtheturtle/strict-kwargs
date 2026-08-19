@@ -2273,6 +2273,11 @@ impl<'a> CallChecker<'a> {
                 fullname: "overload result".to_string(),
                 signature,
             })
+        } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.Queue.get() result".to_string(),
+                signature,
+            })
         } else if let Some(signature) = self.queue_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "queue result".to_string(),
@@ -4001,6 +4006,39 @@ impl<'a> CallChecker<'a> {
             }
             if scope.names.contains_key(receiver.id.as_str())
                 || scope.opaque_locals.contains(receiver.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaited_queue_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Await(awaited) = func else {
+            return None;
+        };
+        let Expr::Call(get_call) = awaited.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || !get_call.arguments.args.is_empty()
+            || !get_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Name(queue) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_queue_items.get(queue.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(queue.id.as_str())
+                || scope.opaque_locals.contains(queue.id.as_str())
             {
                 return None;
             }
