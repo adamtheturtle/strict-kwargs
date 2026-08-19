@@ -1118,6 +1118,8 @@ struct CallChecker<'a> {
     type_vars: FxHashSet<String>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
+    /// `TypeGuard` function fullname -> callable signature asserted when true.
+    callable_typeguards: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1449,6 +1451,7 @@ impl<'a> CallChecker<'a> {
             generic_returns: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             callable_return_overloads: FxHashMap::default(),
+            callable_typeguards: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -3742,6 +3745,33 @@ impl<'a> CallChecker<'a> {
         Self::callable_annotation_signature(item)
     }
 
+    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        (Self::dotted_path(value)?.rsplit('.').next() == Some("TypeGuard"))
+            .then(|| Self::callable_annotation_signature(slice))
+            .flatten()
+    }
+
+    fn callable_typeguard_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let Expr::Call(call) = test else {
+            return None;
+        };
+        let fullname = self.resolve_callee(&call.func)?;
+        let signature = self.callable_typeguards.get(&fullname)?.clone();
+        let target = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .keywords
+                .first()
+                .map(|keyword| &keyword.value)
+        });
+        let Expr::Name(target) = target? else {
+            return None;
+        };
+        Some((target.id.to_string(), signature))
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn unnamed_callable_signature(&self, expr: &Expr) -> Option<Signature> {
         let fullname = self.resolve_callee(expr)?;
@@ -4672,8 +4702,20 @@ impl<'a> CallChecker<'a> {
             ..
         } = if_stmt;
         self.visit_expr(test);
-        for inner in body {
-            self.visit_if_branch_stmt(inner, traversal);
+        let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
+            .then(|| self.callable_typeguard_narrowing(test))
+            .flatten();
+        if let Some((name, signature)) = narrowing {
+            self.push_scope();
+            self.define_function(&name, "TypeGuard narrowed callable".to_string(), signature);
+            for inner in body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
+            self.pop_scope();
+        } else {
+            for inner in body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
         }
         for clause in elif_else_clauses {
             if let Some(clause_test) = &clause.test {
@@ -4869,6 +4911,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.callable_factory_returns
                             .insert(fullname.clone(), class);
                     }
+                }
+                if let Some(signature) = returns
+                    .as_deref()
+                    .and_then(Self::typeguard_callable_signature)
+                {
+                    self.callable_typeguards.insert(fullname.clone(), signature);
                 }
                 if let Some(signature) = returns
                     .as_deref()
