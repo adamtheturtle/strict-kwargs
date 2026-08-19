@@ -2144,7 +2144,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.awaited_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.anext_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "anext() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "awaited result".to_string(),
                 signature,
@@ -3373,7 +3378,7 @@ impl<'a> CallChecker<'a> {
         let container = Self::dotted_path(value)?;
         let container = container.rsplit('.').next()?;
         let item = match container {
-            "Iterator" | "Iterable" => slice.as_ref(),
+            "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
             "Generator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
@@ -3605,6 +3610,27 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&factory_call.func)?;
         self.callable_returns.get(&factory).cloned()
+    }
+
+    // Covered end-to-end by the async-iterator regression. Unsupported await
+    // and iterator-factory shapes intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn anext_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Await(ast::ExprAwait { value, .. }) = func else {
+            return None;
+        };
+        let Expr::Call(next_call) = value.as_ref() else {
+            return None;
+        };
+        let next_fullname = self.resolve_callee(&next_call.func)?;
+        if next_fullname != "builtins.anext" {
+            return None;
+        }
+        let Expr::Call(factory_call) = next_call.arguments.args.first()? else {
+            return None;
+        };
+        let factory_fullname = self.resolve_callee(&factory_call.func)?;
+        self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
