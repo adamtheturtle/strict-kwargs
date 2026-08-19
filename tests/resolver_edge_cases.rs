@@ -236,6 +236,29 @@ fn direct_lambda_invocation_uses_lambda_signature() {
     );
 }
 
+/// `typing.cast` itself is exempt, while a cast to a concrete `Callable`
+/// supplies the result call's positional limit (issue #367).
+#[test]
+fn typing_cast_callable_result_is_checked_without_flagging_cast() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import cast
+def f(value: int) -> None: ...
+cast(Callable[[int], None], f)(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected only the result call: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "cast result"),
+        "expected cast-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
