@@ -1108,6 +1108,9 @@ struct CallChecker<'a> {
     callable_iterator_items: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
+    /// Callable values yielded by `@contextmanager` functions, keyed by the
+    /// manager factory's fullname.
+    callable_contextmanager_items: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1418,6 +1421,7 @@ impl<'a> CallChecker<'a> {
             callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
+            callable_contextmanager_items: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -3921,6 +3925,32 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn visit_with_stmt(&mut self, with_stmt: &'a ast::StmtWith) {
+        for item in &with_stmt.items {
+            self.visit_expr(&item.context_expr);
+            let Some(target) = item.optional_vars.as_deref() else {
+                continue;
+            };
+            self.visit_expr(target);
+            let (Expr::Name(name), Expr::Call(manager_call)) = (target, &item.context_expr) else {
+                continue;
+            };
+            let Some(factory) = self.resolve_callee(&manager_call.func) else {
+                continue;
+            };
+            if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
+                self.define_function(
+                    name.id.as_str(),
+                    format!("{factory} context result"),
+                    signature,
+                );
+            }
+        }
+        for inner in &with_stmt.body {
+            self.visit_stmt(inner);
+        }
+    }
+
     /// Walk a statement that appears in a function body or local control-flow
     /// branch. Statements that carry custom `visit_stmt` logic
     /// (`Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
@@ -3942,6 +3972,10 @@ impl<'a> CallChecker<'a> {
             Stmt::If(if_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody);
+            }
+            Stmt::With(with_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.visit_with_stmt(with_stmt);
             }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
@@ -4042,6 +4076,15 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .as_deref()
                     .and_then(Self::iterator_item_callable_signature)
                 {
+                    if decorator_list.iter().any(|decorator| {
+                        matches!(
+                            decorator_tail(&decorator.expression),
+                            Some("contextmanager" | "asynccontextmanager")
+                        )
+                    }) {
+                        self.callable_contextmanager_items
+                            .insert(fullname.clone(), signature.clone());
+                    }
                     self.callable_iterator_items
                         .insert(fullname.clone(), signature);
                 }
@@ -4165,6 +4208,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
+            Stmt::With(with_stmt) => {
+                self.visit_with_stmt(with_stmt);
+            }
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),

@@ -603,6 +603,26 @@ async def caller() -> None:
     );
 }
 
+/// A `@contextmanager` factory's callable iterator item becomes the concrete
+/// signature of its `with ... as` binding (issue #385).
+#[test]
+fn contextmanager_with_binding_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def manager() -> Iterator[Callable[[int], None]]: ...
+with manager() as call:
+    call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "context result"),
+        "expected context-manager binding violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
