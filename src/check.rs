@@ -1381,6 +1381,8 @@ struct Scope {
     annotations: FxHashMap<String, String>,
     /// Queue-like local binding -> concrete callable item signature.
     callable_queue_items: FxHashMap<String, Signature>,
+    /// Annotated iterable local -> concrete callable item signature.
+    callable_iterable_items: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -1525,6 +1527,7 @@ impl<'a> CallChecker<'a> {
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
         scope.callable_queue_items.remove(local_name);
+        scope.callable_iterable_items.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1548,6 +1551,7 @@ impl<'a> CallChecker<'a> {
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
             scope.callable_queue_items.remove(local_name);
+            scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
             newly_active_scope
         };
@@ -1581,6 +1585,7 @@ impl<'a> CallChecker<'a> {
         scope.modules.remove(name);
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
+        scope.callable_iterable_items.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1598,6 +1603,7 @@ impl<'a> CallChecker<'a> {
         remove_function_binding(scope, name);
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
+        scope.callable_iterable_items.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -3963,6 +3969,46 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn annotated_iterable_item_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        matches!(
+            Self::dotted_path(value)?.rsplit('.').next(),
+            Some("list" | "List" | "Sequence" | "Iterable")
+        )
+        .then(|| Self::callable_annotation_signature(slice))?
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn reversed_item_signature(&self, iterable: &Expr) -> Option<Signature> {
+        let Expr::Call(reversed_call) = iterable else {
+            return None;
+        };
+        let reversed_fullname = self.resolve_callee(&reversed_call.func)?;
+        if !matches!(
+            reversed_fullname.as_str(),
+            "builtins.reversed" | "builtins.reversed.__new__"
+        ) {
+            return None;
+        }
+        let [Expr::Name(source)] = &*reversed_call.arguments.args else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(source.id.as_str())
+                || scope.opaque_locals.contains(source.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -4602,6 +4648,24 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_for_stmt(&mut self, for_stmt: &'a ast::StmtFor) {
+        self.visit_expr(&for_stmt.iter);
+        self.visit_expr(&for_stmt.target);
+        if let (Expr::Name(target), Some(signature)) = (
+            for_stmt.target.as_ref(),
+            self.reversed_item_signature(&for_stmt.iter),
+        ) {
+            self.define_function(target.id.as_str(), "reversed item".to_string(), signature);
+        }
+        for inner in &for_stmt.body {
+            self.visit_stmt(inner);
+        }
+        for inner in &for_stmt.orelse {
+            self.visit_stmt(inner);
+        }
+    }
+
     /// Walk a statement that appears in a function body or local control-flow
     /// branch. Statements that carry custom `visit_stmt` logic
     /// (`Assign`, `AnnAssign`, `FunctionDef`, `ClassDef`) are dispatched
@@ -4627,6 +4691,10 @@ impl<'a> CallChecker<'a> {
             Stmt::With(with_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_with_stmt(with_stmt);
+            }
+            Stmt::For(for_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.visit_for_stmt(for_stmt);
             }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
@@ -4873,6 +4941,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
                     }
+                    if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
+                        self.current_scope()
+                            .callable_iterable_items
+                            .insert(name.id.to_string(), signature);
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -4890,6 +4963,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
                     }
+                    if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
+                        self.current_scope()
+                            .callable_iterable_items
+                            .insert(name.id.to_string(), signature);
+                    }
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
@@ -4897,6 +4975,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             Stmt::With(with_stmt) => {
                 self.visit_with_stmt(with_stmt);
             }
+            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),

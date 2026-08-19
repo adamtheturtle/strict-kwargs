@@ -623,6 +623,25 @@ with manager() as call:
     );
 }
 
+/// `reversed` preserves an annotated list's concrete callable item type when
+/// binding a simple loop target (issue #397).
+#[test]
+fn reversed_loop_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def f(value: int) -> None: ...
+calls: list[Callable[[int], None]] = [f]
+for call in reversed(calls):
+    call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "reversed item"),
+        "expected reversed-item violation, got: {messages:?}"
+    );
+}
+
 /// Generic functions that return the same `TypeVar` accepted by their
 /// arguments preserve an unambiguous concrete callable (issue #386).
 #[test]
