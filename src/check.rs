@@ -3088,6 +3088,14 @@ impl<'a> CallChecker<'a> {
         path.rsplit('.').next() == Some("NamedTuple")
     }
 
+    fn is_make_dataclass(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        Self::dotted_path(&call.func)
+            .is_some_and(|path| path.rsplit('.').next() == Some("make_dataclass"))
+    }
+
     /// Resolve a deeper attribute chain (`os.path.join` -> the joined
     /// module path). Reached only when the attribute's base is itself an
     /// attribute (the bare-`Name` base is handled by the caller), so
@@ -3566,10 +3574,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
+                let is_make_dataclass = Self::is_make_dataclass(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        if is_functional_namedtuple {
+                        if is_functional_namedtuple || is_make_dataclass {
                             self.define(
                                 name.id.as_str(),
                                 format!("{}.{}", self.current_lexical_scope(), name.id),

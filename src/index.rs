@@ -1362,8 +1362,10 @@ fn collect_scoped(
                     .iter()
                     .any(|target| matches!(target, Expr::Attribute(_)));
                 if let Expr::Call(call) = value.as_ref() {
-                    out.has_data_constructor_classes |=
-                        callee_tail(&call.func) == Some("NamedTuple");
+                    out.has_data_constructor_classes |= matches!(
+                        callee_tail(&call.func),
+                        Some("NamedTuple" | "make_dataclass")
+                    );
                 }
                 if let Some(src) = reference_path(value)
                     .and_then(|segments| resolve_reference(bindings, module_name, &segments))
@@ -2007,6 +2009,77 @@ fn synthesize_functional_namedtuple(
 }
 
 #[cfg_attr(coverage, coverage(off))]
+fn synthesize_make_dataclass(
+    store: &mut Store,
+    scope_name: &str,
+    target: &Expr,
+    value: &Expr,
+    bindings: &mut FxHashMap<String, String>,
+) -> bool {
+    let Expr::Name(target) = target else {
+        return false;
+    };
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    let resolved = reference_path(&call.func)
+        .and_then(|segments| resolve_reference(bindings, scope_name, &segments));
+    if callee_tail(&call.func) != Some("make_dataclass")
+        || resolved.is_some_and(|name| name != "dataclasses.make_dataclass")
+    {
+        return false;
+    }
+    let fields = call
+        .arguments
+        .keywords
+        .iter()
+        .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("fields"))
+        .map(|keyword| &keyword.value)
+        .or_else(|| call.arguments.args.get(1));
+    let Some(Expr::List(field_entries)) = fields else {
+        return false;
+    };
+    let mut fields = Vec::with_capacity(field_entries.elts.len());
+    for entry in &field_entries.elts {
+        let Expr::Tuple(pair) = entry else {
+            return false;
+        };
+        let [Expr::StringLiteral(name), annotation, ..] = &*pair.elts else {
+            return false;
+        };
+        fields.push((name.value.to_str().to_owned(), annotation));
+    }
+
+    let class_name = format!("{scope_name}.{}", target.id);
+    store.classes.insert(class_name.clone());
+    store.data_models.insert(
+        class_name.clone(),
+        ClassDataModel {
+            kind: ClassDataKind::Dataclass,
+            init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+        },
+    );
+    let mut parameters = vec![Parameter {
+        name: Some("self".to_string()),
+        kind: ParameterKind::PositionalOrKeyword,
+    }];
+    parameters.extend(fields.iter().map(|(name, _)| Parameter {
+        name: Some(name.clone()),
+        kind: ParameterKind::PositionalOrKeyword,
+    }));
+    let constructor = format!("{class_name}.__init__");
+    store.insert(constructor.clone(), Signature { parameters });
+    store.synthesized.insert(constructor);
+    for (name, annotation) in fields {
+        if let Some(signature) = callable_annotation_signature(annotation) {
+            store.insert(format!("{class_name}.{name}"), signature);
+        }
+    }
+    bind(bindings, target.id.as_str(), class_name);
+    true
+}
+
+#[cfg_attr(coverage, coverage(off))]
 fn index_stmt(
     store: &mut Store,
     module_name: &str,
@@ -2075,7 +2148,9 @@ fn index_stmt(
                 remove_assigned_name(store, scope_name, target);
             }
             if let [target] = targets.as_slice() {
-                synthesize_functional_namedtuple(store, scope_name, target, value, bindings);
+                if !synthesize_functional_namedtuple(store, scope_name, target, value, bindings) {
+                    synthesize_make_dataclass(store, scope_name, target, value, bindings);
+                }
             }
             if scope_name == module_name {
                 for target in targets {
