@@ -2148,6 +2148,68 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(candidate)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn check_methodcaller_invocation(&mut self, call: &ast::ExprCall) -> bool {
+        let Expr::Call(constructor) = call.func.as_ref() else {
+            return false;
+        };
+        let Expr::Attribute(factory) = constructor.func.as_ref() else {
+            return false;
+        };
+        let Expr::Name(module) = factory.value.as_ref() else {
+            return false;
+        };
+        if factory.attr.as_str() != "methodcaller"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("operator")
+        {
+            return false;
+        }
+        let Some(Expr::StringLiteral(method_name)) = constructor.arguments.args.first() else {
+            return true;
+        };
+        if method_name.value.to_str() != "__call__" {
+            return true;
+        }
+        let [target] = &*call.arguments.args else {
+            return true;
+        };
+        let Some(fullname) = self.resolve_callee(target) else {
+            return true;
+        };
+        let Some(signatures) = self.index.get(&fullname) else {
+            return true;
+        };
+        let positional_count = constructor
+            .arguments
+            .args
+            .iter()
+            .skip(1)
+            .filter(|argument| !argument.is_starred_expr())
+            .count();
+        if positional_count == 0
+            || signatures.iter().any(|signature| {
+                !call_exceeds_positional_limit(signature, &fullname, false, positional_count)
+            })
+        {
+            return true;
+        }
+        let max_positional = signatures
+            .iter()
+            .filter_map(|signature| signature.max_positional_at_call_site(&fullname, false))
+            .max()
+            .unwrap_or(0);
+        let (line, column) = self.diagnostic_position(call.start());
+        self.diagnostics.push(Diagnostic::too_many_positional(
+            self.path.clone(),
+            line,
+            column,
+            format_callee_display(&fullname),
+            positional_count,
+            max_positional,
+        ));
+        true
+    }
+
     // Covered end-to-end by resolver/fix integration tests. Excluded from the
     // coverage gate because llvm-cov reports duplicate branch holes for this
     // dispatcher across the unit, integration, and CLI test binaries.
@@ -2164,6 +2226,9 @@ impl<'a> CallChecker<'a> {
                 .noqa
                 .suppresses(call.start().to_usize(), Diagnostic::CODE)
         {
+            return;
+        }
+        if self.check_methodcaller_invocation(call) {
             return;
         }
         let local_function = if let Some(signature) = self.queue_result_signature(&call.func) {
