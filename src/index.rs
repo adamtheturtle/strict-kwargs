@@ -383,6 +383,15 @@ fn assignment_may_construct_descriptor(store: &Store, value: &Expr) -> bool {
     callee_tail(&call.func).is_some_and(|name| store.descriptor_get_names.contains(name))
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn index_callable_field(store: &mut Store, class_name: &str, target: &Expr, annotation: &Expr) {
+    let (Expr::Name(name), Some(signature)) = (target, callable_annotation_signature(annotation))
+    else {
+        return;
+    };
+    store.insert_definition(format!("{class_name}.{}", name.id), signature, false);
+}
+
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     if let Expr::Name(name) = target {
         let fullname = format!("{scope_name}.{}", name.id);
@@ -2479,6 +2488,12 @@ fn index_class_body(
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
             }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
@@ -2630,6 +2645,12 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
             }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
