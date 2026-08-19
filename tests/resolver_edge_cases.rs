@@ -862,6 +862,25 @@ factory("text")("value")
     );
 }
 
+/// Assigning the result of `pop` from an annotated list preserves the
+/// concrete callable item signature (issue #398).
+#[test]
+fn list_pop_assignment_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def f(value: int) -> None: ...
+calls: list[Callable[[int], None]] = [f]
+call = calls.pop()
+call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "list pop result"),
+        "expected list-pop violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
