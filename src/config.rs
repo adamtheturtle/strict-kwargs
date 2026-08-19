@@ -117,10 +117,18 @@ impl Config {
                 path: pyproject.clone(),
                 message: format!("could not be read: {error}"),
             })?;
-        Self::from_pyproject_str(&contents).map_err(|message| CheckError::ConfigInvalid {
-            path: pyproject,
-            message,
-        })
+        let config =
+            Self::from_pyproject_str(&contents).map_err(|message| CheckError::ConfigInvalid {
+                path: pyproject,
+                message,
+            })?;
+        config
+            .validate_directory_settings(project_root)
+            .map_err(|message| CheckError::ConfigInvalid {
+                path: project_root.join("pyproject.toml"),
+                message,
+            })?;
+        Ok(config)
     }
 
     /// Parse configuration from the contents of a `pyproject.toml`.
@@ -166,6 +174,24 @@ impl Config {
     #[must_use]
     pub fn is_ignored(&self, fullname: &str) -> bool {
         self.ignore_names.iter().any(|name| name == fullname)
+    }
+
+    fn validate_directory_settings(&self, project_root: &Path) -> Result<(), String> {
+        for (setting, paths) in [
+            ("src", self.src.as_slice()),
+            ("namespace_packages", self.namespace_packages.as_slice()),
+        ] {
+            for configured in paths {
+                let resolved = resolve_configured_path(project_root, configured);
+                if !resolved.is_dir() {
+                    return Err(format!(
+                        "`[tool.strict_kwargs].{setting}` entry `{}` must be an existing directory",
+                        configured.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -304,13 +330,26 @@ fn validate_required_version(required_version: &str, current_version: &str) -> R
 }
 
 fn minimum_required_version_is_satisfied(current: &Version, minimum: &Version) -> bool {
+    let same_base = current.major == minimum.major
+        && current.minor == minimum.minor
+        && current.patch == minimum.patch;
+    let minimum_is_post = minimum
+        .pre
+        .as_str()
+        .split('.')
+        .next()
+        .is_some_and(|identifier| identifier == "post");
+    // SemVer calls every prerelease older than its bare release, but this
+    // project documents `-post.N` as a post-release suffix. Apply that one
+    // ordering correction before the ordinary SemVer comparison.
+    if same_base && current.pre.is_empty() && minimum_is_post {
+        return false;
+    }
     if current >= minimum {
         return true;
     }
     minimum.pre.is_empty()
-        && current.major == minimum.major
-        && current.minor == minimum.minor
-        && current.patch == minimum.patch
+        && same_base
         && current
             .pre
             .as_str()
@@ -689,6 +728,13 @@ mod tests {
     }
 
     #[test]
+    fn base_release_does_not_satisfy_post_release_minimum() {
+        let message = validate_required_version(">=2026.8.16-post.1", "2026.8.16")
+            .expect_err("base release is older than its post release");
+        assert!(message.contains("not satisfied"), "message: {message}");
+    }
+
+    #[test]
     fn required_version_rejects_empty_specifier() {
         let message = validate_required_version("   ", "2026.5.19-post.3")
             .expect_err("empty specifier must be rejected");
@@ -791,6 +837,44 @@ mod tests {
         .expect("write");
         let config = Config::load(dir.path()).expect("valid config");
         assert_eq!(config.ignore_names, vec!["pkg.f".to_string()]);
+    }
+
+    #[test]
+    fn load_accepts_valid_directory_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("pkg")).expect("mkdir");
+        std::fs::create_dir(dir.path().join("ns")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.strict_kwargs]\nsrc = [\"pkg\"]\nnamespace_packages = [\"ns\"]\n",
+        )
+        .expect("write");
+        Config::load(dir.path()).expect("valid directories must load");
+    }
+
+    #[test]
+    fn load_rejects_invalid_directory_settings() {
+        for (setting, entry) in [
+            ("src", "missing-src"),
+            ("namespace_packages", "missing-namespace"),
+            ("src", "main.py"),
+            ("namespace_packages", "main.py"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
+            std::fs::write(
+                dir.path().join("pyproject.toml"),
+                format!("[tool.strict_kwargs]\n{setting} = [\"{entry}\"]\n"),
+            )
+            .expect("write");
+            let error = Config::load(dir.path()).expect_err("invalid directory must fail");
+            let CheckError::ConfigInvalid { message, .. } = error else {
+                panic!("expected ConfigInvalid, got {error:?}");
+            };
+            assert!(message.contains(setting), "message: {message}");
+            assert!(message.contains(entry), "message: {message}");
+            assert!(message.contains("existing directory"), "message: {message}");
+        }
     }
 
     #[test]

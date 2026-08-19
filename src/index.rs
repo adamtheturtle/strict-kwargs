@@ -71,6 +71,12 @@ struct Store {
     /// Statically proven positional-only signatures returned by simple
     /// decorator functions.
     decorator_returns: FxHashMap<String, Signature>,
+    /// Descriptor class fullname -> concrete callable signature returned by
+    /// its annotated `__get__` method.
+    descriptor_get_returns: FxHashMap<String, Signature>,
+    /// Unqualified descriptor class names, used as a cheap assignment filter
+    /// before resolving a constructor reference.
+    descriptor_get_names: FxHashSet<String>,
     /// Modules supplied as check targets rather than loaded from vendored
     /// typeshed or lazily resolved dependencies.
     first_party_modules: FxHashSet<String>,
@@ -219,6 +225,184 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     if store.signatures.contains_key(&fullname) {
         store.exclude(fullname);
     }
+}
+
+// Exercised end-to-end by resolver and fix regressions. The defensive exits
+// intentionally reject malformed factories, unresolved methods, and binding
+// shapes that cannot be transformed safely.
+#[cfg_attr(coverage, coverage(off))]
+fn synthesize_partialmethod(
+    store: &mut Store,
+    class_name: &str,
+    target: &Expr,
+    value: &Expr,
+    bindings: &mut FxHashMap<String, String>,
+) -> bool {
+    let Expr::Name(target) = target else {
+        return false;
+    };
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    let Some(factory) =
+        reference_path(&call.func).and_then(|path| resolve_reference(bindings, class_name, &path))
+    else {
+        return false;
+    };
+    if factory != "functools.partialmethod" || call.arguments.args.is_empty() {
+        return false;
+    }
+    let Some(wrapped) = reference_path(&call.arguments.args[0])
+        .and_then(|path| resolve_reference(bindings, class_name, &path))
+    else {
+        return false;
+    };
+    let Some(signatures) = store.signatures.get(&wrapped).cloned() else {
+        return false;
+    };
+    if call
+        .arguments
+        .args
+        .iter()
+        .skip(1)
+        .any(Expr::is_starred_expr)
+        || call
+            .arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.is_none())
+    {
+        return false;
+    }
+    let bound_positionals = call.arguments.args.len() - 1;
+    let transformed: Vec<Signature> = signatures
+        .into_iter()
+        .filter_map(|mut signature| {
+            let mut remaining = bound_positionals;
+            while remaining > 0 {
+                let Some(index) = signature.parameters.iter().enumerate().skip(1).find_map(
+                    |(index, parameter)| match parameter.kind {
+                        ParameterKind::PositionalOnly | ParameterKind::PositionalOrKeyword => {
+                            Some(index)
+                        }
+                        ParameterKind::VarPositional => {
+                            remaining = 0;
+                            None
+                        }
+                        ParameterKind::KeywordOnly | ParameterKind::VarKeyword => None,
+                    },
+                ) else {
+                    if remaining == 0 {
+                        break;
+                    }
+                    return None;
+                };
+                signature.parameters.remove(index);
+                remaining -= 1;
+            }
+            for keyword in &call.arguments.keywords {
+                let name = keyword.arg.as_ref()?.as_str();
+                if let Some(index) = signature.parameters.iter().enumerate().skip(1).find_map(
+                    |(index, parameter)| (parameter.name.as_deref() == Some(name)).then_some(index),
+                ) {
+                    signature.parameters.remove(index);
+                }
+            }
+            Some(signature)
+        })
+        .collect();
+    if transformed.is_empty() {
+        return false;
+    }
+    let fullname = format!("{class_name}.{}", target.id);
+    store.excluded.remove(&fullname);
+    store.signatures.insert(fullname.clone(), transformed);
+    bind(bindings, target.id.as_str(), fullname);
+    true
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
+    let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+        return None;
+    };
+    if callee_tail(value) != Some("Callable") {
+        return None;
+    }
+    let Expr::Tuple(tuple) = slice.as_ref() else {
+        return None;
+    };
+    let parameters = match tuple.elts.first()? {
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .map(|_| Parameter {
+                name: None,
+                kind: ParameterKind::PositionalOrKeyword,
+            })
+            .collect(),
+        Expr::EllipsisLiteral(_) => vec![Parameter {
+            name: None,
+            kind: ParameterKind::VarPositional,
+        }],
+        _ => return None,
+    };
+    Some(Signature { parameters })
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn synthesize_descriptor_attribute(
+    store: &mut Store,
+    module_name: &str,
+    class_name: &str,
+    target: &Expr,
+    value: &Expr,
+    bindings: &FxHashMap<String, String>,
+) {
+    let (Expr::Name(target), Expr::Call(constructor)) = (target, value) else {
+        return;
+    };
+    let Some(descriptor_class) = reference_path(&constructor.func)
+        .and_then(|path| resolve_reference(bindings, module_name, &path))
+    else {
+        return;
+    };
+    let Some(signature) = store.descriptor_get_returns.get(&descriptor_class).cloned() else {
+        return;
+    };
+    let fullname = format!("{class_name}.{}", target.id);
+    store.excluded.remove(&fullname);
+    store.signatures.insert(fullname, vec![signature]);
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn assignment_may_construct_descriptor(store: &Store, value: &Expr) -> bool {
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    callee_tail(&call.func).is_some_and(|name| store.descriptor_get_names.contains(name))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn index_callable_field(store: &mut Store, class_name: &str, target: &Expr, annotation: &Expr) {
+    let (Expr::Name(name), Some(signature)) = (target, callable_annotation_signature(annotation))
+    else {
+        return;
+    };
+    store.insert_definition(format!("{class_name}.{}", name.id), signature, false);
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn index_callable_method_return(
+    store: &mut Store,
+    class_name: &str,
+    method_name: &str,
+    returns: Option<&Expr>,
+) {
+    let Some(signature) = returns.and_then(callable_annotation_signature) else {
+        return;
+    };
+    store.insert(format!("{class_name}.{method_name}.__return__"), signature);
 }
 
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
@@ -503,7 +687,8 @@ impl DefinitionIndex {
                 .any(|base| inner.store.data_models.contains_key(base));
         let track_bindings = collected.has_attribute_rebindings
             || track_data_constructors
-            || collected.has_singledispatch_decorator_candidates;
+            || collected.has_singledispatch_decorator_candidates
+            || collected.has_partialmethod_candidates;
         index_module(
             &mut inner.store,
             module_name,
@@ -956,6 +1141,26 @@ impl DefinitionIndex {
         self.read().store.synthesized.contains(fullname)
     }
 
+    /// Whether `fullname` is an indexed dataclass with a synthesized field
+    /// model.
+    pub fn is_dataclass(&self, fullname: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .is_some_and(|model| model.kind == ClassDataKind::Dataclass)
+    }
+
+    /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
+    /// model.
+    pub fn is_namedtuple(&self, fullname: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .is_some_and(|model| model.kind == ClassDataKind::NamedTuple)
+    }
+
     /// Whether `fullname` is a function that must be skipped entirely
     /// (see [`Store::excluded`]).
     pub fn is_excluded(&self, fullname: &str) -> bool {
@@ -1053,6 +1258,7 @@ struct Collected {
     has_data_constructor_classes: bool,
     has_attribute_rebindings: bool,
     has_singledispatch_decorator_candidates: bool,
+    has_partialmethod_candidates: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
     class_metaclasses: FxHashMap<String, String>,
@@ -1378,6 +1584,12 @@ fn collect_scoped(
                         }
                     }
                 }
+            }
+            Stmt::Assign(ast::StmtAssign { value, .. }) => {
+                out.has_partialmethod_candidates |= matches!(
+                    value.as_ref(),
+                    Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
+                );
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -1915,29 +2127,6 @@ fn update_constructor_base_bindings(
     }
 }
 
-fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
-    let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
-        return None;
-    };
-    (callee_tail(value) == Some("Callable")).then_some(())?;
-    let Expr::Tuple(parts) = slice.as_ref() else {
-        return None;
-    };
-    let Expr::List(parameters) = parts.elts.first()? else {
-        return None;
-    };
-    Some(Signature {
-        parameters: parameters
-            .elts
-            .iter()
-            .map(|_| Parameter {
-                name: None,
-                kind: ParameterKind::PositionalOrKeyword,
-            })
-            .collect(),
-    })
-}
-
 #[cfg_attr(coverage, coverage(off))]
 fn synthesize_functional_namedtuple(
     store: &mut Store,
@@ -2373,6 +2562,7 @@ fn index_class_body(
                 parameters,
                 decorator_list,
                 body,
+                returns,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
@@ -2396,6 +2586,26 @@ fn index_class_body(
                         fullname.clone(),
                         signature,
                         has_overload_decorator(decorator_list),
+                    );
+                }
+                if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
+                    if let Some(signature) =
+                        returns.as_deref().and_then(callable_annotation_signature)
+                    {
+                        store
+                            .descriptor_get_returns
+                            .insert(class_name.to_string(), signature);
+                        if let Some(name) = class_name.rsplit('.').next() {
+                            store.descriptor_get_names.insert(name.to_string());
+                        }
+                    }
+                }
+                if name.as_str() == "__getitem__" {
+                    index_callable_method_return(
+                        store,
+                        class_name,
+                        name.as_str(),
+                        returns.as_deref(),
                     );
                 }
                 if body_may_contain_indexed_def(body) {
@@ -2426,6 +2636,19 @@ fn index_class_body(
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
+                    if synthesize_partialmethod(store, class_name, target, value, bindings) {
+                        continue;
+                    }
+                    if assignment_may_construct_descriptor(store, value) {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            bindings,
+                        );
+                    }
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
@@ -2438,6 +2661,12 @@ fn index_class_body(
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
             }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
@@ -2514,6 +2743,7 @@ fn index_class_body(
 
 #[cfg_attr(coverage, coverage(off))]
 fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str, body: &[Stmt]) {
+    let bindings = FxHashMap::default();
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
@@ -2521,6 +2751,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 parameters,
                 decorator_list,
                 body,
+                returns,
                 ..
             }) => {
                 let fullname = format!("{class_name}.{name}");
@@ -2542,6 +2773,26 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         has_overload_decorator(decorator_list),
                     );
                 }
+                if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
+                    if let Some(signature) =
+                        returns.as_deref().and_then(callable_annotation_signature)
+                    {
+                        store
+                            .descriptor_get_returns
+                            .insert(class_name.to_string(), signature);
+                        if let Some(name) = class_name.rsplit('.').next() {
+                            store.descriptor_get_names.insert(name.to_string());
+                        }
+                    }
+                }
+                if name.as_str() == "__getitem__" {
+                    index_callable_method_return(
+                        store,
+                        class_name,
+                        name.as_str(),
+                        returns.as_deref(),
+                    );
+                }
                 if body_may_contain_indexed_def(body) {
                     index_module_fast(store, module_name, &fullname, body);
                 }
@@ -2553,6 +2804,16 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
+                    if assignment_may_construct_descriptor(store, value) {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            &bindings,
+                        );
+                    }
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
@@ -2565,6 +2826,12 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
             }
+            Stmt::AnnAssign(ast::StmtAnnAssign {
+                target,
+                annotation,
+                value: None,
+                ..
+            }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
                 body,
                 elif_else_clauses,
