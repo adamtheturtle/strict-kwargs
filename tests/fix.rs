@@ -115,6 +115,14 @@ fn rewrites_partialmethod_remaining_argument() {
 }
 
 #[test]
+fn rewrites_typed_factory_callable_instance_result() {
+    assert_fixed(
+        "class C:\n    def __call__(self, value): ...\ndef factory() -> C:\n    return C()\nfactory()(1)\n",
+        "class C:\n    def __call__(self, value): ...\ndef factory() -> C:\n    return C()\nfactory()(value=1)\n",
+    );
+}
+
+#[test]
 fn rewrites_direct_lambda_invocation() {
     assert_fixed(
         "(lambda value: None)(1)\n",
