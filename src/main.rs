@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 use strict_kwargs::{
-    check_paths, find_project_root, fix_paths_with_opt_ins, unified_diff, CheckError, Config,
-    Diagnostic, FileFix, FixOptIns, OutputFormat,
+    check_paths, find_project_root, fix_paths_with_opt_ins, is_python_environment, unified_diff,
+    CheckError, Config, Diagnostic, FileFix, FixOptIns, OutputFormat,
 };
 
 const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
@@ -43,6 +43,11 @@ enum Command {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    clap::ArgGroup::new("fix_mode")
+        .args(["fix", "diff"])
+        .multiple(false)
+))]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "clap stores independent boolean flags directly"
@@ -65,7 +70,7 @@ struct CheckArgs {
     diff: bool,
 
     /// Include fixes that may change runtime behavior.
-    #[arg(long)]
+    #[arg(long, requires = "fix_mode")]
     unsafe_fixes: bool,
 
     /// Diagnostic output format.
@@ -73,7 +78,7 @@ struct CheckArgs {
     output_format: Option<OutputFormat>,
 
     /// Directory for the persistent on-disk diagnostic cache.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["fix", "diff"])]
     cache_dir: Option<PathBuf>,
 
     /// Python environment for the `ty` inference fallback.
@@ -104,17 +109,22 @@ fn main() -> ExitCode {
 /// nonexistent path is reported on stderr and dropped, so the run falls
 /// back to `ty`'s own environment discovery (the same as if `--python`
 /// were unset) rather than silently degrading detection.
-fn resolve_python_env(python: Option<PathBuf>) -> Option<PathBuf> {
-    let path = python?;
+fn resolve_python_env(python: Option<PathBuf>) -> Result<Option<PathBuf>, CheckError> {
+    let Some(path) = python else {
+        return Ok(None);
+    };
     if path.exists() {
-        return Some(path);
+        if is_python_environment(&path) {
+            return Ok(Some(path));
+        }
+        return Err(CheckError::InvalidPythonEnvironment { path });
     }
     eprintln!(
         "warning: --python {} does not exist; ignoring it and falling back to \
          ty's own environment discovery",
         path.display()
     );
-    None
+    Ok(None)
 }
 
 fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<PathBuf, CheckError> {
@@ -126,7 +136,17 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<Path
     }
 
     let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-    Ok(find_project_root(&start))
+    let root = find_project_root(&start);
+    for path in paths.iter().skip(1) {
+        let other = find_project_root(path);
+        if other != root {
+            return Err(CheckError::MultipleProjectRoots {
+                first: root,
+                second: other,
+            });
+        }
+    }
+    Ok(root)
 }
 
 fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
@@ -169,7 +189,7 @@ fn run_check(args: CheckArgs) -> Result<ExitCode, CheckError> {
     config.error_on_unused_noqa |= args.error_on_unused_noqa;
     let config = config;
     let output_format = args.output_format.unwrap_or(config.output_format);
-    let python_env = resolve_python_env(args.python);
+    let python_env = resolve_python_env(args.python)?;
     let cache_dir = effective_cache_dir(args.cache_dir, &config, &project_root);
     let diagnostics = check_paths(
         &project_root,
@@ -420,7 +440,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
         synthesized_constructors: config.fix_synthesized_constructors
             || args_fix_opt_ins.synthesized_constructors,
     };
-    let python_env = resolve_python_env(args.python);
+    let python_env = resolve_python_env(args.python)?;
     let outcome = fix_paths_with_opt_ins(
         &project_root,
         &args.paths,
@@ -434,14 +454,18 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
 
     if args.diff {
         let color = diff_color();
+        let stdout = std::io::stdout();
+        let mut stdout = BufWriter::new(stdout.lock());
         for fix in fixes {
-            print!(
+            write!(
+                stdout,
                 "{}",
                 unified_diff(&fix.path, &fix.original, &fix.fixed, color)
-            );
+            )?;
         }
+        stdout.flush()?;
         report_diff_summary(fixes, remaining);
-        return Ok(ExitCode::from(0));
+        return Ok(fix_exit_code(remaining));
     }
 
     strict_kwargs::write_all_preserving_encoding(fixes)?;
@@ -480,6 +504,21 @@ mod tests {
     }
 
     #[test]
+    fn project_root_rejects_paths_from_different_projects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("a");
+        let second = dir.path().join("b");
+        std::fs::create_dir_all(&first).expect("mkdir");
+        std::fs::create_dir_all(&second).expect("mkdir");
+        std::fs::write(first.join("pyproject.toml"), "[project]\n").expect("write");
+        std::fs::write(second.join("pyproject.toml"), "[project]\n").expect("write");
+
+        let error = project_root_for(None, &[first.join("m.py"), second.join("m.py")])
+            .expect_err("mixed roots must be rejected");
+        assert!(matches!(error, CheckError::MultipleProjectRoots { .. }));
+    }
+
+    #[test]
     fn project_root_falls_back_to_dot_when_no_paths() {
         // `paths.first()` is `None` (unreachable from the CLI because clap
         // defaults `paths` to `.`, but covered here for completeness).
@@ -489,14 +528,18 @@ mod tests {
 
     #[test]
     fn python_env_unset_stays_unset() {
-        assert_eq!(resolve_python_env(None), None);
+        assert_eq!(resolve_python_env(None).expect("valid"), None);
     }
 
     #[test]
     fn python_env_existing_path_is_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyvenv.cfg"), "").expect("write");
         let path = dir.path().to_path_buf();
-        assert_eq!(resolve_python_env(Some(path.clone())), Some(path));
+        assert_eq!(
+            resolve_python_env(Some(path.clone())).expect("valid"),
+            Some(path)
+        );
     }
 
     #[test]
@@ -505,7 +548,7 @@ mod tests {
         // discovery) rather than silently forwarded and ignored (issue #55).
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("no_such_python");
-        assert_eq!(resolve_python_env(Some(missing)), None);
+        assert_eq!(resolve_python_env(Some(missing)).expect("valid"), None);
     }
 
     #[test]
