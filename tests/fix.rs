@@ -107,6 +107,14 @@ fn rewrites_itemgetter_result_without_rewriting_operand() {
 }
 
 #[test]
+fn rewrites_partialmethod_remaining_argument() {
+    assert_fixed(
+        "from functools import partialmethod\nclass C:\n    def base(self, required, /, value): ...\n    method = partialmethod(base, 0)\nC().method(1)\n",
+        "from functools import partialmethod\nclass C:\n    def base(self, required, /, value): ...\n    method = partialmethod(base, 0)\nC().method(value=1)\n",
+    );
+}
+
+#[test]
 fn rewrites_direct_lambda_invocation() {
     assert_fixed(
         "(lambda value: None)(1)\n",
