@@ -3428,9 +3428,8 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn resolve_literal_subscript(&self, subscript: &ast::ExprSubscript) -> Option<String> {
-        let ast::ExprSubscript { value, slice, .. } = subscript;
-        match value.as_ref() {
+    fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
@@ -4096,6 +4095,29 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(referent)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn operator_getitem_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "getitem"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("operator")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [value, slice] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_literal_container_item(value, slice)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -4132,9 +4154,11 @@ impl<'a> CallChecker<'a> {
                 }
                 if let Expr::Call(sorted) = subscript.value.as_ref() {
                     self.preserving_builtin_result(sorted, &["builtins.sorted"])
-                        .or_else(|| self.resolve_literal_subscript(subscript))
+                        .or_else(|| {
+                            self.resolve_literal_container_item(&subscript.value, &subscript.slice)
+                        })
                 } else {
-                    self.resolve_literal_subscript(subscript)
+                    self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                 }
             }
             Expr::Name(name) => {
@@ -4217,6 +4241,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.operator_getitem_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.weakref_result_callable(func) {
                     return Some(callable);
                 }
