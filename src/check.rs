@@ -1105,6 +1105,8 @@ struct CallChecker<'a> {
     callable_iterator_items: FxHashMap<String, Signature>,
     /// Local asyncio Queue item bindings with a concrete callable item.
     callable_queue_items: FxHashMap<String, Signature>,
+    /// Function fullname -> concrete callable returned by that function.
+    callable_function_results: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1414,6 +1416,7 @@ impl<'a> CallChecker<'a> {
             function_stack: Vec::new(),
             callable_iterator_items: FxHashMap::default(),
             callable_queue_items: FxHashMap::default(),
+            callable_function_results: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2125,7 +2128,12 @@ impl<'a> CallChecker<'a> {
             return;
         }
         let local_function =
-            if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+            if let Some(signature) = self.asyncio_combinator_result_signature(&call.func) {
+                Some(LocalFunction {
+                    fullname: "asyncio result".to_string(),
+                    signature,
+                })
+            } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
                 Some(LocalFunction {
                     fullname: "asyncio.Queue.get() result".to_string(),
                     signature,
@@ -3206,6 +3214,54 @@ impl<'a> CallChecker<'a> {
         self.callable_queue_items.get(queue.id.as_str()).cloned()
     }
 
+    fn callable_expression_signature(&self, expr: &Expr) -> Option<Signature> {
+        match expr {
+            Expr::Call(call) => {
+                let fullname = self.resolve_callee(&call.func)?;
+                self.callable_function_results.get(&fullname).cloned()
+            }
+            Expr::Lambda(lambda) => self.callable_expression_signature(&lambda.body),
+            _ => {
+                let fullname = self.resolve_callee(expr)?;
+                self.index
+                    .get(&fullname)
+                    .and_then(|signatures| signatures.first().cloned())
+            }
+        }
+    }
+
+    fn awaited_asyncio_call_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Await(awaited) = expr else {
+            return None;
+        };
+        let Expr::Call(call) = awaited.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_module(module.id.as_str()).as_deref() != Some("asyncio") {
+            return None;
+        }
+        match attribute.attr.as_str() {
+            "wait_for" | "shield" | "to_thread" | "gather" => {
+                self.callable_expression_signature(call.arguments.args.first()?)
+            }
+            _ => None,
+        }
+    }
+
+    fn asyncio_combinator_result_signature(&self, func: &Expr) -> Option<Signature> {
+        match func {
+            Expr::Await(_) => self.awaited_asyncio_call_signature(func),
+            Expr::Subscript(subscript) => self.awaited_asyncio_call_signature(&subscript.value),
+            _ => None,
+        }
+    }
+
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(next_call) = func else {
             return None;
@@ -3488,6 +3544,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_expr(&decorator.expression);
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                if let Some(signature) = returns
+                    .as_deref()
+                    .and_then(Self::callable_annotation_signature)
+                {
+                    self.callable_function_results
+                        .insert(fullname.clone(), signature);
+                }
                 if let Some(signature) = returns
                     .as_deref()
                     .and_then(Self::iterator_item_callable_signature)

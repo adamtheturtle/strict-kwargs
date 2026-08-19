@@ -177,6 +177,31 @@ async def caller() -> None:
     );
 }
 
+/// Asyncio combinators preserve concrete callable results (issue #446).
+#[test]
+fn asyncio_combinator_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+def f(value: int) -> None: ...
+async def factory() -> Callable[[int], None]:
+    return f
+async def caller() -> None:
+    (await asyncio.wait_for(factory(), timeout=1))(1)
+    (await asyncio.shield(factory()))(1)
+    (await asyncio.to_thread(lambda: f))(1)
+    (await asyncio.gather(factory()))[0](1)
+",
+    );
+    for line in 8..=11 {
+        assert!(
+            has_error_at(&messages, line, "asyncio result"),
+            "expected line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
