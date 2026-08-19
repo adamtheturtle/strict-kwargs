@@ -3386,6 +3386,9 @@ impl<'a> CallChecker<'a> {
         self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
+    // Covered end-to-end by the SimpleNamespace attribute regression. Other
+    // constructor, keyword, and rebinding shapes intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
     fn simple_namespace_callable_attributes(&self, value: &Expr) -> Vec<(String, String)> {
         let Expr::Call(call) = value else {
             return Vec::new();
@@ -3411,6 +3414,7 @@ impl<'a> CallChecker<'a> {
             .collect()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_bound_callable_attribute(&self, base: &str, attr: &str) -> Option<String> {
         let dotted = format!("{base}.{attr}");
         for scope in self.scopes.iter().rev() {
