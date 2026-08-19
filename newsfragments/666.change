@@ -1,0 +1,2 @@
+Keep a parse failure fatal for a file named on the command line even when
+selection reached it under a different spelling.

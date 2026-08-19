@@ -838,6 +838,167 @@ operator.methodcaller("__call__", 1)(f)
     );
 }
 
+/// `from operator import getitem` names the same callable as
+/// `operator.getitem`, so it selects the literal container's element too.
+#[test]
+fn imported_operator_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from operator import getitem
+def f(value: int) -> None: ...
+getitem([f], 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected operator.getitem violation, got: {messages:?}"
+    );
+}
+
+/// A local binding named `operator` shadows the import, so its `getitem` is
+/// not the stdlib one and the literal container is not selected through it.
+#[test]
+fn shadowed_operator_module_is_not_stdlib_getitem() {
+    let messages = check_source(
+        r"
+import operator
+def f(value: int) -> None: ...
+def use(operator: object) -> None:
+    operator.getitem([f], 0)(1)
+",
+    );
+    assert!(
+        !has_error_at(&messages, 5, "f"),
+        "a shadowed operator must not resolve to the stdlib one: {messages:?}"
+    );
+}
+
+/// `from operator import methodcaller` builds the same encoded call, so its
+/// target boundary stays positional.
+#[test]
+fn imported_methodcaller_target_boundary_stays_positional() {
+    let messages = check_source(
+        r#"
+from operator import methodcaller
+def f(value: int) -> None: ...
+methodcaller("__call__", 1)(f)
+"#,
+    );
+    assert_eq!(messages.len(), 1, "unexpected diagnostics: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("methodcaller")),
+        "methodcaller target boundary must stay positional: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 4, "\"f\""),
+        "expected encoded f-call violation, got: {messages:?}"
+    );
+}
+
+/// An encoded call takes the same `ignore_names` exemption a written-out call
+/// to the same callee would.
+#[test]
+fn encoded_methodcaller_call_honours_ignore_names() {
+    let project = TestProject::new()
+        .pyproject(
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n\
+             [tool.strict_kwargs]\nignore_names = [\"main.f\"]\n",
+        )
+        .main(
+            r#"
+import operator
+def f(value: int) -> None: ...
+operator.methodcaller("__call__", 1)(f)
+"#,
+        );
+    let messages = project.check();
+    assert!(
+        messages.is_empty(),
+        "an ignored callee must stay ignored through an encoded call: {messages:?}"
+    );
+}
+
+/// A `def` that replaces a completed `@overload` group no longer answers to
+/// the group's recorded arms.
+#[test]
+fn redefinition_drops_completed_overload_arms() {
+    let messages = check_source(
+        r#"
+from typing import Callable, overload
+
+def g(value: int) -> None: ...
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+def make(kind, /): ...
+
+make("a")(1)
+"#,
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("overload result")),
+        "a replaced overload group must not select a stale arm: {messages:?}"
+    );
+}
+
+/// A second `@overload` group replaces a completed one rather than extending
+/// it, so only the new group's arms can be selected.
+#[test]
+fn a_second_overload_group_replaces_a_completed_one() {
+    let messages = check_source(
+        r"
+from typing import Callable, overload
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+def make(kind): ...
+
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+make(kind=1)(1)
+make(kind='a')(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "overload result"),
+        "expected the new int arm to be selected, got: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 13, "overload result"),
+        "the replaced str arm must not be selected: {messages:?}"
+    );
+}
+
+/// A negative literal is still an `int` for overload selection.
+#[test]
+fn negative_literals_select_numeric_overload_arms() {
+    let messages = check_source(
+        r"
+from typing import Callable, overload
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+make(-1)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "overload result"),
+        "expected the int arm to be selected, got: {messages:?}"
+    );
+}
+
 /// A literal argument uniquely selects an overload's concrete callable return
 /// signature (issue #396).
 #[test]
