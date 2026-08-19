@@ -283,6 +283,26 @@ f(1)
     assert!(messages.is_empty(), "stale exception target: {messages:?}");
 }
 
+/// Tuple and list assignment targets recursively invalidate earlier callable
+/// bindings (issue #421).
+#[test]
+fn destructuring_assignments_invalidate_prior_function_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(f,) = (lambda *args: None,)
+f(1)
+def g(value: int) -> None: ...
+[g] = [lambda *args: None]
+g(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale destructured bindings: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

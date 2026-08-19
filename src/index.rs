@@ -224,6 +224,24 @@ fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     }
 }
 
+fn exclude_destructured_names(store: &mut Store, scope_name: &str, target: &Expr) {
+    match target {
+        Expr::Name(name) => store.exclude(format!("{scope_name}.{}", name.id)),
+        Expr::Tuple(tuple) => {
+            for element in &tuple.elts {
+                exclude_destructured_names(store, scope_name, element);
+            }
+        }
+        Expr::List(list) => {
+            for element in &list.elts {
+                exclude_destructured_names(store, scope_name, element);
+            }
+        }
+        Expr::Starred(starred) => exclude_destructured_names(store, scope_name, &starred.value),
+        _ => {}
+    }
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_pattern_bindings(store: &mut Store, scope_name: &str, pattern: &ast::Pattern) {
     match pattern {
@@ -2016,6 +2034,9 @@ fn index_stmt(
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
                 remove_assigned_name(store, scope_name, target);
+                if !matches!(target, Expr::Name(_)) {
+                    exclude_destructured_names(store, scope_name, target);
+                }
             }
             if scope_name == module_name {
                 for target in targets {
@@ -2202,6 +2223,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
                 remove_assigned_name(store, scope_name, target);
+                if !matches!(target, Expr::Name(_)) {
+                    exclude_destructured_names(store, scope_name, target);
+                }
                 if scope_name == module_name {
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
