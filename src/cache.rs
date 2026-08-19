@@ -105,12 +105,19 @@ fn mtime_nanos(path: &Path) -> Option<[u8; 16]> {
 pub struct FingerprintFile {
     path: PathBuf,
     mtime: Option<[u8; 16]>,
+    #[serde(default)]
+    content: Option<u64>,
 }
 
 impl FingerprintFile {
     pub fn from_path(path: PathBuf) -> Self {
         let mtime = mtime_nanos(&path);
-        Self { path, mtime }
+        let content = content_fingerprint(&path);
+        Self {
+            path,
+            mtime,
+            content,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -145,6 +152,22 @@ fn hash_fingerprint_files(files: &[FingerprintFile], h: &mut FnvHasher) {
         if let Some(mtime) = file.mtime {
             h.write_bytes(&mtime);
         }
+        if let Some(content) = file.content {
+            h.write_bytes(&content.to_le_bytes());
+        }
+    }
+}
+
+fn content_fingerprint(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut h = FnvHasher::new();
+    h.write_bytes(&bytes);
+    Some(h.finish())
+}
+
+fn hash_path_content(path: &Path, h: &mut FnvHasher) {
+    if let Some(content) = content_fingerprint(path) {
+        h.write_bytes(&content.to_le_bytes());
     }
 }
 
@@ -179,10 +202,11 @@ fn hash_ty_binary(h: &mut FnvHasher) {
     if let Some(mtime) = mtime_nanos(&ty_path) {
         h.write_bytes(&mtime);
     }
+    hash_path_content(&ty_path, h);
 }
 
 /// Collect all first-party `.py`/`.pyi` files under `root`, then mix each
-/// file's path and mtime into `h`.
+/// file's path, mtime, and content digest into `h`.
 ///
 /// Excluded from the coverage gate: the walkdir error arm (requires an OS-level
 /// permission fault to trigger) and the mtime-failure arm (requires a file to
@@ -214,6 +238,7 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
         if let Some(mtime) = mtime_nanos(path) {
             h.write_bytes(&mtime);
         }
+        hash_path_content(path, h);
     }
 }
 
@@ -281,22 +306,18 @@ fn fingerprint_walk_roots(project_root: &Path, first_party_roots: &[PathBuf]) ->
 /// Hashes:
 /// - tool version (`CARGO_PKG_VERSION`)
 /// - `config_json` (serialised `Config`)
-/// - `python_env` path + mtime (if provided)
-/// - `ty` binary path + mtime (located via `PATH`)
+/// - `python_env` path + metadata/content (if provided)
+/// - `ty` binary path + metadata/content (located via `PATH`)
 /// - every `.py`/`.pyi` file under `project_root`, sorted by path, each
-///   contributing its canonical path bytes and **mtime** (not content)
+///   contributing its canonical path bytes, mtime, and content digest
 /// - every configured first-party source root, including absolute roots
 ///   outside `project_root`
 /// - every `.py`/`.pyi` file in automatically discovered or explicitly
 ///   selected `site-packages`
 ///
-/// Using mtime rather than content keeps the fingerprint computation to
-/// `stat(2)` calls — one per file — avoiding the O(N × file-size) sequential
-/// reads that content-hashing all first-party sources would add on every
-/// invocation. A first-party change updates its mtime in normal workflows
-/// (editors, `git checkout`, `cp`, etc.); a deliberately mtime-preserving
-/// change could produce a stale cache hit, the same trade-off accepted by
-/// `make`, Cargo, and most build systems.
+/// Content digests make cache correctness independent of timestamp behavior:
+/// editors, archive extraction, and copy tools may legitimately preserve or
+/// restore mtimes while changing bytes.
 ///
 /// The walk uses the same pruning logic as the main checker
 /// ([`is_prunable_dir`]), so the fingerprint is stable between runs that do
@@ -360,6 +381,7 @@ pub fn compute_cache_fingerprints_with_project_files(
         if let Some(mtime) = mtime_nanos(env_path) {
             dependency.write_bytes(&mtime);
         }
+        hash_path_content(env_path, &mut dependency);
     }
 
     // `ty` binary path + mtime.
@@ -633,22 +655,22 @@ impl DiagnosticCache {
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|file| (file.path.clone(), file.mtime))
+            .map(|file| (file.path.clone(), (file.mtime, file.content)))
             .collect();
         let old_metadata: BTreeMap<_, _> = self
             .previous_project_files
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|file| (file.path.clone(), file.mtime))
+            .map(|file| (file.path.clone(), (file.mtime, file.content)))
             .collect();
         let same_paths = old_metadata.len() == current_metadata.len()
             && old_metadata
                 .keys()
                 .all(|path| current_metadata.contains_key(path));
         let semantically_unchanged = same_paths
-            && current_metadata.iter().all(|(path, mtime)| {
-                old_metadata.get(path) == Some(mtime)
+            && current_metadata.iter().all(|(path, metadata)| {
+                old_metadata.get(path) == Some(metadata)
                     || self.entries.get(path).is_some_and(|entry| {
                         entry.semantic_fingerprint
                             == current_semantic_fingerprints.get(path).copied()
@@ -896,6 +918,7 @@ mod tests {
         FingerprintFile {
             path: PathBuf::from(path),
             mtime: Some([marker; 16]),
+            content: Some(u64::from(marker)),
         }
     }
 
@@ -960,6 +983,7 @@ mod tests {
             &[FingerprintFile {
                 path: path.clone(),
                 mtime: None,
+                content: None,
             }],
             &mut actual,
         );
@@ -967,6 +991,23 @@ mod tests {
         let mut expected = FnvHasher::new();
         expected.write_bytes(path.as_os_str().as_encoded_bytes());
         assert_eq!(actual.finish(), expected.finish());
+    }
+
+    #[test]
+    fn fingerprint_content_changes_with_preserved_mtime() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("main.py");
+        std::fs::write(&path, "f(1)\n").expect("write old source");
+        let old = FingerprintFile::from_path(path.clone());
+        std::fs::write(&path, "f(x)\n").expect("write new source");
+        let mut new = FingerprintFile::from_path(path);
+        new.mtime = old.mtime;
+
+        let mut old_hash = FnvHasher::new();
+        hash_fingerprint_files(&[old], &mut old_hash);
+        let mut new_hash = FnvHasher::new();
+        hash_fingerprint_files(&[new], &mut new_hash);
+        assert_ne!(old_hash.finish(), new_hash.finish());
     }
 
     // ---- DiagnosticCache ----------------------------------------------------
