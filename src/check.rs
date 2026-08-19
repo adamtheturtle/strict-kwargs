@@ -1357,6 +1357,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Callable names invalidated by an ambiguous reassignment. Do not defer
+    /// these to ty, which can resolve the earlier stale definition.
+    invalidated_callables: FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -1484,6 +1487,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.invalidated_callables.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1503,6 +1507,7 @@ impl<'a> CallChecker<'a> {
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -2116,6 +2121,16 @@ impl<'a> CallChecker<'a> {
                 .suppresses(call.start().to_usize(), Diagnostic::CODE)
         {
             return;
+        }
+        if let Expr::Name(name) = call.func.as_ref() {
+            if self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.invalidated_callables.contains(name.id.as_str()))
+            {
+                return;
+            }
         }
         let local_function = if self.local_function_scope_count == 0 {
             None
@@ -3552,6 +3567,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
+                            if is_lambda {
+                                self.current_scope()
+                                    .invalidated_callables
+                                    .insert(name.id.to_string());
+                            }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }

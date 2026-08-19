@@ -176,9 +176,6 @@ fn exclude_assigned_attribute(
     target: &Expr,
     bindings: Option<&FxHashMap<String, String>>,
 ) {
-    if store.conditional_depth > 0 {
-        return;
-    }
     let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
         return;
     };
@@ -197,9 +194,6 @@ fn exclude_assigned_attribute(
 
 #[cfg_attr(coverage, coverage(off))]
 fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, value: &Expr) {
-    if store.conditional_depth > 0 {
-        return;
-    }
     // Invalidate a name only when an inline ``lambda`` *replaces an already
     // indexed ``def``* with a different, untrusted call signature. Both
     // conditions matter:

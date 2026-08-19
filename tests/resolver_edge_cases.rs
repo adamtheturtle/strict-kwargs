@@ -139,6 +139,29 @@ fn over_deep_relative_import_returns_none() {
 
 // --- Unusual callee expressions --------------------------------------------
 
+/// A conditional reassignment makes the post-branch callable signature
+/// ambiguous, so the original definition must not be reported (issue #412).
+#[test]
+fn conditional_reassignments_do_not_use_stale_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+if condition:
+    f = lambda *args: None
+f(1)
+class C:
+    def method(self, value: int) -> None: ...
+if condition:
+    C.method = lambda *args: None
+C().method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "conditionally stale definitions: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
