@@ -3205,6 +3205,37 @@ impl<'a> CallChecker<'a> {
         self.resolve_literal_container_item(value, slice)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Set(set) if call.arguments.args.is_empty() => {
+                let mut elements = set.elts.iter();
+                let resolved = self.resolve_callee(elements.next()?)?;
+                elements
+                    .all(|element| {
+                        self.resolve_callee(element).as_deref() == Some(resolved.as_str())
+                    })
+                    .then_some(resolved)
+            }
+            Expr::Dict(_) => {
+                let [key] = &*call.arguments.args else {
+                    return None;
+                };
+                self.resolve_literal_container_item(&method.value, key)
+            }
+            _ => None,
+        }
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3302,6 +3333,9 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Call(constructor) => {
                 if let Some(callable) = self.operator_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_pop_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;

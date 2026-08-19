@@ -226,6 +226,28 @@ operator.getitem([f], 0)(1)
     );
 }
 
+/// Literal set and dictionary `pop` results preserve their concrete callable
+/// element signatures (issue #408).
+#[test]
+fn literal_set_and_dict_pop_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+{first}.pop()(1)
+{"call": second}.pop("call")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected set-pop violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected dict-pop violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
