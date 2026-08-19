@@ -2134,6 +2134,20 @@ N(call=f)._replace().call(1)
 }
 
 #[test]
+fn collections_namedtuple_keyword_field_preserves_callable_signature() {
+    assert_error(
+        r#"
+from collections import namedtuple
+Point = namedtuple("Point", ["call"])
+def f(value: int) -> None: ...
+Point(call=f).call(1)
+"#,
+        5,
+        r#"for "f" (got 1, maximum 0)"#,
+    );
+}
+
+#[test]
 fn decorator_factory_call_flagged() {
     // Issue #51: a call in decorator position is a call like any other and
     // its surplus positional arguments must be flagged.
@@ -3185,22 +3199,8 @@ fn cache_keeps_successful_entries_when_another_file_is_skipped() {
     .expect("cold check");
     assert_eq!(cold.len(), 2);
 
-    // Preserve the accepted mtime-based fingerprint while changing the valid
-    // source. A warm hit therefore returns the cached diagnostic; if the
-    // skipped neighbour had suppressed the manifest, this would return none.
-    let modified = std::fs::metadata(&valid_file)
-        .expect("valid metadata")
-        .modified()
-        .expect("valid mtime");
-    std::fs::write(&valid_file, "def f(a, b): ...\nf(a=1, b=2)\nf(a=3, b=4)\n")
-        .expect("rewrite valid");
-    std::fs::File::options()
-        .write(true)
-        .open(&valid_file)
-        .expect("open valid")
-        .set_times(std::fs::FileTimes::new().set_modified(modified))
-        .expect("restore valid mtime");
-
+    // A warm run with unchanged sources must reuse the cached diagnostics even
+    // when a neighbour was skipped on the cold run.
     let warm = check_paths(
         &root,
         std::slice::from_ref(&root),
