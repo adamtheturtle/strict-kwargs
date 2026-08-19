@@ -404,6 +404,32 @@ in_finally(1)
     );
 }
 
+/// `for`/`while` else suites participate in callable invalidation (issue
+/// #427).
+#[test]
+fn loop_else_assignments_invalidate_prior_signatures() {
+    let messages = check_source(
+        r"
+def from_for(value: int) -> None: ...
+for _ in []:
+    pass
+else:
+    from_for = lambda *args: None
+from_for(1)
+def from_while(value: int) -> None: ...
+while False:
+    pass
+else:
+    from_while = lambda *args: None
+from_while(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale loop-else bindings: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
