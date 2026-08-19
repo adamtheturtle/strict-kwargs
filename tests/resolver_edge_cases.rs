@@ -381,6 +381,26 @@ Holder(call=f).call(1)
     );
 }
 
+/// A `NamedTuple` constructor keyword directly supplies the corresponding
+/// callable field value (issue #374).
+#[test]
+fn namedtuple_constructor_keyword_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import NamedTuple
+class Holder(NamedTuple):
+    call: Callable[[int], None]
+def f(value: int) -> None: ...
+Holder(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "f"),
+        "expected NamedTuple field violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
