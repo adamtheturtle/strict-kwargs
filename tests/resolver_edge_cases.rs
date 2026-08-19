@@ -259,6 +259,24 @@ cast(Callable[[int], None], f)(1)
     );
 }
 
+/// `functools.partial` exposes the wrapped callable after removing parameters
+/// consumed by bound positional arguments (issue #368).
+#[test]
+fn functools_partial_result_preserves_remaining_signature() {
+    let messages = check_source(
+        r"
+from functools import partial
+def f(required: int, /, value: int) -> None: ...
+partial(f)(0, 1)
+partial(f, 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "partial") && has_error_at(&messages, 5, "partial"),
+        "expected both partial-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
