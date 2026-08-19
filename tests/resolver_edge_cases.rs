@@ -819,6 +819,30 @@ operator.methodcaller("__call__", 1)(f)
     );
 }
 
+/// A literal argument uniquely selects an overload's concrete callable return
+/// signature (issue #396).
+#[test]
+fn overload_selection_preserves_callable_return_signature() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from typing import overload
+@overload
+def factory(kind: int) -> Callable[[int], None]: ...
+@overload
+def factory(kind: str) -> Callable[[str], None]: ...
+def factory(kind): ...
+factory(kind=1)(1)
+factory("text")("value")
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "overload result")
+            && has_error_at(&messages, 10, "overload result"),
+        "expected overload-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
