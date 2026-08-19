@@ -1116,6 +1116,8 @@ struct CallChecker<'a> {
     generic_returns: FxHashMap<String, GenericReturn>,
     /// Locally declared `TypeVar` names eligible for generic propagation.
     type_vars: FxHashSet<String>,
+    /// Literal-discriminated overload arms that return concrete callables.
+    callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1392,6 +1394,14 @@ struct GenericReturn {
     parameters: Vec<(Option<usize>, String)>,
 }
 
+#[derive(Debug, Clone)]
+struct CallableReturnOverload {
+    parameter_index: usize,
+    parameter_name: String,
+    argument_type: String,
+    signature: Signature,
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn remove_function_binding(scope: &mut Scope, local_name: &str) {
     if scope.had_function_binding {
@@ -1436,6 +1446,7 @@ impl<'a> CallChecker<'a> {
             callable_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             type_vars: FxHashSet::default(),
+            callable_return_overloads: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2231,7 +2242,12 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function = if let Some(signature) = self.queue_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.overload_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "overload result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.queue_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "queue result".to_string(),
                 signature,
@@ -3618,6 +3634,84 @@ impl<'a> CallChecker<'a> {
     // Covered end-to-end by annotated iterator-result integration tests. The
     // remaining branches deliberately decline unsupported annotation shapes.
     #[cfg_attr(coverage, coverage(off))]
+    fn callable_return_overload(
+        parameters: &ast::Parameters,
+        returns: Option<&Expr>,
+    ) -> Option<CallableReturnOverload> {
+        let signature = Self::callable_annotation_signature(returns?)?;
+        parameters
+            .posonlyargs
+            .iter()
+            .chain(&parameters.args)
+            .enumerate()
+            .find_map(|(parameter_index, parameter)| {
+                let annotation = parameter.parameter.annotation.as_deref()?;
+                let argument_type = Self::dotted_path(annotation)?;
+                matches!(
+                    argument_type.rsplit('.').next(),
+                    Some("int" | "str" | "bytes" | "bool" | "float")
+                )
+                .then(|| CallableReturnOverload {
+                    parameter_index,
+                    parameter_name: parameter.parameter.name.to_string(),
+                    argument_type,
+                    signature: signature.clone(),
+                })
+            })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    const fn literal_argument_type(argument: &Expr) -> Option<&'static str> {
+        match argument {
+            Expr::StringLiteral(_) => Some("str"),
+            Expr::BytesLiteral(_) => Some("bytes"),
+            Expr::BooleanLiteral(_) => Some("bool"),
+            Expr::NumberLiteral(number) => match number.value {
+                Number::Int(_) => Some("int"),
+                Number::Float(_) => Some("float"),
+                Number::Complex { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn overload_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(factory_call) = func else {
+            return None;
+        };
+        let factory = self.resolve_callee(&factory_call.func)?;
+        let overloads = self.callable_return_overloads.get(&factory)?;
+        let mut selected = None;
+        for overload in overloads {
+            let argument = factory_call
+                .arguments
+                .args
+                .get(overload.parameter_index)
+                .or_else(|| {
+                    factory_call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str)
+                            == Some(overload.parameter_name.as_str()))
+                        .then_some(&keyword.value)
+                    })
+                });
+            if argument.and_then(Self::literal_argument_type)
+                != overload.argument_type.rsplit('.').next()
+            {
+                continue;
+            }
+            if selected
+                .as_ref()
+                .is_some_and(|signature| signature != &overload.signature)
+            {
+                return None;
+            }
+            selected = Some(overload.signature.clone());
+        }
+        selected
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn iterator_item_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -4618,6 +4712,19 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_expr(&decorator.expression);
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                if decorator_list
+                    .iter()
+                    .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
+                {
+                    if let Some(overload) =
+                        Self::callable_return_overload(parameters, returns.as_deref())
+                    {
+                        self.callable_return_overloads
+                            .entry(fullname.clone())
+                            .or_default()
+                            .push(overload);
+                    }
+                }
                 if let Some(class) = returns.as_deref().and_then(|annotation| {
                     self.class_from_annotation(&self.source[annotation.range()])
                 }) {
