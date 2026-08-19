@@ -357,6 +357,42 @@ def caller(value: object) -> None:
     );
 }
 
+#[test]
+fn typeguard_narrowing_with_positional_argument() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeGuard
+def is_call(value: object) -> TypeGuard[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "TypeGuard"),
+        "expected narrowed violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn typeguard_narrowing_accepts_qualified_annotation() {
+    let messages = check_source(
+        r"
+import typing
+from collections.abc import Callable
+def is_call(value: object) -> typing.TypeGuard[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "TypeGuard"),
+        "expected narrowed violation, got: {messages:?}"
+    );
+}
+
 /// `iter(instance)` uses the concrete callable item type declared by the
 /// instance class's `__iter__` return annotation (issue #382).
 #[test]
