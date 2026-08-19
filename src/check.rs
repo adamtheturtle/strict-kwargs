@@ -3110,6 +3110,75 @@ impl<'a> CallChecker<'a> {
             .map_or(self.module_name.as_str(), String::as_str)
     }
 
+    fn literal_sequence_index(slice: &Expr, len: usize) -> Option<usize> {
+        match slice {
+            Expr::NumberLiteral(ast::ExprNumberLiteral {
+                value: Number::Int(value),
+                ..
+            }) => value.as_usize().filter(|&index| index < len),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::UAdd,
+                operand,
+                ..
+            }) => Self::literal_sequence_index(operand, len),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::USub,
+                operand,
+                ..
+            }) => {
+                let Expr::NumberLiteral(ast::ExprNumberLiteral {
+                    value: Number::Int(value),
+                    ..
+                }) = operand.as_ref()
+                else {
+                    return None;
+                };
+                let distance = value.as_usize()?;
+                (distance > 0).then(|| len.checked_sub(distance)).flatten()
+            }
+            _ => None,
+        }
+    }
+
+    fn same_literal_key(left: &Expr, right: &Expr) -> bool {
+        match (left, right) {
+            (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
+                left.value.to_str() == right.value.to_str()
+            }
+            (
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value: left, .. }),
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value: right, .. }),
+            ) => left == right,
+            (Expr::BooleanLiteral(left), Expr::BooleanLiteral(right)) => left.value == right.value,
+            (Expr::NoneLiteral(_), Expr::NoneLiteral(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn resolve_literal_subscript(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        match value {
+            Expr::List(list) => {
+                let index = Self::literal_sequence_index(slice, list.elts.len())?;
+                self.resolve_callee(&list.elts[index])
+            }
+            Expr::Tuple(tuple) => {
+                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
+                self.resolve_callee(&tuple.elts[index])
+            }
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
+                .items
+                .iter()
+                .rev()
+                .find(|item| {
+                    item.key
+                        .as_ref()
+                        .is_some_and(|key| Self::same_literal_key(key, slice))
+                })
+                .and_then(|item| self.resolve_callee(&item.value)),
+            _ => None,
+        }
+    }
+
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             // A named expression evaluates to its value. Resolve the value
@@ -3131,6 +3200,9 @@ impl<'a> CallChecker<'a> {
                 values
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
+            }
+            Expr::Subscript(ast::ExprSubscript { value, slice, .. }) => {
+                self.resolve_literal_subscript(value, slice)
             }
             Expr::Name(name) => {
                 let local = name.id.as_str();
