@@ -682,6 +682,28 @@ copy.deepcopy(x=f)(1)
     );
 }
 
+/// Type-preserving itertools recipes retain callable element shapes through
+/// `next`, including a selected iterator returned by `tee` (issue #389).
+#[test]
+fn itertools_results_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.repeat(object=f))(1)
+next(itertools.chain([f]))(1)
+next(itertools.cycle([f]))(1)
+next(itertools.tee([f])[0])(1)
+",
+    );
+    for line in 4..=7 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected itertools-result violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
