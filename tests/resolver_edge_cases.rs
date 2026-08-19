@@ -623,6 +623,29 @@ with manager() as call:
     );
 }
 
+/// Generic functions that return the same `TypeVar` accepted by their
+/// arguments preserve an unambiguous concrete callable (issue #386).
+#[test]
+fn generic_return_propagates_callable_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def identity(value: T) -> T: ...
+def choose(first: T, second: T) -> T: ...
+def f(value: int) -> None: ...
+def g(other: int) -> None: ...
+identity(value=f)(1)
+choose(f, g)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result")
+            && has_error_at(&messages, 9, "generic result"),
+        "expected generic-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
