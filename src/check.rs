@@ -3600,6 +3600,29 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weakref_proxy_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "proxy"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("weakref")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [referent] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(referent)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
         let Expr::Call(call) = subscript.value.as_ref() else {
             return None;
@@ -3787,6 +3810,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.itertools_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.weakref_proxy_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
