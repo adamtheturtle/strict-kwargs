@@ -2201,12 +2201,25 @@ fn index_stmt(
             }
             store.conditional_depth -= 1;
         }
-        Stmt::For(ast::StmtFor { target, body, .. }) => {
+        Stmt::For(ast::StmtFor {
+            target,
+            body,
+            orelse,
+            ..
+        }) => {
             if let Expr::Name(name) = target.as_ref() {
                 store.exclude(format!("{scope_name}.{}", name.id));
             }
             exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            index_module_with_bindings(
+                store,
+                module_name,
+                is_package,
+                scope_name,
+                orelse,
+                bindings,
+            );
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
             for target in items
@@ -2220,8 +2233,16 @@ fn index_stmt(
             }
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
         }
-        Stmt::While(ast::StmtWhile { body, .. }) => {
+        Stmt::While(ast::StmtWhile { body, orelse, .. }) => {
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            index_module_with_bindings(
+                store,
+                module_name,
+                is_package,
+                scope_name,
+                orelse,
+                bindings,
+            );
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -2390,12 +2411,18 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
             store.conditional_depth -= 1;
         }
-        Stmt::For(ast::StmtFor { target, body, .. }) => {
+        Stmt::For(ast::StmtFor {
+            target,
+            body,
+            orelse,
+            ..
+        }) => {
             if let Expr::Name(name) = target.as_ref() {
                 store.exclude(format!("{scope_name}.{}", name.id));
             }
             exclude_assigned_attribute(store, scope_name, target, None);
             index_module_fast(store, module_name, scope_name, body);
+            index_module_fast(store, module_name, scope_name, orelse);
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
             for target in items
@@ -2409,8 +2436,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
             index_module_fast(store, module_name, scope_name, body);
         }
-        Stmt::While(ast::StmtWhile { body, .. }) => {
+        Stmt::While(ast::StmtWhile { body, orelse, .. }) => {
             index_module_fast(store, module_name, scope_name, body);
+            index_module_fast(store, module_name, scope_name, orelse);
         }
         Stmt::Try(ast::StmtTry {
             body,
