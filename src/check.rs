@@ -1100,6 +1100,8 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    /// Local names bound by functional NamedTuple/namedtuple factories.
+    functional_namedtuple_names: FxHashSet<String>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1407,6 +1409,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            functional_namedtuple_names: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -3088,6 +3091,32 @@ impl<'a> CallChecker<'a> {
         path.rsplit('.').next() == Some("NamedTuple")
     }
 
+    fn is_collections_namedtuple(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        Self::dotted_path(&call.func)
+            .is_some_and(|path| path.rsplit('.').next() == Some("namedtuple"))
+    }
+
+    fn namedtuple_keyword_field_callable(&self, value: &Expr, field: &str) -> Option<String> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let Expr::Name(class) = constructor.func.as_ref() else {
+            return None;
+        };
+        if !self.functional_namedtuple_names.contains(class.id.as_str()) {
+            return None;
+        }
+        constructor
+            .arguments
+            .keywords
+            .iter()
+            .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(field))
+            .and_then(|keyword| self.resolve_callee(&keyword.value))
+    }
+
     /// Resolve a deeper attribute chain (`os.path.join` -> the joined
     /// module path). Reached only when the attribute's base is itself an
     /// attribute (the bare-`Name` base is handled by the caller), so
@@ -3258,6 +3287,9 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
+                    return Some(callable);
+                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;
@@ -3566,9 +3598,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
+                let is_collections_namedtuple = Self::is_collections_namedtuple(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
+                        if is_functional_namedtuple || is_collections_namedtuple {
+                            self.functional_namedtuple_names.insert(name.id.to_string());
+                        }
                         if is_functional_namedtuple {
                             self.define(
                                 name.id.as_str(),
