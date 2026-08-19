@@ -107,6 +107,14 @@ fn rewrites_direct_lambda_invocation() {
 }
 
 #[test]
+fn rewrites_functools_partial_result_call() {
+    assert_fixed(
+        "from functools import partial\ndef f(required, /, value): ...\npartial(f, 0)(1)\n",
+        "from functools import partial\ndef f(required, /, value): ...\npartial(f, 0)(value=1)\n",
+    );
+}
+
+#[test]
 fn stale_function_signature_after_rebinding_is_not_used() {
     assert_unchanged(
         "def f(value):\n    return value\n\nf = lambda value, /: value\n\nassert f(1) == 1\n",

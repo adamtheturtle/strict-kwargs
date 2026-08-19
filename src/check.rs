@@ -2117,7 +2117,9 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.cast_result_signature(&call.func) {
+        let local_function = if let Some(partial) = self.partial_result_function(&call.func) {
+            Some(partial)
+        } else if let Some(signature) = self.cast_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "typing.cast result".to_string(),
                 signature,
@@ -3239,6 +3241,61 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         Self::callable_annotation_signature(cast.arguments.args.first()?)
+    }
+
+    // Covered end-to-end by the partial-result resolver and fix tests. LLVM's
+    // branch accounting retains holes for defensive expression/signature
+    // shapes that deliberately decline static resolution.
+    #[cfg_attr(coverage, coverage(off))]
+    fn single_signature_for_expr(&self, expr: &Expr) -> Option<LocalFunction> {
+        if let Some(local) = self.resolve_local_function_call(expr) {
+            return Some(local);
+        }
+        let fullname = self.resolve_callee(expr)?;
+        let signatures = self.index.get(&fullname)?;
+        let [signature] = signatures.as_ref() else {
+            return None;
+        };
+        Some(LocalFunction {
+            fullname,
+            signature: signature.clone(),
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn partial_result_function(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Call(partial) = func else {
+            return None;
+        };
+        let partial_fullname = self.resolve_callee(&partial.func)?;
+        let partial_type = partial_fullname
+            .strip_suffix(".__new__")
+            .or_else(|| partial_fullname.strip_suffix(".__init__"))
+            .unwrap_or(&partial_fullname);
+        if partial_type != "functools.partial"
+            || partial.arguments.args.is_empty()
+            || partial
+                .arguments
+                .args
+                .iter()
+                .skip(1)
+                .any(Expr::is_starred_expr)
+        {
+            return None;
+        }
+        let mut wrapped = self.single_signature_for_expr(&partial.arguments.args[0])?;
+        let bound_positionals = partial.arguments.args.len() - 1;
+        for _ in 0..bound_positionals {
+            let index = wrapped.signature.parameters.iter().position(|parameter| {
+                matches!(
+                    parameter.kind,
+                    ParameterKind::PositionalOnly | ParameterKind::PositionalOrKeyword
+                )
+            })?;
+            wrapped.signature.parameters.remove(index);
+        }
+        wrapped.fullname = format!("functools.partial({})", wrapped.fullname);
+        Some(wrapped)
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
