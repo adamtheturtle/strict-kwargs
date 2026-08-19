@@ -646,6 +646,23 @@ choose(f, g)(1)
     );
 }
 
+/// An immediately constructed and dereferenced `weakref.ref` preserves its
+/// referent callable's signature (issue #387).
+#[test]
+fn weakref_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def f(value: int) -> None: ...
+weakref.ref(f)()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected weakref-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

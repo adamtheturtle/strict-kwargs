@@ -3730,6 +3730,37 @@ impl<'a> CallChecker<'a> {
         self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn weakref_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(dereference) = func else {
+            return None;
+        };
+        if !dereference.arguments.args.is_empty() || !dereference.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Call(construction) = dereference.func.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(reference) = construction.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = reference.value.as_ref() else {
+            return None;
+        };
+        if reference.attr.as_str() != "ref"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("weakref")
+        {
+            return None;
+        }
+        let [referent] = &*construction.arguments.args else {
+            return None;
+        };
+        if !construction.arguments.keywords.is_empty() {
+            return None;
+        }
+        self.resolve_callee(referent)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3851,6 +3882,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.weakref_result_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.factory_result_callable(func) {
                     return Some(callable);
                 }
