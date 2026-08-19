@@ -236,6 +236,7 @@ pub fn discover_site_packages_in_environment(python_env: &Path) -> Vec<PathBuf> 
 /// Whether a `--python` path has the shape of an interpreter, virtual
 /// environment, or Python installation prefix.
 #[must_use]
+#[cfg_attr(coverage, coverage(off))]
 pub fn is_python_environment(python_env: &Path) -> bool {
     if python_env.is_file() {
         let Some(parent_name) = python_env.parent().and_then(Path::file_name) else {

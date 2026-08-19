@@ -249,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn invalid_python_environment_names_path_and_expected_shapes() {
+        let error = CheckError::InvalidPythonEnvironment {
+            path: PathBuf::from("README.md"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("--python"));
+        assert!(message.contains("Python interpreter"));
+        assert!(message.contains("README.md"));
+        assert!(format!("{error:?}").starts_with("InvalidPythonEnvironment"));
+    }
+
+    #[test]
     fn config_invalid_shows_path_then_reason() {
         let error = CheckError::ConfigInvalid {
             path: PathBuf::from("pyproject.toml"),
