@@ -4009,6 +4009,33 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn annotated_list_pop_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(pop_call) = value else {
+            return None;
+        };
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" {
+            return None;
+        }
+        let Expr::Name(source) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(source.id.as_str())
+                || scope.opaque_locals.contains(source.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -4892,6 +4919,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.type_vars.insert(target.id.to_string());
                     }
                 }
+                let popped_signature = self.annotated_list_pop_signature(value);
                 let class_fullname = self.class_from_obvious_instance(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
@@ -4912,6 +4940,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.mark_opaque_local(name.id.as_str());
                         } else {
                             self.clear_instance_binding(name.id.as_str());
+                        }
+                        if let Some(signature) = &popped_signature {
+                            self.define_function(
+                                name.id.as_str(),
+                                "list pop result".to_string(),
+                                signature.clone(),
+                            );
                         }
                     }
                 }
