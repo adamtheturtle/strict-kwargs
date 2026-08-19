@@ -3122,6 +3122,16 @@ impl<'a> CallChecker<'a> {
                 let body = self.resolve_callee(body)?;
                 (self.resolve_callee(orelse)? == body).then_some(body)
             }
+            // Boolean expressions may return any operand. They still have an
+            // unambiguous callable when every operand resolves identically
+            // (issue #363).
+            Expr::BoolOp(ast::ExprBoolOp { values, .. }) => {
+                let mut values = values.iter();
+                let resolved = self.resolve_callee(values.next()?)?;
+                values
+                    .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
+                    .then_some(resolved)
+            }
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
