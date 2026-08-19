@@ -3687,6 +3687,18 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.define_annotation(name.id.as_str(), annotation);
                 }
             }
+            Stmt::Try(try_stmt) => {
+                walk_stmt(self, stmt);
+                for handler in &try_stmt.handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(name) = &handler.name {
+                        self.mark_opaque_local(name.as_str());
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.to_string());
+                    }
+                }
+            }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),

@@ -266,6 +266,23 @@ f(1)
     assert!(messages.is_empty(), "stale walrus binding: {messages:?}");
 }
 
+/// Python deletes an exception-handler target after the handler, so an older
+/// function with the same name must not become visible again (issue #420).
+#[test]
+fn exception_target_cleanup_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+try:
+    raise ValueError
+except ValueError as f:
+    pass
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale exception target: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

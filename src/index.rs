@@ -2116,6 +2116,12 @@ fn index_stmt(
                 orelse,
                 bindings,
             );
+            for handler in handlers {
+                let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                if let Some(name) = &handler.name {
+                    store.exclude(format!("{scope_name}.{name}"));
+                }
+            }
             store.conditional_depth -= 1;
             index_module_with_bindings(
                 store,
@@ -2275,6 +2281,12 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             index_module_fast(store, module_name, scope_name, orelse);
             store.conditional_depth -= 1;
             index_module_fast(store, module_name, scope_name, finalbody);
+            for handler in handlers {
+                let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                if let Some(name) = &handler.name {
+                    store.exclude(format!("{scope_name}.{name}"));
+                }
+            }
         }
         Stmt::Match(ast::StmtMatch { cases, .. }) => {
             for case in cases {
