@@ -220,6 +220,27 @@ task.result()(1)
     );
 }
 
+/// An async-with target retains its callable __aenter__ return annotation
+/// (issue #454).
+#[test]
+fn async_with_target_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Manager:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args) -> None: ...
+async def caller(manager: Manager) -> None:
+    async with manager as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "__aenter__"),
+        "expected async-with violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
