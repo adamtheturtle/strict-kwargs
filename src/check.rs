@@ -5993,6 +5993,32 @@ mod tests {
     }
 
     #[test]
+    fn callable_annotation_signature_covers_supported_and_invalid_shapes() {
+        fn expression(source: &str) -> Expr {
+            let parsed = parse_module(source).expect("parse annotation expression");
+            let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+                panic!("expected an expression statement");
+            };
+            stmt.value.as_ref().clone()
+        }
+
+        let fixed = CallChecker::callable_annotation_signature(&expression("Callable[[int], str]"))
+            .expect("fixed Callable");
+        assert_eq!(fixed.parameters.len(), 1);
+        assert_eq!(fixed.parameters[0].kind, ParameterKind::PositionalOrKeyword);
+
+        let variadic = CallChecker::callable_annotation_signature(&expression(
+            "collections.abc.Callable[..., str]",
+        ))
+        .expect("variadic Callable");
+        assert_eq!(variadic.parameters[0].kind, ParameterKind::VarPositional);
+
+        for invalid in ["int", "list[int]", "Callable[int]", "Callable[int, str]"] {
+            assert!(CallChecker::callable_annotation_signature(&expression(invalid)).is_none());
+        }
+    }
+
+    #[test]
     fn decorator_tail_covers_attribute_call_and_dynamic_shapes() {
         let parsed = parse_module(
             "\
