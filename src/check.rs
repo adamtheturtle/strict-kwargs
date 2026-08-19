@@ -3390,6 +3390,14 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
+        if factory_fullname == "builtins.iter" {
+            let receiver = factory_call.arguments.args.first()?;
+            let class_fullname = self.class_from_constructor(receiver)?;
+            return self
+                .callable_iterator_items
+                .get(&format!("{class_fullname}.__iter__"))
+                .cloned();
+        }
         self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
@@ -3746,6 +3754,7 @@ impl<'a> CallChecker<'a> {
             parameters,
             body,
             decorator_list,
+            returns,
             ..
         } = method_def;
         for decorator in decorator_list {
@@ -3753,6 +3762,13 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if let Some(signature) = returns
+            .as_deref()
+            .and_then(Self::iterator_item_callable_signature)
+        {
+            self.callable_iterator_items
+                .insert(method_fullname.clone(), signature);
+        }
         self.push_scope();
         self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
