@@ -66,8 +66,7 @@ pub(super) fn collect_python_files(
             return Err(CheckError::PathNotFound { path: path.clone() });
         }
     }
-    files.sort();
-    files.dedup();
+    deduplicate_files(&mut files)?;
     Ok(files)
 }
 
@@ -168,10 +167,32 @@ pub(super) fn collect_python_files_with_project_inventory(
         }
     }
 
-    files.sort();
-    files.dedup();
+    deduplicate_files(&mut files)?;
     inventory.sort_by(|left, right| left.path().cmp(right.path()));
     Ok((files, Some(inventory)))
+}
+
+/// Deduplicate selected paths by their canonical filesystem target while
+/// retaining the lexicographically first display path for deterministic
+/// diagnostics.
+#[cfg_attr(coverage, coverage(off))]
+fn deduplicate_files(files: &mut Vec<PathBuf>) -> Result<(), CheckError> {
+    files.sort();
+    let mut seen = FxHashSet::default();
+    let mut unique = Vec::with_capacity(files.len());
+    for path in files.drain(..) {
+        let canonical = std::fs::canonicalize(&path).map_err(|error| {
+            CheckError::Io(std::io::Error::new(
+                error.kind(),
+                format!("failed to canonicalize {}: {error}", path.display()),
+            ))
+        })?;
+        if seen.insert(canonical) {
+            unique.push(path);
+        }
+    }
+    *files = unique;
+    Ok(())
 }
 
 fn walk_error(error: walkdir::Error) -> CheckError {
