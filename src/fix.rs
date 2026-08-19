@@ -168,11 +168,17 @@ pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
     commit_prepared_fixes(&prepared)
 }
 
+fn fix_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::Result<()> {
     let transaction = format!("{}-{}", std::process::id(), unique_transaction_suffix());
     let mut entries: Vec<JournalEntry> = Vec::with_capacity(prepared.len());
     for (index, (destination, _, fixed)) in prepared.iter().enumerate() {
-        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let parent = fix_parent(destination);
         let staged = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.new"));
         let backup = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.old"));
         let stage_result = (|| {
@@ -198,7 +204,7 @@ fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::R
         });
     }
 
-    let first_parent = prepared[0].0.parent().unwrap_or_else(|| Path::new("."));
+    let first_parent = fix_parent(&prepared[0].0);
     let journal_path = first_parent.join(format!("{FIX_JOURNAL_PREFIX}{transaction}.json"));
     let mut journal = FixJournal {
         committed: false,
@@ -245,18 +251,13 @@ fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
 }
 
 fn sync_parent(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()
+    std::fs::File::open(fix_parent(path))?.sync_all()
 }
 
 fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
     let mut parents = fixes
         .iter()
-        .map(|fix| {
-            fix.path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()
-        })
+        .map(|fix| fix_parent(&fix.path).to_path_buf())
         .collect::<Vec<_>>();
     parents.sort();
     parents.dedup();
