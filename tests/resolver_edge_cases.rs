@@ -241,6 +241,24 @@ async def caller(manager: Manager) -> None:
     );
 }
 
+/// An async-for target retains its declared async iterator callable item
+/// signature (issue #455).
+#[test]
+fn async_for_target_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
+    async for call in values:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "async iterator item"),
+        "expected async-for violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

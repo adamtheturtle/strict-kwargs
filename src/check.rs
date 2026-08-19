@@ -1111,6 +1111,8 @@ struct CallChecker<'a> {
     callable_function_results: FxHashMap<String, Signature>,
     /// Method fullname -> concrete callable returned by that method.
     callable_method_results: FxHashMap<String, Signature>,
+    /// Local async iterator name -> concrete callable item signature.
+    callable_async_iterator_items: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1423,6 +1425,7 @@ impl<'a> CallChecker<'a> {
             callable_task_results: FxHashMap::default(),
             callable_function_results: FxHashMap::default(),
             callable_method_results: FxHashMap::default(),
+            callable_async_iterator_items: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -1570,6 +1573,15 @@ impl<'a> CallChecker<'a> {
             .chain(parameters.args.iter())
             .chain(parameters.kwonlyargs.iter())
         {
+            if let Some(signature) = param
+                .parameter
+                .annotation
+                .as_deref()
+                .and_then(Self::async_iterator_item_callable_signature)
+            {
+                self.callable_async_iterator_items
+                    .insert(param.parameter.name.to_string(), signature);
+            }
             self.mark_param_opaque_and_annotation(
                 param.parameter.name.as_str(),
                 param.parameter.annotation.as_deref(),
@@ -3202,6 +3214,15 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    fn async_iterator_item_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        (Self::dotted_path(value)?.rsplit('.').next() == Some("AsyncIterator"))
+            .then(|| Self::callable_annotation_signature(slice))
+            .flatten()
+    }
+
     fn task_result_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -3511,6 +3532,11 @@ impl<'a> CallChecker<'a> {
                 self.bind_async_with_callable_targets(with_stmt);
                 walk_stmt(self, stmt);
             }
+            Stmt::For(for_stmt) if for_stmt.is_async => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.bind_async_for_callable_target(for_stmt);
+                walk_stmt(self, stmt);
+            }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
                 walk_stmt(self, stmt);
@@ -3534,6 +3560,26 @@ impl<'a> CallChecker<'a> {
             };
             self.define_function(target.id.as_str(), format!("{method} result"), signature);
         }
+    }
+
+    fn bind_async_for_callable_target(&mut self, for_stmt: &ast::StmtFor) {
+        let (Expr::Name(iterator), Expr::Name(target)) =
+            (for_stmt.iter.as_ref(), for_stmt.target.as_ref())
+        else {
+            return;
+        };
+        let Some(signature) = self
+            .callable_async_iterator_items
+            .get(iterator.id.as_str())
+            .cloned()
+        else {
+            return;
+        };
+        self.define_function(
+            target.id.as_str(),
+            "async iterator item".to_string(),
+            signature,
+        );
     }
 
     /// Walk a statement that appears in a class body or class-level branch.
