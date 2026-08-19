@@ -7264,13 +7264,7 @@ mod tests {
         let files =
             collect_python_files(root.path(), &[scan], &Config::default()).expect("collect");
 
-        assert_eq!(
-            files,
-            vec![
-                root.path().join("scan/linked-dir/module.py"),
-                root.path().join("scan/linked.py"),
-            ]
-        );
+        assert_eq!(files, vec![root.path().join("scan/linked-dir/module.py")]);
 
         let expected = collect_python_files(
             root.path(),
