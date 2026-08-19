@@ -277,6 +277,25 @@ partial(f, 0)(1)
     );
 }
 
+/// `next` returns the item type declared by local iterator and generator
+/// factories, including a concrete callable signature (issue #369).
+#[test]
+fn annotated_iterator_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator, Generator
+def iterator() -> Iterator[Callable[[int], None]]: ...
+def generator() -> Generator[Callable[[int], None], None, None]: ...
+next(iterator())(1)
+next(generator())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        "expected iterator and generator result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
