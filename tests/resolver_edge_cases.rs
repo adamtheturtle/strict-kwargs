@@ -219,6 +219,23 @@ C().method(1)
     );
 }
 
+/// A later module import replaces an earlier function binding with the same
+/// local name (issue #417).
+#[test]
+fn later_module_import_replaces_prior_function_binding() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+import some_module as target
+target(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale pre-import function: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

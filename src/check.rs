@@ -2131,6 +2131,11 @@ impl<'a> CallChecker<'a> {
             {
                 return;
             }
+            if self.resolve_local(name.id.as_str()).is_none()
+                && self.resolve_module(name.id.as_str()).is_some()
+            {
+                return;
+            }
         }
         let local_function = if self.local_function_scope_count == 0 {
             None
@@ -3240,6 +3245,11 @@ impl<'a> CallChecker<'a> {
                     }
                     // Class name -> its constructor, if indexed.
                     return Some(self.callable_fullname(&resolved).unwrap_or(resolved));
+                }
+                // A later plain import replaces an earlier callable binding.
+                // It is a module object, not the stale module-level `def`.
+                if self.resolve_module(local).is_some() {
+                    return None;
                 }
                 // Not a local binding: try this module, then builtins.
                 let module_candidate = format!("{}.{}", self.module_name, local);
