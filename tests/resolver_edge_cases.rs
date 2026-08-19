@@ -385,6 +385,40 @@ next(itertools.islice([f], 1))(1)
     }
 }
 
+/// Tuple-producing itertools constructors retain callable element signatures
+/// through next and subscription (issue #449).
+#[test]
+fn itertools_tuple_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.pairwise([f, f]))[0](1)
+next(itertools.product([f]))[0](1)
+next(itertools.permutations([f]))[0](1)
+next(itertools.combinations([f], 1))[0](1)
+next(itertools.zip_longest([f]))[0](1)
+",
+    );
+    for line in 4..=8 {
+        assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
+    }
+}
+
+/// A weak callable proxy retains the concrete referent signature (issue
+/// #450).
+#[test]
+fn weakref_proxy_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def f(value: int) -> None: ...
+weakref.proxy(f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
