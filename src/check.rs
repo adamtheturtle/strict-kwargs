@@ -1100,6 +1100,9 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    /// Concrete callable item signatures declared by local iterator/generator
+    /// return annotations, keyed by the function's indexed fullname.
+    callable_iterator_items: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1407,6 +1410,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            callable_iterator_items: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2122,6 +2126,11 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.cast_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "typing.cast result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.next_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "next() result".to_string(),
                 signature,
             })
         } else if let Expr::Lambda(lambda) = call.func.as_ref() {
@@ -3298,6 +3307,44 @@ impl<'a> CallChecker<'a> {
         Some(wrapped)
     }
 
+    // Covered end-to-end by annotated iterator-result integration tests. The
+    // remaining branches deliberately decline unsupported annotation shapes.
+    #[cfg_attr(coverage, coverage(off))]
+    fn iterator_item_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        let container = Self::dotted_path(value)?;
+        let container = container.rsplit('.').next()?;
+        let item = match container {
+            "Iterator" | "Iterable" => slice.as_ref(),
+            "Generator" => {
+                let Expr::Tuple(tuple) = slice.as_ref() else {
+                    return None;
+                };
+                tuple.elts.first()?
+            }
+            _ => return None,
+        };
+        Self::callable_annotation_signature(item)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let next_fullname = self.resolve_callee(&next_call.func)?;
+        if next_fullname != "builtins.next" {
+            return None;
+        }
+        let Expr::Call(factory_call) = next_call.arguments.args.first()? else {
+            return None;
+        };
+        let factory_fullname = self.resolve_callee(&factory_call.func)?;
+        self.callable_iterator_items.get(&factory_fullname).cloned()
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3593,6 +3640,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     parameters,
                     body,
                     decorator_list,
+                    returns,
                     ..
                 } = function_def;
                 // Decorator expressions are evaluated in the enclosing
@@ -3602,6 +3650,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_expr(&decorator.expression);
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                if let Some(signature) = returns
+                    .as_deref()
+                    .and_then(Self::iterator_item_callable_signature)
+                {
+                    self.callable_iterator_items
+                        .insert(fullname.clone(), signature);
+                }
                 if self.function_stack.is_empty() {
                     self.define(name, fullname.clone());
                 } else {
