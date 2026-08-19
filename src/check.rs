@@ -1182,6 +1182,35 @@ struct CallChecker<'a> {
     callee_exprs: FxHashSet<usize>,
 }
 
+#[derive(Default)]
+struct NonlocalCollector {
+    names: FxHashSet<String>,
+}
+
+impl<'a> Visitor<'a> for NonlocalCollector {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::Nonlocal(nonlocal) => {
+                self.names
+                    .extend(nonlocal.names.iter().map(ToString::to_string));
+            }
+            // A deeper function has its own enclosing scope; its `nonlocal`
+            // declarations do not target the function currently being
+            // collected.
+            Stmt::FunctionDef(_) => {}
+            _ => walk_stmt(self, stmt),
+        }
+    }
+}
+
+fn declared_nonlocals(body: &[Stmt]) -> FxHashSet<String> {
+    let mut collector = NonlocalCollector::default();
+    for stmt in body {
+        collector.visit_stmt(stmt);
+    }
+    collector.names
+}
+
 /// One name binding tracked for hover grouping: a parameter, an import, a
 /// `def`/`class` statement, or a plain single assignment. Calls on the bare
 /// name resolve to the innermost *visible* frame for that name; a call
@@ -3616,6 +3645,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // (issue #51: decorator-factory calls were never checked).
                 for decorator in decorator_list {
                     self.visit_expr(&decorator.expression);
+                }
+                if !self.function_stack.is_empty() {
+                    for nonlocal in declared_nonlocals(body) {
+                        self.invalidate_pattern_callable(&nonlocal);
+                    }
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 if self.function_stack.is_empty() {
