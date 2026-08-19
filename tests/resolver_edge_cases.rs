@@ -155,6 +155,22 @@ def f(value: int) -> None: ...
     );
 }
 
+/// A conditional expression with the same callable on both branches has an
+/// unambiguous signature (issue #362).
+#[test]
+fn conditional_expression_callee_resolves_matching_branches() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(f if condition else f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "f"),
+        "expected conditional-expression violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

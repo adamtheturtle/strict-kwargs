@@ -3116,6 +3116,12 @@ impl<'a> CallChecker<'a> {
             // directly so `(alias := f)(1)` has the same callable signature
             // as `f(1)` (issue #361).
             Expr::Named(ast::ExprNamed { value, .. }) => self.resolve_callee(value),
+            // A conditional expression is statically unambiguous when both
+            // branches resolve to the same callable (issue #362).
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                let body = self.resolve_callee(body)?;
+                (self.resolve_callee(orelse)? == body).then_some(body)
+            }
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
