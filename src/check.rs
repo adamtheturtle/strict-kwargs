@@ -3498,6 +3498,93 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn unnamed_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let fullname = self.resolve_callee(expr)?;
+        let signatures = self.index.get(&fullname)?;
+        let [signature] = signatures.as_ref() else {
+            return None;
+        };
+        Some(Signature {
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| Parameter {
+                    name: None,
+                    kind: parameter.kind,
+                })
+                .collect(),
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_iterable_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let elements = match expr {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            Expr::Set(set) => set.elts.as_slice(),
+            _ => return None,
+        };
+        let mut result = None;
+        for element in elements {
+            let signature = self.unnamed_callable_signature(element)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn imported_callable_path(&self, expr: &Expr) -> Option<String> {
+        let dotted = Self::dotted_path(expr)?;
+        let (head, rest) = dotted.split_once('.')?;
+        Some(format!("{}.{}", self.resolve_module(head)?, rest))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn itertools_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        if let Expr::Subscript(subscript) = expr {
+            return self.itertools_item_signature(&subscript.value);
+        }
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        match self.imported_callable_path(&call.func)?.as_str() {
+            "itertools.repeat" => {
+                let object = call.arguments.args.first().or_else(|| {
+                    call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("object"))
+                            .then_some(&keyword.value)
+                    })
+                })?;
+                self.unnamed_callable_signature(object)
+            }
+            "itertools.cycle" | "itertools.tee" => {
+                self.literal_iterable_callable_signature(call.arguments.args.first()?)
+            }
+            "itertools.chain" => {
+                let mut result = None;
+                for iterable in &call.arguments.args {
+                    let signature = self.literal_iterable_callable_signature(iterable)?;
+                    if result
+                        .as_ref()
+                        .is_some_and(|existing| existing != &signature)
+                    {
+                        return None;
+                    }
+                    result = Some(signature);
+                }
+                result
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(next_call) = func else {
             return None;
@@ -3506,7 +3593,11 @@ impl<'a> CallChecker<'a> {
         if next_fullname != "builtins.next" {
             return None;
         }
-        let Expr::Call(factory_call) = next_call.arguments.args.first()? else {
+        let iterator = next_call.arguments.args.first()?;
+        if let Some(signature) = self.itertools_item_signature(iterator) {
+            return Some(signature);
+        }
+        let Expr::Call(factory_call) = iterator else {
             return None;
         };
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
