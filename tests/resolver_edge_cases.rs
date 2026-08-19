@@ -209,6 +209,22 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Calling an argument-free lambda evaluates to its body, so a callable
+/// returned directly from that body retains its signature (issue #365).
+#[test]
+fn direct_lambda_result_callee_resolves_body() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+(lambda: f)()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "f"),
+        "expected direct lambda-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

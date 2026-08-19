@@ -3277,6 +3277,19 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if constructor.arguments.is_empty() {
+                    if let Expr::Lambda(ast::ExprLambda {
+                        parameters, body, ..
+                    }) = constructor.func.as_ref()
+                    {
+                        let accepts_no_arguments = parameters
+                            .as_deref()
+                            .is_none_or(|parameters| parameters.iter().next().is_none());
+                        if accepts_no_arguments {
+                            return self.resolve_callee(body);
+                        }
+                    }
+                }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
                 let dunder_call = format!("{class_fullname}.__call__");
                 self.index
