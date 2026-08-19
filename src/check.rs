@@ -7306,6 +7306,35 @@ mod tests {
     }
 
     #[test]
+    fn collect_python_files_deduplicates_equivalent_path_spellings() {
+        let root = tempfile::Builder::new()
+            .prefix("strictkw")
+            .tempdir()
+            .expect("tempdir");
+        let source = root.path().join("file.py");
+        std::fs::write(&source, "def f(value): ...\nf(1)\n").expect("write");
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).expect("mkdir");
+
+        let files = collect_python_files(
+            root.path(),
+            &[
+                source.clone(),
+                root.path().join("./file.py"),
+                nested.join("../file.py"),
+            ],
+            &Config::default(),
+        )
+        .expect("collect");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&files[0]).expect("canonical selected path"),
+            std::fs::canonicalize(source).expect("canonical source")
+        );
+    }
+
+    #[test]
     fn collect_python_files_reports_invalid_extend_exclude_pattern() {
         let root = tempfile::tempdir().expect("tempdir");
         let Err(error) = collect_python_files(
