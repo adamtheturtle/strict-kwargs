@@ -99,6 +99,14 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn rewrites_itemgetter_result_without_rewriting_operand() {
+    assert_fixed(
+        "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(1)\n",
+        "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(value=1)\n",
+    );
+}
+
+#[test]
 fn rewrites_direct_lambda_invocation() {
     assert_fixed(
         "(lambda value: None)(1)\n",
