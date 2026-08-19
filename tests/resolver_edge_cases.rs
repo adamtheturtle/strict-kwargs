@@ -335,6 +335,22 @@ C().method(1)
     assert!(messages.is_empty(), "stale setattr method: {messages:?}");
 }
 
+/// Replacing a base method invalidates inherited lookup through indexed
+/// subclasses (issue #424).
+#[test]
+fn mutated_base_method_invalidates_inherited_signature() {
+    let messages = check_source(
+        r"
+class Base:
+    def method(self, value: int) -> None: ...
+class Child(Base): ...
+Base.method = lambda *args: None
+Child().method(1)
+",
+    );
+    assert!(messages.is_empty(), "stale inherited method: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

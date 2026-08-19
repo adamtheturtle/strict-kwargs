@@ -2160,6 +2160,9 @@ impl<'a> CallChecker<'a> {
         if self.invalidated_fullnames.contains(&callee_fullname) {
             return;
         }
+        if self.index.method_is_excluded(&callee_fullname) {
+            return;
+        }
         // Functions whose first argument must stay positional at runtime
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
         // without deferring to ty.

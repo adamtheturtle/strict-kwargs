@@ -849,6 +849,40 @@ impl DefinitionIndex {
         self.resolve_method_inner(class_fullname, method, &mut visited)
     }
 
+    /// Whether `class.method` or the inherited method selected through its
+    /// indexed MRO was explicitly invalidated.
+    pub fn method_is_excluded(&self, fullname: &str) -> bool {
+        let Some((class_fullname, method)) = fullname.rsplit_once('.') else {
+            return false;
+        };
+        let mut visited = FxHashSet::default();
+        self.method_is_excluded_inner(class_fullname, method, &mut visited)
+    }
+
+    fn method_is_excluded_inner(
+        &self,
+        class_fullname: &str,
+        method: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> bool {
+        if !visited.insert(class_fullname.to_string()) {
+            return false;
+        }
+        if self.is_excluded(&format!("{class_fullname}.{method}")) {
+            return true;
+        }
+        let bases = self
+            .read()
+            .store
+            .class_bases
+            .get(class_fullname)
+            .cloned()
+            .unwrap_or_default();
+        bases
+            .iter()
+            .any(|base| self.method_is_excluded_inner(base, method, visited))
+    }
+
     /// Whether `class_fullname` inherits from `base_fullname` through the
     /// indexed direct-base graph.
     pub fn class_inherits_from(&self, class_fullname: &str, base_fullname: &str) -> bool {
