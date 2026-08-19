@@ -1474,10 +1474,6 @@ fn collect_scoped(
             // Only pure name/attribute references alias; calls, literals and
             // comprehensions are not (they would not share a signature).
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) if module_scope => {
-                out.has_partialmethod_candidates |= matches!(
-                    value.as_ref(),
-                    Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
-                );
                 out.has_attribute_rebindings |= targets
                     .iter()
                     .any(|target| matches!(target, Expr::Attribute(_)));
