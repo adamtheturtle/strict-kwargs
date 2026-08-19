@@ -271,6 +271,29 @@ def fallback(value: int) -> None: ...
     );
 }
 
+/// Standard-library generic mappings retain the concrete callable value type
+/// through their result-returning methods (issue #440).
+#[test]
+fn collections_mapping_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict, UserDict
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+def third(value: int) -> None: ...
+ChainMap({"call": first}).pop("call")(1)
+OrderedDict([("call", second)]).popitem()[1](1)
+UserDict({"call": third}).pop("call")(1)
+"#,
+    );
+    for (line, callee) in [(6, "first"), (7, "second"), (8, "third")] {
+        assert!(
+            has_error_at(&messages, line, callee),
+            "expected {callee} violation, got: {messages:?}"
+        );
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

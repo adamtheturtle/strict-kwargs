@@ -3274,6 +3274,80 @@ impl<'a> CallChecker<'a> {
         .flatten()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn collections_mapping_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [key] = &*call.arguments.args else {
+            return None;
+        };
+        let class = self.class_from_constructor_func(&constructor.func)?;
+        if !matches!(
+            class.as_str(),
+            "collections.ChainMap" | "collections.UserDict"
+        ) || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [mapping] = &*constructor.arguments.args else {
+            return None;
+        };
+        self.resolve_literal_container_item(mapping, key)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn ordered_dict_popitem_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.args.is_empty()
+            || !popitem.arguments.keywords.is_empty()
+            || self
+                .class_from_constructor_func(&constructor.func)?
+                .as_str()
+                != "collections.OrderedDict"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [entries] = &*constructor.arguments.args else {
+            return None;
+        };
+        let entry_elements = match entries {
+            Expr::List(entries) => &entries.elts,
+            Expr::Tuple(entries) => &entries.elts,
+            _ => return None,
+        };
+        let Expr::Tuple(pair) = entry_elements.last()? else {
+            return None;
+        };
+        let [_, value] = &*pair.elts else {
+            return None;
+        };
+        self.resolve_callee(value)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3300,9 +3374,9 @@ impl<'a> CallChecker<'a> {
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
             }
-            Expr::Subscript(subscript) => {
-                self.resolve_literal_container_item(&subscript.value, &subscript.slice)
-            }
+            Expr::Subscript(subscript) => self
+                .resolve_literal_container_item(&subscript.value, &subscript.slice)
+                .or_else(|| self.ordered_dict_popitem_value_callable(subscript)),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
@@ -3377,6 +3451,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.collections_mapping_pop_callable(func) {
                     return Some(callable);
                 }
                 let class_fullname = self.class_from_constructor_func(&constructor.func)?;
