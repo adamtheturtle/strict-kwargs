@@ -3432,6 +3432,9 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    // Covered by the dataclass callable-field regression; non-constructor,
+    // non-dataclass, missing-field, and non-callable shapes intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
     fn dataclass_constructor_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
         let Expr::Call(constructor) = value else {
             return None;
