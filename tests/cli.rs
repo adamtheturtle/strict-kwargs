@@ -9,7 +9,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_strict-kwargs");
 const CACHE_DIR_ENV_VAR: &str = "STRICT_KWARGS_CACHE_DIR";
@@ -1071,6 +1071,29 @@ fn fix_diff_prints_patch_without_writing() {
     );
     // `--diff` must not modify the file.
     assert_eq!(project.read("main.py"), source);
+}
+
+#[test]
+fn fix_diff_handles_closed_stdout_without_panicking() {
+    let mut source = String::from("def f(value: int) -> None: ...\n");
+    for _ in 0..5_000 {
+        source.push_str("f(1)\n");
+    }
+    let project = Project::new().write("main.py", &source);
+    let mut child = Command::new(BIN)
+        .args(["check", "--diff", "main.py"])
+        .current_dir(&project.root)
+        .env_remove(CACHE_DIR_ENV_VAR)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn strict-kwargs");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait for strict-kwargs");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(!err.contains("panicked"), "stderr: {err}");
+    assert!(!err.contains("backtrace"), "stderr: {err}");
 }
 
 #[test]
