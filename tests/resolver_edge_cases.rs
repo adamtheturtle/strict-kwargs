@@ -504,6 +504,29 @@ C().call(1)
     );
 }
 
+/// Callable-annotated instance fields retain the annotation's concrete
+/// signature when accessed on a newly constructed instance (issue #380).
+#[test]
+fn callable_instance_field_annotation_is_resolved() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+
+class C:
+    call: Callable[[int], None]
+    def __init__(self, call: Callable[[int], None]) -> None:
+        self.call = call
+
+def f(value: int) -> None: ...
+C(call=f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "call"),
+        "expected callable-field violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
