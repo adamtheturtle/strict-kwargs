@@ -3713,6 +3713,48 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn dict_values_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        let iter_fullname = self.resolve_callee(&iter_call.func)?;
+        if !matches!(
+            iter_fullname.as_str(),
+            "builtins.iter" | "builtins.iter.__new__"
+        ) {
+            return None;
+        }
+        let [Expr::Call(view_call)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = view_call.func.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "values"
+            || !view_call.arguments.args.is_empty()
+            || !view_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Dict(dict) = attribute.value.as_ref() else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            item.key.as_ref()?;
+            let signature = self.unnamed_callable_signature(&item.value)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -3731,6 +3773,9 @@ impl<'a> CallChecker<'a> {
         }
         let iterator = next_call.arguments.args.first()?;
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.dict_values_item_signature(iterator) {
             return Some(signature);
         }
         if let Some(signature) = self.itertools_item_signature(iterator) {
