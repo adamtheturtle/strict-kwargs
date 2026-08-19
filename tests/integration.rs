@@ -2084,11 +2084,28 @@ fn dataclass_explicit_init_wins_over_synthesis() {
 }
 
 #[test]
-fn functional_namedtuple_form_out_of_scope() {
-    // The functional `NamedTuple("N", [...])` form is not synthesized; no
-    // false positive for the surrounding call.
-    assert_ok(
-        "from typing import NamedTuple\n\nNT = NamedTuple(\"NT\", [(\"a\", int), (\"b\", int)])\n",
+fn functional_namedtuple_constructor_and_callable_field_are_modeled() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from typing import NamedTuple
+Point = NamedTuple("Point", [("call", Callable[[int], None])])
+def f(value: int) -> None: ...
+Point(f).call(1)
+"#,
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "Point""#)),
+        "got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "call" of "Point""#)),
+        "got: {messages:?}"
     );
 }
 

@@ -3078,6 +3078,16 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn is_functional_namedtuple(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        let Some(path) = Self::dotted_path(&call.func) else {
+            return false;
+        };
+        path.rsplit('.').next() == Some("NamedTuple")
+    }
+
     /// Resolve a deeper attribute chain (`os.path.join` -> the joined
     /// module path). Reached only when the attribute's base is itself an
     /// attribute (the bare-`Name` base is handled by the caller), so
@@ -3555,10 +3565,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
+                let is_functional_namedtuple = Self::is_functional_namedtuple(value);
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        if let Some(class_fullname) = &class_fullname {
+                        if is_functional_namedtuple {
+                            self.define(
+                                name.id.as_str(),
+                                format!("{}.{}", self.current_lexical_scope(), name.id),
+                            );
+                        } else if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
