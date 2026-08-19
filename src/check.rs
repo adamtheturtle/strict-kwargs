@@ -1106,6 +1106,8 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
+    /// Concrete `Callable` signatures declared as local function returns.
+    callable_returns: FxHashMap<String, Signature>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1415,6 +1417,7 @@ impl<'a> CallChecker<'a> {
             function_stack: Vec::new(),
             callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
+            callable_returns: FxHashMap::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -2141,7 +2144,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(partial) = self.partial_result_function(&call.func) {
+        let local_function = if let Some(signature) = self.awaited_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "awaited result".to_string(),
+                signature,
+            })
+        } else if let Some(partial) = self.partial_result_function(&call.func) {
             Some(partial)
         } else if let Some(signature) = self.cast_result_signature(&call.func) {
             Some(LocalFunction {
@@ -3585,6 +3593,20 @@ impl<'a> CallChecker<'a> {
         })
     }
 
+    // Covered end-to-end by the awaited callable regression. Unsupported
+    // await expressions and unresolved factories intentionally decline.
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaited_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Await(ast::ExprAwait { value, .. }) = func else {
+            return None;
+        };
+        let Expr::Call(factory_call) = value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&factory_call.func)?;
+        self.callable_returns.get(&factory).cloned()
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3996,6 +4018,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_iterator_items
                         .insert(fullname.clone(), signature);
+                }
+                if let Some(signature) = returns
+                    .as_deref()
+                    .and_then(Self::callable_annotation_signature)
+                {
+                    self.callable_returns.insert(fullname.clone(), signature);
                 }
                 if self.function_stack.is_empty() {
                     self.define(name, fullname.clone());

@@ -567,6 +567,24 @@ C()["call"](1)
     );
 }
 
+/// Awaiting a local async factory preserves its concrete callable return
+/// annotation (issue #383).
+#[test]
+fn awaited_callable_result_preserves_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def caller() -> None:
+    (await factory())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "awaited result"),
+        "expected awaited-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
