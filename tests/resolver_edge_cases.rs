@@ -162,6 +162,33 @@ C().method(1)
     );
 }
 
+/// Reassignments in an exception handler are conditional and invalidate the
+/// original callable signatures (issue #413).
+#[test]
+fn except_handler_reassignments_do_not_use_stale_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+try:
+    operation()
+except ValueError:
+    f = lambda *args: None
+f(1)
+class C:
+    def method(self, value: int) -> None: ...
+try:
+    operation()
+except ValueError:
+    C.method = lambda *args: None
+C().method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "except-handler stale definitions: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
