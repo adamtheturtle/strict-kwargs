@@ -778,6 +778,26 @@ fn fix_skips_non_utf8_file_and_still_fixes_others() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn fix_does_not_follow_a_nested_directory_symlink_outside_the_requested_tree() {
+    use std::os::unix::fs::symlink;
+
+    let project = Project::new();
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let external = outside.path().join("external.py");
+    std::fs::write(&external, "def f(*, x): pass\nf(1)\n").expect("write external source");
+    symlink(outside.path(), project.root.join("vendor-link")).expect("create directory symlink");
+
+    let output = project.run(&["check", "--fix", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        std::fs::read_to_string(external).expect("read external source"),
+        "def f(*, x): pass\nf(1)\n"
+    );
+}
+
 #[test]
 fn fix_directory_skips_parse_incompatible_file_and_still_fixes_others() {
     let project = Project::new()

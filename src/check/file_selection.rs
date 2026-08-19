@@ -70,6 +70,57 @@ pub(super) fn collect_python_files(
     Ok(files)
 }
 
+/// Collect Python files for an in-place fix without escaping requested trees.
+///
+/// Ordinary checks follow directory symlinks because reading a linked source is
+/// useful. Mutation is different: a directory argument defines the boundary
+/// within which writes are allowed. Canonicalizing both sides prevents a
+/// symlink nested below that argument from redirecting a write elsewhere. A
+/// directly requested file or symlinked directory is still an explicit opt-in.
+pub(super) fn collect_python_files_for_fix(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<PathBuf>, CheckError> {
+    let files = collect_python_files(project_root, paths, config)?;
+    let directory_roots = paths
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| canonicalize_for_fix(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let explicit_files = paths
+        .iter()
+        .filter(|path| path.is_file())
+        .map(|path| canonicalize_for_fix(path))
+        .collect::<Result<FxHashSet<_>, _>>()?;
+
+    files
+        .into_iter()
+        .map(|path| canonicalize_for_fix(&path).map(|canonical| (path, canonical)))
+        .filter_map(|result| match result {
+            Ok((path, canonical))
+                if explicit_files.contains(&canonical)
+                    || directory_roots
+                        .iter()
+                        .any(|root| canonical.starts_with(root)) =>
+            {
+                Some(Ok(path))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn canonicalize_for_fix(path: &Path) -> Result<PathBuf, CheckError> {
+    std::fs::canonicalize(path).map_err(|error| {
+        CheckError::Io(std::io::Error::new(
+            error.kind(),
+            format!("IO error for operation on {}: {error}", path.display()),
+        ))
+    })
+}
+
 /// Collect a whole project while also capturing the broader file inventory
 /// used by cache invalidation.
 ///
