@@ -316,6 +316,24 @@ next(generator())(1)
     );
 }
 
+/// A single irrefutable capture aliases the match subject and therefore keeps
+/// its concrete callable signature (issue #371).
+#[test]
+fn match_capture_alias_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+match f:
+    case alias:
+        alias(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "f"),
+        "expected match-capture alias violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

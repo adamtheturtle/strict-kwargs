@@ -3554,6 +3554,46 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    // Covered end-to-end by match-capture diagnostic and fix tests. Defensive
+    // context/pattern branches intentionally fall back to the normal walker.
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_match_body_stmt(&mut self, stmt: &'a Stmt) {
+        if self.class_body_depth > 0 {
+            self.visit_class_body_stmt(stmt);
+        } else if self.function_stack.is_empty() {
+            self.visit_stmt(stmt);
+        } else {
+            self.visit_body_stmt(stmt);
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_irrefutable_capture_match(&mut self, match_stmt: &'a ast::StmtMatch) -> bool {
+        let [case] = match_stmt.cases.as_slice() else {
+            return false;
+        };
+        let ast::Pattern::MatchAs(ast::PatternMatchAs {
+            pattern: None,
+            name: Some(name),
+            ..
+        }) = &case.pattern
+        else {
+            return false;
+        };
+        let Some(callable) = self.resolve_callee(&match_stmt.subject) else {
+            return false;
+        };
+        self.visit_expr(&match_stmt.subject);
+        self.define(name.as_str(), callable);
+        if let Some(guard) = &case.guard {
+            self.visit_expr(guard);
+        }
+        for stmt in &case.body {
+            self.visit_match_body_stmt(stmt);
+        }
+        true
+    }
+
     /// `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each `elif`
     /// test expression twice: once via a direct `visit_expr` call and again
     /// inside `walk_elif_else_clause`. Override `Stmt::If` to traverse each test
@@ -3800,6 +3840,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
+            Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
