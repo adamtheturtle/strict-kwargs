@@ -620,3 +620,33 @@ mod tests {
         assert!(diff.contains("-Y\n+Y1\n"));
     }
 }
+
+/// Exercises `git_diff_path` under llvm-cov. The main `tests` module is
+/// `#[coverage(off)]`.
+#[cfg(test)]
+mod git_diff_path_coverage {
+    use super::{git_diff_path, unified_diff};
+    use std::path::Path;
+
+    #[test]
+    fn git_diff_path_keeps_safe_paths_unquoted() {
+        assert_eq!(
+            git_diff_path("a/", Path::new("pkg/main.py")),
+            "a/pkg/main.py"
+        );
+    }
+
+    #[test]
+    fn git_diff_path_quotes_control_bytes_with_octal_escapes() {
+        assert_eq!(
+            git_diff_path("a/", Path::new("ctrl\x01name.py")),
+            "\"a/ctrl\\001name.py\""
+        );
+    }
+
+    #[test]
+    fn git_diff_path_quotes_carriage_return() {
+        let diff = unified_diff(Path::new("line\rname.py"), "f(1)\n", "f(x=1)\n", false);
+        assert!(diff.starts_with("--- \"a/line\\rname.py\"\n"));
+    }
+}
