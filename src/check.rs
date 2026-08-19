@@ -30,7 +30,7 @@ use crate::index::{
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
-use crate::signature::{ParameterKind, Signature};
+use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
@@ -2117,7 +2117,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Expr::Lambda(lambda) = call.func.as_ref() {
+        let local_function = if let Some(signature) = self.cast_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "typing.cast result".to_string(),
+                signature,
+            })
+        } else if let Expr::Lambda(lambda) = call.func.as_ref() {
             Some(LocalFunction {
                 fullname: format!("{}.<lambda>", self.current_lexical_scope()),
                 signature: lambda.parameters.as_deref().map_or_else(
@@ -3193,6 +3198,49 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        let callable_name = Self::dotted_path(value)?;
+        if callable_name.rsplit('.').next() != Some("Callable") {
+            return None;
+        }
+        let Expr::Tuple(tuple) = slice.as_ref() else {
+            return None;
+        };
+        let parameters = match tuple.elts.first()? {
+            Expr::List(list) => list
+                .elts
+                .iter()
+                .map(|_| Parameter {
+                    name: None,
+                    kind: ParameterKind::PositionalOrKeyword,
+                })
+                .collect(),
+            Expr::EllipsisLiteral(_) => vec![Parameter {
+                name: None,
+                kind: ParameterKind::VarPositional,
+            }],
+            _ => return None,
+        };
+        Some(Signature { parameters })
+    }
+
+    fn cast_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(cast) = func else {
+            return None;
+        };
+        let cast_fullname = self.resolve_callee(&cast.func)?;
+        if !matches!(
+            cast_fullname.as_str(),
+            "typing.cast" | "typing_extensions.cast"
+        ) {
+            return None;
+        }
+        Self::callable_annotation_signature(cast.arguments.args.first()?)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -3872,7 +3920,7 @@ fn is_typing_special_form_constructor(fullname: &str) -> bool {
     module_ok
         && matches!(
             name,
-            "TypeVar" | "ParamSpec" | "TypeVarTuple" | "NewType" | "TypeAliasType"
+            "TypeVar" | "ParamSpec" | "TypeVarTuple" | "NewType" | "TypeAliasType" | "cast"
         )
 }
 
@@ -5936,16 +5984,37 @@ mod tests {
 
     #[test]
     fn does_not_exempt_unrelated_callables() {
-        for fullname in [
-            "typing.cast",
-            "typing.NamedTuple",
-            "mypkg.TypeVar.__init__",
-            "TypeVar",
-        ] {
+        for fullname in ["typing.NamedTuple", "mypkg.TypeVar.__init__", "TypeVar"] {
             assert!(
                 !is_typing_special_form_constructor(fullname),
                 "{fullname} must not be exempt"
             );
+        }
+    }
+
+    #[test]
+    fn callable_annotation_signature_covers_supported_and_invalid_shapes() {
+        fn expression(source: &str) -> Expr {
+            let parsed = parse_module(source).expect("parse annotation expression");
+            let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
+                panic!("expected an expression statement");
+            };
+            stmt.value.as_ref().clone()
+        }
+
+        let fixed = CallChecker::callable_annotation_signature(&expression("Callable[[int], str]"))
+            .expect("fixed Callable");
+        assert_eq!(fixed.parameters.len(), 1);
+        assert_eq!(fixed.parameters[0].kind, ParameterKind::PositionalOrKeyword);
+
+        let variadic = CallChecker::callable_annotation_signature(&expression(
+            "collections.abc.Callable[..., str]",
+        ))
+        .expect("variadic Callable");
+        assert_eq!(variadic.parameters[0].kind, ParameterKind::VarPositional);
+
+        for invalid in ["int", "list[int]", "Callable[int]", "Callable[int, str]"] {
+            assert!(CallChecker::callable_annotation_signature(&expression(invalid)).is_none());
         }
     }
 
