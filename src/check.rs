@@ -1776,6 +1776,18 @@ impl<'a> CallChecker<'a> {
         false
     }
 
+    /// Whether a name must not be deferred to ty after the built-in resolver
+    /// misses it. Opaque loop/with targets and invalidated callables can still
+    /// be resolved by ty to a stale earlier definition.
+    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
+        self.is_opaque_local(name)
+            || self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.invalidated_callables.contains(name))
+    }
+
     fn define_module(&mut self, local_name: &str, module_path: String) {
         let plan_fixes = self.plan_fixes;
         let scope = self.current_scope();
@@ -2319,6 +2331,11 @@ impl<'a> CallChecker<'a> {
             local_function.fullname.clone()
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+                if let Expr::Name(name) = call.func.as_ref() {
+                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
+                        return;
+                    }
+                }
                 // Built-in resolver couldn't resolve: defer to a pipelined ty
                 // query (handled once per file after the walk).
                 self.record_ty_pending(call);
@@ -3289,11 +3306,14 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
+            if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
+                return None;
+            }
+            if scope.names.contains_key(local) {
+                return None;
+            }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
-            }
-            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
-                return None;
             }
         }
         None
