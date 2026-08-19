@@ -2443,14 +2443,16 @@ fn index_class_body(
                     if synthesize_partialmethod(store, class_name, target, value, bindings) {
                         continue;
                     }
-                    synthesize_descriptor_attribute(
-                        store,
-                        module_name,
-                        class_name,
-                        target,
-                        value,
-                        bindings,
-                    );
+                    if !store.descriptor_get_returns.is_empty() {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            bindings,
+                        );
+                    }
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
@@ -2589,14 +2591,16 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
-                    synthesize_descriptor_attribute(
-                        store,
-                        module_name,
-                        class_name,
-                        target,
-                        value,
-                        &bindings,
-                    );
+                    if !store.descriptor_get_returns.is_empty() {
+                        synthesize_descriptor_attribute(
+                            store,
+                            module_name,
+                            class_name,
+                            target,
+                            value,
+                            &bindings,
+                        );
+                    }
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
