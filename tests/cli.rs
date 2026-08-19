@@ -1196,7 +1196,7 @@ fn fix_diff_reports_declined() {
         &format!("{DATACLASS}def f(a, b): ...\n\nf(1, 2)\nD(1, 2)\n"),
     );
     let output = project.run(&["check", "--diff", "main.py"]);
-    assert_eq!(code(&output), 0);
+    assert_eq!(code(&output), 1);
     let patch = stdout(&output);
     assert!(patch.contains("+f(a=1, b=2)"), "patch: {patch}");
     assert!(
