@@ -241,6 +241,9 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
         for i in start..=end {
             if before[i] == after[i] {
                 lines.push(format!(" {}", before[i]));
+                if i + 1 == before.len() && !original.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
             } else {
                 let removal = format!("-{}", before[i]);
                 let addition = format!("+{}", after[i]);
@@ -249,11 +252,17 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
                 } else {
                     removal
                 });
+                if i + 1 == before.len() && !original.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
                 lines.push(if color {
                     format!("{}", addition.green())
                 } else {
                     addition
                 });
+                if i + 1 == after.len() && !fixed.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
             }
         }
     }
@@ -528,6 +537,15 @@ mod tests {
         // Context window clamps at the start (`saturating_sub`) and end
         // (`min(line_count - 1)`).
         assert!(diff.starts_with("--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1,6"));
+    }
+
+    #[test]
+    fn unified_diff_marks_missing_final_newline_on_both_sides() {
+        let diff = unified_diff(Path::new("m.py"), "f(1)", "f(value=1)", false);
+        assert!(diff.contains(
+            "-f(1)\n\\ No newline at end of file\n+f(value=1)\n\\ No newline at end of file\n"
+        ));
+        assert_eq!(diff.matches("\\ No newline at end of file").count(), 2);
     }
 
     #[test]
