@@ -663,6 +663,23 @@ weakref.ref(f)()(1)
     );
 }
 
+/// `operator.getitem` shares literal container selection semantics with a
+/// subscript expression (issue #394).
+#[test]
+fn operator_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+def f(value: int) -> None: ...
+operator.getitem([f], 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected operator.getitem violation, got: {messages:?}"
+    );
+}
+
 /// `copy.copy` and `copy.deepcopy` return their input type, preserving a
 /// concrete callable shape without preserving unsafe keyword names (#388).
 #[test]
