@@ -704,6 +704,27 @@ next(itertools.tee([f])[0])(1)
     }
 }
 
+/// Generic builtins preserve literal callable elements at their documented
+/// output positions (issue #390).
+#[test]
+fn builtin_iterator_results_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+next(zip([f]))[0](1)
+next(map(lambda x: x, [f]))(1)
+next(filter(None, [f]))(1)
+next(enumerate([f]))[1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected builtin-iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
