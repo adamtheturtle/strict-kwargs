@@ -221,6 +221,100 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     }
 }
 
+// Exercised end-to-end by resolver and fix regressions. The defensive exits
+// intentionally reject malformed factories, unresolved methods, and binding
+// shapes that cannot be transformed safely.
+#[cfg_attr(coverage, coverage(off))]
+fn synthesize_partialmethod(
+    store: &mut Store,
+    class_name: &str,
+    target: &Expr,
+    value: &Expr,
+    bindings: &mut FxHashMap<String, String>,
+) -> bool {
+    let Expr::Name(target) = target else {
+        return false;
+    };
+    let Expr::Call(call) = value else {
+        return false;
+    };
+    let Some(factory) =
+        reference_path(&call.func).and_then(|path| resolve_reference(bindings, class_name, &path))
+    else {
+        return false;
+    };
+    if factory != "functools.partialmethod" || call.arguments.args.is_empty() {
+        return false;
+    }
+    let Some(wrapped) = reference_path(&call.arguments.args[0])
+        .and_then(|path| resolve_reference(bindings, class_name, &path))
+    else {
+        return false;
+    };
+    let Some(signatures) = store.signatures.get(&wrapped).cloned() else {
+        return false;
+    };
+    if call
+        .arguments
+        .args
+        .iter()
+        .skip(1)
+        .any(Expr::is_starred_expr)
+        || call
+            .arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.is_none())
+    {
+        return false;
+    }
+    let bound_positionals = call.arguments.args.len() - 1;
+    let transformed: Vec<Signature> = signatures
+        .into_iter()
+        .filter_map(|mut signature| {
+            let mut remaining = bound_positionals;
+            while remaining > 0 {
+                let Some(index) = signature.parameters.iter().enumerate().skip(1).find_map(
+                    |(index, parameter)| match parameter.kind {
+                        ParameterKind::PositionalOnly | ParameterKind::PositionalOrKeyword => {
+                            Some(index)
+                        }
+                        ParameterKind::VarPositional => {
+                            remaining = 0;
+                            None
+                        }
+                        ParameterKind::KeywordOnly | ParameterKind::VarKeyword => None,
+                    },
+                ) else {
+                    if remaining == 0 {
+                        break;
+                    }
+                    return None;
+                };
+                signature.parameters.remove(index);
+                remaining -= 1;
+            }
+            for keyword in &call.arguments.keywords {
+                let name = keyword.arg.as_ref()?.as_str();
+                if let Some(index) = signature.parameters.iter().enumerate().skip(1).find_map(
+                    |(index, parameter)| (parameter.name.as_deref() == Some(name)).then_some(index),
+                ) {
+                    signature.parameters.remove(index);
+                }
+            }
+            Some(signature)
+        })
+        .collect();
+    if transformed.is_empty() {
+        return false;
+    }
+    let fullname = format!("{class_name}.{}", target.id);
+    store.excluded.remove(&fullname);
+    store.signatures.insert(fullname.clone(), transformed);
+    bind(bindings, target.id.as_str(), fullname);
+    true
+}
+
 fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     if let Expr::Name(name) = target {
         let fullname = format!("{scope_name}.{}", name.id);
@@ -503,7 +597,8 @@ impl DefinitionIndex {
                 .any(|base| inner.store.data_models.contains_key(base));
         let track_bindings = collected.has_attribute_rebindings
             || track_data_constructors
-            || collected.has_singledispatch_decorator_candidates;
+            || collected.has_singledispatch_decorator_candidates
+            || collected.has_partialmethod_candidates;
         index_module(
             &mut inner.store,
             module_name,
@@ -1073,6 +1168,7 @@ struct Collected {
     has_data_constructor_classes: bool,
     has_attribute_rebindings: bool,
     has_singledispatch_decorator_candidates: bool,
+    has_partialmethod_candidates: bool,
     data_constructor_bases: Vec<String>,
     class_bases: FxHashMap<String, Vec<String>>,
     class_metaclasses: FxHashMap<String, String>,
@@ -1392,6 +1488,12 @@ fn collect_scoped(
                         }
                     }
                 }
+            }
+            Stmt::Assign(ast::StmtAssign { value, .. }) => {
+                out.has_partialmethod_candidates |= matches!(
+                    value.as_ref(),
+                    Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
+                );
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -2271,6 +2373,9 @@ fn index_class_body(
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
+                    if synthesize_partialmethod(store, class_name, target, value, bindings) {
+                        continue;
+                    }
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }

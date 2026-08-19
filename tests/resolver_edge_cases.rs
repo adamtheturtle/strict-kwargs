@@ -139,6 +139,27 @@ fn over_deep_relative_import_returns_none() {
 
 // --- Unusual callee expressions --------------------------------------------
 
+/// `partialmethod` retains the wrapped method signature after removing
+/// arguments bound after the receiver (issue #377).
+#[test]
+fn partialmethod_preserves_remaining_method_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, required: int, /, value: int) -> None: ...
+    method = partialmethod(base)
+    bound = partialmethod(base, 0)
+C().method(0, 1)
+C().bound(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "method") && has_error_at(&messages, 8, "bound"),
+        "expected both partialmethod violations, got: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
