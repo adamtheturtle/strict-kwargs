@@ -3158,8 +3158,9 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn resolve_literal_subscript(&self, value: &Expr, slice: &Expr) -> Option<String> {
-        match value {
+    fn resolve_literal_subscript(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let ast::ExprSubscript { value, slice, .. } = subscript;
+        match value.as_ref() {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
@@ -3204,9 +3205,7 @@ impl<'a> CallChecker<'a> {
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
             }
-            Expr::Subscript(ast::ExprSubscript { value, slice, .. }) => {
-                self.resolve_literal_subscript(value, slice)
-            }
+            Expr::Subscript(subscript) => self.resolve_literal_subscript(subscript),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
