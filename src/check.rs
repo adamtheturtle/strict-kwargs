@@ -1377,6 +1377,8 @@ struct Scope {
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
     annotations: FxHashMap<String, String>,
+    /// Queue-like local binding -> concrete callable item signature.
+    callable_queue_items: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -1511,6 +1513,7 @@ impl<'a> CallChecker<'a> {
         remove_function_binding(scope, local_name);
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
+        scope.callable_queue_items.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1533,6 +1536,7 @@ impl<'a> CallChecker<'a> {
             );
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
+            scope.callable_queue_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
             newly_active_scope
         };
@@ -1565,6 +1569,7 @@ impl<'a> CallChecker<'a> {
         remove_function_binding(scope, name);
         scope.modules.remove(name);
         scope.instances.remove(name);
+        scope.callable_queue_items.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1581,6 +1586,7 @@ impl<'a> CallChecker<'a> {
         scope.names.remove(name);
         remove_function_binding(scope, name);
         scope.instances.remove(name);
+        scope.callable_queue_items.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2160,7 +2166,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.deque_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "queue result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.deque_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "deque result".to_string(),
                 signature,
@@ -3755,6 +3766,45 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn queue_item_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        matches!(
+            Self::dotted_path(value)?.rsplit('.').next(),
+            Some("Queue" | "LifoQueue" | "PriorityQueue")
+        )
+        .then(|| Self::callable_annotation_signature(slice))?
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn queue_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        if !matches!(method.attr.as_str(), "get" | "get_nowait") {
+            return None;
+        }
+        let Expr::Name(receiver) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_queue_items.get(receiver.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(receiver.id.as_str())
+                || scope.opaque_locals.contains(receiver.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -4619,6 +4669,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                    if let Some(signature) = Self::queue_item_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -4631,6 +4686,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     self.mark_opaque_local(name.id.as_str());
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(signature) = Self::queue_item_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),

@@ -759,6 +759,25 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// A queue's declared callable item type becomes the signature returned by
+/// `get` and `get_nowait` (issue #393).
+#[test]
+fn queue_get_preserves_declared_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from queue import Queue
+queue: Queue[Callable[[int], None]] = Queue()
+queue.get()(1)
+queue.get_nowait()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "queue result") && has_error_at(&messages, 6, "queue result"),
+        "expected queue-result violations, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
