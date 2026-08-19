@@ -183,6 +183,24 @@ current.get()(1)
     );
 }
 
+/// `Future[T].result()` preserves an explicitly declared callable result
+/// signature (issue #410).
+#[test]
+fn future_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from concurrent.futures import Future
+future: Future[Callable[[int], None]] = Future()
+future.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "result() result"),
+        "expected Future.result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

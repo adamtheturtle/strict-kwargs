@@ -1367,6 +1367,9 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
+    /// Local `Future[Callable[...]]` bindings and the callable signature
+    /// returned by their zero-argument `result()` method.
+    future_callables: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -2124,7 +2127,12 @@ impl<'a> CallChecker<'a> {
         {
             return;
         }
-        let local_function = if let Some(signature) = self.contextvar_result_signature(&call.func) {
+        let local_function = if let Some(signature) = self.future_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Future.result() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "ContextVar.get() result".to_string(),
                 signature,
@@ -3213,6 +3221,45 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn future_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("Future") {
+            return None;
+        }
+        Self::callable_annotation_signature(slice)
+    }
+
+    fn future_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(result_call) = func else {
+            return None;
+        };
+        if !result_call.arguments.args.is_empty() || !result_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = result_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(value) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "result" {
+            return None;
+        }
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_callables.get(value.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(value.id.as_str())
+                || scope.opaque_locals.contains(value.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(next_call) = func else {
             return None;
@@ -3590,6 +3637,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
+                                .insert(name.id.to_string(), signature);
+                        }
+                    }
+                    if let Some(signature) = Self::future_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .future_callables
                                 .insert(name.id.to_string(), signature);
                         }
                     }
