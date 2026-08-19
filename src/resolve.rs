@@ -233,6 +233,45 @@ pub fn discover_site_packages_in_environment(python_env: &Path) -> Vec<PathBuf> 
     discover_site_packages_in_venvs(&[environment_root])
 }
 
+/// Whether a `--python` path has the shape of an interpreter, virtual
+/// environment, or Python installation prefix.
+#[must_use]
+pub fn is_python_environment(python_env: &Path) -> bool {
+    if python_env.is_file() {
+        let Some(parent_name) = python_env.parent().and_then(Path::file_name) else {
+            return false;
+        };
+        let Some(file_name) = python_env.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        return (parent_name.eq_ignore_ascii_case("bin")
+            || parent_name.eq_ignore_ascii_case("scripts"))
+            && file_name.to_ascii_lowercase().starts_with("python");
+    }
+    if !python_env.is_dir() {
+        return false;
+    }
+    if python_env.join("pyvenv.cfg").is_file()
+        || python_env.join("Lib").join("site-packages").is_dir()
+    {
+        return true;
+    }
+    ["bin", "Scripts"].iter().any(|directory| {
+        std::fs::read_dir(python_env.join(directory)).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.to_ascii_lowercase().starts_with("python"))
+            })
+        })
+    }) || discover_site_packages_in_venvs(&[python_env.to_path_buf()])
+        .into_iter()
+        .next()
+        .is_some()
+}
+
 /// Normalize the path shapes accepted by `--python` to an environment root.
 ///
 /// Excluded from the coverage gate because the parentless and nameless path
@@ -469,6 +508,34 @@ mod tests {
             .expect("typed namespace subpackage")
             .source
             .contains("def f"));
+    }
+
+    #[test]
+    fn python_environment_validation_rejects_arbitrary_existing_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("README.md");
+        let directory = dir.path().join("ordinary");
+        std::fs::write(&file, "text").expect("write");
+        std::fs::create_dir(&directory).expect("mkdir");
+        assert!(!is_python_environment(&file));
+        assert!(!is_python_environment(&directory));
+    }
+
+    #[test]
+    fn python_environment_validation_accepts_documented_shapes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let environment = dir.path().join("venv");
+        let bin = environment.join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let interpreter = bin.join("python3");
+        std::fs::write(&interpreter, "").expect("write");
+        assert!(is_python_environment(&interpreter));
+        assert!(is_python_environment(&environment));
+
+        let configured = dir.path().join("configured");
+        std::fs::create_dir(&configured).expect("mkdir");
+        std::fs::write(configured.join("pyvenv.cfg"), "").expect("write");
+        assert!(is_python_environment(&configured));
     }
 
     #[test]
