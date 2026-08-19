@@ -585,6 +585,24 @@ async def caller() -> None:
     );
 }
 
+/// `anext` preserves callable item signatures declared by async iterator
+/// factories (issue #384).
+#[test]
+fn annotated_anext_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def functions() -> AsyncIterator[Callable[[int], None]]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected anext-result violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
