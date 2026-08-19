@@ -177,6 +177,20 @@ f(1)
     );
 }
 
+/// Exercises index-side conditional-delete exclusion (coverage for
+/// `exclude_deleted_name` when `conditional_depth > 0`).
+#[test]
+fn conditional_delete_is_indexed_without_exclusion() {
+    let _messages = check_source(
+        r"
+def f(value: int) -> None: ...
+if condition:
+    del f
+f(1)
+",
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
