@@ -3319,6 +3319,26 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn atexit_register_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "register"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("atexit")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.resolve_callee(call.arguments.args.first()?)
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -4578,6 +4598,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.atexit_register_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.operator_getitem_callable(func) {
                     return Some(callable);
                 }
