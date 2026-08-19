@@ -2000,3 +2000,21 @@ atexit.register(target)(1)
         "messages: {messages:?}"
     );
 }
+
+/// `MethodType` binds the leading receiver of a concrete method signature
+/// (issue #460).
+#[test]
+fn method_type_result_preserves_bound_method_signature() {
+    let messages = check_source(
+        r"
+from types import MethodType
+class C:
+    def method(self, value: int) -> None: ...
+MethodType(C.method, C())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "MethodType"),
+        "expected bound method violation, got: {messages:?}"
+    );
+}
