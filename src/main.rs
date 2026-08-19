@@ -446,7 +446,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
             );
         }
         report_diff_summary(fixes, remaining);
-        return Ok(ExitCode::from(0));
+        return Ok(fix_exit_code(remaining));
     }
 
     strict_kwargs::write_all_preserving_encoding(fixes)?;
