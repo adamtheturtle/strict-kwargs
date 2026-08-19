@@ -711,3 +711,36 @@ mod tests {
         }
     }
 }
+
+/// Exercises `diff_header_path` branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`, so these live in a sibling module.
+#[cfg(test)]
+mod diff_header_path_coverage {
+    use super::diff_header_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn diff_header_path_falls_back_to_file_py_without_file_name() {
+        assert_eq!(
+            diff_header_path(Path::new("/project"), Path::new("/")),
+            PathBuf::from("file.py")
+        );
+    }
+
+    #[test]
+    fn diff_header_path_canonicalizes_before_stripping_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let file = root.join("main.py");
+        std::fs::write(&file, "").expect("write file");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let absolute = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            diff_header_path(Path::new("proj"), &absolute),
+            PathBuf::from("main.py")
+        );
+        std::env::set_current_dir(previous).expect("restore cwd");
+    }
+}
