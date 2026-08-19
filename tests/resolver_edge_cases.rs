@@ -188,6 +188,27 @@ def f(value: int) -> None: ...
     );
 }
 
+/// Literal list, tuple, and dictionary subscripts preserve the selected
+/// callable's signature (issue #364).
+#[test]
+fn literal_container_subscripts_resolve_selected_callables() {
+    let messages = check_source(
+        r#"
+def f(value: int) -> None: ...
+def g(first: int, second: int) -> None: ...
+[g, f][1](1)
+(f, g)[-2](1)
+{"other": g, "call": f}["call"](1)
+"#,
+    );
+    for line in 4..=6 {
+        assert!(
+            has_error_at(&messages, line, "f"),
+            "expected literal-subscript violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

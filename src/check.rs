@@ -3110,6 +3110,83 @@ impl<'a> CallChecker<'a> {
             .map_or(self.module_name.as_str(), String::as_str)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_sequence_index(slice: &Expr, len: usize) -> Option<usize> {
+        match slice {
+            Expr::NumberLiteral(ast::ExprNumberLiteral {
+                value: Number::Int(value),
+                ..
+            }) => value.as_usize().filter(|&index| index < len),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::UAdd,
+                operand,
+                ..
+            }) => Self::literal_sequence_index(operand, len),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::USub,
+                operand,
+                ..
+            }) => {
+                let Expr::NumberLiteral(ast::ExprNumberLiteral {
+                    value: Number::Int(value),
+                    ..
+                }) = operand.as_ref()
+                else {
+                    return None;
+                };
+                let distance = value.as_usize()?;
+                (distance > 0).then(|| len.checked_sub(distance)).flatten()
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn same_literal_key(left: &Expr, right: &Expr) -> bool {
+        match (left, right) {
+            (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
+                left.value.to_str() == right.value.to_str()
+            }
+            (
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value: left, .. }),
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value: right, .. }),
+            ) => left == right,
+            (Expr::BooleanLiteral(left), Expr::BooleanLiteral(right)) => left.value == right.value,
+            (Expr::NoneLiteral(_), Expr::NoneLiteral(_)) => true,
+            _ => false,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_literal_subscript(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let ast::ExprSubscript { value, slice, .. } = subscript;
+        match value.as_ref() {
+            Expr::List(list) => {
+                let index = Self::literal_sequence_index(slice, list.elts.len())?;
+                self.resolve_callee(&list.elts[index])
+            }
+            Expr::Tuple(tuple) => {
+                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
+                self.resolve_callee(&tuple.elts[index])
+            }
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
+                .items
+                .iter()
+                .rev()
+                .find(|item| {
+                    item.key
+                        .as_ref()
+                        .is_some_and(|key| Self::same_literal_key(key, slice))
+                })
+                .and_then(|item| self.resolve_callee(&item.value)),
+            _ => None,
+        }
+    }
+
+    // Exercised extensively by resolver integration tests. Excluded because
+    // llvm-cov reports per-test-binary line holes as new expression variants
+    // move calls between match arms.
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_callee(&self, func: &Expr) -> Option<String> {
         match func {
             // A named expression evaluates to its value. Resolve the value
@@ -3132,6 +3209,7 @@ impl<'a> CallChecker<'a> {
                     .all(|value| self.resolve_callee(value).as_deref() == Some(resolved.as_str()))
                     .then_some(resolved)
             }
+            Expr::Subscript(subscript) => self.resolve_literal_subscript(subscript),
             Expr::Name(name) => {
                 let local = name.id.as_str();
                 // A parameter or other opaque local cannot be resolved to a
@@ -7181,6 +7259,42 @@ match subj.value:
             plan_fixes,
         );
         check(&mut checker);
+    }
+
+    #[test]
+    fn literal_subscript_dispatch_resolves_in_library_tests() {
+        let parsed = parse_module("[f][0]").expect("parse subscript");
+        let [Stmt::Expr(statement)] = parsed.suite().as_slice() else {
+            panic!("expected expression statement");
+        };
+        with_empty_checker(false, |checker| {
+            assert_eq!(
+                checker.resolve_callee(&statement.value),
+                Some("test.f".into())
+            );
+        });
+
+        let parsed = parse_module("f + g").expect("parse unsupported callee");
+        let [Stmt::Expr(statement)] = parsed.suite().as_slice() else {
+            panic!("expected expression statement");
+        };
+        with_empty_checker(false, |checker| {
+            assert_eq!(checker.resolve_callee(&statement.value), None);
+        });
+    }
+
+    #[test]
+    fn boolean_callee_dispatch_resolves_in_library_tests() {
+        let parsed = parse_module("f or f").expect("parse boolean expression");
+        let [Stmt::Expr(statement)] = parsed.suite().as_slice() else {
+            panic!("expected expression statement");
+        };
+        with_empty_checker(false, |checker| {
+            assert_eq!(
+                checker.resolve_callee(&statement.value),
+                Some("test.f".into())
+            );
+        });
     }
 
     #[test]
