@@ -160,6 +160,42 @@ C().bound(1)
     );
 }
 
+/// A `for` target remains bound after the loop and invalidates an earlier
+/// function definition with the same name (issue #414).
+#[test]
+fn for_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+for f in [lambda *args: None]:
+    pass
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale loop-target function: {messages:?}"
+    );
+}
+
+/// A `with ... as` target remains bound after the statement and invalidates
+/// an earlier function definition with the same name (issue #415).
+#[test]
+fn with_as_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+class Manager:
+    def __enter__(self): return lambda *args: None
+    def __exit__(self, *args): pass
+with Manager() as f:
+    pass
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale with-as function: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
@@ -814,6 +850,25 @@ queue.get_nowait()(1)
     );
 }
 
+/// Awaiting an asyncio Queue get retains a callable item annotation
+/// (issue #445).
+#[test]
+fn annotated_asyncio_queue_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+queue: asyncio.Queue[Callable[[int], None]] = asyncio.Queue()
+async def caller() -> None:
+    (await queue.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "get() result"),
+        "expected queue result violation, got: {messages:?}"
+    );
+}
+
 /// A constructed `operator.methodcaller` accepts its target positionally,
 /// while encoded `__call__` arguments are checked against that target (#395).
 #[test]
@@ -835,6 +890,167 @@ operator.methodcaller("__call__", 1)(f)
             .iter()
             .all(|message| !message.contains("methodcaller")),
         "methodcaller target boundary must stay positional: {messages:?}"
+    );
+}
+
+/// `from operator import getitem` names the same callable as
+/// `operator.getitem`, so it selects the literal container's element too.
+#[test]
+fn imported_operator_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from operator import getitem
+def f(value: int) -> None: ...
+getitem([f], 0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected operator.getitem violation, got: {messages:?}"
+    );
+}
+
+/// A local binding named `operator` shadows the import, so its `getitem` is
+/// not the stdlib one and the literal container is not selected through it.
+#[test]
+fn shadowed_operator_module_is_not_stdlib_getitem() {
+    let messages = check_source(
+        r"
+import operator
+def f(value: int) -> None: ...
+def use(operator: object) -> None:
+    operator.getitem([f], 0)(1)
+",
+    );
+    assert!(
+        !has_error_at(&messages, 5, "f"),
+        "a shadowed operator must not resolve to the stdlib one: {messages:?}"
+    );
+}
+
+/// `from operator import methodcaller` builds the same encoded call, so its
+/// target boundary stays positional.
+#[test]
+fn imported_methodcaller_target_boundary_stays_positional() {
+    let messages = check_source(
+        r#"
+from operator import methodcaller
+def f(value: int) -> None: ...
+methodcaller("__call__", 1)(f)
+"#,
+    );
+    assert_eq!(messages.len(), 1, "unexpected diagnostics: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("methodcaller")),
+        "methodcaller target boundary must stay positional: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 4, "\"f\""),
+        "expected encoded f-call violation, got: {messages:?}"
+    );
+}
+
+/// An encoded call takes the same `ignore_names` exemption a written-out call
+/// to the same callee would.
+#[test]
+fn encoded_methodcaller_call_honours_ignore_names() {
+    let project = TestProject::new()
+        .pyproject(
+            "[project]\nname = \"t\"\nversion = \"0\"\n\n\
+             [tool.strict_kwargs]\nignore_names = [\"main.f\"]\n",
+        )
+        .main(
+            r#"
+import operator
+def f(value: int) -> None: ...
+operator.methodcaller("__call__", 1)(f)
+"#,
+        );
+    let messages = project.check();
+    assert!(
+        messages.is_empty(),
+        "an ignored callee must stay ignored through an encoded call: {messages:?}"
+    );
+}
+
+/// A `def` that replaces a completed `@overload` group no longer answers to
+/// the group's recorded arms.
+#[test]
+fn redefinition_drops_completed_overload_arms() {
+    let messages = check_source(
+        r#"
+from typing import Callable, overload
+
+def g(value: int) -> None: ...
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+def make(kind, /): ...
+
+make("a")(1)
+"#,
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("overload result")),
+        "a replaced overload group must not select a stale arm: {messages:?}"
+    );
+}
+
+/// A second `@overload` group replaces a completed one rather than extending
+/// it, so only the new group's arms can be selected.
+#[test]
+fn a_second_overload_group_replaces_a_completed_one() {
+    let messages = check_source(
+        r"
+from typing import Callable, overload
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+def make(kind): ...
+
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+make(kind=1)(1)
+make(kind='a')(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "overload result"),
+        "expected the new int arm to be selected, got: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 13, "overload result"),
+        "the replaced str arm must not be selected: {messages:?}"
+    );
+}
+
+/// A negative literal is still an `int` for overload selection.
+#[test]
+fn negative_literals_select_numeric_overload_arms() {
+    let messages = check_source(
+        r"
+from typing import Callable, overload
+
+@overload
+def make(kind: str) -> Callable[[int], None]: ...
+@overload
+def make(kind: int) -> Callable[[int], None]: ...
+def make(kind): ...
+
+make(-1)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "overload result"),
+        "expected the int arm to be selected, got: {messages:?}"
     );
 }
 
@@ -1747,4 +1963,21 @@ fn diagnostic_message_shape() {
         check_paths(&project.root, &[main], &config, None, None).expect("check");
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message().contains("Too many positional"));
+}
+
+/// atexit.register returns the registered callable unchanged (issue #478).
+#[test]
+fn atexit_register_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import atexit
+def target(value: int) -> int:
+    return value
+atexit.register(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
 }
