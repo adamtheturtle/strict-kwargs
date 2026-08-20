@@ -257,7 +257,16 @@ fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
 
 #[cfg_attr(coverage, coverage(off))]
 fn sync_parent(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(fix_parent(path))?.sync_all()
+    // Windows rejects directory handles opened for syncing.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(fix_parent(path))?.sync_all()
+    }
 }
 
 #[cfg_attr(coverage, coverage(off))]
