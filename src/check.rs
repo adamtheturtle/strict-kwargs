@@ -1661,6 +1661,21 @@ impl<'a> CallChecker<'a> {
             .then_some(first)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn weakset_initializer_callable(&self, value: &Expr) -> Option<String> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        if !matches!(
+            class.as_str(),
+            "weakref.WeakSet" | "weakref.WeakSet.__init__" | "weakref.WeakSet.__new__"
+        ) {
+            return None;
+        }
+        self.homogeneous_callable_sequence(constructor.arguments.args.first()?)
+    }
+
     fn mark_param_opaque(&mut self, name: &str) {
         self.mark_opaque_local(name);
     }
@@ -2504,6 +2519,11 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.queue_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "queue result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.weak_value_dict_pop_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "WeakValueDictionary.pop() result".to_string(),
                 signature,
             })
         } else if let Some(signature) = self.deque_result_signature(&call.func) {
@@ -5709,6 +5729,170 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn statistics_selector_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "mode"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
+        {
+            return None;
+        }
+        let data = call.arguments.args.first().or_else(|| {
+            call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("data"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.homogeneous_callable_sequence(data)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn statistics_multimode_element_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "multimode"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
+        {
+            return None;
+        }
+        let data = call.arguments.args.first().or_else(|| {
+            call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("data"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.homogeneous_callable_sequence(data)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_most_common_key_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        // ``Counter([...]).most_common(...)[i][0]`` — key of a (key, count) pair.
+        if Self::literal_sequence_index(&subscript.slice, 2)? != 0 {
+            return None;
+        }
+        let Expr::Subscript(pair) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Call(most_common) = pair.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = most_common.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "most_common" {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let class = class
+            .strip_suffix(".__new__")
+            .or_else(|| class.strip_suffix(".__init__"))
+            .unwrap_or(&class);
+        if class != "collections.Counter" {
+            return None;
+        }
+        let iterable = constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.homogeneous_callable_sequence(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weakset_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(pop_call) = func else {
+            return None;
+        };
+        if !pop_call.arguments.args.is_empty() || !pop_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Name(name) => self.resolve_callable_list_element(name.id.as_str()),
+            Expr::Call(constructor) => {
+                let class = self.resolve_callee(&constructor.func)?;
+                if !matches!(
+                    class.as_str(),
+                    "weakref.WeakSet" | "weakref.WeakSet.__init__" | "weakref.WeakSet.__new__"
+                ) {
+                    return None;
+                }
+                self.homogeneous_callable_sequence(constructor.arguments.args.first()?)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_value_dict_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("WeakValueDictionary") {
+            return None;
+        }
+        let Expr::Tuple(tuple) = slice.as_ref() else {
+            return None;
+        };
+        let value_type = tuple.elts.get(1)?;
+        Self::callable_annotation_signature(value_type)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_value_dict_pop_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(pop_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" {
+            return None;
+        }
+        let Expr::Name(mapping) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_queue_items.get(mapping.id.as_str()) {
+                // Reuse queue-item storage for annotated WeakValueDictionary values.
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(mapping.id.as_str())
+                || scope.opaque_locals.contains(mapping.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn operator_getitem_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -5764,10 +5948,14 @@ impl<'a> CallChecker<'a> {
                         })
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.statistics_multimode_element_callable(subscript))
+                        .or_else(|| self.counter_most_common_key_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.statistics_multimode_element_callable(subscript))
+                        .or_else(|| self.counter_most_common_key_callable(subscript))
                 }
             }
             Expr::Name(name) => {
@@ -5904,6 +6092,12 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.random_choice_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.statistics_selector_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.weakset_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(result) =
@@ -6413,7 +6607,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
                 let is_collections_namedtuple = Self::is_collections_namedtuple(value);
-                let callable_list = self.homogeneous_callable_list(value);
+                let callable_list = self
+                    .homogeneous_callable_list(value)
+                    .or_else(|| self.weakset_initializer_callable(value));
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
@@ -6443,7 +6639,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        self.record_callable_list(name.id.as_str(), callable_list.clone());
                         if let Some(signature) = &generator_yield {
                             self.callable_generator_yields
                                 .insert(name.id.to_string(), signature.clone());
@@ -6479,6 +6674,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
+                        // Record after instance clearing so WeakSet/list element
+                        // tracking is not wiped by ``clear_instance_binding``.
+                        self.record_callable_list(name.id.as_str(), callable_list.clone());
                         if let Some(signature) = &popped_signature {
                             self.define_function(
                                 name.id.as_str(),
@@ -6575,6 +6773,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
                     }
+                    if let Some(signature) = Self::weak_value_dict_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
                         self.current_scope()
                             .callable_iterable_items
@@ -6597,6 +6800,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.mark_opaque_local(name.id.as_str());
                     self.define_annotation(name.id.as_str(), annotation);
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::weak_value_dict_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
