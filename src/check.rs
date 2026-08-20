@@ -2511,6 +2511,11 @@ impl<'a> CallChecker<'a> {
         if self.index.is_excluded(&callee_fullname) {
             return;
         }
+        // `@property` / enum magic attributes are descriptors: `obj.prop(...)`
+        // calls the returned value, not the getter (issues #668, #669).
+        if self.index.is_property(&callee_fullname) {
+            return;
+        }
         let indexed_signatures;
         let local_signatures;
         let signatures: &[Signature] = if let Some(local_function) = &local_function {
