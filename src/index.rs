@@ -2300,6 +2300,7 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn has_property_accessor_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(

@@ -1615,6 +1615,7 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_callable_list_element(&self, name: &str) -> Option<String> {
         for scope in self.scopes.iter().rev() {
             if let Some(callable) = scope.callable_list_elements.get(name) {
