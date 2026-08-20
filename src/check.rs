@@ -1381,6 +1381,9 @@ struct Scope {
     /// Names explicitly removed by `del`; unlike other opaque bindings these
     /// must not be sent to ty, which may still resolve the stale definition.
     deleted_names: FxHashSet<String>,
+    /// Callable names invalidated by an ambiguous reassignment. Do not defer
+    /// these to ty, which can resolve the earlier stale definition.
+    invalidated_callables: FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -1540,6 +1543,7 @@ impl<'a> CallChecker<'a> {
         }
         scope.opaque_locals.remove(local_name);
         scope.deleted_names.remove(local_name);
+        scope.invalidated_callables.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1562,6 +1566,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
+            scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -1780,13 +1785,14 @@ impl<'a> CallChecker<'a> {
         false
     }
 
-    fn is_deleted_or_opaque_name(&self, name: &str) -> bool {
+    /// Whether a name must not be deferred to ty after the built-in resolver
+    /// misses it. Deleted names, opaque loop/with targets, and invalidated
+    /// callables can still be resolved by ty to a stale earlier definition.
+    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
         self.is_opaque_local(name)
-            || self
-                .scopes
-                .iter()
-                .rev()
-                .any(|scope| scope.deleted_names.contains(name))
+            || self.scopes.iter().rev().any(|scope| {
+                scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
+            })
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2354,7 +2360,7 @@ impl<'a> CallChecker<'a> {
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
                 if let Expr::Name(name) = call.func.as_ref() {
-                    if self.is_deleted_or_opaque_name(name.id.as_str()) {
+                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
                         return;
                     }
                 }
@@ -3328,13 +3334,16 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
-            if scope.deleted_names.contains(local) {
+            if scope.deleted_names.contains(local)
+                || scope.opaque_locals.contains(local)
+                || scope.invalidated_callables.contains(local)
+            {
                 return None;
             }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
             }
-            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
+            if scope.names.contains_key(local) {
                 return None;
             }
         }
@@ -5111,6 +5120,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
+                            if is_lambda {
+                                self.current_scope()
+                                    .invalidated_callables
+                                    .insert(name.id.to_string());
+                            }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
@@ -5134,6 +5148,42 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
                 walk_stmt(self, stmt);
+            }
+            Stmt::For(for_stmt) => {
+                if let Expr::Name(name) = for_stmt.target.as_ref() {
+                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                        scope.functions.contains_key(name.id.as_str())
+                            || scope.names.contains_key(name.id.as_str())
+                    });
+                    self.mark_opaque_local(name.id.as_str());
+                    if was_known_callable {
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.id.to_string());
+                    }
+                }
+                self.visit_for_stmt(for_stmt);
+            }
+            Stmt::With(with_stmt) => {
+                for target in with_stmt
+                    .items
+                    .iter()
+                    .filter_map(|item| item.optional_vars.as_deref())
+                {
+                    if let Expr::Name(name) = target {
+                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                            scope.functions.contains_key(name.id.as_str())
+                                || scope.names.contains_key(name.id.as_str())
+                        });
+                        self.mark_opaque_local(name.id.as_str());
+                        if was_known_callable {
+                            self.current_scope()
+                                .invalidated_callables
+                                .insert(name.id.to_string());
+                        }
+                    }
+                }
+                self.visit_with_stmt(with_stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -5191,10 +5241,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
-            Stmt::With(with_stmt) => {
-                self.visit_with_stmt(with_stmt);
-            }
-            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),

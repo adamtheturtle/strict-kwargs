@@ -191,6 +191,42 @@ f(1)
     );
 }
 
+/// A `for` target remains bound after the loop and invalidates an earlier
+/// function definition with the same name (issue #414).
+#[test]
+fn for_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+for f in [lambda *args: None]:
+    pass
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale loop-target function: {messages:?}"
+    );
+}
+
+/// A `with ... as` target remains bound after the statement and invalidates
+/// an earlier function definition with the same name (issue #415).
+#[test]
+fn with_as_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+class Manager:
+    def __enter__(self): return lambda *args: None
+    def __exit__(self, *args): pass
+with Manager() as f:
+    pass
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale with-as function: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
