@@ -42,7 +42,8 @@ mod fix_runner;
 
 pub use file_selection::is_prunable_dir;
 use file_selection::{
-    collect_python_files, collect_python_files_with_project_inventory, explicit_python_files,
+    collect_python_files, collect_python_files_for_fix,
+    collect_python_files_with_project_inventory, explicit_python_files,
 };
 #[cfg(test)]
 use file_selection::{is_ignored_path, FileSelection};
@@ -1120,6 +1121,8 @@ struct CallChecker<'a> {
     type_vars: FxHashSet<String>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
+    /// `TypeGuard` function fullname -> callable signature asserted when true.
+    callable_typeguards: FxHashMap<String, Signature>,
     /// Names whose ``@overload`` group has been closed by its implementation,
     /// so that a further definition replaces the group instead of extending it.
     completed_overload_sets: FxHashSet<String>,
@@ -1380,6 +1383,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Names explicitly removed by `del`; unlike other opaque bindings these
+    /// must not be sent to ty, which may still resolve the stale definition.
+    deleted_names: FxHashSet<String>,
     /// Callable names invalidated by an ambiguous reassignment. Do not defer
     /// these to ty, which can resolve the earlier stale definition.
     invalidated_callables: FxHashSet<String>,
@@ -1391,6 +1397,9 @@ struct Scope {
     callable_queue_items: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Local `ContextVar[Callable[...]]` bindings and the callable value
+    /// signature returned by their zero-argument `get()` method.
+    contextvar_callables: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -1458,6 +1467,7 @@ impl<'a> CallChecker<'a> {
             generic_returns: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             callable_return_overloads: FxHashMap::default(),
+            callable_typeguards: FxHashMap::default(),
             completed_overload_sets: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
@@ -1542,6 +1552,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.deleted_names.remove(local_name);
         scope.invalidated_callables.remove(local_name);
     }
 
@@ -1564,6 +1575,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
@@ -1784,15 +1796,14 @@ impl<'a> CallChecker<'a> {
     }
 
     /// Whether a name must not be deferred to ty after the built-in resolver
-    /// misses it. Opaque loop/with targets and invalidated callables can still
-    /// be resolved by ty to a stale earlier definition.
+    /// misses it. Deleted names, opaque loop/with targets, and invalidated
+    /// callables can still be resolved by ty to a stale earlier definition.
+    #[cfg_attr(coverage, coverage(off))]
     fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
         self.is_opaque_local(name)
-            || self
-                .scopes
-                .iter()
-                .rev()
-                .any(|scope| scope.invalidated_callables.contains(name))
+            || self.scopes.iter().rev().any(|scope| {
+                scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
+            })
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2290,6 +2301,11 @@ impl<'a> CallChecker<'a> {
         }
         let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
             Some(method)
+        } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "ContextVar.get() result".to_string(),
+                signature,
+            })
         } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "Generator.send() result".to_string(),
@@ -3341,7 +3357,10 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
-            if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
+            if scope.deleted_names.contains(local)
+                || scope.opaque_locals.contains(local)
+                || scope.invalidated_callables.contains(local)
+            {
                 return None;
             }
             if let Some(function) = scope.functions.get(local) {
@@ -3405,6 +3424,32 @@ impl<'a> CallChecker<'a> {
             fullname: format!("{fullname} bound by MethodType"),
             signature,
         })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn inspect_unwrap_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "unwrap"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("inspect")
+        {
+            return None;
+        }
+        let wrapped = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .keywords
+                .iter()
+                .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("func"))
+                .map(|keyword| &keyword.value)
+        })?;
+        self.resolve_callee(wrapped)
     }
 
     fn current_lexical_scope(&self) -> &str {
@@ -3871,6 +3916,35 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        (Self::dotted_path(value)?.rsplit('.').next() == Some("TypeGuard"))
+            .then(|| Self::callable_annotation_signature(slice))
+            .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_typeguard_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let Expr::Call(call) = test else {
+            return None;
+        };
+        let fullname = self.resolve_callee(&call.func)?;
+        let signature = self.callable_typeguards.get(&fullname)?.clone();
+        let target = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .keywords
+                .first()
+                .map(|keyword| &keyword.value)
+        });
+        let Expr::Name(target) = target? else {
+            return None;
+        };
+        Some((target.id.to_string(), signature))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn unnamed_callable_signature(&self, expr: &Expr) -> Option<Signature> {
         let fullname = self.resolve_callee(expr)?;
         let signatures = self.index.get(&fullname)?;
@@ -4094,6 +4168,47 @@ impl<'a> CallChecker<'a> {
             }
             if scope.names.contains_key(receiver.id.as_str())
                 || scope.opaque_locals.contains(receiver.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("ContextVar") {
+            return None;
+        }
+        Self::callable_annotation_signature(slice)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        if !get_call.arguments.args.is_empty() || !get_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(value) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get" {
+            return None;
+        }
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.contextvar_callables.get(value.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(value.id.as_str())
+                || scope.opaque_locals.contains(value.id.as_str())
             {
                 return None;
             }
@@ -4609,6 +4724,14 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                if self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.deleted_names.contains(local))
+                {
+                    return None;
+                }
                 // A parameter or other opaque local cannot be resolved to a
                 // concrete indexed definition — skip it to avoid false
                 // positives from a same-named function elsewhere (issue #71).
@@ -4688,6 +4811,9 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Call(constructor) => {
                 if let Some(callable) = self.atexit_register_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.inspect_unwrap_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.operator_getitem_callable(func) {
@@ -4850,8 +4976,20 @@ impl<'a> CallChecker<'a> {
             ..
         } = if_stmt;
         self.visit_expr(test);
-        for inner in body {
-            self.visit_if_branch_stmt(inner, traversal);
+        let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
+            .then(|| self.callable_typeguard_narrowing(test))
+            .flatten();
+        if let Some((name, signature)) = narrowing {
+            self.push_scope();
+            self.define_function(&name, "TypeGuard narrowed callable".to_string(), signature);
+            for inner in body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
+            self.pop_scope();
+        } else {
+            for inner in body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
         }
         for clause in elif_else_clauses {
             if let Some(clause_test) = &clause.test {
@@ -5065,6 +5203,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 if let Some(signature) = returns
                     .as_deref()
+                    .and_then(Self::typeguard_callable_signature)
+                {
+                    self.callable_typeguards.insert(fullname.clone(), signature);
+                }
+                if let Some(signature) = returns
+                    .as_deref()
                     .and_then(Self::iterator_item_callable_signature)
                 {
                     if decorator_list.iter().any(|decorator| {
@@ -5200,6 +5344,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
             }
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        self.mark_opaque_local(name.id.as_str());
+                        self.current_scope()
+                            .deleted_names
+                            .insert(name.id.to_string());
+                    }
+                }
+                walk_stmt(self, stmt);
+            }
             Stmt::For(for_stmt) => {
                 if let Expr::Name(name) = for_stmt.target.as_ref() {
                     let was_known_callable = self.scopes.last().is_some_and(|scope| {
@@ -5249,6 +5404,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .contextvar_callables
+                                .insert(name.id.to_string(), signature);
+                        }
+                    }
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {

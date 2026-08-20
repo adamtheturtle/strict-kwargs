@@ -411,6 +411,16 @@ fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn exclude_deleted_name(store: &mut Store, scope_name: &str, target: &Expr) {
+    if store.conditional_depth > 0 {
+        return;
+    }
+    if let Expr::Name(name) = target {
+        store.exclude(format!("{scope_name}.{}", name.id));
+    }
+}
+
 // Covered through callable-instance integration tests. Excluded from the
 // coverage gate because llvm-cov reports branch holes for the duplicated
 // test-binary instantiations of this small binding shim.
@@ -2192,6 +2202,14 @@ fn index_stmt(
                 }
             }
         }
+        Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+            for target in targets {
+                exclude_deleted_name(store, scope_name, target);
+                if scope_name == module_name {
+                    exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+                }
+            }
+        }
         Stmt::AnnAssign(ast::StmtAnnAssign {
             target,
             value: Some(_),
@@ -2348,6 +2366,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::Assign(ast::StmtAssign { targets, .. }) => {
             for target in targets {
                 remove_assigned_name(store, scope_name, target);
+                if scope_name == module_name {
+                    exclude_assigned_attribute(store, scope_name, target, None);
+                }
+            }
+        }
+        Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+            for target in targets {
+                exclude_deleted_name(store, scope_name, target);
                 if scope_name == module_name {
                     exclude_assigned_attribute(store, scope_name, target, None);
                 }
@@ -3076,6 +3102,13 @@ class Child(Base):
     }
 
     #[test]
+    fn delete_excludes_function_signature() {
+        let store = indexed_store("def f(value: int) -> None: ...\ndel f\n");
+        assert!(!store.signatures.contains_key("main.f"));
+        assert!(store.excluded.contains("main.f"));
+    }
+
+    #[test]
     fn assignment_removes_stale_function_signature() {
         let store = indexed_store("def f(value): ...\nf = lambda value, /: value\n");
         assert!(!store.signatures.contains_key("main.f"));
@@ -3653,5 +3686,31 @@ class Child(Base):
                 .expect("worker result"),
             1
         );
+    }
+}
+
+/// Exercises delete-indexing branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`.
+#[cfg(test)]
+mod exclude_deleted_name_coverage {
+    use super::{index_module, Store};
+    use ruff_python_parser::parse_module;
+
+    #[test]
+    fn delete_excludes_module_level_callable() {
+        let parsed = parse_module("def f(value: int) -> None: ...\ndel f\n").expect("parse");
+        let mut store = Store::default();
+        index_module(&mut store, "main", false, parsed.suite(), true);
+        assert!(!store.signatures.contains_key("main.f"));
+        assert!(store.excluded.contains("main.f"));
+    }
+
+    #[test]
+    fn conditional_delete_does_not_exclude_callable() {
+        let parsed =
+            parse_module("def f(value: int) -> None: ...\nif c:\n    del f\n").expect("parse");
+        let mut store = Store::default();
+        index_module(&mut store, "main", false, parsed.suite(), true);
+        assert!(store.signatures.contains_key("main.f"));
     }
 }

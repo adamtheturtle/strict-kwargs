@@ -160,6 +160,37 @@ C().bound(1)
     );
 }
 
+/// `del f` removes a local callable binding so later calls are not resolved
+/// against the deleted definition.
+#[test]
+fn delete_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+del f
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "deleted function must not be resolved: {messages:?}"
+    );
+}
+
+/// Exercises index-side conditional-delete exclusion (coverage for
+/// `exclude_deleted_name` when `conditional_depth > 0`).
+#[test]
+fn conditional_delete_is_indexed_without_exclusion() {
+    let _messages = check_source(
+        r"
+def f(value: int) -> None: ...
+if condition:
+    del f
+f(1)
+",
+    );
+}
+
 /// A `for` target remains bound after the loop and invalidates an earlier
 /// function definition with the same name (issue #414).
 #[test]
@@ -373,6 +404,62 @@ next(generator())(1)
     );
 }
 
+/// A true `TypeGuard` branch narrows its argument to the declared callable
+/// signature (issue #456).
+#[test]
+fn typeguard_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeGuard
+def is_call(value: object) -> TypeGuard[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value=value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "TypeGuard"),
+        "expected narrowed violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn typeguard_narrowing_with_positional_argument() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeGuard
+def is_call(value: object) -> TypeGuard[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "TypeGuard"),
+        "expected narrowed violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn typeguard_narrowing_accepts_qualified_annotation() {
+    let messages = check_source(
+        r"
+import typing
+from collections.abc import Callable
+def is_call(value: object) -> typing.TypeGuard[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "TypeGuard"),
+        "expected narrowed violation, got: {messages:?}"
+    );
+}
+
 /// `iter(instance)` uses the concrete callable item type declared by the
 /// instance class's `__iter__` return annotation (issue #382).
 #[test]
@@ -432,6 +519,31 @@ namespace.call(1)
             .iter()
             .any(|message| message.starts_with("main:7:")),
         "rebinding must clear synthesized attributes: {messages:?}"
+    );
+}
+
+/// `ContextVar` accepts its required name positionally and `get()` preserves
+/// the configured callable value type (issue #409).
+#[test]
+fn contextvar_constructor_and_get_callable_result() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+def f(value: int) -> None: ...
+current: ContextVar[Callable[[int], None]] = ContextVar("current", default=f)
+current.get()(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:5:")),
+        "ContextVar name must be allowed positionally: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "get() result"),
+        "expected ContextVar.get result violation, got: {messages:?}"
     );
 }
 
@@ -2017,4 +2129,18 @@ MethodType(C.method, C())(1)
         has_error_at(&messages, 5, "MethodType"),
         "expected bound method violation, got: {messages:?}"
     );
+}
+
+/// inspect.unwrap retains the concrete wrapped callable signature (issue
+/// #459).
+#[test]
+fn inspect_unwrap_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import inspect
+def f(value: int) -> None: ...
+inspect.unwrap(func=f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }

@@ -6,9 +6,26 @@
 
 use std::cmp::Reverse;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
+use serde::{Deserialize, Serialize};
+
+const FIX_JOURNAL_PREFIX: &str = ".strict-kwargs-fix-journal-";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FixJournal {
+    committed: bool,
+    entries: Vec<JournalEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalEntry {
+    destination: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+}
 
 /// Fix categories a caller may opt into explicitly.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -112,10 +129,11 @@ impl FileFix {
     /// # Errors
     ///
     /// Returns an I/O error if the original file cannot be read, the fixed
-    /// text cannot be represented in its original encoding, or the rewritten
-    /// bytes cannot be written.
+    /// text cannot be represented in its original encoding, the file changed
+    /// after this fix was planned, or the rewritten bytes cannot be written.
     pub fn write_preserving_encoding(&self) -> std::io::Result<()> {
         let original_bytes = std::fs::read(&self.path)?;
+        ensure_source_is_current(self, &original_bytes)?;
         let fixed_bytes = crate::source::encode_python_source(&original_bytes, &self.fixed)
             .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
         std::fs::write(&self.path, fixed_bytes)
@@ -133,27 +151,206 @@ impl FileFix {
 /// Returns an I/O error when a source cannot be read or encoded, or when a
 /// destination cannot be written.
 pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
+    recover_fix_transactions(fixes)?;
     let prepared: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = fixes
         .iter()
         .map(|fix| {
             let original = std::fs::read(&fix.path)?;
+            ensure_source_is_current(fix, &original)?;
             let fixed_bytes = crate::source::encode_python_source(&original, &fix.fixed)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
             Ok((fix.path.clone(), original, fixed_bytes))
         })
         .collect::<std::io::Result<_>>()?;
 
-    let mut written = Vec::new();
-    for (path, original, fixed) in &prepared {
-        if let Err(error) = std::fs::write(path, fixed) {
-            for (path, original) in written.into_iter().rev() {
-                let _ = std::fs::write(path, original);
+    if prepared.is_empty() {
+        return Ok(());
+    }
+    commit_prepared_fixes(&prepared)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn fix_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::Result<()> {
+    let transaction = format!("{}-{}", std::process::id(), unique_transaction_suffix());
+    let mut entries: Vec<JournalEntry> = Vec::with_capacity(prepared.len());
+    for (index, (destination, _, fixed)) in prepared.iter().enumerate() {
+        let parent = fix_parent(destination);
+        let staged = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.new"));
+        let backup = parent.join(format!(".strict-kwargs-fix-{transaction}-{index}.old"));
+        let stage_result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            file.write_all(fixed)?;
+            file.set_permissions(std::fs::metadata(destination)?.permissions())?;
+            file.sync_all()
+        })();
+        if let Err(error) = stage_result {
+            let _ = std::fs::remove_file(&staged);
+            for entry in &entries {
+                let _ = std::fs::remove_file(&entry.staged);
             }
             return Err(error);
         }
-        written.push((path, original));
+        entries.push(JournalEntry {
+            destination: destination.clone(),
+            staged,
+            backup,
+        });
+    }
+
+    let first_parent = fix_parent(&prepared[0].0);
+    let journal_path = first_parent.join(format!("{FIX_JOURNAL_PREFIX}{transaction}.json"));
+    let mut journal = FixJournal {
+        committed: false,
+        entries,
+    };
+    if let Err(error) = write_journal(&journal_path, &journal) {
+        for entry in &journal.entries {
+            let _ = std::fs::remove_file(&entry.staged);
+        }
+        return Err(error);
+    }
+
+    let result = (|| {
+        for entry in &journal.entries {
+            std::fs::rename(&entry.destination, &entry.backup)?;
+            std::fs::rename(&entry.staged, &entry.destination)?;
+            sync_parent(&entry.destination)?;
+        }
+        journal.committed = true;
+        write_journal(&journal_path, &journal)?;
+        cleanup_committed_transaction(&journal, &journal_path)
+    })();
+    if result.is_err() {
+        let _ = recover_journal(&journal_path);
+    }
+    result
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn unique_transaction_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(journal)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    sync_parent(path)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    // Windows rejects directory handles opened for syncing.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(fix_parent(path))?.sync_all()
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
+    let mut parents = fixes
+        .iter()
+        .map(|fix| fix_parent(&fix.path).to_path_buf())
+        .collect::<Vec<_>>();
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
+        for entry in std::fs::read_dir(parent)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(FIX_JOURNAL_PREFIX))
+            {
+                recover_journal(&path)?;
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn recover_journal(path: &Path) -> std::io::Result<()> {
+    let journal: FixJournal = serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if journal.committed {
+        return cleanup_committed_transaction(&journal, path);
+    }
+    for entry in journal.entries.iter().rev() {
+        if entry.backup.exists() {
+            if entry.destination.exists() {
+                std::fs::remove_file(&entry.destination)?;
+            }
+            std::fs::rename(&entry.backup, &entry.destination)?;
+            sync_parent(&entry.destination)?;
+        }
+        if entry.staged.exists() {
+            std::fs::remove_file(&entry.staged)?;
+        }
+    }
+    std::fs::remove_file(path)?;
+    sync_parent(path)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn cleanup_committed_transaction(journal: &FixJournal, path: &Path) -> std::io::Result<()> {
+    for entry in &journal.entries {
+        if entry.backup.exists() {
+            std::fs::remove_file(&entry.backup)?;
+        }
+        if entry.staged.exists() {
+            std::fs::remove_file(&entry.staged)?;
+        }
+    }
+    std::fs::remove_file(path)?;
+    sync_parent(path)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn ensure_source_is_current(fix: &FileFix, bytes: &[u8]) -> std::io::Result<()> {
+    match crate::source::decode_python_source(bytes) {
+        crate::source::Source::Decoded(current) if current == fix.original => Ok(()),
+        crate::source::Source::Decoded(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to overwrite {}: source changed after fixes were planned",
+                fix.path.display()
+            ),
+        )),
+        crate::source::Source::Undecodable(reason) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to overwrite {}: current source cannot be decoded: {reason}",
+                fix.path.display()
+            ),
+        )),
+    }
 }
 
 /// What a fix run produced: the files it would rewrite plus the number of
@@ -362,6 +559,32 @@ mod tests {
     }
 
     #[test]
+    fn write_preserving_encoding_rejects_a_stale_fix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.py");
+        std::fs::write(&path, "edited independently\n").expect("write source");
+        let fix = FileFix {
+            path: path.clone(),
+            original: "analyzed source\n".to_owned(),
+            fixed: "fixed analyzed source\n".to_owned(),
+            count: 1,
+        };
+
+        let error = fix
+            .write_preserving_encoding()
+            .expect_err("stale fix must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("changed after fixes were planned"));
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read source"),
+            "edited independently\n"
+        );
+    }
+
+    #[test]
     fn write_all_preflights_every_file_before_changing_any() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.py");
@@ -412,19 +635,13 @@ mod tests {
     }
 
     #[test]
-    fn write_all_restores_earlier_files_after_write_failure() {
+    fn write_all_rejects_a_stale_fix_before_writing_any_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.py");
-        let read_only = dir.path().join("read_only.py");
+        let stale = dir.path().join("stale.py");
         std::fs::write(&first, "first before\n").expect("write first");
-        std::fs::write(&read_only, "second before\n").expect("write second");
-        let original_permissions = std::fs::metadata(&read_only)
-            .expect("second metadata")
-            .permissions();
-        let mut read_only_permissions = original_permissions.clone();
-        read_only_permissions.set_readonly(true);
-        std::fs::set_permissions(&read_only, read_only_permissions).expect("make read-only");
-        let fixes = vec![
+        std::fs::write(&stale, "independent edit\n").expect("write stale");
+        let fixes = [
             FileFix {
                 path: first.clone(),
                 original: "first before\n".to_owned(),
@@ -432,24 +649,54 @@ mod tests {
                 count: 1,
             },
             FileFix {
-                path: read_only.clone(),
-                original: "second before\n".to_owned(),
-                fixed: "second after\n".to_owned(),
+                path: stale.clone(),
+                original: "stale before\n".to_owned(),
+                fixed: "stale after\n".to_owned(),
                 count: 1,
             },
         ];
 
-        let error = write_all_preserving_encoding(&fixes).expect_err("second write must fail");
-        std::fs::set_permissions(&read_only, original_permissions).expect("restore permissions");
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let error = write_all_preserving_encoding(&fixes)
+            .expect_err("stale fix must fail during preflight");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             std::fs::read_to_string(first).expect("read first"),
             "first before\n"
         );
         assert_eq!(
-            std::fs::read_to_string(read_only).expect("read second"),
-            "second before\n"
+            std::fs::read_to_string(stale).expect("read stale"),
+            "independent edit\n"
         );
+    }
+
+    #[test]
+    fn recovery_rolls_back_an_interrupted_transaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("source.py");
+        let staged = dir.path().join("source.new");
+        let backup = dir.path().join("source.old");
+        let journal_path = dir.path().join(".strict-kwargs-fix-journal-test.json");
+        std::fs::write(&destination, "fixed\n").expect("write partial replacement");
+        std::fs::write(&backup, "before\n").expect("write backup");
+        let journal = FixJournal {
+            committed: false,
+            entries: vec![JournalEntry {
+                destination: destination.clone(),
+                staged,
+                backup: backup.clone(),
+            }],
+        };
+        write_journal(&journal_path, &journal).expect("write journal");
+
+        recover_journal(&journal_path).expect("recover transaction");
+
+        assert_eq!(
+            std::fs::read_to_string(destination).expect("read destination"),
+            "before\n"
+        );
+        assert!(!backup.exists());
+        assert!(!journal_path.exists());
     }
 
     #[test]

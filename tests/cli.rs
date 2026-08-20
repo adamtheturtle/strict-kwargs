@@ -778,6 +778,83 @@ fn fix_skips_non_utf8_file_and_still_fixes_others() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn fix_does_not_follow_a_nested_directory_symlink_outside_the_requested_tree() {
+    use std::os::unix::fs::symlink;
+
+    let project = Project::new();
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let external = outside.path().join("external.py");
+    std::fs::write(&external, "def f(*, x): pass\nf(1)\n").expect("write external source");
+    symlink(outside.path(), project.root.join("vendor-link")).expect("create directory symlink");
+
+    let output = project.run(&["check", "--fix", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        std::fs::read_to_string(external).expect("read external source"),
+        "def f(*, x): pass\nf(1)\n"
+    );
+}
+
+#[test]
+fn fix_scoped_to_subdirectory_skips_files_outside_scope() {
+    let project = Project::new()
+        .write("pkg/ok.py", "def f(a: int) -> None: ...\nf(1)\n")
+        .write("other.py", "def g(a: int) -> None: ...\ng(1)\n");
+    let output = project.run(&["check", "--fix", "pkg"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("pkg/ok.py"),
+        "def f(a: int) -> None: ...\nf(a=1)\n"
+    );
+    assert_eq!(
+        project.read("other.py"),
+        "def g(a: int) -> None: ...\ng(1)\n"
+    );
+}
+
+#[test]
+fn fix_explicit_file_does_not_touch_other_files() {
+    let project = Project::new()
+        .write("main.py", "def f(a: int) -> None: ...\nf(1)\n")
+        .write("other.py", "def g(a: int) -> None: ...\ng(1)\n");
+    let output = project.run(&["check", "--fix", "main.py"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("main.py"),
+        "def f(a: int) -> None: ...\nf(a=1)\n"
+    );
+    assert_eq!(
+        project.read("other.py"),
+        "def g(a: int) -> None: ...\ng(1)\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fix_subdirectory_does_not_follow_symlink_outside_scope() {
+    use std::os::unix::fs::symlink;
+
+    let project = Project::new().write("pkg/ok.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let escape = outside.path().join("escape.py");
+    std::fs::write(&escape, "def f(a: int) -> None: ...\nf(1)\n").expect("write escape source");
+    symlink(outside.path(), project.root.join("pkg/link")).expect("create directory symlink");
+
+    let output = project.run(&["check", "--fix", "pkg"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("pkg/ok.py"),
+        "def f(a: int) -> None: ...\nf(a=1)\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&escape).expect("read escape source"),
+        "def f(a: int) -> None: ...\nf(1)\n"
+    );
+}
+
 #[test]
 fn fix_directory_skips_parse_incompatible_file_and_still_fixes_others() {
     let project = Project::new()
@@ -1175,6 +1252,17 @@ fn fix_diff_marks_missing_newline_on_unchanged_context_line() {
 }
 
 #[test]
+fn fix_diff_uses_project_relative_headers_for_absolute_input() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
+    let absolute = project.root.join("main.py").to_string_lossy().into_owned();
+    let output = project.run(&["check", "--diff", &absolute]);
+    let patch = stdout(&output);
+    assert!(patch.contains("--- a/main.py"), "patch: {patch}");
+    assert!(patch.contains("+++ b/main.py"), "patch: {patch}");
+    assert!(!patch.contains("a//"), "patch: {patch}");
+}
+
+#[test]
 fn fix_diff_handles_closed_stdout_without_panicking() {
     let mut source = String::from("def f(value: int) -> None: ...\n");
     for _ in 0..5_000 {
@@ -1421,14 +1509,19 @@ fn fix_write_failure_is_fatal_exit_two() {
     use std::os::unix::fs::PermissionsExt;
 
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let target = project.root.join("main.py");
-    // Read-only file: the fix is computed fine but `std::fs::write` fails,
-    // exercising the `?` error path in `run_fix`.
-    let mut perms = std::fs::metadata(&target).expect("metadata").permissions();
-    perms.set_mode(0o444);
-    std::fs::set_permissions(&target, perms).expect("chmod");
+    // A read-only file can still be replaced via rename, so make the project
+    // directory non-writable to force staged fix bytes to fail.
+    let mut dir_perms = std::fs::metadata(&project.root)
+        .expect("metadata")
+        .permissions();
+    dir_perms.set_mode(0o555);
+    std::fs::set_permissions(&project.root, dir_perms.clone()).expect("chmod project dir");
 
     let output = project.run(&["check", "--fix", "main.py"]);
+
+    dir_perms.set_mode(0o755);
+    std::fs::set_permissions(&project.root, dir_perms).expect("restore project dir");
+
     assert_eq!(code(&output), 2);
     assert!(
         stderr(&output).starts_with("error: "),

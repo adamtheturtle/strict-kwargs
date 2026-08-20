@@ -9,9 +9,9 @@ use crate::index::build_index_with_sources;
 use crate::ty_resolver::TyResolver;
 
 use super::{
-    collect_python_files, explicit_python_files, plan_rewrite_insertions, require_ty_present,
-    resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix,
-    ScanOutcome, TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
+    collect_python_files_for_fix, explicit_python_files, plan_rewrite_insertions,
+    require_ty_present, resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack,
+    scan_files_for_fix, ScanOutcome, TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
 };
 
 /// Minimum deferred-call count that justifies starting multiple ty servers.
@@ -222,7 +222,7 @@ fn fix_paths_impl(
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
-    let python_files = collect_python_files(project_root, paths, config)?;
+    let python_files = collect_python_files_for_fix(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
     let (index, indexed_files) =
