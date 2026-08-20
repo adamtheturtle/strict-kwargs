@@ -223,7 +223,7 @@ fn fix_paths_impl(
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
     let python_files = collect_python_files(project_root, paths, config)?;
-    let explicit_files = explicit_python_files(paths);
+    let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
     let (index, indexed_files) =
         build_index_with_sources(project_root, &python_files, &source_roots, python_env);

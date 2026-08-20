@@ -1,0 +1,2 @@
+Resolve ``operator.getitem`` and ``operator.methodcaller`` through either
+import style, and let a nearer binding of the same name shadow the import.

@@ -1,0 +1,3 @@
+Check paths that share a directory as one project when no ``pyproject.toml``
+is found, and compare discovered project roots by what they name rather than
+by how they are spelled.
