@@ -446,7 +446,10 @@ fn fix_exit_code(remaining: usize) -> ExitCode {
 
 fn diff_header_path(project_root: &std::path::Path, path: &std::path::Path) -> PathBuf {
     if !path.is_absolute() {
-        return path.to_path_buf();
+        // On Windows, `/` is not absolute and has no file name — still fall back.
+        return path
+            .file_name()
+            .map_or_else(|| PathBuf::from("file.py"), |_| path.to_path_buf());
     }
     if let Ok(relative) = path.strip_prefix(project_root) {
         return relative.to_path_buf();
