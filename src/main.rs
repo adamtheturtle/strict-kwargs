@@ -169,6 +169,7 @@ fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &Path
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn effective_cache_dir(
     cli_cache_dir: Option<PathBuf>,
     config: &Config,
@@ -181,7 +182,13 @@ fn effective_cache_dir(
                 .as_ref()
                 .map(|dir| resolve_configured_cache_dir(project_root, dir))
         })
-        .or_else(|| std::env::var_os(CACHE_DIR_ENV_VAR).map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os(CACHE_DIR_ENV_VAR).and_then(|value| {
+                // An empty value must not resolve to the working directory
+                // (issue #513).
+                (!value.is_empty()).then(|| PathBuf::from(value))
+            })
+        })
 }
 
 fn run() -> Result<ExitCode, CheckError> {
