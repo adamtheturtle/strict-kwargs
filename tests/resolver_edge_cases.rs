@@ -2986,10 +2986,14 @@ def f(value: int) -> None: ...
 heap = [f]
 heapq.heappop(heap)(1)
 heapq.heapreplace(heap, f)(1)
+heapq.heappop([f, f])(1)
+heapq.heapreplace([f, f], f)(1)
 ",
     );
     assert!(has_error_at(&messages, 5, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 7, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
 }
 
 /// Generic selectors in `random` and `secrets` retain their input element's
@@ -3001,11 +3005,14 @@ fn random_selector_results_preserve_callable_signatures() {
 import random, secrets
 def f(value: int) -> None: ...
 random.choice([f])(1)
+random.choice((f,))(1)
 random.sample([f], k=1)[0](1)
+random.sample((f,), k=1)[0](1)
 secrets.choice([f])(1)
+secrets.choice((f,))(1)
 ",
     );
-    for line in 4..=6 {
+    for line in 4..=9 {
         assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
     }
 }

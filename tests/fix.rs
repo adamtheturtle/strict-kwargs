@@ -256,7 +256,7 @@ fn stale_imported_method_signature_after_rebinding_is_not_used() {
         .file("pkg.py", "class C:\n    def method(self, value): ...\n")
         .main(source);
 
-    assert!(proj.check_main().is_empty());
+    assert_eq!(proj.check_main().len(), 0);
     assert_eq!(proj.fixed_main(), source);
 }
 

@@ -400,9 +400,12 @@ mod tests {
     #[test]
     fn explicit_code_directive_positions_are_empty_without_comments() {
         let source = "f(1, 2, 3)\n";
-        assert!(directives(source)
-            .explicit_code_directive_positions(source, "KW001")
-            .is_empty());
+        assert_eq!(
+            directives(source)
+                .explicit_code_directive_positions(source, "KW001")
+                .len(),
+            0
+        );
     }
 
     #[test]
