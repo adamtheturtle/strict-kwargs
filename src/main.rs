@@ -444,6 +444,26 @@ fn fix_exit_code(remaining: usize) -> ExitCode {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
+fn diff_header_path(project_root: &std::path::Path, path: &std::path::Path) -> PathBuf {
+    if !path.is_absolute() {
+        // On Windows, `/` is not absolute and has no file name — still fall back.
+        return path
+            .file_name()
+            .map_or_else(|| PathBuf::from("file.py"), |_| path.to_path_buf());
+    }
+    if let Ok(relative) = path.strip_prefix(project_root) {
+        return relative.to_path_buf();
+    }
+    if let (Ok(root), Ok(canonical_path)) = (project_root.canonicalize(), path.canonicalize()) {
+        if let Ok(relative) = canonical_path.strip_prefix(root) {
+            return relative.to_path_buf();
+        }
+    }
+    path.file_name()
+        .map_or_else(|| PathBuf::from("file.py"), PathBuf::from)
+}
+
 fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     let args_fix_opt_ins = fix_opt_ins_from_args(&args);
     let project_root = project_root_for(args.project_root, &args.paths)?;
@@ -469,10 +489,11 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
         let stdout = std::io::stdout();
         let mut stdout = BufWriter::new(stdout.lock());
         for fix in fixes {
+            let path = diff_header_path(&project_root, &fix.path);
             write!(
                 stdout,
                 "{}",
-                unified_diff(&fix.path, &fix.original, &fix.fixed, color)
+                unified_diff(&path, &fix.original, &fix.fixed, color)
             )?;
         }
         stdout.flush()?;
@@ -489,6 +510,7 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn project_root_uses_explicit_when_given() {
@@ -627,6 +649,51 @@ mod tests {
     }
 
     #[test]
+    fn diff_header_path_keeps_relative_paths() {
+        let root = PathBuf::from("/project");
+        assert_eq!(
+            diff_header_path(&root, Path::new("src/main.py")),
+            PathBuf::from("src/main.py")
+        );
+    }
+
+    #[test]
+    fn diff_header_path_strips_project_root_from_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let absolute = root.join("main.py");
+        assert_eq!(diff_header_path(&root, &absolute), PathBuf::from("main.py"));
+    }
+
+    #[test]
+    fn diff_header_path_canonicalizes_before_stripping_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let file = root.join("main.py");
+        std::fs::write(&file, "").expect("write file");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let absolute = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            diff_header_path(Path::new("proj"), &absolute),
+            PathBuf::from("main.py")
+        );
+        std::env::set_current_dir(previous).expect("restore cwd");
+    }
+
+    #[test]
+    fn diff_header_path_falls_back_to_file_name_outside_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let outside = dir.path().join("elsewhere").join("other.py");
+        std::fs::create_dir_all(outside.parent().unwrap()).expect("create parent");
+        std::fs::write(&outside, "").expect("write file");
+        assert_eq!(diff_header_path(&root, &outside), PathBuf::from("other.py"));
+    }
+
+    #[test]
     fn success_and_found_summaries_render_plain_and_colored() {
         assert_eq!(success_message(false), "All checks passed!");
         assert!(success_message(true).contains("\u{1b}["));
@@ -689,5 +756,38 @@ mod tests {
         ] {
             assert!(summary.contains("\u{1b}["));
         }
+    }
+}
+
+/// Exercises `diff_header_path` branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`, so these live in a sibling module.
+#[cfg(test)]
+mod diff_header_path_coverage {
+    use super::diff_header_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn diff_header_path_falls_back_to_file_py_without_file_name() {
+        assert_eq!(
+            diff_header_path(Path::new("/project"), Path::new("/")),
+            PathBuf::from("file.py")
+        );
+    }
+
+    #[test]
+    fn diff_header_path_canonicalizes_before_stripping_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).expect("create project dir");
+        let file = root.join("main.py");
+        std::fs::write(&file, "").expect("write file");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let absolute = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            diff_header_path(Path::new("proj"), &absolute),
+            PathBuf::from("main.py")
+        );
+        std::env::set_current_dir(previous).expect("restore cwd");
     }
 }
