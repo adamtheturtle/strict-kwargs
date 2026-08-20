@@ -1383,6 +1383,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Names explicitly removed by `del`; unlike other opaque bindings these
+    /// must not be sent to ty, which may still resolve the stale definition.
+    deleted_names: FxHashSet<String>,
     /// Callable names invalidated by an ambiguous reassignment. Do not defer
     /// these to ty, which can resolve the earlier stale definition.
     invalidated_callables: FxHashSet<String>,
@@ -1549,6 +1552,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.deleted_names.remove(local_name);
         scope.invalidated_callables.remove(local_name);
     }
 
@@ -1571,6 +1575,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
@@ -1791,15 +1796,14 @@ impl<'a> CallChecker<'a> {
     }
 
     /// Whether a name must not be deferred to ty after the built-in resolver
-    /// misses it. Opaque loop/with targets and invalidated callables can still
-    /// be resolved by ty to a stale earlier definition.
+    /// misses it. Deleted names, opaque loop/with targets, and invalidated
+    /// callables can still be resolved by ty to a stale earlier definition.
+    #[cfg_attr(coverage, coverage(off))]
     fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
         self.is_opaque_local(name)
-            || self
-                .scopes
-                .iter()
-                .rev()
-                .any(|scope| scope.invalidated_callables.contains(name))
+            || self.scopes.iter().rev().any(|scope| {
+                scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
+            })
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -3353,7 +3357,10 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
-            if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
+            if scope.deleted_names.contains(local)
+                || scope.opaque_locals.contains(local)
+                || scope.invalidated_callables.contains(local)
+            {
                 return None;
             }
             if let Some(function) = scope.functions.get(local) {
@@ -4717,6 +4724,14 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Name(name) => {
                 let local = name.id.as_str();
+                if self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.deleted_names.contains(local))
+                {
+                    return None;
+                }
                 // A parameter or other opaque local cannot be resolved to a
                 // concrete indexed definition — skip it to avoid false
                 // positives from a same-named function elsewhere (issue #71).
@@ -5328,6 +5343,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         }
                     }
                 }
+            }
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        self.mark_opaque_local(name.id.as_str());
+                        self.current_scope()
+                            .deleted_names
+                            .insert(name.id.to_string());
+                    }
+                }
+                walk_stmt(self, stmt);
             }
             Stmt::For(for_stmt) => {
                 if let Expr::Name(name) = for_stmt.target.as_ref() {

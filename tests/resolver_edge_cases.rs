@@ -160,6 +160,37 @@ C().bound(1)
     );
 }
 
+/// `del f` removes a local callable binding so later calls are not resolved
+/// against the deleted definition.
+#[test]
+fn delete_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+del f
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "deleted function must not be resolved: {messages:?}"
+    );
+}
+
+/// Exercises index-side conditional-delete exclusion (coverage for
+/// `exclude_deleted_name` when `conditional_depth > 0`).
+#[test]
+fn conditional_delete_is_indexed_without_exclusion() {
+    let _messages = check_source(
+        r"
+def f(value: int) -> None: ...
+if condition:
+    del f
+f(1)
+",
+    );
+}
+
 /// A `for` target remains bound after the loop and invalidates an earlier
 /// function definition with the same name (issue #414).
 #[test]
