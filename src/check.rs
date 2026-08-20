@@ -1108,6 +1108,8 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
+    /// Local generator name -> concrete callable yield signature.
+    callable_generator_yields: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
     /// Callable values yielded by `@contextmanager` functions, keyed by the
@@ -1380,6 +1382,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Callable names invalidated by an ambiguous reassignment. Do not defer
+    /// these to ty, which can resolve the earlier stale definition.
+    invalidated_callables: FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -1450,6 +1455,7 @@ impl<'a> CallChecker<'a> {
             functional_namedtuple_names: FxHashSet::default(),
             callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
+            callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
@@ -1539,6 +1545,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.invalidated_callables.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1560,6 +1567,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -1776,6 +1784,18 @@ impl<'a> CallChecker<'a> {
             }
         }
         false
+    }
+
+    /// Whether a name must not be deferred to ty after the built-in resolver
+    /// misses it. Opaque loop/with targets and invalidated callables can still
+    /// be resolved by ty to a stale earlier definition.
+    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
+        self.is_opaque_local(name)
+            || self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.invalidated_callables.contains(name))
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2287,7 +2307,14 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function = if let Some(signature) = self.overload_result_signature(&call.func) {
+        let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
+            Some(method)
+        } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Generator.send() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.overload_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "overload result".to_string(),
                 signature,
@@ -2358,6 +2385,11 @@ impl<'a> CallChecker<'a> {
             local_function.fullname.clone()
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+                if let Expr::Name(name) = call.func.as_ref() {
+                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
+                        return;
+                    }
+                }
                 // Built-in resolver couldn't resolve: defer to a pipelined ty
                 // query (handled once per file after the walk).
                 self.record_ty_pending(call);
@@ -3364,10 +3396,13 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
+            if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
+                return None;
+            }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
             }
-            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
+            if scope.names.contains_key(local) {
                 return None;
             }
         }
@@ -3392,6 +3427,39 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         self.resolve_callee(call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn method_type_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let method_type = match call.func.as_ref() {
+            Expr::Name(name) => self.resolve_local(name.id.as_str()),
+            Expr::Attribute(attribute) => {
+                let Expr::Name(module) = attribute.value.as_ref() else {
+                    return None;
+                };
+                self.resolve_module(module.id.as_str())
+                    .map(|module| format!("{module}.{}", attribute.attr))
+            }
+            _ => None,
+        };
+        if method_type.as_deref() != Some("types.MethodType") || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [method, _receiver] = &*call.arguments.args else {
+            return None;
+        };
+        let fullname = self.resolve_callee(method)?;
+        let mut signature = self.index.get(&fullname)?.first()?.clone();
+        (!signature.parameters.is_empty()).then_some(())?;
+        signature.parameters.remove(0);
+        Some(LocalFunction {
+            fullname: format!("{fullname} bound by MethodType"),
+            signature,
+        })
     }
 
     fn current_lexical_scope(&self) -> &str {
@@ -4484,6 +4552,28 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generator_send_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(generator) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "send"
+            || call.arguments.args.len() != 1
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.callable_generator_yields
+            .get(generator.id.as_str())
+            .cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn weakref_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(dereference) = func else {
             return None;
@@ -4519,9 +4609,8 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem")
-            || !call.arguments.keywords.is_empty()
-        {
+        // Keyword arguments are allowed; only positional value/slice matter.
+        if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem") {
             return None;
         }
         let [value, slice] = &*call.arguments.args else {
@@ -5131,9 +5220,21 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
                 let is_collections_namedtuple = Self::is_collections_namedtuple(value);
+                let generator_yield = if let Expr::Call(factory) = value.as_ref() {
+                    self.resolve_callee(&factory.func)
+                        .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
+                } else {
+                    None
+                };
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
+                        if let Some(signature) = &generator_yield {
+                            self.callable_generator_yields
+                                .insert(name.id.to_string(), signature.clone());
+                        } else {
+                            self.callable_generator_yields.remove(name.id.as_str());
+                        }
                         if is_functional_namedtuple || is_collections_namedtuple {
                             self.functional_namedtuple_names.insert(name.id.to_string());
                         }
@@ -5152,6 +5253,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
+                            if is_lambda {
+                                self.current_scope()
+                                    .invalidated_callables
+                                    .insert(name.id.to_string());
+                            }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
@@ -5164,6 +5270,42 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         }
                     }
                 }
+            }
+            Stmt::For(for_stmt) => {
+                if let Expr::Name(name) = for_stmt.target.as_ref() {
+                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                        scope.functions.contains_key(name.id.as_str())
+                            || scope.names.contains_key(name.id.as_str())
+                    });
+                    self.mark_opaque_local(name.id.as_str());
+                    if was_known_callable {
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.id.to_string());
+                    }
+                }
+                self.visit_for_stmt(for_stmt);
+            }
+            Stmt::With(with_stmt) => {
+                for target in with_stmt
+                    .items
+                    .iter()
+                    .filter_map(|item| item.optional_vars.as_deref())
+                {
+                    if let Expr::Name(name) = target {
+                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                            scope.functions.contains_key(name.id.as_str())
+                                || scope.names.contains_key(name.id.as_str())
+                        });
+                        self.mark_opaque_local(name.id.as_str());
+                        if was_known_callable {
+                            self.current_scope()
+                                .invalidated_callables
+                                .insert(name.id.to_string());
+                        }
+                    }
+                }
+                self.visit_with_stmt(with_stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -5221,10 +5363,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
-            Stmt::With(with_stmt) => {
-                self.visit_with_stmt(with_stmt);
-            }
-            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
