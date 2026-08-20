@@ -177,8 +177,32 @@ f(1)
     );
 }
 
-/// Exercises index-side conditional-delete exclusion (coverage for
-/// `exclude_deleted_name` when `conditional_depth > 0`).
+/// Calls before a later ``del`` must still resolve; index-excluding on ``del``
+/// would suppress earlier sites such as ``@_wraps`` then ``del _wraps``.
+#[test]
+fn use_before_delete_still_checks_callable() {
+    let messages = check_source(
+        r"
+def _wraps(wrapped):
+    def decorator(wrapper):
+        return wrapper
+    return decorator
+
+@_wraps(abs)
+def signal(x):
+    return x
+
+del _wraps
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "_wraps"),
+        "use before del must still be checked, got: {messages:?}"
+    );
+}
+
+/// Exercises that conditional ``del`` does not permanently drop the binding
+/// from check resolution of later unconditional uses.
 #[test]
 fn conditional_delete_is_indexed_without_exclusion() {
     let _messages = check_source(
