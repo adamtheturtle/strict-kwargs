@@ -196,6 +196,28 @@ f(1)
     assert!(messages.is_empty(), "stale with-as function: {messages:?}");
 }
 
+/// Bound-method aliases are opaque to the built-in resolver but must still
+/// reach the ty fallback. Skipping ty for every opaque local (not only
+/// invalidated callables) silenced Sphinx-style `_filter = lang.word_filter`
+/// diagnostics after #561.
+#[test]
+fn bound_method_alias_still_defers_to_ty() {
+    let messages = check_source(
+        r"
+class SearchLanguage:
+    def word_filter(self, word: str) -> bool: ...
+
+def feed(lang: SearchLanguage, stemmed_word: str, extra: str) -> bool:
+    _filter = lang.word_filter
+    return _filter(stemmed_word, extra)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "Too many positional"),
+        "bound-method alias must still reach ty, got: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

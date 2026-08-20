@@ -1791,15 +1791,16 @@ impl<'a> CallChecker<'a> {
     }
 
     /// Whether a name must not be deferred to ty after the built-in resolver
-    /// misses it. Opaque loop/with targets and invalidated callables can still
-    /// be resolved by ty to a stale earlier definition.
-    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
-        self.is_opaque_local(name)
-            || self
-                .scopes
-                .iter()
-                .rev()
-                .any(|scope| scope.invalidated_callables.contains(name))
+    /// misses it. Only names whose earlier callable binding was explicitly
+    /// invalidated (for/with rebinding, lambda replacement) are blocked —
+    /// general opaque locals (bound-method aliases, parameters, …) still need
+    /// the ty fallback, or Sphinx-style `_filter = lang.word_filter` calls go
+    /// unchecked.
+    fn is_invalidated_callable_name(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.invalidated_callables.contains(name))
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2379,7 +2380,7 @@ impl<'a> CallChecker<'a> {
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
                 if let Expr::Name(name) = call.func.as_ref() {
-                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
+                    if self.is_invalidated_callable_name(name.id.as_str()) {
                         return;
                     }
                 }
