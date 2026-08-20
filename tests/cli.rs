@@ -1475,14 +1475,19 @@ fn fix_write_failure_is_fatal_exit_two() {
     use std::os::unix::fs::PermissionsExt;
 
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let target = project.root.join("main.py");
-    // Read-only file: the fix is computed fine but `std::fs::write` fails,
-    // exercising the `?` error path in `run_fix`.
-    let mut perms = std::fs::metadata(&target).expect("metadata").permissions();
-    perms.set_mode(0o444);
-    std::fs::set_permissions(&target, perms).expect("chmod");
+    // A read-only file can still be replaced via rename, so make the project
+    // directory non-writable to force staged fix bytes to fail.
+    let mut dir_perms = std::fs::metadata(&project.root)
+        .expect("metadata")
+        .permissions();
+    dir_perms.set_mode(0o555);
+    std::fs::set_permissions(&project.root, dir_perms.clone()).expect("chmod project dir");
 
     let output = project.run(&["check", "--fix", "main.py"]);
+
+    dir_perms.set_mode(0o755);
+    std::fs::set_permissions(&project.root, dir_perms).expect("restore project dir");
+
     assert_eq!(code(&output), 2);
     assert!(
         stderr(&output).starts_with("error: "),
