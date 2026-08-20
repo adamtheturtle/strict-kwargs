@@ -2345,3 +2345,21 @@ unittest.expectedFailure(test_item=target)(1)
         "messages: {messages:?}"
     );
 }
+
+/// ``from unittest.case import expectedFailure`` resolves through the case
+/// module path.
+#[test]
+fn unittest_case_expected_failure_preserves_callable_signature() {
+    let messages = check_source(
+        "
+from unittest.case import expectedFailure
+def target(value: int) -> int:
+    return value
+expectedFailure(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
