@@ -2663,3 +2663,32 @@ MysteryEnter().__enter__()(1)
         "unindexed enter callable must not use generic-result checking, got: {messages:?}"
     );
 }
+
+/// ``__enter__`` bodies that are not a single ``return`` of a callable/lambda,
+/// and single returns of non-callable literals, take the indexing fallthrough
+/// arms (no map insert).
+#[test]
+fn context_manager_enter_non_indexable_bodies_are_skipped() {
+    let messages = check_source(
+        r"
+class PassEnter:
+    def __enter__(self):
+        pass
+    def __exit__(self, *args: object) -> None:
+        pass
+
+class LiteralEnter:
+    def __enter__(self):
+        return 1
+    def __exit__(self, *args: object) -> None:
+        pass
+
+PassEnter().__enter__()
+LiteralEnter().__enter__()
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "non-callable enter results should not emit violations, got: {messages:?}"
+    );
+}
