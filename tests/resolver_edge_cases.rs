@@ -1358,6 +1358,62 @@ gen.send(None)(1)
     );
 }
 
+/// A Generator throw result retains the declared callable yield signature
+/// (issue #656).
+#[test]
+fn generator_throw_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def functions() -> Generator[Callable[[int], None], None, None]: ...
+gen = functions()
+gen.throw(typ=RuntimeError)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "throw() result"),
+        "expected generator throw violation, got: {messages:?}"
+    );
+}
+
+/// An `AsyncGenerator` asend result retains the declared callable yield signature
+/// (issue #657).
+#[test]
+fn async_generator_asend_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+agen = functions()
+async def main() -> None:
+    (await agen.asend(value=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "asend() result"),
+        "expected async generator asend violation, got: {messages:?}"
+    );
+}
+
+/// An `AsyncGenerator` athrow result retains the declared callable yield signature
+/// (issue #658).
+#[test]
+fn async_generator_athrow_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+agen = functions()
+async def main() -> None:
+    (await agen.athrow(typ=RuntimeError))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "athrow() result"),
+        "expected async generator athrow violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
@@ -2226,6 +2282,24 @@ atexit.register(target)(1)
     );
 }
 
+/// ``from unittest.case import expectedFailure`` resolves through the case
+/// module path.
+#[test]
+fn unittest_case_expected_failure_preserves_callable_signature() {
+    let messages = check_source(
+        "
+from unittest.case import expectedFailure
+def target(value: int) -> int:
+    return value
+expectedFailure(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
 /// `MethodType` binds the leading receiver of a concrete method signature
 /// (issue #460).
 #[test]
@@ -2256,4 +2330,68 @@ inspect.unwrap(func=f)(1)
 ",
     );
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
+}
+
+/// Context-manager helpers and ``__enter__`` preserve managed callable types
+/// (issues #618-#621, #627-#632, #444).
+#[test]
+fn context_manager_generic_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+
+def target(value: int) -> int:
+    return value
+
+class Writer:
+    def write(self, text: str) -> int:
+        return len(text)
+    def flush(self) -> None:
+        pass
+    def __call__(self, value: int) -> int:
+        return value
+
+class Value:
+    async def aclose(self) -> None:
+        pass
+    def __call__(self, value: int) -> int:
+        return value
+
+class Decorator(contextlib.ContextDecorator):
+    def __enter__(self):
+        return self
+    def __exit__(self, *args: object) -> None:
+        pass
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None:
+        pass
+
+contextlib.closing(thing=target).__enter__()(1)
+contextlib.aclosing(thing=Value()).__aenter__()(1)
+contextlib.redirect_stdout(new_target=Writer()).__enter__()(1)
+contextlib.redirect_stderr(new_target=Writer()).__enter__()(1)
+unittest.enterModuleContext(cm=contextlib.nullcontext(enter_result=target))(1)
+unittest.TestCase().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+unittest.TestCase.enterClassContext(cm=contextlib.nullcontext(enter_result=target))(1)
+Decorator()(func=target)(1)
+contextlib.ExitStack().enter_context(cm=contextlib.nullcontext(enter_result=target))(1)
+contextlib.nullcontext(enter_result=target).__enter__()(1)
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    stack = contextlib.AsyncExitStack()
+    (await stack.enter_async_context(cm=Manager()))(1)
+",
+    );
+    for line in [33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 46, 48] {
+        assert!(
+            has_error_at(&messages, line, "generic result"),
+            "expected generic-result violation on line {line}, got: {messages:?}"
+        );
+    }
 }

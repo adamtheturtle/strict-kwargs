@@ -2342,9 +2342,11 @@ impl<'a> CallChecker<'a> {
                 fullname: "ContextVar.get() result".to_string(),
                 signature,
             })
-        } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
+        } else if let Some((signature, fullname)) =
+            self.generator_resume_result_signature(&call.func)
+        {
             Some(LocalFunction {
-                fullname: "Generator.send() result".to_string(),
+                fullname: fullname.to_string(),
                 signature,
             })
         } else if let Some(signature) = self.overload_result_signature(&call.func) {
@@ -2375,6 +2377,13 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.anext_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "anext() result".to_string(),
+                signature,
+            })
+        } else if let Some((signature, fullname)) =
+            self.async_generator_resume_result_signature(&call.func)
+        {
+            Some(LocalFunction {
+                fullname: fullname.to_string(),
                 signature,
             })
         } else if let Some(signature) = self.awaited_result_signature(&call.func) {
@@ -3979,7 +3988,7 @@ impl<'a> CallChecker<'a> {
         let container = container.rsplit('.').next()?;
         let item = match container {
             "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
-            "Generator" => {
+            "Generator" | "AsyncGenerator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
                 };
@@ -3988,6 +3997,22 @@ impl<'a> CallChecker<'a> {
             _ => return None,
         };
         Self::callable_annotation_signature(item)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generator_yield_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        let container = Self::dotted_path(value)?;
+        let container = container.rsplit('.').next()?;
+        if !matches!(container, "Generator" | "AsyncGenerator") {
+            return None;
+        }
+        let Expr::Tuple(tuple) = slice.as_ref() else {
+            return None;
+        };
+        Self::callable_annotation_signature(tuple.elts.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4687,7 +4712,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn generator_send_result_signature(&self, func: &Expr) -> Option<Signature> {
+    fn generator_resume_result_signature(&self, func: &Expr) -> Option<(Signature, &'static str)> {
         let Expr::Call(call) = func else {
             return None;
         };
@@ -4697,15 +4722,56 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(generator) = method.value.as_ref() else {
             return None;
         };
-        if method.attr.as_str() != "send"
-            || call.arguments.args.len() != 1
-            || !call.arguments.keywords.is_empty()
-        {
-            return None;
-        }
+        let label = match method.attr.as_str() {
+            "send" if call.arguments.args.len() == 1 && call.arguments.keywords.is_empty() => {
+                "Generator.send() result"
+            }
+            "throw" => "Generator.throw() result",
+            _ => return None,
+        };
         self.callable_generator_yields
             .get(generator.id.as_str())
             .cloned()
+            .map(|signature| (signature, label))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn async_generator_resume_result_signature(
+        &self,
+        func: &Expr,
+    ) -> Option<(Signature, &'static str)> {
+        let Expr::Await(ast::ExprAwait { value, .. }) = func else {
+            return None;
+        };
+        let Expr::Call(call) = value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(generator) = method.value.as_ref() else {
+            return None;
+        };
+        let label = match method.attr.as_str() {
+            "asend"
+                if (call.arguments.args.len() == 1 && call.arguments.keywords.is_empty())
+                    || (call.arguments.args.is_empty()
+                        && call.arguments.keywords.len() == 1
+                        && call.arguments.keywords[0]
+                            .arg
+                            .as_ref()
+                            .map(ast::Identifier::as_str)
+                            == Some("value")) =>
+            {
+                "AsyncGenerator.asend() result"
+            }
+            "athrow" => "AsyncGenerator.athrow() result",
+            _ => return None,
+        };
+        self.callable_generator_yields
+            .get(generator.id.as_str())
+            .cloned()
+            .map(|signature| (signature, label))
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5542,6 +5608,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
+                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                        self.callable_generator_yields
+                            .insert(name.id.to_string(), signature);
+                    } else {
+                        self.callable_generator_yields.remove(name.id.as_str());
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -5563,6 +5635,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.current_scope()
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                        self.callable_generator_yields
+                            .insert(name.id.to_string(), signature);
+                    } else {
+                        self.callable_generator_yields.remove(name.id.as_str());
                     }
                 }
             }
