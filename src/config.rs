@@ -420,7 +420,8 @@ mod tests {
       "#,
         )
         .expect("valid config");
-        assert_eq!(config.ignore_names,
+        assert_eq!(
+            config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
         );
         assert_eq!(config.src, vec![PathBuf::from("src"), PathBuf::from("lib")]);
@@ -458,13 +459,21 @@ mod tests {
     #[test]
     fn absent_table_is_default_not_an_error() {
         // No `[tool]` table at all.
-        assert_eq!(Config::from_pyproject_str("[project]\nname = \"x\"\n")
-            .expect("absent table is not an error")
-            .ignore_names.len(), 0);
+        assert_eq!(
+            Config::from_pyproject_str("[project]\nname = \"x\"\n")
+                .expect("absent table is not an error")
+                .ignore_names
+                .len(),
+            0
+        );
         // `tool` present but not a table (so it cannot hold our subtable).
-        assert_eq!(Config::from_pyproject_str("tool = 5\n")
-            .expect("non-table `tool` is not our concern")
-            .ignore_names.len(), 0);
+        assert_eq!(
+            Config::from_pyproject_str("tool = 5\n")
+                .expect("non-table `tool` is not our concern")
+                .ignore_names
+                .len(),
+            0
+        );
         // `[tool]` present but no `strict_kwargs` key.
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");

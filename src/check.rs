@@ -10609,7 +10609,8 @@ registry['k'](1, 2)
         .expect("skipped scan records a warning");
 
         assert_eq!(diagnostics.len(), 0);
-        assert_eq!(skip_warnings,
+        assert_eq!(
+            skip_warnings,
             vec![(
                 7,
                 PathBuf::from("skipped.py"),

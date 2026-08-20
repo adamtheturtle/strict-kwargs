@@ -577,7 +577,10 @@ mod tests {
             discover_site_packages_in_environment(&dir.path().join("Scripts/python.exe")),
             expected
         );
-        assert_eq!(discover_site_packages_in_environment(&dir.path().join("python")).len(), 0);
+        assert_eq!(
+            discover_site_packages_in_environment(&dir.path().join("python")).len(),
+            0
+        );
     }
 
     /// Run `f` with `VIRTUAL_ENV` set to `value` (or removed when `None`),
