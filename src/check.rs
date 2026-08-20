@@ -3682,9 +3682,13 @@ impl<'a> CallChecker<'a> {
         "functools.wraps",
         "reprlib.recursive_repr",
         "types.coroutine",
+        "typing.assert_type",
         "typing.final",
         "typing.no_type_check",
         "typing.override",
+        "contextlib.ExitStack.callback",
+        "contextlib._BaseExitStack.callback",
+        "contextlib.AsyncExitStack.push_async_callback",
         "unittest.skip",
         "unittest.skipIf",
         "unittest.skipUnless",
@@ -3710,6 +3714,7 @@ impl<'a> CallChecker<'a> {
                 matches!(
                     name.as_str(),
                     "arg"
+                        | "callback"
                         | "cls"
                         | "f"
                         | "func"
@@ -3717,6 +3722,7 @@ impl<'a> CallChecker<'a> {
                         | "method"
                         | "test_item"
                         | "user_function"
+                        | "val"
                         | "wrapper"
                 )
             }) {
