@@ -3824,6 +3824,10 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Some(map_call) = self.pool_map_call_from_value(value) {
+            Self::literal_sequence_index(slice, 1)?;
+            return self.pool_map_callable_fullname(map_call);
+        }
         match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
@@ -4128,6 +4132,79 @@ impl<'a> CallChecker<'a> {
             result = Some(signature);
         }
         result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_multiprocessing_pool_map_method(fullname: &str) -> bool {
+        let Some((class, method)) = fullname.rsplit_once('.') else {
+            return false;
+        };
+        matches!(
+            method,
+            "map" | "starmap" | "imap" | "imap_unordered" | "map_async" | "starmap_async"
+        ) && class.contains("multiprocessing")
+            && (class.ends_with(".Pool") || class.ends_with(".ThreadPool"))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_map_func_argument(call: &ast::ExprCall) -> Option<&Expr> {
+        call.arguments.args.first().or_else(|| {
+            call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("func"))
+                    .then_some(&keyword.value)
+            })
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_map_call(&self, call: &ast::ExprCall) -> bool {
+        self.resolve_callee(&call.func)
+            .as_deref()
+            .is_some_and(Self::is_multiprocessing_pool_map_method)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_map_call_from_value(&self, value: &'a Expr) -> Option<&'a ast::ExprCall> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        if self.pool_map_call(call) {
+            return Some(call);
+        }
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get" {
+            return None;
+        }
+        let Expr::Call(async_call) = method.value.as_ref() else {
+            return None;
+        };
+        self.pool_map_call(async_call).then_some(async_call)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_map_callable_fullname(&self, call: &ast::ExprCall) -> Option<String> {
+        if !self.pool_map_call(call) {
+            return None;
+        }
+        let func = Self::pool_map_func_argument(call)?;
+        match func {
+            Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
+            _ => self.resolve_callee(func),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_map_callable_signature(&self, call: &ast::ExprCall) -> Option<Signature> {
+        if !self.pool_map_call(call) {
+            return None;
+        }
+        let func = Self::pool_map_func_argument(call)?;
+        match func {
+            Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
+            _ => self.unnamed_callable_signature(func),
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4521,6 +4598,11 @@ impl<'a> CallChecker<'a> {
         }
         if let Some(signature) = self.itertools_item_signature(iterator) {
             return Some(signature);
+        }
+        if let Expr::Call(map_call) = iterator {
+            if self.pool_map_call(map_call) {
+                return self.pool_map_callable_signature(map_call);
+            }
         }
         let Expr::Call(factory_call) = iterator else {
             return None;
