@@ -1170,3 +1170,31 @@ fn noqa_suppresses_only_its_own_call_during_fix() {
         "def func(a: int) -> None: ...\nfunc(a=1)\nfunc(2)  # noqa: KW001\n",
     );
 }
+
+#[test]
+fn unified_diff_quotes_unsafe_path_bytes() {
+    use strict_kwargs::unified_diff;
+
+    for (path, escaped) in [
+        ("line\nbreak.py", "line\\nbreak.py"),
+        ("tab\tname.py", "tab\\tname.py"),
+        ("back\\slash.py", "back\\\\slash.py"),
+        ("\"quote.py", "\\\"quote.py"),
+        ("ctrl\x01name.py", "ctrl\\001name.py"),
+    ] {
+        let diff = unified_diff(Path::new(path), "f(1)\n", "f(x=1)\n", false);
+        let expected_old = format!("--- \"a/{escaped}\"");
+        let expected_new = format!("+++ \"b/{escaped}\"");
+        let mut lines = diff.lines();
+        assert_eq!(lines.next(), Some(expected_old.as_str()), "path: {path}");
+        assert_eq!(lines.next(), Some(expected_new.as_str()), "path: {path}");
+    }
+}
+
+#[test]
+fn unified_diff_keeps_safe_paths_unquoted() {
+    use strict_kwargs::unified_diff;
+
+    let diff = unified_diff(Path::new("pkg/main.py"), "f(1)\n", "f(x=1)\n", false);
+    assert!(diff.starts_with("--- a/pkg/main.py\n+++ b/pkg/main.py\n"));
+}
