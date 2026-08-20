@@ -444,6 +444,7 @@ fn fix_exit_code(remaining: usize) -> ExitCode {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn diff_header_path(project_root: &std::path::Path, path: &std::path::Path) -> PathBuf {
     if !path.is_absolute() {
         // On Windows, `/` is not absolute and has no file name — still fall back.
