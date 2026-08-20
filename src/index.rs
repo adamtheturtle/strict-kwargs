@@ -107,6 +107,10 @@ struct Store {
     /// ``args[0].__class__``; a keyword first argument would raise
     /// ``TypeError`` at runtime.
     excluded: FxHashSet<String>,
+    /// Methods decorated as properties / enum magic attributes. Calling
+    /// through the attribute reads the property; the call targets the
+    /// returned value, not the getter signature (issues #668, #669).
+    properties: FxHashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +132,7 @@ impl Store {
 
     fn exclude(&mut self, fullname: String) {
         self.signatures.remove(&fullname);
+        self.properties.remove(&fullname);
         self.excluded.insert(fullname);
     }
 
@@ -140,6 +145,7 @@ impl Store {
         }
         self.signatures.remove(fullname);
         self.excluded.remove(fullname);
+        self.properties.remove(fullname);
         self.pending_overloads.remove(fullname);
     }
 
@@ -1170,6 +1176,13 @@ impl DefinitionIndex {
         self.read().store.excluded.contains(fullname)
     }
 
+    /// Whether `fullname` is a ``@property`` (or enum magic attribute) getter.
+    pub fn is_property(&self, fullname: &str) -> bool {
+        let mut query_budget = MAX_QUERY_MODULES;
+        self.ensure_for(fullname, &mut query_budget);
+        self.read().store.properties.contains(fullname)
+    }
+
     /// Whether `fullname` has an unknown post-decoration signature.
     pub fn is_runtime_decorated(&self, fullname: &str) -> bool {
         self.read().store.runtime_decorated.contains(fullname)
@@ -2050,6 +2063,15 @@ fn has_overload_decorator(decorator_list: &[ast::Decorator]) -> bool {
         .any(|decorator| callee_tail(&decorator.expression) == Some("overload"))
 }
 
+fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list.iter().any(|decorator| {
+        matches!(
+            callee_tail(&decorator.expression),
+            Some("property" | "_builtins_property" | "_magic_enum_attr" | "DynamicClassAttribute")
+        )
+    })
+}
+
 // Maintains statement-order import/alias bindings for synthesized constructor
 // base resolution. The user-visible behavior is covered by imported and
 // aliased dataclass-base integration tests; the branches here duplicate the
@@ -2655,6 +2677,9 @@ fn index_class_body(
                         has_overload_decorator(decorator_list),
                     );
                 }
+                if has_property_decorator(decorator_list) {
+                    store.properties.insert(fullname.clone());
+                }
                 if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
                     if let Some(signature) =
                         returns.as_deref().and_then(callable_annotation_signature)
@@ -2845,6 +2870,9 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         signature,
                         has_overload_decorator(decorator_list),
                     );
+                }
+                if has_property_decorator(decorator_list) {
+                    store.properties.insert(fullname.clone());
                 }
                 if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
                     if let Some(signature) =

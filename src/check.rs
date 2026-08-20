@@ -1123,8 +1123,12 @@ struct CallChecker<'a> {
     type_vars: FxHashSet<String>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
-    /// `TypeGuard` function fullname -> callable signature asserted when true.
+    /// `TypeGuard`/`TypeIs` function fullname -> callable signature asserted when true.
     callable_typeguards: FxHashMap<String, Signature>,
+    /// Subset of `callable_typeguards` whose return annotation was `TypeIs`.
+    callable_typeis: FxHashSet<String>,
+    /// Local type aliases bound to a concrete `Callable[...]` signature.
+    callable_aliases: FxHashMap<String, Signature>,
     /// Names whose ``@overload`` group has been closed by its implementation,
     /// so that a further definition replaces the group instead of extending it.
     completed_overload_sets: FxHashSet<String>,
@@ -1402,6 +1406,9 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
+    /// Parameter/locals annotated `Callable | None` / `Optional[Callable]` whose
+    /// callable signature is restored after an `is not None` narrow.
+    optional_callables: FxHashMap<String, Signature>,
 }
 
 #[derive(Debug, Clone)]
@@ -1471,6 +1478,8 @@ impl<'a> CallChecker<'a> {
             type_vars: FxHashSet::default(),
             callable_return_overloads: FxHashMap::default(),
             callable_typeguards: FxHashMap::default(),
+            callable_typeis: FxHashSet::default(),
+            callable_aliases: FxHashMap::default(),
             completed_overload_sets: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
@@ -1733,6 +1742,11 @@ impl<'a> CallChecker<'a> {
         self.mark_param_opaque(name);
         if let Some(annotation) = annotation {
             self.define_annotation(name, annotation);
+            if let Some(signature) = self.optional_callable_signature(annotation) {
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.optional_callables.insert(name.to_string(), signature);
+                }
+            }
         }
     }
 
@@ -2445,6 +2459,11 @@ impl<'a> CallChecker<'a> {
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
         // without deferring to ty.
         if self.index.is_excluded(&callee_fullname) {
+            return;
+        }
+        // `@property` / enum magic attributes are descriptors: `obj.prop(...)`
+        // calls the returned value, not the getter (issues #668, #669).
+        if self.index.is_property(&callee_fullname) {
             return;
         }
         let indexed_signatures;
@@ -4065,17 +4084,86 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
-        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+    fn resolve_callable_type_expr(&self, annotation: &Expr) -> Option<Signature> {
+        if let Some(signature) = Self::callable_annotation_signature(annotation) {
+            return Some(signature);
+        }
+        let Expr::Name(name) = annotation else {
             return None;
         };
-        (Self::dotted_path(value)?.rsplit('.').next() == Some("TypeGuard"))
-            .then(|| Self::callable_annotation_signature(slice))
-            .flatten()
+        self.callable_aliases.get(name.id.as_str()).cloned()
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn callable_typeguard_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+    fn typeguard_callable_signature(&self, annotation: &Expr) -> Option<(bool, Signature)> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        let kind = Self::dotted_path(value)?.rsplit('.').next()?.to_string();
+        let is_typeis = match kind.as_str() {
+            "TypeGuard" => false,
+            "TypeIs" => true,
+            _ => return None,
+        };
+        Some((is_typeis, self.resolve_callable_type_expr(slice)?))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn optional_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
+        match annotation {
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::BitOr,
+                right,
+                ..
+            }) => {
+                let left_none = matches!(left.as_ref(), Expr::NoneLiteral(_));
+                let right_none = matches!(right.as_ref(), Expr::NoneLiteral(_));
+                if left_none == right_none {
+                    return None;
+                }
+                let other = if left_none {
+                    right.as_ref()
+                } else {
+                    left.as_ref()
+                };
+                self.resolve_callable_type_expr(other)
+            }
+            Expr::Subscript(ast::ExprSubscript { value, slice, .. }) => {
+                let name = Self::dotted_path(value)?.rsplit('.').next()?.to_string();
+                match name.as_str() {
+                    "Optional" => self.resolve_callable_type_expr(slice),
+                    "Union" => {
+                        let Expr::Tuple(tuple) = slice.as_ref() else {
+                            return None;
+                        };
+                        let mut callable = None;
+                        let mut saw_none = false;
+                        for elt in &tuple.elts {
+                            if matches!(elt, Expr::NoneLiteral(_)) {
+                                saw_none = true;
+                                continue;
+                            }
+                            let signature = self.resolve_callable_type_expr(elt)?;
+                            if callable
+                                .as_ref()
+                                .is_some_and(|existing| existing != &signature)
+                            {
+                                return None;
+                            }
+                            callable = Some(signature);
+                        }
+                        saw_none.then_some(callable).flatten()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_typeguard_narrowing(&self, test: &Expr) -> Option<(String, Signature, bool)> {
         let Expr::Call(call) = test else {
             return None;
         };
@@ -4090,7 +4178,48 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(target) = target? else {
             return None;
         };
-        Some((target.id.to_string(), signature))
+        let is_typeis = self.callable_typeis.contains(&fullname);
+        Some((target.id.to_string(), signature, is_typeis))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_not_none_comparison(test: &Expr) -> Option<String> {
+        let Expr::Compare(ast::ExprCompare {
+            left,
+            ops,
+            comparators,
+            ..
+        }) = test
+        else {
+            return None;
+        };
+        if ops.len() != 1 || ops[0] != ast::CmpOp::IsNot || comparators.len() != 1 {
+            return None;
+        }
+        let Expr::NoneLiteral(_) = comparators[0] else {
+            return None;
+        };
+        let Expr::Name(name) = left.as_ref() else {
+            return None;
+        };
+        Some(name.id.to_string())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn optional_none_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let name = Self::is_not_none_comparison(test)?;
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.optional_callables.get(&name) {
+                return Some((name, signature.clone()));
+            }
+            if scope.names.contains_key(&name)
+                || scope.functions.contains_key(&name)
+                || scope.opaque_locals.contains(&name)
+            {
+                break;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5269,11 +5398,26 @@ impl<'a> CallChecker<'a> {
         } = if_stmt;
         self.visit_expr(test);
         let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
-            .then(|| self.callable_typeguard_narrowing(test))
+            .then(|| {
+                self.callable_typeguard_narrowing(test)
+                    .map(|(name, signature, is_typeis)| {
+                        let label = if is_typeis {
+                            "TypeIs narrowed callable"
+                        } else {
+                            "TypeGuard narrowed callable"
+                        };
+                        (name, signature, label)
+                    })
+                    .or_else(|| {
+                        self.optional_none_narrowing(test).map(|(name, signature)| {
+                            (name, signature, "Optional narrowed callable")
+                        })
+                    })
+            })
             .flatten();
-        if let Some((name, signature)) = narrowing {
+        if let Some((name, signature, label)) = narrowing {
             self.push_scope();
-            self.define_function(&name, "TypeGuard narrowed callable".to_string(), signature);
+            self.define_function(&name, label.to_string(), signature);
             for inner in body {
                 self.visit_if_branch_stmt(inner, traversal);
             }
@@ -5369,6 +5513,17 @@ impl<'a> CallChecker<'a> {
             Stmt::For(for_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_for_stmt(for_stmt);
+            }
+            Stmt::Assert(assert_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                walk_stmt(self, stmt);
+                if let Some((name, signature)) = self.optional_none_narrowing(&assert_stmt.test) {
+                    self.define_function(
+                        &name,
+                        "Optional narrowed callable".to_string(),
+                        signature,
+                    );
+                }
             }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
@@ -5493,11 +5648,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(fullname.clone(), class);
                     }
                 }
-                if let Some(signature) = returns
+                if let Some((is_typeis, signature)) = returns
                     .as_deref()
-                    .and_then(Self::typeguard_callable_signature)
+                    .and_then(|annotation| self.typeguard_callable_signature(annotation))
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
+                    if is_typeis {
+                        self.callable_typeis.insert(fullname.clone());
+                    }
                 }
                 if let Some(signature) = returns
                     .as_deref()
@@ -5585,6 +5743,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     if decorator_tail(&call.func) == Some("TypeVar") {
                         self.type_vars.insert(target.id.to_string());
+                    }
+                }
+                if let ([Expr::Name(target)],) = (targets.as_slice(),) {
+                    if let Some(signature) = self.resolve_callable_type_expr(value) {
+                        self.callable_aliases
+                            .insert(target.id.to_string(), signature);
                     }
                 }
                 let popped_signature = self.annotated_list_pop_signature(value);
@@ -5729,6 +5893,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(signature) = self.resolve_callable_type_expr(value) {
+                        self.callable_aliases.insert(name.id.to_string(), signature);
+                    } else if let Some(signature) = self.resolve_callable_type_expr(annotation) {
+                        self.callable_aliases.insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = self.optional_callable_signature(annotation) {
+                        self.current_scope()
+                            .optional_callables
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
@@ -5769,6 +5943,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     self.mark_opaque_local(name.id.as_str());
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(signature) = self.resolve_callable_type_expr(annotation) {
+                        self.callable_aliases.insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = self.optional_callable_signature(annotation) {
+                        self.current_scope()
+                            .optional_callables
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items
