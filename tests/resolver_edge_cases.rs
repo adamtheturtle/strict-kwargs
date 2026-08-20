@@ -2257,3 +2257,91 @@ inspect.unwrap(func=f)(1)
     );
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
+
+/// reprlib.recursive_repr preserves the decorated callable signature (issue
+/// #613).
+#[test]
+fn recursive_repr_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import reprlib
+def target(value: int) -> int:
+    return value
+reprlib.recursive_repr(fillvalue='...')(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// unittest.skip preserves the decorated callable signature (issue #614).
+#[test]
+fn unittest_skip_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import unittest
+def target(value: int) -> int:
+    return value
+unittest.skip('skip')(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// unittest.skipIf preserves the decorated callable signature (issue #615).
+#[test]
+fn unittest_skip_if_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import unittest
+def target(value: int) -> int:
+    return value
+unittest.skipIf(True, 'skip')(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// unittest.skipUnless preserves the decorated callable signature (issue
+/// #616).
+#[test]
+fn unittest_skip_unless_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import unittest
+def target(value: int) -> int:
+    return value
+unittest.skipUnless(False, 'skip')(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// unittest.expectedFailure preserves its identity return signature (issue
+/// #617).
+#[test]
+fn unittest_expected_failure_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import unittest
+def target(value: int) -> int:
+    return value
+unittest.expectedFailure(test_item=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}

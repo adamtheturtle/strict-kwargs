@@ -3527,6 +3527,66 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(wrapped)
     }
 
+    /// Stdlib callables typed as returning their wrapped argument unchanged.
+    const IDENTITY_RETURN_STDLIB: &'static [&'static str] = &[
+        "reprlib.recursive_repr",
+        "unittest.skip",
+        "unittest.skipIf",
+        "unittest.skipUnless",
+        "unittest.expectedFailure",
+        "unittest.case.skip",
+        "unittest.case.skipIf",
+        "unittest.case.skipUnless",
+        "unittest.case.expectedFailure",
+    ];
+
+    fn is_identity_return_stdlib(fullname: &str) -> bool {
+        Self::IDENTITY_RETURN_STDLIB.contains(&fullname)
+    }
+
+    fn wrapped_callable_argument<'b>(call: &'b ast::ExprCall) -> Option<&'b Expr> {
+        if let Some(arg) = call.arguments.args.first() {
+            return Some(arg);
+        }
+        for keyword in &call.arguments.keywords {
+            if keyword
+                .arg
+                .as_ref()
+                .is_some_and(|name| matches!(name.as_str(), "func" | "test_item"))
+            {
+                return Some(&keyword.value);
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn identity_return_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+
+        // Direct identity return: ``expectedFailure(test_item=target)``.
+        if let Some(factory) = self.resolve_callee(&call.func) {
+            if factory.ends_with("expectedFailure") && Self::is_identity_return_stdlib(&factory) {
+                let wrapped = Self::wrapped_callable_argument(call)?;
+                return self.resolve_callee(wrapped);
+            }
+        }
+
+        // Decorator-factory application: ``skip(...)(target)`` /
+        // ``recursive_repr(...)(target)``.
+        let Expr::Call(factory_call) = call.func.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&factory_call.func)?;
+        if !Self::is_identity_return_stdlib(&factory) || factory.ends_with("expectedFailure") {
+            return None;
+        }
+        let wrapped = Self::wrapped_callable_argument(call)?;
+        self.resolve_callee(wrapped)
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -4895,6 +4955,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.inspect_unwrap_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.identity_return_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.operator_getitem_callable(func) {
