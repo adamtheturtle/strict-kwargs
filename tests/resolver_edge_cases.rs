@@ -1164,6 +1164,52 @@ next(itertools.tee([f])[0])(1)
     }
 }
 
+/// Filtering/slicing itertools helpers preserve callable item types (issue
+/// #448).
+#[test]
+fn itertools_filter_helpers_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.accumulate([f]))(1)
+next(itertools.compress([f], [True]))(1)
+next(itertools.dropwhile(lambda _: False, [f]))(1)
+next(itertools.takewhile(lambda _: True, [f]))(1)
+next(itertools.islice([f], 1))(1)
+",
+    );
+    for line in 4..=8 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected itertools filter-helper violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Combinatoric itertools helpers preserve callable tuple-element types
+/// (issue #449).
+#[test]
+fn itertools_tuple_helpers_preserve_callable_element_signatures() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.pairwise([f, f]))[0](1)
+next(itertools.product([f]))[0](1)
+next(itertools.permutations([f]))[0](1)
+next(itertools.combinations([f], 1))[0](1)
+next(itertools.zip_longest([f]))[0](1)
+",
+    );
+    for line in 4..=8 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected itertools tuple-helper violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Generic builtins preserve literal callable elements at their documented
 /// output positions (issue #390).
 #[test]
