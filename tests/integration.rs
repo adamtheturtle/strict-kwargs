@@ -642,7 +642,7 @@ fn explicit_paths_ignore_extend_exclude_unless_forced() {
     let config = Config::load(&root).expect("valid config");
     let diagnostics =
         check_paths(&root, std::slice::from_ref(&file), &config, None, None).expect("check");
-    assert!(diagnostics.is_empty());
+    assert_eq!(diagnostics.len(), 0);
 }
 
 /// Build a non-dotted project dir, write the given files, and check them all

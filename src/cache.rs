@@ -1101,7 +1101,7 @@ mod tests {
 
         let cache = open_cache(dir.path(), 1);
         let got = cache.get(&path).expect("cache hit");
-        assert!(got.is_empty());
+        assert_eq!(got.len(), 0);
     }
 
     #[test]

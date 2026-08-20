@@ -353,13 +353,13 @@ mod tests {
 
         // Vendored typeshed stdlib module (`<name>.pyi`).
         let stdlib = resolver.resolve("types").expect("stdlib module");
-        assert!(!stdlib.source.is_empty());
+        assert_ne!(stdlib.source, "");
         assert!(!stdlib.is_package);
 
         // Vendored typeshed stdlib package (`<name>/__init__.pyi`).
         let pkg = resolver.resolve("os").expect("stdlib package");
         assert!(pkg.is_package);
-        assert!(!pkg.source.is_empty());
+        assert_ne!(pkg.source, "");
 
         // Nested vendored module: confirms the recursive index includes files
         // below more than one embedded directory level.
@@ -367,7 +367,7 @@ mod tests {
             .resolve("xml.etree.ElementTree")
             .expect("nested stdlib module");
         assert!(!nested.is_package);
-        assert!(!nested.source.is_empty());
+        assert_ne!(nested.source, "");
 
         // Nothing resolves: unknown name.
         assert!(resolver.resolve("this_module_does_not_exist_xyz").is_none());
@@ -425,7 +425,7 @@ mod tests {
             .resolve("airflow.providers")
             .expect("namespace package");
         assert!(namespace.is_package);
-        assert!(namespace.source.is_empty());
+        assert_eq!(namespace.source, "");
         assert!(resolver
             .resolve("airflow.providers.tasks")
             .expect("module under namespace")
@@ -577,7 +577,7 @@ mod tests {
             discover_site_packages_in_environment(&dir.path().join("Scripts/python.exe")),
             expected
         );
-        assert!(discover_site_packages_in_environment(&dir.path().join("python")).is_empty());
+        assert_eq!(discover_site_packages_in_environment(&dir.path().join("python")).len(), 0);
     }
 
     /// Run `f` with `VIRTUAL_ENV` set to `value` (or removed when `None`),
@@ -638,10 +638,10 @@ mod tests {
             let empty = with_virtual_env(Some(std::ffi::OsStr::new("")), || {
                 discover_site_packages(dir.path())
             });
-            assert!(empty.is_empty());
+            assert_eq!(empty.len(), 0);
             // Unset (covers the `None` value arm).
             let unset = with_virtual_env(None, || discover_site_packages(dir.path()));
-            assert!(unset.is_empty());
+            assert_eq!(unset.len(), 0);
         });
     }
 

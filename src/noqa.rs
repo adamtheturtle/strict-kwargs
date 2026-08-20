@@ -391,8 +391,7 @@ mod tests {
         let noqa = directives(source);
         // Columns point at the `#` that introduces the directive itself, not
         // at the start of the comment: on line 5 that is the second `#`.
-        assert_eq!(
-            noqa.explicit_code_directive_positions(source, "KW001"),
+        assert_eq!(noqa.explicit_code_directive_positions(source, "KW001"),
             vec![(1, 13), (5, 27)]
         );
     }
@@ -400,9 +399,8 @@ mod tests {
     #[test]
     fn explicit_code_directive_positions_are_empty_without_comments() {
         let source = "f(1, 2, 3)\n";
-        assert!(directives(source)
-            .explicit_code_directive_positions(source, "KW001")
-            .is_empty());
+        assert_eq!(directives(source)
+            .explicit_code_directive_positions(source, "KW001").len(), 0);
     }
 
     #[test]

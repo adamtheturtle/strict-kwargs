@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn parse_error_converts_and_displays() {
         let error = CheckError::from(parse_error());
-        assert!(!error.to_string().is_empty());
+        assert_ne!(error.to_string(), "");
         assert!(format!("{error:?}").starts_with("Parse("));
     }
 

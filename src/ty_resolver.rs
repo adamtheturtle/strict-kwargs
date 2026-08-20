@@ -860,8 +860,7 @@ mod tests {
 
     #[test]
     fn posix_path_to_uri() {
-        assert_eq!(
-            path_to_uri(Path::new("/home/u/a.py")),
+        assert_eq!(path_to_uri(Path::new("/home/u/a.py")),
             "file:///home/u/a.py"
         );
     }
@@ -947,13 +946,12 @@ mod tests {
         );
         // A `def`/`bound method` head with an empty name is not a signature
         // and yields nothing (no crash).
-        assert!(parse_callable_type_overloads("(def () -> int) | Any").is_empty());
+        assert_eq!(parse_callable_type_overloads("(def () -> int) | Any").len(), 0);
     }
 
     #[test]
     fn callable_type_overloads_single_and_bare_overload() {
-        assert_eq!(
-            parse_callable_type_overloads("(x: int) -> str"),
+        assert_eq!(parse_callable_type_overloads("(x: int) -> str"),
             vec!["x: int".to_string()],
         );
         assert_eq!(
@@ -979,12 +977,10 @@ mod tests {
 
     #[test]
     fn callable_type_overloads_rejects_non_callables() {
-        assert!(parse_callable_type_overloads("<class 'C'>").is_empty());
-        assert!(
-            parse_callable_type_overloads("<method-wrapper 'startswith' of string 'abc'>")
-                .is_empty()
+        assert_eq!(parse_callable_type_overloads("<class 'C'>").len(), 0);
+        assert_eq!(parse_callable_type_overloads("<method-wrapper 'startswith' of string 'abc'>"), [] as [std::string::String; 0]
         );
-        assert!(parse_callable_type_overloads("list[int]").is_empty());
+        assert_eq!(parse_callable_type_overloads("list[int]").len(), 0);
     }
 
     #[test]
@@ -1125,9 +1121,9 @@ mod tests {
             vec!["x: int".to_string()]
         );
         // `Overload[` without a closing `]` is treated as a single entry.
-        assert!(parse_callable_type_overloads("Overload[(a) -> b").is_empty());
+        assert_eq!(parse_callable_type_overloads("Overload[(a) -> b").len(), 0);
         // No callable arm in the union at all.
-        assert!(parse_callable_type_overloads("None | int").is_empty());
+        assert_eq!(parse_callable_type_overloads("None | int").len(), 0);
     }
 
     #[test]

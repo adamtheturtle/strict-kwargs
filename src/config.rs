@@ -420,8 +420,7 @@ mod tests {
       "#,
         )
         .expect("valid config");
-        assert_eq!(
-            config.ignore_names,
+        assert_eq!(config.ignore_names,
             vec!["main.func".to_string(), "builtins.str".to_string()]
         );
         assert_eq!(config.src, vec![PathBuf::from("src"), PathBuf::from("lib")]);
@@ -459,22 +458,20 @@ mod tests {
     #[test]
     fn absent_table_is_default_not_an_error() {
         // No `[tool]` table at all.
-        assert!(Config::from_pyproject_str("[project]\nname = \"x\"\n")
+        assert_eq!(Config::from_pyproject_str("[project]\nname = \"x\"\n")
             .expect("absent table is not an error")
-            .ignore_names
-            .is_empty());
+            .ignore_names.len(), 0);
         // `tool` present but not a table (so it cannot hold our subtable).
-        assert!(Config::from_pyproject_str("tool = 5\n")
+        assert_eq!(Config::from_pyproject_str("tool = 5\n")
             .expect("non-table `tool` is not our concern")
-            .ignore_names
-            .is_empty());
+            .ignore_names.len(), 0);
         // `[tool]` present but no `strict_kwargs` key.
         let config =
             Config::from_pyproject_str("[tool.other]\nk = 1\n").expect("absent subtable is fine");
-        assert!(config.ignore_names.is_empty());
-        assert!(config.src.is_empty());
-        assert!(config.namespace_packages.is_empty());
-        assert!(config.extend_exclude.is_empty());
+        assert_eq!(config.ignore_names.len(), 0);
+        assert_eq!(config.src.len(), 0);
+        assert_eq!(config.namespace_packages.len(), 0);
+        assert_eq!(config.extend_exclude.len(), 0);
         assert!(!config.force_exclude);
         assert!(config.required_version.is_none());
         assert_eq!(config.cache_dir, None);
@@ -881,7 +878,7 @@ mod tests {
     fn load_missing_pyproject_is_default() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = Config::load(dir.path()).expect("missing file is not an error");
-        assert!(config.ignore_names.is_empty());
+        assert_eq!(config.ignore_names.len(), 0);
         assert!(!config.debug);
         assert!(!config.fix_synthesized_constructors);
     }

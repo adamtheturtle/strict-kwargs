@@ -790,7 +790,7 @@ mod tests {
     #[test]
     fn unified_diff_empty_when_unchanged() {
         let path = Path::new("m.py");
-        assert!(unified_diff(path, "a\nb\n", "a\nb\n", false).is_empty());
+        assert_eq!(unified_diff(path, "a\nb\n", "a\nb\n", false), "");
     }
 
     #[test]

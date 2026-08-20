@@ -267,7 +267,7 @@ fn check_clean_exits_zero() {
     // Explicit path argument.
     let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    assert!(stderr(&output).is_empty());
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn check_json_output_writes_structured_diagnostics_to_stdout() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["check", "--output-format", "json", "main.py"]);
     assert_eq!(code(&output), 1);
-    assert!(stderr(&output).is_empty());
+    assert_eq!(stderr(&output), "");
 
     let json: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json output");
     let diagnostic = json.as_array().expect("diagnostic array")[0].clone();
@@ -405,7 +405,7 @@ fn check_github_output_writes_annotations_to_stdout() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
     let output = project.run(&["check", "--output-format", "github", "main.py"]);
     assert_eq!(code(&output), 1);
-    assert!(stderr(&output).is_empty());
+    assert_eq!(stderr(&output), "");
     assert_eq!(
         stdout(&output),
         "::error file=main.py,line=2,col=1,title=KW001::\
@@ -425,12 +425,12 @@ fn check_output_format_config_is_overridden_by_cli() {
 
     let configured = project.run(&["check", "main.py"]);
     assert_eq!(code(&configured), 1);
-    assert!(stderr(&configured).is_empty());
+    assert_eq!(stderr(&configured), "");
     assert!(stdout(&configured).starts_with("[\n  {"));
 
     let overridden = project.run(&["check", "--output-format", "full", "main.py"]);
     assert_eq!(code(&overridden), 1);
-    assert!(stderr(&overridden).is_empty());
+    assert_eq!(stderr(&overridden), "");
     assert!(stdout(&overridden).contains("main.py:2:1: KW001"));
 }
 
@@ -449,7 +449,7 @@ fn check_nonexistent_explicit_project_root_is_fatal_exit_two() {
     let output = project.run(&["check", "--project-root", "does-not-exist", "main.py"]);
     let err = stderr(&output);
     assert_eq!(code(&output), 2, "stderr: {err}");
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
     assert!(err.contains("--project-root"), "stderr: {err}");
     assert!(err.contains("existing directory"), "stderr: {err}");
     assert!(err.contains("does-not-exist"), "stderr: {err}");
@@ -463,7 +463,7 @@ fn check_file_explicit_project_root_is_fatal_exit_two() {
     let output = project.run(&["check", "--project-root", "not-a-directory", "main.py"]);
     let err = stderr(&output);
     assert_eq!(code(&output), 2, "stderr: {err}");
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
     assert!(err.contains("--project-root"), "stderr: {err}");
     assert!(err.contains("existing directory"), "stderr: {err}");
     assert!(err.contains("not-a-directory"), "stderr: {err}");
@@ -490,7 +490,7 @@ fn check_paths_from_multiple_projects_are_rejected_in_any_order() {
         let output = project.run(&["check", paths[0], paths[1]]);
         let err = stderr(&output);
         assert_eq!(code(&output), 2, "stderr: {err}");
-        assert!(stdout(&output).is_empty());
+        assert_eq!(stdout(&output), "");
         assert!(err.contains("multiple project roots"), "stderr: {err}");
         assert!(err.contains("separately"), "stderr: {err}");
     }
@@ -521,7 +521,7 @@ fn check_bare_required_version_minimum_accepts_post_build() {
         .write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let output = project.run(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    assert!(stderr(&output).is_empty());
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]
@@ -1141,7 +1141,7 @@ fn check_existing_non_python_path_is_fatal_exit_two() {
     let output = project.run(&["check", "--python", "README.md", "main.py"]);
     let err = stderr(&output);
     assert_eq!(code(&output), 2, "stderr: {err}");
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
     assert!(err.contains("--python"), "stderr: {err}");
     assert!(err.contains("Python interpreter"), "stderr: {err}");
     assert!(err.contains("README.md"), "stderr: {err}");
@@ -1152,7 +1152,7 @@ fn fix_reports_when_nothing_to_fix() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
     let output = project.run(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0);
-    assert!(stderr(&output).is_empty());
+    assert_eq!(stderr(&output), "");
     assert_eq!(stdout(&output), "All checks passed!\n");
 }
 
