@@ -2585,8 +2585,7 @@ contextlib.ExitStack().enter_context(cm=contextlib.nullcontext(enter_result=targ
 contextlib.nullcontext(enter_result=target).__enter__()(1)
 
 async def main() -> None:
-    case = unittest.IsolatedAsyncioTestCase()
-    (await case.enterAsyncContext(cm=Manager()))(1)
+    (await unittest.IsolatedAsyncioTestCase().enterAsyncContext(cm=Manager()))(1)
     stack = contextlib.AsyncExitStack()
     (await stack.enter_async_context(cm=Manager()))(1)
 ",
@@ -2597,7 +2596,7 @@ async def main() -> None:
             "expected generic-result violation on line {line}, got: {messages:?}"
         );
     }
-    for line in [47, 49] {
+    for line in [46, 48] {
         assert!(
             has_error_at(&messages, line, "awaited result")
                 || has_error_at(&messages, line, "generic result"),

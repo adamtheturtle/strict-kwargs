@@ -2139,6 +2139,40 @@ impl<'a> CallChecker<'a> {
         self.index.is_class(aliased).then(|| aliased.to_string())
     }
 
+    /// Resolve `unittest.TestCase().enterContext` and similar re-exported
+    /// constructors without teaching `class_from_constructor` about those
+    /// aliases (which would divert all `TestCase` instance methods from ty).
+    #[cfg_attr(coverage, coverage(off))]
+    fn unittest_enter_factory(&self, func: &Expr) -> Option<String> {
+        let Expr::Attribute(attr) = func else {
+            return None;
+        };
+        if !matches!(
+            attr.attr.as_str(),
+            "enterContext" | "enterClassContext" | "enterAsyncContext"
+        ) {
+            return None;
+        }
+        let Expr::Call(constructor) = attr.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(ast::ExprAttribute {
+            value,
+            attr: class_attr,
+            ..
+        }) = constructor.func.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Name(module) = value.as_ref() else {
+            return None;
+        };
+        let module_path = self.resolve_module(module.id.as_str())?;
+        let candidate = format!("{module_path}.{}", class_attr.as_str());
+        let class = self.indexed_class(&candidate)?;
+        Some(format!("{class}.{}", attr.attr.as_str()))
+    }
+
     // Covered by integration tests that exercise constructor receivers through
     // real calls. Excluded from the coverage gate because llvm-cov reports an
     // unexecuted per-test-binary instantiation even when those paths are hit.
@@ -2153,11 +2187,11 @@ impl<'a> CallChecker<'a> {
                 self.resolve_local(local)
                     .or_else(|| {
                         let candidate = format!("{}.{}", self.module_name, local);
-                        self.indexed_class(&candidate)
+                        self.index.is_class(&candidate).then_some(candidate)
                     })
                     .or_else(|| {
                         let candidate = format!("builtins.{local}");
-                        self.indexed_class(&candidate)
+                        self.index.is_class(&candidate).then_some(candidate)
                     })
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
@@ -2180,7 +2214,7 @@ impl<'a> CallChecker<'a> {
                     let module_path = self.resolve_module(head)?;
                     format!("{module_path}.{rest}.{attr_name}")
                 };
-                self.indexed_class(&candidate)
+                self.index.is_class(&candidate).then_some(candidate)
             }
             _ => None,
         }
@@ -3938,7 +3972,9 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let factory = self.resolve_callee(&call.func)?;
+        let factory = self
+            .resolve_callee(&call.func)
+            .or_else(|| self.unittest_enter_factory(&call.func))?;
         let generic = self
             .generic_returns
             .get(&factory)
