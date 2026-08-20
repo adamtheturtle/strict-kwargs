@@ -2288,79 +2288,80 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function =
-            if let Some(signature) = self.generator_send_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "Generator.send() result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.overload_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "overload result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "asyncio.Queue.get() result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.queue_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "queue result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.deque_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "deque result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.generic_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "generic result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.anext_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "anext() result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.awaited_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "awaited result".to_string(),
-                    signature,
-                })
-            } else if let Some(partial) = self.partial_result_function(&call.func) {
-                Some(partial)
-            } else if let Some(signature) = self.cast_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "typing.cast result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.reduce_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "reduce result".to_string(),
-                    signature,
-                })
-            } else if let Some(signature) = self.next_result_signature(&call.func) {
-                Some(LocalFunction {
-                    fullname: "next() result".to_string(),
-                    signature,
-                })
-            } else if let Expr::Lambda(lambda) = call.func.as_ref() {
-                Some(LocalFunction {
-                    fullname: format!("{}.<lambda>", self.current_lexical_scope()),
-                    signature: lambda.parameters.as_deref().map_or_else(
-                        || Signature {
-                            parameters: Vec::new(),
-                        },
-                        signature_from_parameters,
-                    ),
-                })
-            } else if self.local_function_scope_count == 0 {
-                None
-            } else {
-                self.resolve_local_function_call(&call.func)
-            };
+        let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
+            Some(method)
+        } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Generator.send() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.overload_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "overload result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.Queue.get() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "queue result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.deque_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "deque result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.generic_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "generic result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.anext_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "anext() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "awaited result".to_string(),
+                signature,
+            })
+        } else if let Some(partial) = self.partial_result_function(&call.func) {
+            Some(partial)
+        } else if let Some(signature) = self.cast_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "typing.cast result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.reduce_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "reduce result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.next_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "next() result".to_string(),
+                signature,
+            })
+        } else if let Expr::Lambda(lambda) = call.func.as_ref() {
+            Some(LocalFunction {
+                fullname: format!("{}.<lambda>", self.current_lexical_scope()),
+                signature: lambda.parameters.as_deref().map_or_else(
+                    || Signature {
+                        parameters: Vec::new(),
+                    },
+                    signature_from_parameters,
+                ),
+            })
+        } else if self.local_function_scope_count == 0 {
+            None
+        } else {
+            self.resolve_local_function_call(&call.func)
+        };
         let callee_fullname = if let Some(local_function) = &local_function {
             local_function.fullname.clone()
         } else {
@@ -3371,6 +3372,39 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         self.resolve_callee(call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn method_type_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let method_type = match call.func.as_ref() {
+            Expr::Name(name) => self.resolve_local(name.id.as_str()),
+            Expr::Attribute(attribute) => {
+                let Expr::Name(module) = attribute.value.as_ref() else {
+                    return None;
+                };
+                self.resolve_module(module.id.as_str())
+                    .map(|module| format!("{module}.{}", attribute.attr))
+            }
+            _ => None,
+        };
+        if method_type.as_deref() != Some("types.MethodType") || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [method, _receiver] = &*call.arguments.args else {
+            return None;
+        };
+        let fullname = self.resolve_callee(method)?;
+        let mut signature = self.index.get(&fullname)?.first()?.clone();
+        (!signature.parameters.is_empty()).then_some(())?;
+        signature.parameters.remove(0);
+        Some(LocalFunction {
+            fullname: format!("{fullname} bound by MethodType"),
+            signature,
+        })
     }
 
     fn current_lexical_scope(&self) -> &str {
