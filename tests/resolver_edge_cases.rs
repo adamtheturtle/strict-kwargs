@@ -595,7 +595,7 @@ fn assert_is_not_none_narrowing_preserves_callable_signature() {
         r"
 from collections.abc import Callable
 def caller(value: Callable[[int], None] | None) -> None:
-    assert value is not None
+    assert value is not None, "present"
     value(1)
 ",
     );

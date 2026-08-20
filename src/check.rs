@@ -5363,14 +5363,7 @@ impl<'a> CallChecker<'a> {
             }
             Stmt::Assert(assert_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
-                self.visit_expr(&assert_stmt.test);
-                if let Some((name, signature)) = self.optional_callable_narrowing(&assert_stmt.test)
-                {
-                    self.define_function(&name, "narrowed callable".to_string(), signature);
-                }
-                if let Some(msg) = &assert_stmt.msg {
-                    self.visit_expr(msg);
-                }
+                self.apply_assert_optional_callable_narrowing(assert_stmt);
             }
             Stmt::With(with_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
