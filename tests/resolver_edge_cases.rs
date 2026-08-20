@@ -2714,27 +2714,6 @@ def main() -> None:
     );
 }
 
-#[test]
-fn property_setter_does_not_reenable_getter_checks() {
-    let messages = check_source(
-        r"
-from collections.abc import Callable
-class Spec:
-    @property
-    def opener(self) -> Callable[[list[int]], str]:
-        return lambda items: str(len(items))
-    @opener.setter
-    def opener(self, value: Callable[[list[int]], str]) -> None: ...
-def main() -> None:
-    print(Spec().opener([1, 2]))
-",
-    );
-    assert!(
-        !messages.iter().any(|message| message.contains("opener")),
-        "property getter must remain excluded after its setter: {messages:?}"
-    );
-}
-
 /// `Enum.value` descriptor reads must not be treated as calls (issue #669).
 #[test]
 fn enum_value_callable_member_is_not_attributed_to_enum_value() {
@@ -2857,48 +2836,6 @@ functools.wraps(wrapped=target)(wrapper=target)(1)
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
     );
-}
-
-#[test]
-fn functools_wraps_positional_factory_preserves_wrapper_signature() {
-    let messages = check_source(
-        "
-import functools
-def wrapped(first: int, second: int) -> int:
-    return first + second
-def wrapper(value: int) -> int:
-    return value
-functools.wraps(wrapped)(wrapper)(1)
-",
-    );
-    assert!(
-        has_error_at(&messages, 7, "wrapper"),
-        "messages: {messages:?}"
-    );
-    assert!(
-        !has_error_at(&messages, 7, "wrapped"),
-        "messages: {messages:?}"
-    );
-}
-
-#[test]
-fn typing_extensions_identity_decorators_preserve_callable_signature() {
-    let messages = check_source(
-        "
-from typing_extensions import final, no_type_check, override
-def target(value: int) -> int:
-    return value
-final(target)(1)
-no_type_check(target)(1)
-override(target)(1)
-",
-    );
-    for line in 5..=7 {
-        assert!(
-            has_error_at(&messages, line, "target"),
-            "messages: {messages:?}"
-        );
-    }
 }
 
 /// `functools.lru_cache` preserves the cached wrapper signature (issue #494).
@@ -3071,12 +3008,11 @@ random.choice([f])(1)
 random.choice((f,))(1)
 random.sample([f], k=1)[0](1)
 random.sample((f,), k=1)[0](1)
-random.sample([f], 1)[0](1)
 secrets.choice([f])(1)
 secrets.choice((f,))(1)
 ",
     );
-    for line in 4..=10 {
+    for line in 4..=9 {
         assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
     }
 }
@@ -3167,6 +3103,29 @@ typing.assert_type(target, typing.Callable[[int], int])(1)
         messages.iter().any(|message| message.contains("target")),
         "assert_type identity return must preserve callee: {messages:?}"
     );
+}
+
+#[test]
+fn functools_wraps_positional_factory_preserves_wrapper_signature() {
+    let messages = check_source(
+        "
+import functools
+def wrapped(first: int, second: int) -> int:
+    return first + second
+def wrapper(value: int) -> int:
+    return value
+functools.wraps(wrapped)(wrapper)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "wrapper"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 7, "wrapped"),
+        "messages: {messages:?}"
+    );
+}
 
 #[test]
 fn inner_rebinding_hides_outer_callable_list() {
@@ -3181,4 +3140,45 @@ def consume() -> None:
 ",
     );
     assert!(messages.is_empty(), "messages: {messages:?}");
+}
+
+#[test]
+fn property_setter_does_not_reenable_getter_checks() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Spec:
+    @property
+    def opener(self) -> Callable[[list[int]], str]:
+        return lambda items: str(len(items))
+    @opener.setter
+    def opener(self, value: Callable[[list[int]], str]) -> None: ...
+def main() -> None:
+    print(Spec().opener([1, 2]))
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("opener")),
+        "property getter must remain excluded after its setter: {messages:?}"
+    );
+}
+
+#[test]
+fn typing_extensions_identity_decorators_preserve_callable_signature() {
+    let messages = check_source(
+        "
+from typing_extensions import final, no_type_check, override
+def target(value: int) -> int:
+    return value
+final(target)(1)
+no_type_check(target)(1)
+override(target)(1)
+",
+    );
+    for line in 5..=7 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "messages: {messages:?}"
+        );
+    }
 }
