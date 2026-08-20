@@ -272,8 +272,7 @@ impl<'a> SourceRoots<'a> {
                         .map(|relative| (root.components().count(), relative))
                 })
                 .max_by_key(|(depth, _)| *depth)
-                .map(|(_, relative)| relative)
-                .unwrap_or(path)
+                .map_or(path, |(_, relative)| relative)
         }
         .with_extension("");
         let mut parts: Vec<String> = relative
