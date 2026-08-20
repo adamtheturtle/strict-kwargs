@@ -1412,6 +1412,9 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
+    /// Local `Future[Callable[...]]` bindings and the callable value
+    /// signature returned by their zero-argument `result()` method.
+    future_callables: FxHashMap<String, Signature>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
 }
@@ -2452,6 +2455,16 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "ContextVar.get() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.future_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Future.result() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.context_run_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Context.run() result".to_string(),
                 signature,
             })
         } else if let Some((signature, label)) = self.generator_resume_result_signature(&call.func)
@@ -4826,6 +4839,17 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn future_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("Future") {
+            return None;
+        }
+        Self::callable_annotation_signature(slice)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn contextvar_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(get_call) = func else {
             return None;
@@ -4853,6 +4877,82 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn future_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(result_call) = func else {
+            return None;
+        };
+        if !result_call.arguments.args.is_empty() || !result_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = result_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(value) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "result" {
+            return None;
+        }
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_callables.get(value.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(value.id.as_str())
+                || scope.opaque_locals.contains(value.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_run_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(run_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = run_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "run" {
+            return None;
+        }
+        let is_context_run = match method.value.as_ref() {
+            Expr::Call(factory) => {
+                let factory = self.resolve_callee(&factory.func)?;
+                matches!(
+                    factory.as_str(),
+                    "contextvars.copy_context"
+                        | "contextvars.Context"
+                        | "contextvars.Context.__init__"
+                        | "contextvars.Context.__new__"
+                )
+            }
+            Expr::Name(name) => {
+                self.resolve_local(name.id.as_str())
+                    .as_deref()
+                    .is_some_and(|resolved| {
+                        resolved.ends_with(".Context") || resolved.ends_with("contextvars.Context")
+                    })
+            }
+            _ => false,
+        };
+        if !is_context_run {
+            return None;
+        }
+        let callback = run_call.arguments.args.first().or_else(|| {
+            run_call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("callable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        match callback {
+            Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
+            _ => self.unnamed_callable_signature(callback),
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6410,6 +6510,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .insert(name.id.to_string(), signature);
                         }
                     }
+                    if let Some(signature) = Self::future_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .future_callables
+                                .insert(name.id.to_string(), signature);
+                        }
+                    }
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {
@@ -6447,6 +6554,20 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.current_scope()
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .contextvar_callables
+                                .insert(name.id.to_string(), signature);
+                        }
+                    }
+                    if let Some(signature) = Self::future_callable_signature(annotation) {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope
+                                .future_callables
+                                .insert(name.id.to_string(), signature);
+                        }
                     }
                     if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
                         self.current_scope()

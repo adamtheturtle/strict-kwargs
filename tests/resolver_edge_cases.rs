@@ -3009,3 +3009,40 @@ secrets.choice([f])(1)
         assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
     }
 }
+
+/// Annotated `Future[Callable[...]].result()` preserves the callable signature
+/// (issue #410).
+#[test]
+fn future_result_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from concurrent.futures import Future
+def f(value: int) -> None: ...
+future: Future[Callable[[int], None]] = Future()
+future.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "result() result"),
+        "expected Future.result violation, got: {messages:?}"
+    );
+}
+
+/// `Context.run` preserves a lambda callback result callable signature
+/// (issue #480).
+#[test]
+fn context_run_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+import contextvars
+def target(value: int) -> int:
+    return value
+contextvars.copy_context().run(lambda: target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "run() result"),
+        "expected Context.run violation, got: {messages:?}"
+    );
+}
