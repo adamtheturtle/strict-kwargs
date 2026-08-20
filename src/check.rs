@@ -3873,6 +3873,7 @@ impl<'a> CallChecker<'a> {
         Self::callable_annotation_signature(item)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -3882,6 +3883,7 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn callable_typeguard_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
         let Expr::Call(call) = test else {
             return None;
