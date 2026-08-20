@@ -1170,9 +1170,7 @@ impl DefinitionIndex {
                 return Some(found);
             }
         }
-        if star_filtered {
-            self.mark_star_import_blocked(name);
-        }
+        self.maybe_mark_star_import_blocked(name, star_filtered);
         None
     }
 
@@ -1239,8 +1237,10 @@ impl DefinitionIndex {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn mark_star_import_blocked(&self, name: &str) {
-        self.write().star_blocked.insert(name.to_string());
+    fn maybe_mark_star_import_blocked(&self, name: &str, star_filtered: bool) {
+        if star_filtered {
+            self.write().star_blocked.insert(name.to_string());
+        }
     }
 
     /// Whether `fullname` is a constructor we synthesized from class fields
