@@ -1799,14 +1799,15 @@ impl<'a> CallChecker<'a> {
     }
 
     /// Whether a name must not be deferred to ty after the built-in resolver
-    /// misses it. Deleted names, opaque loop/with targets, and invalidated
-    /// callables can still be resolved by ty to a stale earlier definition.
+    /// misses it. Only deleted names and explicitly invalidated callables are
+    /// blocked — general opaque locals (bound-method aliases, parameters, …)
+    /// still need the ty fallback, or Sphinx-style `_filter = lang.word_filter`
+    /// calls go unchecked.
     #[cfg_attr(coverage, coverage(off))]
-    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
-        self.is_opaque_local(name)
-            || self.scopes.iter().rev().any(|scope| {
-                scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
-            })
+    fn is_invalidated_callable_name(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| {
+            scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
+        })
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2418,7 +2419,7 @@ impl<'a> CallChecker<'a> {
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
                 if let Expr::Name(name) = call.func.as_ref() {
-                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
+                    if self.is_invalidated_callable_name(name.id.as_str()) {
                         return;
                     }
                 }
@@ -5389,6 +5390,26 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 } else {
                     None
                 };
+                // Snapshot before ``walk_stmt``: visiting the assign target can
+                // clear the prior ``def`` binding we need to detect replacement.
+                let lambda_replaces_function = is_lambda
+                    && targets.iter().any(|target| {
+                        matches!(
+                            target,
+                            Expr::Name(name) if self.scopes.last().is_some_and(|scope| {
+                                let local = name.id.as_str();
+                                // Nested ``def`` bindings live in ``functions``.
+                                // Module-level ``def`` uses ``define`` → ``names``
+                                // only. Imports also use ``names`` but additionally
+                                // populate ``modules`` — skip those so a try/except
+                                // fallback lambda does not invalidate a successful
+                                // import (``_tuplegetter``).
+                                scope.functions.contains_key(local)
+                                    || (scope.names.contains_key(local)
+                                        && !scope.modules.contains_key(local))
+                            })
+                        )
+                    });
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
@@ -5416,7 +5437,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
-                            if is_lambda {
+                            // Only block ty when a lambda *replaces* an earlier
+                            // ``def`` (issue #412). Fresh lambda bindings and
+                            // try/except import fallbacks still need ty.
+                            if lambda_replaces_function {
                                 self.current_scope()
                                     .invalidated_callables
                                     .insert(name.id.to_string());

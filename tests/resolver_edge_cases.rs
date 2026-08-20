@@ -227,6 +227,95 @@ f(1)
     assert!(messages.is_empty(), "stale with-as function: {messages:?}");
 }
 
+/// Bound-method aliases are opaque to the built-in resolver but must still
+/// reach the ty fallback. Skipping ty for every opaque local (not only
+/// invalidated callables) silenced Sphinx-style `_filter = lang.word_filter`
+/// diagnostics after #561.
+#[test]
+fn bound_method_alias_still_defers_to_ty() {
+    let messages = check_source(
+        r"
+class SearchLanguage:
+    def word_filter(self, word: str) -> bool: ...
+
+def feed(lang: SearchLanguage, stemmed_word: str, extra: str) -> bool:
+    _filter = lang.word_filter
+    return _filter(stemmed_word, extra)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "Too many positional"),
+        "bound-method alias must still reach ty, got: {messages:?}"
+    );
+}
+
+/// Fresh lambda bindings are opaque but must still reach ty. Marking every
+/// lambda assignment as invalidated (rather than only those replacing a
+/// prior ``def``) silenced `CPython` helpers such as
+/// ``badvalue = lambda f: self.assertRaises(...)``.
+#[test]
+fn fresh_lambda_binding_still_defers_to_ty() {
+    let messages = check_source(
+        r"
+def test() -> None:
+    badvalue = lambda f: None
+    badvalue(lambda: None)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "Too many positional")
+            || messages
+                .iter()
+                .any(|m| m.contains("badvalue") || m.contains("lambda")),
+        "fresh lambda binding must still reach ty, got: {messages:?}"
+    );
+}
+
+/// A lambda that replaces an earlier ``def`` must not keep the stale
+/// signature (issue #412).
+#[test]
+fn lambda_replacement_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+f = lambda *args: None
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale lambda-replaced function: {messages:?}"
+    );
+}
+
+/// A try/except import fallback lambda must not suppress calls through the
+/// successfully imported name (``_tuplegetter`` pattern in `CPython`).
+#[test]
+fn try_except_import_fallback_lambda_still_checks_import() {
+    let project = TestProject::new()
+        .pyproject(DEFAULT_PYPROJECT)
+        .file(
+            "collections_helper.py",
+            "def _tuplegetter(index: int, doc: str) -> object: ...\n",
+        )
+        .main(
+            r"
+try:
+    from collections_helper import _tuplegetter
+except ImportError:
+    _tuplegetter = lambda index, doc: None
+_tuplegetter(0)
+",
+        );
+    let messages = project.check();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("_tuplegetter") || m.contains("Too many")),
+        "imported _tuplegetter must still be checked, got: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

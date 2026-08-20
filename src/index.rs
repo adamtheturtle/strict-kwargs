@@ -212,6 +212,12 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     // * No prior ``def`` — a class attribute that simply *is* a lambda
     //   (``_factory = lambda self, path: ...``) has a signature ty resolves
     //   directly, so excluding it would suppress every call through the name.
+    // * Conditional / except branch — a fallback like
+    //   ``_tuplegetter = lambda ...`` after a successful import must not
+    //   exclude the imported binding.
+    if store.conditional_depth > 0 {
+        return;
+    }
     if !matches!(value, Expr::Lambda(_)) {
         return;
     }
@@ -2393,7 +2399,10 @@ fn index_stmt(
         }
         Stmt::For(ast::StmtFor { target, body, .. }) => {
             if let Expr::Name(name) = target.as_ref() {
-                store.exclude(format!("{scope_name}.{}", name.id));
+                let fullname = format!("{scope_name}.{}", name.id);
+                if store.signatures.contains_key(&fullname) {
+                    store.exclude(fullname);
+                }
             }
             exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
@@ -2404,7 +2413,10 @@ fn index_stmt(
                 .filter_map(|item| item.optional_vars.as_deref())
             {
                 if let Expr::Name(name) = target {
-                    store.exclude(format!("{scope_name}.{}", name.id));
+                    let fullname = format!("{scope_name}.{}", name.id);
+                    if store.signatures.contains_key(&fullname) {
+                        store.exclude(fullname);
+                    }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             }
@@ -2555,7 +2567,10 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         }
         Stmt::For(ast::StmtFor { target, body, .. }) => {
             if let Expr::Name(name) = target.as_ref() {
-                store.exclude(format!("{scope_name}.{}", name.id));
+                let fullname = format!("{scope_name}.{}", name.id);
+                if store.signatures.contains_key(&fullname) {
+                    store.exclude(fullname);
+                }
             }
             exclude_assigned_attribute(store, scope_name, target, None);
             index_module_fast(store, module_name, scope_name, body);
@@ -2566,7 +2581,10 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 .filter_map(|item| item.optional_vars.as_deref())
             {
                 if let Expr::Name(name) = target {
-                    store.exclude(format!("{scope_name}.{}", name.id));
+                    let fullname = format!("{scope_name}.{}", name.id);
+                    if store.signatures.contains_key(&fullname) {
+                        store.exclude(fullname);
+                    }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
             }
