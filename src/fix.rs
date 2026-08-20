@@ -169,12 +169,14 @@ pub fn write_all_preserving_encoding(fixes: &[FileFix]) -> std::io::Result<()> {
     commit_prepared_fixes(&prepared)
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn fix_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::Result<()> {
     let transaction = format!("{}-{}", std::process::id(), unique_transaction_suffix());
     let mut entries: Vec<JournalEntry> = Vec::with_capacity(prepared.len());
@@ -234,12 +236,14 @@ fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::R
     result
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn unique_transaction_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(journal)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -251,10 +255,12 @@ fn write_journal(path: &Path, journal: &FixJournal) -> std::io::Result<()> {
     sync_parent(path)
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn sync_parent(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(fix_parent(path))?.sync_all()
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
     let mut parents = fixes
         .iter()
@@ -280,6 +286,7 @@ fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn recover_journal(path: &Path) -> std::io::Result<()> {
     let journal: FixJournal = serde_json::from_slice(&std::fs::read(path)?)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -302,6 +309,7 @@ fn recover_journal(path: &Path) -> std::io::Result<()> {
     sync_parent(path)
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn cleanup_committed_transaction(journal: &FixJournal, path: &Path) -> std::io::Result<()> {
     for entry in &journal.entries {
         if entry.backup.exists() {
@@ -315,6 +323,7 @@ fn cleanup_committed_transaction(journal: &FixJournal, path: &Path) -> std::io::
     sync_parent(path)
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn ensure_source_is_current(fix: &FileFix, bytes: &[u8]) -> std::io::Result<()> {
     match crate::source::decode_python_source(bytes) {
         crate::source::Source::Decoded(current) if current == fix.original => Ok(()),
