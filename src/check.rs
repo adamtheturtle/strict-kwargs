@@ -3334,11 +3334,11 @@ impl<'a> CallChecker<'a> {
             if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
                 return None;
             }
-            if scope.names.contains_key(local) {
-                return None;
-            }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
+            }
+            if scope.names.contains_key(local) {
+                return None;
             }
         }
         None
