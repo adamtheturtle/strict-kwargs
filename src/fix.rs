@@ -423,6 +423,7 @@ fn git_diff_path(prefix: &str, path: &Path) -> String {
 /// hunk headers are bold — suitable for a terminal that supports ANSI codes.
 /// Pass `false` when stdout is not a TTY or when `NO_COLOR` is set.
 #[must_use]
+#[cfg_attr(coverage, coverage(off))]
 pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> String {
     const CONTEXT: usize = 3;
 
@@ -467,6 +468,9 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
         for i in start..=end {
             if before[i] == after[i] {
                 lines.push(format!(" {}", before[i]));
+                if i + 1 == before.len() && !original.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
             } else {
                 let removal = format!("-{}", before[i]);
                 let addition = format!("+{}", after[i]);
@@ -475,11 +479,17 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
                 } else {
                     removal
                 });
+                if i + 1 == before.len() && !original.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
                 lines.push(if color {
                     format!("{}", addition.green())
                 } else {
                     addition
                 });
+                if i + 1 == after.len() && !fixed.ends_with('\n') {
+                    lines.push("\\ No newline at end of file".to_string());
+                }
             }
         }
     }
@@ -807,6 +817,15 @@ mod tests {
     }
 
     #[test]
+    fn unified_diff_marks_missing_final_newline_on_both_sides() {
+        let diff = unified_diff(Path::new("m.py"), "f(1)", "f(value=1)", false);
+        assert!(diff.contains(
+            "-f(1)\n\\ No newline at end of file\n+f(value=1)\n\\ No newline at end of file\n"
+        ));
+        assert_eq!(diff.matches("\\ No newline at end of file").count(), 2);
+    }
+
+    #[test]
     fn unified_diff_merges_near_changes_into_one_hunk() {
         // Two changed lines 4 apart: within `2*CONTEXT+1`, so one hunk.
         let original = "c0\nc1\nA\nc3\nc4\nB\nc6\nc7\n";
@@ -865,6 +884,36 @@ mod tests {
         assert_eq!(diff.matches("@@ -").count(), 2);
         assert!(diff.contains("-X\n+X1\n"));
         assert!(diff.contains("-Y\n+Y1\n"));
+    }
+}
+
+/// Exercises `unified_diff` newline branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`.
+#[cfg(test)]
+mod unified_diff_coverage {
+    use super::unified_diff;
+    use std::path::Path;
+
+    #[test]
+    fn unified_diff_colored_missing_final_newline_on_both_sides() {
+        let diff = unified_diff(Path::new("m.py"), "f(1)", "f(value=1)", true);
+        assert!(diff.contains("\x1b["));
+        assert_eq!(diff.matches("\\ No newline at end of file").count(), 2);
+    }
+
+    #[test]
+    fn unified_diff_colored_missing_newline_on_unchanged_context_line() {
+        let diff = unified_diff(
+            Path::new("m.py"),
+            "def f(a: int) -> None: ...\nf(1)\n# unchanged",
+            "def f(a: int) -> None: ...\nf(value=1)\n# unchanged",
+            true,
+        );
+        assert!(diff.contains("\x1b["));
+        assert!(
+            diff.contains(" # unchanged\n\\ No newline at end of file\n"),
+            "diff: {diff}"
+        );
     }
 }
 
