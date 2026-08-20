@@ -3656,3 +3656,29 @@ class Child(Base):
         );
     }
 }
+
+/// Exercises delete-indexing branches under llvm-cov. The main `tests`
+/// module is `#[coverage(off)]`.
+#[cfg(test)]
+mod exclude_deleted_name_coverage {
+    use super::{index_module, Store};
+    use rustpython_ruff_python_parser::parse_module;
+
+    #[test]
+    fn delete_excludes_module_level_callable() {
+        let parsed = parse_module("def f(value: int) -> None: ...\ndel f\n").expect("parse");
+        let mut store = Store::default();
+        index_module(&mut store, "main", false, parsed.suite(), true);
+        assert!(!store.signatures.contains_key("main.f"));
+        assert!(store.excluded.contains("main.f"));
+    }
+
+    #[test]
+    fn conditional_delete_does_not_exclude_callable() {
+        let parsed =
+            parse_module("def f(value: int) -> None: ...\nif c:\n    del f\n").expect("parse");
+        let mut store = Store::default();
+        index_module(&mut store, "main", false, parsed.suite(), true);
+        assert!(store.signatures.contains_key("main.f"));
+    }
+}
