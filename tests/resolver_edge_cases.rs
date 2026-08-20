@@ -257,6 +257,34 @@ f(1)
     );
 }
 
+/// A try/except import fallback lambda must not suppress calls through the
+/// successfully imported name (``_tuplegetter`` pattern in `CPython`).
+#[test]
+fn try_except_import_fallback_lambda_still_checks_import() {
+    let project = TestProject::new()
+        .pyproject(DEFAULT_PYPROJECT)
+        .file(
+            "collections_helper.py",
+            "def _tuplegetter(index: int, doc: str) -> object: ...\n",
+        )
+        .main(
+            r"
+try:
+    from collections_helper import _tuplegetter
+except ImportError:
+    _tuplegetter = lambda index, doc: None
+_tuplegetter(0)
+",
+        );
+    let messages = project.check();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("_tuplegetter") || m.contains("Too many")),
+        "imported _tuplegetter must still be checked, got: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

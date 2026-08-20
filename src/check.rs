@@ -5287,12 +5287,35 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
+<<<<<<< HEAD
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
                 } else {
                     None
                 };
+=======
+                // Snapshot before ``walk_stmt``: visiting the assign target can
+                // clear the prior ``def`` binding we need to detect replacement.
+                let lambda_replaces_function = is_lambda
+                    && targets.iter().any(|target| {
+                        matches!(
+                            target,
+                            Expr::Name(name) if self.scopes.last().is_some_and(|scope| {
+                                let local = name.id.as_str();
+                                // Nested ``def`` bindings live in ``functions``.
+                                // Module-level ``def`` uses ``define`` → ``names``
+                                // only. Imports also use ``names`` but additionally
+                                // populate ``modules`` — skip those so a try/except
+                                // fallback lambda does not invalidate a successful
+                                // import (``_tuplegetter``).
+                                scope.functions.contains_key(local)
+                                    || (scope.names.contains_key(local)
+                                        && !scope.modules.contains_key(local))
+                            })
+                        )
+                    });
+>>>>>>> b2d9166 (Tighten #561 invalidation so imports and for-targets stay checkable.)
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
@@ -5311,16 +5334,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 );
                             }
                         } else if is_callable_attribute_alias || is_lambda {
-                            let replaced_known_callable = is_lambda
-                                && self.scopes.last().is_some_and(|scope| {
-                                    scope.functions.contains_key(name.id.as_str())
-                                        || scope.names.contains_key(name.id.as_str())
-                                });
                             self.mark_opaque_local(name.id.as_str());
                             // Only block ty when a lambda *replaces* an earlier
-                            // callable binding (issue #412). Fresh lambda bindings
-                            // such as ``badvalue = lambda f: ...`` still need ty.
-                            if replaced_known_callable {
+                            // ``def`` (issue #412). Fresh lambda bindings and
+                            // try/except import fallbacks still need ty.
+                            if lambda_replaces_function {
                                 self.current_scope()
                                     .invalidated_callables
                                     .insert(name.id.to_string());
