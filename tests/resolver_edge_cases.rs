@@ -3053,3 +3053,54 @@ contextvars.copy_context().run(lambda: target)(1)
         "expected Context.run violation, got: {messages:?}"
     );
 }
+
+/// `ExitStack.callback` returns the callback unchanged (issue #481).
+#[test]
+fn exit_stack_callback_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from contextlib import ExitStack
+def target(value: int) -> int:
+    return value
+ExitStack().callback(target)(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "callback identity return must preserve callee: {messages:?}"
+    );
+}
+
+/// `AsyncExitStack.push_async_callback` returns the callback unchanged (issue #482).
+#[test]
+fn async_exit_stack_push_async_callback_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from contextlib import AsyncExitStack
+async def target(value: int) -> int:
+    return value
+AsyncExitStack().push_async_callback(target)(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "push_async_callback identity return must preserve callee: {messages:?}"
+    );
+}
+
+/// `typing.assert_type` returns its first argument (issue #486).
+#[test]
+fn typing_assert_type_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import typing
+def target(value: int) -> int:
+    return value
+typing.assert_type(target, typing.Callable[[int], int])(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "assert_type identity return must preserve callee: {messages:?}"
+    );
+}
