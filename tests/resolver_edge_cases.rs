@@ -1366,13 +1366,12 @@ fn generator_throw_result_preserves_callable_signature() {
         r"
 import collections.abc
 import typing
-Callback = typing.Callable[[int], int]
-generator: collections.abc.Generator[Callback, None, None]
+generator: collections.abc.Generator[typing.Callable[[int], int], None, None]
 generator.throw(typ=RuntimeError)(1)
 ",
     );
     assert!(
-        has_error_at(&messages, 6, "throw() result"),
+        has_error_at(&messages, 5, "throw() result"),
         "expected generator throw violation, got: {messages:?}"
     );
 }
@@ -1385,14 +1384,13 @@ fn async_generator_asend_result_preserves_callable_signature() {
         r"
 import collections.abc
 import typing
-Callback = typing.Callable[[int], int]
-agen: collections.abc.AsyncGenerator[Callback, None]
+agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
 async def main() -> None:
     (await agen.asend(value=None))(1)
 ",
     );
     assert!(
-        has_error_at(&messages, 7, "asend() result"),
+        has_error_at(&messages, 6, "asend() result"),
         "expected async generator asend violation, got: {messages:?}"
     );
 }
@@ -1405,14 +1403,13 @@ fn async_generator_athrow_result_preserves_callable_signature() {
         r"
 import collections.abc
 import typing
-Callback = typing.Callable[[int], int]
-agen: collections.abc.AsyncGenerator[Callback, None]
+agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
 async def main() -> None:
     (await agen.athrow(typ=RuntimeError))(1)
 ",
     );
     assert!(
-        has_error_at(&messages, 7, "athrow() result"),
+        has_error_at(&messages, 6, "athrow() result"),
         "expected async generator athrow violation, got: {messages:?}"
     );
 }
