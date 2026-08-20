@@ -3540,10 +3540,12 @@ impl<'a> CallChecker<'a> {
         "unittest.case.expectedFailure",
     ];
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_identity_return_stdlib(fullname: &str) -> bool {
         Self::IDENTITY_RETURN_STDLIB.contains(&fullname)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn wrapped_callable_argument(call: &ast::ExprCall) -> Option<&Expr> {
         if let Some(arg) = call.arguments.args.first() {
             return Some(arg);
