@@ -5380,6 +5380,17 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn apply_assert_optional_callable_narrowing(&mut self, assert_stmt: &'a ast::StmtAssert) {
+        self.visit_expr(&assert_stmt.test);
+        if let Some((name, signature)) = self.optional_callable_narrowing(&assert_stmt.test) {
+            self.define_function(&name, "narrowed callable".to_string(), signature);
+        }
+        if let Some(msg) = &assert_stmt.msg {
+            self.visit_expr(msg);
+        }
+    }
+
     /// Walk a statement that appears in a class body or class-level branch.
     /// Function definitions in this context are methods, including those under
     /// class-level control flow, so their leading `self` parameter can bind to
