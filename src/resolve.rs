@@ -69,10 +69,10 @@ impl ModuleResolver {
     pub fn resolve(&self, dotted: &str) -> Option<ResolvedModule> {
         let rel = dotted.replace('.', "/");
 
-        // 1. First-party source (`.py` then `.pyi`).
+        // 1. First-party source (`.pyi` then `.py` so adjacent stubs win).
         if let Some(namespace_packages) = &self.namespace_packages {
             for root in &self.first_party {
-                if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
+                if let Some(m) = read_module(root, &rel, &["pyi", "py"]) {
                     return Some(m);
                 }
                 let namespace_dir = root.join(&rel);
@@ -84,7 +84,7 @@ impl ModuleResolver {
             }
         } else {
             for root in &self.first_party {
-                if let Some(m) = read_module(root, &rel, &["py", "pyi"]) {
+                if let Some(m) = read_module(root, &rel, &["pyi", "py"]) {
                     return Some(m);
                 }
             }
@@ -197,13 +197,14 @@ impl ResolvedModule {
 /// (a package).
 fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> {
     for ext in exts {
-        if let Some(text) = read_python_source_lossy(&root.join(format!("{rel}.{ext}"))) {
-            return Some(ResolvedModule::module(text));
-        }
+        // Python prefers a package directory over a same-name module file.
         if let Some(text) =
             read_python_source_lossy(&root.join(rel).join(format!("__init__.{ext}")))
         {
             return Some(ResolvedModule::package(text));
+        }
+        if let Some(text) = read_python_source_lossy(&root.join(format!("{rel}.{ext}"))) {
+            return Some(ResolvedModule::module(text));
         }
     }
     None
@@ -383,6 +384,25 @@ mod tests {
         let resolver = ModuleResolver::new(root, &source_roots, None);
         let module = resolver.resolve("pkg").expect("package");
         assert!(module.is_package);
+    }
+
+    #[test]
+    fn prefers_package_directory_over_same_name_module_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("collision.py"), "PACKAGE = False\n").expect("write module");
+        std::fs::create_dir_all(root.join("collision")).expect("mkdir package");
+        std::fs::write(
+            root.join("collision").join("__init__.py"),
+            "PACKAGE = True\n",
+        )
+        .expect("write package");
+        let config = crate::config::Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let module_resolver = ModuleResolver::new(root, &source_roots, None);
+        let resolved = module_resolver.resolve("collision").expect("package wins");
+        assert!(resolved.is_package);
+        assert!(resolved.source.contains("PACKAGE = True"));
     }
 
     #[test]

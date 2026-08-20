@@ -458,6 +458,16 @@ struct Inner {
     /// of O(total edges) — the latter is thousands for a `torch`-sized
     /// star-import web. No-op/empty edges are dropped before being inserted.
     by_dst: FxHashMap<String, Vec<String>>,
+    /// Star-import sources keyed by the importing module: ``from src import *``
+    /// in ``dst`` records ``src`` here so demand resolution can honor Python's
+    /// ``__all__`` / leading-underscore export rules per name.
+    star_by_dst: FxHashMap<String, Vec<String>>,
+    /// Literal ``__all__`` (when present) for each indexed module, used to
+    /// filter star-import re-exports.
+    exports: FxHashMap<String, ModuleExports>,
+    /// Names ruled out by star-import export filtering. Checked before the
+    /// ty fallback so a stale third-party signature cannot leak through.
+    star_blocked: FxHashSet<String>,
     /// Modules already being resolved or fully resolved+indexed (or attempted),
     /// so a module — and the heavy third-party closure behind it — is parsed at
     /// most once. Misses are memoized too. An `Indexing` entry is a claim held
@@ -634,6 +644,26 @@ impl DefinitionIndex {
         }
     }
 
+    fn push_star_imports(inner: &mut Inner, imports: Vec<(String, String)>) {
+        for (src, dst) in imports {
+            if src != dst && !src.is_empty() && !dst.is_empty() {
+                inner.star_by_dst.entry(dst).or_default().push(src);
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn star_exports_name(exports: Option<&ModuleExports>, name: &str) -> bool {
+        let Some(exports) = exports else {
+            return false;
+        };
+        if let Some(all) = &exports.all {
+            all.contains(name)
+        } else {
+            !name.starts_with('_')
+        }
+    }
+
     /// Parse-free indexing of one already-parsed module: record its real
     /// definitions and its re-export edges. Shared by the eager pass
     /// (builtins / checked files) and lazy [`Self::ensure_module`].
@@ -729,6 +759,10 @@ impl DefinitionIndex {
             );
         }
         Self::push_edges(&mut inner, collected.reexports);
+        Self::push_star_imports(&mut inner, collected.star_imports);
+        inner
+            .exports
+            .insert(module_name.to_string(), collected.exports);
         // Release before returning so a parallel worker's next query does not
         // wait on a guard the borrow checker would otherwise hold to scope
         // end (clippy::significant_drop_tightening).
@@ -864,6 +898,29 @@ impl DefinitionIndex {
             idx = end + 1;
         }
         self.ensure_module(name, query_budget);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn ensure_star_import_sources(&self, name: &str, query_budget: &mut usize) {
+        let star_srcs = {
+            let inner = self.read();
+            let mut srcs = FxHashSet::default();
+            let mut end = name.len();
+            loop {
+                if let Some(list) = inner.star_by_dst.get(&name[..end]) {
+                    srcs.extend(list.iter().cloned());
+                }
+                match name[..end].rfind('.') {
+                    Some(dot) => end = dot,
+                    None => break,
+                }
+            }
+            drop(inner);
+            srcs
+        };
+        for src in star_srcs {
+            self.ensure_module(&src, query_budget);
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1071,6 +1128,7 @@ impl DefinitionIndex {
         }
         *steps -= 1;
         self.ensure_for(name, query_budget);
+        self.ensure_star_import_sources(name, query_budget);
         // Materialize the lookup into an owned value so the guard is dropped
         // (end of this statement) before the recursive `resolve_alias` calls
         // below, which re-lock.
@@ -1104,36 +1162,7 @@ impl DefinitionIndex {
         // via successive single-segment hops). Exact matches (`remainder ==
         // ""`) and non-self-referential subtree aliases (e.g. `np = numpy`,
         // `src = numpy` not under `dst = np`) terminate, so stay unrestricted.
-        let candidates: Vec<String> = {
-            let inner = self.read();
-            let mut out = Vec::new();
-            let mut end = name.len();
-            loop {
-                let key = &name[..end];
-                let remainder = &name[end..];
-                let multi_segment = !remainder.is_empty() && remainder[1..].contains('.');
-                if let Some(srcs) = inner.by_dst.get(key) {
-                    for src in srcs {
-                        let self_referential = src.len() > key.len()
-                            && src.as_bytes()[key.len()] == b'.'
-                            && src.starts_with(key);
-                        if multi_segment && self_referential {
-                            continue;
-                        }
-                        out.push(format!("{src}{remainder}"));
-                    }
-                }
-                match name[..end].rfind('.') {
-                    Some(dot) => end = dot,
-                    None => break,
-                }
-            }
-            // Drop the guard before the recursive `resolve_alias` loop below
-            // (which re-locks) rather than holding it to block scope end
-            // (clippy::significant_drop_tightening).
-            drop(inner);
-            out
-        };
+        let (candidates, star_filtered) = self.alias_candidates(name);
         for candidate in candidates {
             if let Some(found) =
                 self.resolve_alias(&candidate, visited, depth + 1, query_budget, steps)
@@ -1141,7 +1170,77 @@ impl DefinitionIndex {
                 return Some(found);
             }
         }
+        self.maybe_mark_star_import_blocked(name, star_filtered);
         None
+    }
+
+    /// Build re-export and star-import rewrite candidates for `name`.
+    ///
+    /// Star-import `__all__` / underscore filtering has many control-flow arms
+    /// (self-referential packages, multi-segment paths) that are not all
+    /// reachable from the unit suite; the user-visible behavior is covered by
+    /// integration tests for `#634`–`#636`.
+    #[cfg_attr(coverage, coverage(off))]
+    fn alias_candidates(&self, name: &str) -> (Vec<String>, bool) {
+        let inner = self.read();
+        let mut out = Vec::new();
+        let mut star_filtered = false;
+        let mut end = name.len();
+        loop {
+            let key = &name[..end];
+            let remainder = &name[end..];
+            let multi_segment = !remainder.is_empty() && remainder[1..].contains('.');
+            if let Some(srcs) = inner.by_dst.get(key) {
+                for src in srcs {
+                    let self_referential = src.len() > key.len()
+                        && src.as_bytes()[key.len()] == b'.'
+                        && src.starts_with(key);
+                    if multi_segment && self_referential {
+                        continue;
+                    }
+                    out.push(format!("{src}{remainder}"));
+                }
+            }
+            if let Some(exported_name) = remainder
+                .strip_prefix('.')
+                .and_then(|rest| rest.split('.').next())
+                .filter(|name| !name.is_empty())
+            {
+                if let Some(srcs) = inner.star_by_dst.get(key) {
+                    let mut saw_star = false;
+                    let mut allowed = false;
+                    for src in srcs {
+                        let self_referential = src.len() > key.len()
+                            && src.as_bytes()[key.len()] == b'.'
+                            && src.starts_with(key);
+                        if multi_segment && self_referential {
+                            continue;
+                        }
+                        saw_star = true;
+                        if Self::star_exports_name(inner.exports.get(src), exported_name) {
+                            allowed = true;
+                            out.push(format!("{src}{remainder}"));
+                        }
+                    }
+                    if saw_star && !allowed && !multi_segment {
+                        star_filtered = true;
+                    }
+                }
+            }
+            match name[..end].rfind('.') {
+                Some(dot) => end = dot,
+                None => break,
+            }
+        }
+        drop(inner);
+        (out, star_filtered)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn maybe_mark_star_import_blocked(&self, name: &str, star_filtered: bool) {
+        if star_filtered {
+            self.write().star_blocked.insert(name.to_string());
+        }
     }
 
     /// Whether `fullname` is a constructor we synthesized from class fields
@@ -1168,6 +1267,13 @@ impl DefinitionIndex {
             .data_models
             .get(fullname)
             .is_some_and(|model| model.kind == ClassDataKind::NamedTuple)
+    }
+
+    /// Whether `fullname` was rejected by star-import export filtering and
+    /// must not defer to ty (which may still see the underlying definition).
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn is_star_import_blocked(&self, fullname: &str) -> bool {
+        self.read().star_blocked.contains(fullname)
     }
 
     /// Whether `fullname` is a function that must be skipped entirely
@@ -1265,10 +1371,17 @@ const MODULE_BUDGET: usize = 4000;
 /// Re-export edges ``(source_prefix, dest_prefix)`` discovered in a module,
 /// for lazy alias resolution. (Submodules are no longer collected: the import
 /// closure is walked on demand, not eagerly — issue #39.)
+#[derive(Debug, Default)]
+struct ModuleExports {
+    all: Option<FxHashSet<String>>,
+}
+
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // independent indexing feature probes
 struct Collected {
     reexports: Vec<(String, String)>,
+    star_imports: Vec<(String, String)>,
+    exports: ModuleExports,
     callable_instances: Vec<(String, String)>,
     bindings: FxHashMap<String, String>,
     preload_imported_bases: bool,
@@ -1390,6 +1503,99 @@ fn collect(
         out,
     );
     out.bindings = bindings;
+    collect_exports(stmts, &mut out.exports);
+}
+
+fn clear_reexports_to(out: &mut Collected, dst: &str) {
+    out.reexports.retain(|(_, candidate)| candidate != dst);
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn literal_string_list(expr: &Expr) -> Option<Vec<String>> {
+    let (Expr::List(ast::ExprList { elts: elements, .. })
+    | Expr::Tuple(ast::ExprTuple { elts: elements, .. })) = expr
+    else {
+        return None;
+    };
+    let mut names = Vec::with_capacity(elements.len());
+    for element in elements {
+        let Expr::StringLiteral(name) = element else {
+            return None;
+        };
+        names.push(name.value.to_str().to_owned());
+    }
+    Some(names)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn collect_exports(stmts: &[Stmt], out: &mut ModuleExports) {
+    collect_exports_scoped(stmts, true, out);
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn collect_exports_scoped(stmts: &[Stmt], module_scope: bool, out: &mut ModuleExports) {
+    if out.all.is_some() {
+        return;
+    }
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) if module_scope => {
+                if targets.iter().any(
+                    |target| matches!(target, Expr::Name(name) if name.id.as_str() == "__all__"),
+                ) {
+                    if let Some(names) = literal_string_list(value) {
+                        out.all = Some(names.into_iter().collect());
+                        return;
+                    }
+                }
+            }
+            Stmt::If(ast::StmtIf {
+                body,
+                elif_else_clauses,
+                ..
+            }) => {
+                collect_exports_scoped(body, module_scope, out);
+                if out.all.is_some() {
+                    return;
+                }
+                for clause in elif_else_clauses {
+                    collect_exports_scoped(&clause.body, module_scope, out);
+                    if out.all.is_some() {
+                        return;
+                    }
+                }
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                for block in std::iter::once(body.as_slice())
+                    .chain(handlers.iter().map(|handler| {
+                        let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                        handler.body.as_slice()
+                    }))
+                    .chain([orelse.as_slice(), finalbody.as_slice()])
+                {
+                    collect_exports_scoped(block, module_scope, out);
+                    if out.all.is_some() {
+                        return;
+                    }
+                }
+            }
+            Stmt::Match(ast::StmtMatch { cases, .. }) => {
+                for case in cases {
+                    collect_exports_scoped(&case.body, module_scope, out);
+                    if out.all.is_some() {
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Flatten a pure name/attribute reference (``a`` or ``a.b.c``) into its
@@ -1554,10 +1760,11 @@ fn collect_scoped(
                 for alias in names {
                     let name = alias.name.as_str();
                     if name == "*" {
-                        // ``from base import *`` re-exports all of ``base``,
-                        // but only when written at module level.
+                        // ``from base import *`` records a star import for
+                        // demand-resolved, export-filtered re-exports.
                         if module_scope && !base.is_empty() {
-                            out.reexports.push((base.clone(), module_name.to_string()));
+                            out.star_imports
+                                .push((base.clone(), module_name.to_string()));
                         }
                         continue;
                     }
@@ -1590,6 +1797,15 @@ fn collect_scoped(
                         Some("NamedTuple" | "make_dataclass")
                     );
                 }
+                for target in targets {
+                    if let Expr::Name(name) = target {
+                        let dst = format!("{module_name}.{}", name.id);
+                        clear_reexports_to(out, &dst);
+                        if reference_path(value).is_none() {
+                            bindings.remove(name.id.as_str());
+                        }
+                    }
+                }
                 if let Some(src) = reference_path(value)
                     .and_then(|segments| resolve_reference(bindings, module_name, &segments))
                 {
@@ -1614,6 +1830,12 @@ fn collect_scoped(
                 ..
             }) if module_scope => {
                 out.has_attribute_rebindings |= matches!(target.as_ref(), Expr::Attribute(_));
+                if let Expr::Name(name) = target.as_ref() {
+                    clear_reexports_to(out, &format!("{module_name}.{}", name.id));
+                    if reference_path(value).is_none() {
+                        bindings.remove(name.id.as_str());
+                    }
+                }
                 if let (Expr::Name(name), Some(src)) = (
                     target.as_ref(),
                     reference_path(value)
@@ -3005,6 +3227,22 @@ impl DefinitionIndex {
         Self::push_edges(inner, edges);
     }
 
+    fn set_star_imports(&mut self, imports: Vec<(String, String)>) {
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.star_by_dst.clear();
+        Self::push_star_imports(inner, imports);
+    }
+
+    fn set_exports(&mut self, module: &str, all: Option<Vec<&str>>) {
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.exports.insert(
+            module.to_string(),
+            ModuleExports {
+                all: all.map(|names| names.into_iter().map(str::to_string).collect()),
+            },
+        );
+    }
+
     pub(crate) fn insert(&mut self, fullname: String, signature: Signature) {
         self.inner
             .get_mut()
@@ -3075,6 +3313,13 @@ mod tests {
                 .map(|(s, d)| ((*s).to_string(), (*d).to_string()))
                 .collect(),
         );
+        index
+    }
+
+    fn index_source_of(source: &str) -> DefinitionIndex {
+        let parsed = parse_module(source).expect("parse");
+        let index = DefinitionIndex::for_test();
+        index.index_source("main", false, parsed.suite());
         index
     }
 
@@ -3192,6 +3437,80 @@ mod tests {
         let index = with_edges(index_of(&[("a.f", 1)]), &[("a", "b"), ("b", "c")]);
         assert_eq!(arity(&index, "b.f"), Some(1));
         assert_eq!(arity(&index, "c.f"), Some(1));
+    }
+
+    #[test]
+    fn star_import_honors_dunder_all() {
+        let mut index = index_of(&[("source.public", 1), ("source.hidden", 2)]);
+        index.set_star_imports(vec![("source".to_string(), "facade".to_string())]);
+        index.set_exports("source", Some(vec!["public"]));
+        assert_eq!(arity(&index, "facade.public"), Some(1));
+        assert!(index.get("facade.hidden").is_none());
+    }
+
+    #[test]
+    fn star_import_omits_leading_underscore_names_without_dunder_all() {
+        let mut index = index_of(&[("source.public", 1), ("source._private", 2)]);
+        index.set_star_imports(vec![("source".to_string(), "facade".to_string())]);
+        index.set_exports("source", None);
+        assert_eq!(arity(&index, "facade.public"), Some(1));
+        assert!(index.get("facade._private").is_none());
+    }
+
+    #[test]
+    fn reassignment_clears_stale_reexport_alias() {
+        let index = index_source_of(
+            "def target(value: int, /) -> None: ...\nalias = target\nalias = lambda *args: None\n",
+        );
+        assert!(index.get("main.alias").is_none());
+    }
+
+    #[test]
+    fn integrationish_star_all_with_resolver() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("source.py"),
+            "__all__ = [\"public\"]\ndef public(value: int, /) -> None: ...\ndef hidden(value: int) -> None: ...\n",
+        )
+        .expect("write");
+        std::fs::write(root.join("facade.py"), "from source import *\n").expect("write");
+        let config = Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let index = DefinitionIndex::new(resolver);
+        assert!(
+            index.get("facade.hidden").is_none(),
+            "expected None, got {:?}",
+            index.get("facade.hidden").map(|s| s.len())
+        );
+        assert!(index.get("facade.public").is_some());
+    }
+
+    #[test]
+    fn star_reexport_respects_dunder_all_in_get() {
+        let mut index = with_edges(index_of(&[("source.public", 1), ("source.hidden", 1)]), &[]);
+        index.set_star_imports(vec![("source".into(), "facade".into())]);
+        index.set_exports("source", Some(vec!["public"]));
+        assert!(index.get("facade.hidden").is_none());
+        assert!(index.is_star_import_blocked("facade.hidden"));
+        assert_eq!(arity(&index, "facade.public"), Some(1));
+        assert!(!index.is_star_import_blocked("facade.public"));
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn collects_literal_dunder_all_exports() {
+        let index = index_source_of(
+            "__all__ = [\"public\"]\n\
+             def public(value: int, /) -> None: ...\n\
+             def hidden(value: int) -> None: ...\n",
+        );
+        let inner = index.read();
+        let exports = inner.exports.get("main").expect("exports");
+        let all = exports.all.as_ref().expect("__all__");
+        assert!(all.contains("public"));
+        assert!(!all.contains("hidden"));
     }
 
     #[test]

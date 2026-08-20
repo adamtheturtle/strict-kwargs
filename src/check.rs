@@ -3476,7 +3476,9 @@ impl<'a> CallChecker<'a> {
         callee_fullname: &str,
         call: &ast::ExprCall,
     ) {
-        if !self.index.is_excluded(callee_fullname) {
+        if !self.index.is_excluded(callee_fullname)
+            && !self.index.is_star_import_blocked(callee_fullname)
+        {
             self.record_ty_pending(call);
         }
     }
