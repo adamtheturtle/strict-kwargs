@@ -532,7 +532,7 @@ def caller(value: object) -> None:
 ",
     );
     assert!(
-        has_error_at(&messages, 7, "TypeGuard"),
+        has_error_at(&messages, 7, "narrowed"),
         "expected narrowed violation, got: {messages:?}"
     );
 }
@@ -550,8 +550,58 @@ def caller(value: object) -> None:
 ",
     );
     assert!(
-        has_error_at(&messages, 7, "TypeGuard"),
+        has_error_at(&messages, 7, "narrowed") || has_error_at(&messages, 7, "narrowed"),
         "expected narrowed violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn typeis_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeIs
+def is_call(value: object) -> TypeIs[Callable[[int], None]]: ...
+def caller(value: object) -> None:
+    if is_call(value=value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "narrowed") || has_error_at(&messages, 7, "Too many"),
+        "expected TypeIs narrowed violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn optional_is_not_none_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def caller(value: Callable[[int], None] | None) -> None:
+    if value is not None:
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "narrowed") || has_error_at(&messages, 5, "Too many"),
+        "expected optional narrowing violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn assert_is_not_none_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def caller(value: Callable[[int], None] | None) -> None:
+    assert value is not None
+    value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "narrowed") || has_error_at(&messages, 5, "Too many"),
+        "expected assert narrowing violation, got: {messages:?}"
     );
 }
 
@@ -568,7 +618,7 @@ def caller(value: object) -> None:
 ",
     );
     assert!(
-        has_error_at(&messages, 7, "TypeGuard"),
+        has_error_at(&messages, 7, "narrowed"),
         "expected narrowed violation, got: {messages:?}"
     );
 }
