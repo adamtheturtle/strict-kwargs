@@ -606,6 +606,40 @@ def caller(value: Callable[[int], None] | None) -> None:
 }
 
 #[test]
+
+#[test]
+fn optional_typing_optional_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Optional
+def caller(value: Optional[Callable[[int], None]]) -> None:
+    if value is not None:
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed") || has_error_at(&messages, 6, "Too many"),
+        "expected Optional narrowing violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn optional_none_union_left_narrowing_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def caller(value: None | Callable[[int], None]) -> None:
+    if value is not None:
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "narrowed") || has_error_at(&messages, 5, "Too many"),
+        "expected None|Callable narrowing violation, got: {messages:?}"
+    );
+}
+
 fn typeguard_narrowing_accepts_qualified_annotation() {
     let messages = check_source(
         r"
