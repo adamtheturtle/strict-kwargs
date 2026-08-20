@@ -2534,3 +2534,74 @@ expectedFailure(target)(1)
         "messages: {messages:?}"
     );
 }
+
+/// Context-manager helpers and ``__enter__`` preserve managed callable types
+/// (issues #618-#621, #627-#632, #444, #630, #631).
+#[test]
+fn context_manager_generic_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+
+def target(value: int) -> int:
+    return value
+
+class Writer:
+    def write(self, text: str) -> int:
+        return len(text)
+    def flush(self) -> None:
+        pass
+    def __call__(self, value: int) -> int:
+        return value
+
+class Value:
+    async def aclose(self) -> None:
+        pass
+    def __call__(self, value: int) -> int:
+        return value
+
+class Decorator(contextlib.ContextDecorator):
+    def __enter__(self):
+        return self
+    def __exit__(self, *args: object) -> None:
+        pass
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None:
+        pass
+
+contextlib.closing(thing=target).__enter__()(1)
+contextlib.aclosing(thing=Value()).__aenter__()(1)
+contextlib.redirect_stdout(new_target=Writer()).__enter__()(1)
+contextlib.redirect_stderr(new_target=Writer()).__enter__()(1)
+unittest.enterModuleContext(cm=contextlib.nullcontext(enter_result=target))(1)
+unittest.TestCase().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+unittest.TestCase.enterClassContext(cm=contextlib.nullcontext(enter_result=target))(1)
+Decorator()(func=target)(1)
+contextlib.ExitStack().enter_context(cm=contextlib.nullcontext(enter_result=target))(1)
+contextlib.nullcontext(enter_result=target).__enter__()(1)
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    stack = contextlib.AsyncExitStack()
+    (await stack.enter_async_context(cm=Manager()))(1)
+",
+    );
+    for line in 34..=43 {
+        assert!(
+            has_error_at(&messages, line, "generic result"),
+            "expected generic-result violation on line {line}, got: {messages:?}"
+        );
+    }
+    for line in [47, 49] {
+        assert!(
+            has_error_at(&messages, line, "awaited result")
+                || has_error_at(&messages, line, "generic result"),
+            "expected awaited/generic-result violation on line {line}, got: {messages:?}"
+        );
+    }
+}

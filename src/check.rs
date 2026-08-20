@@ -1119,6 +1119,13 @@ struct CallChecker<'a> {
     /// Generic function fullname -> parameters whose type variable is also
     /// returned, allowing concrete callable arguments to flow to the result.
     generic_returns: FxHashMap<String, GenericReturn>,
+    /// Indexed local class fullname -> callable returned by ``__enter__`` /
+    /// ``__aenter__`` when the method body is a single ``return`` of a
+    /// resolved callable.
+    context_manager_enter_callables: FxHashMap<String, String>,
+    /// Concrete signatures returned by ``__enter__`` / ``__aenter__`` when the
+    /// method body is a single ``return`` of a literal lambda.
+    context_manager_enter_signatures: FxHashMap<String, Signature>,
     /// Locally declared `TypeVar` names eligible for generic propagation.
     type_vars: FxHashSet<String>,
     /// Literal-discriminated overload arms that return concrete callables.
@@ -1471,6 +1478,8 @@ impl<'a> CallChecker<'a> {
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
+            context_manager_enter_callables: FxHashMap::default(),
+            context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             callable_return_overloads: FxHashMap::default(),
             callable_typeguards: FxHashMap::default(),
@@ -2117,6 +2126,19 @@ impl<'a> CallChecker<'a> {
         false
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn indexed_class(&self, candidate: &str) -> Option<String> {
+        if self.index.is_class(candidate) {
+            return Some(candidate.to_string());
+        }
+        let aliased = match candidate {
+            "unittest.TestCase" => "unittest.case.TestCase",
+            "unittest.IsolatedAsyncioTestCase" => "unittest.async_case.IsolatedAsyncioTestCase",
+            _ => return None,
+        };
+        self.index.is_class(aliased).then(|| aliased.to_string())
+    }
+
     // Covered by integration tests that exercise constructor receivers through
     // real calls. Excluded from the coverage gate because llvm-cov reports an
     // unexecuted per-test-binary instantiation even when those paths are hit.
@@ -2131,11 +2153,11 @@ impl<'a> CallChecker<'a> {
                 self.resolve_local(local)
                     .or_else(|| {
                         let candidate = format!("{}.{}", self.module_name, local);
-                        self.index.is_class(&candidate).then_some(candidate)
+                        self.indexed_class(&candidate)
                     })
                     .or_else(|| {
                         let candidate = format!("builtins.{local}");
-                        self.index.is_class(&candidate).then_some(candidate)
+                        self.indexed_class(&candidate)
                     })
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
@@ -2158,7 +2180,7 @@ impl<'a> CallChecker<'a> {
                     let module_path = self.resolve_module(head)?;
                     format!("{module_path}.{rest}.{attr_name}")
                 };
-                self.index.is_class(&candidate).then_some(candidate)
+                self.indexed_class(&candidate)
             }
             _ => None,
         }
@@ -3673,54 +3695,257 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn generic_result_signature(&self, func: &Expr) -> Option<Signature> {
+    fn normalize_factory_fullname(fullname: &str) -> &str {
+        fullname
+            .strip_suffix(".__init__")
+            .or_else(|| fullname.strip_suffix(".__new__"))
+            .unwrap_or(fullname)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn known_stdlib_generic_return(factory: &str) -> Option<GenericReturn> {
+        match Self::normalize_factory_fullname(factory) {
+            "copy.copy" | "copy.deepcopy" => Some(GenericReturn {
+                parameters: vec![(Some(0), "x".to_string())],
+            }),
+            "contextlib.closing" | "contextlib.aclosing" => Some(GenericReturn {
+                parameters: vec![(Some(0), "thing".to_string())],
+            }),
+            "contextlib.redirect_stdout"
+            | "contextlib.redirect_stderr"
+            | "contextlib._RedirectStream" => Some(GenericReturn {
+                parameters: vec![(Some(0), "new_target".to_string())],
+            }),
+            "contextlib.nullcontext" => Some(GenericReturn {
+                parameters: vec![(Some(0), "enter_result".to_string())],
+            }),
+            "contextlib._BaseExitStack.enter_context"
+            | "contextlib.ExitStack.enter_context"
+            | "contextlib._BaseExitStack.enter_async_context"
+            | "contextlib.AsyncExitStack.enter_async_context"
+            | "unittest.enterModuleContext"
+            | "unittest.case.TestCase.enterContext"
+            | "unittest.TestCase.enterContext"
+            | "unittest.case.TestCase.enterClassContext"
+            | "unittest.TestCase.enterClassContext"
+            | "unittest.async_case.IsolatedAsyncioTestCase.enterAsyncContext"
+            | "unittest.IsolatedAsyncioTestCase.enterAsyncContext" => Some(GenericReturn {
+                parameters: vec![(Some(0), "cm".to_string())],
+            }),
+            "contextlib.ContextDecorator.__call__" => Some(GenericReturn {
+                parameters: vec![(Some(0), "func".to_string())],
+            }),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_decorator_generic_return(&self, factory: &str) -> Option<GenericReturn> {
+        if Self::normalize_factory_fullname(factory) == "contextlib.ContextDecorator.__call__" {
+            return Self::known_stdlib_generic_return(factory);
+        }
+        let class = factory.strip_suffix(".__call__")?;
+        (self
+            .index
+            .class_inherits_from(class, "contextlib.ContextDecorator")
+            || self
+                .index
+                .class_inherits_from(class, "contextlib.AsyncContextDecorator"))
+        .then(|| Self::known_stdlib_generic_return("contextlib.ContextDecorator.__call__"))
+        .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generic_argument<'b>(
+        call: &'b ast::ExprCall,
+        index: Option<usize>,
+        name: &str,
+    ) -> Option<&'b Expr> {
+        index
+            .and_then(|index| call.arguments.args.get(index))
+            .filter(|argument| !argument.is_starred_expr())
+            .or_else(|| {
+                call.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
+                        .then_some(&keyword.value)
+                })
+            })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_fullname_signature(&self, fullname: &str) -> Option<Signature> {
+        let signatures = self.index.get(fullname)?;
+        let [signature] = signatures.as_ref() else {
+            return None;
+        };
+        Some(Signature {
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| crate::signature::Parameter {
+                    name: None,
+                    kind: parameter.kind,
+                })
+                .collect(),
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_manager_enter_signature(&self, expr: &Expr) -> Option<Signature> {
+        if let Expr::Call(constructor) = expr {
+            let factory = self.resolve_callee(&constructor.func)?;
+            if let Some(generic) =
+                Self::known_stdlib_generic_return(Self::normalize_factory_fullname(&factory))
+            {
+                return self.signature_from_generic_call(constructor, &generic);
+            }
+        }
+        let class = self.class_from_constructor(expr)?;
+        if let Some(signature) = self.context_manager_enter_signatures.get(&class) {
+            return Some(signature.clone());
+        }
+        let callable = self.context_manager_enter_callables.get(&class)?;
+        self.callable_fullname_signature(callable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_manager_enter_callable(&self, expr: &Expr) -> Option<String> {
+        if let Expr::Call(constructor) = expr {
+            let factory = self.resolve_callee(&constructor.func)?;
+            if let Some(generic) =
+                Self::known_stdlib_generic_return(Self::normalize_factory_fullname(&factory))
+            {
+                return self.callable_from_generic_constructor(constructor, &generic);
+            }
+        }
+        let class = self.class_from_constructor(expr)?;
+        self.context_manager_enter_callables.get(&class).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_from_generic_constructor(
+        &self,
+        call: &ast::ExprCall,
+        generic: &GenericReturn,
+    ) -> Option<String> {
+        let mut result = None;
+        for (index, name) in &generic.parameters {
+            let argument = Self::generic_argument(call, *index, name)?;
+            let callable = if name == "cm" {
+                self.context_manager_enter_callable(argument)?
+            } else {
+                self.resolve_callee(argument)?
+            };
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &callable)
+            {
+                return None;
+            }
+            result = Some(callable);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn signature_from_generic_call(
+        &self,
+        call: &ast::ExprCall,
+        generic: &GenericReturn,
+    ) -> Option<Signature> {
+        let mut result = None;
+        for (index, name) in &generic.parameters {
+            let argument = Self::generic_argument(call, *index, name)?;
+            let signature = if name == "cm" {
+                self.context_manager_enter_signature(argument)?
+            } else {
+                let callable = self.resolve_callee(argument)?;
+                self.callable_fullname_signature(&callable)?
+            };
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_manager_enter_callable_result(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(enter_call) = func else {
+            return None;
+        };
+        if !enter_call.arguments.args.is_empty() || !enter_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = enter_call.func.as_ref() else {
+            return None;
+        };
+        if !matches!(method.attr.as_str(), "__enter__" | "__aenter__") {
+            return None;
+        }
+        self.context_manager_enter_callable(method.value.as_ref())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_manager_enter_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(enter_call) = func else {
+            return None;
+        };
+        if !enter_call.arguments.args.is_empty() || !enter_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = enter_call.func.as_ref() else {
+            return None;
+        };
+        if !matches!(method.attr.as_str(), "__enter__" | "__aenter__") {
+            return None;
+        }
+        self.context_manager_enter_signature(method.value.as_ref())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn context_decorator_call_result(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
         };
         let factory = self.resolve_callee(&call.func)?;
-        let known_copy_return;
-        let generic = if let Some(generic) = self.generic_returns.get(&factory) {
-            generic
-        } else if matches!(factory.as_str(), "copy.copy" | "copy.deepcopy") {
-            known_copy_return = GenericReturn {
-                parameters: vec![(Some(0), "x".to_string())],
-            };
-            &known_copy_return
-        } else {
+        let generic = self.context_decorator_generic_return(&factory)?;
+        let (index, name) = generic.parameters.first()?;
+        let argument = Self::generic_argument(call, *index, name)?;
+        self.resolve_callee(argument)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn single_return_expression(body: &[Stmt]) -> Option<&Expr> {
+        let [Stmt::Return(ast::StmtReturn {
+            value: Some(value), ..
+        })] = body
+        else {
             return None;
         };
-        let mut result: Option<Signature> = None;
-        for (index, name) in &generic.parameters {
-            let argument = index
-                .and_then(|index| call.arguments.args.get(index))
-                .filter(|argument| !argument.is_starred_expr())
-                .or_else(|| {
-                    call.arguments.keywords.iter().find_map(|keyword| {
-                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name.as_str()))
-                            .then_some(&keyword.value)
-                    })
-                })?;
-            let callable = self.resolve_callee(argument)?;
-            let signatures = self.index.get(&callable)?;
-            let [signature] = signatures.as_ref() else {
-                return None;
-            };
-            let unnamed = Signature {
-                parameters: signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| crate::signature::Parameter {
-                        name: None,
-                        kind: parameter.kind,
-                    })
-                    .collect(),
-            };
-            if result.as_ref().is_some_and(|existing| existing != &unnamed) {
-                return None;
-            }
-            result = Some(unnamed);
+        Some(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generic_result_signature(&self, func: &Expr) -> Option<Signature> {
+        if let Some(signature) = self.context_manager_enter_result_signature(func) {
+            return Some(signature);
         }
-        result
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let factory = self.resolve_callee(&call.func)?;
+        let generic = self
+            .generic_returns
+            .get(&factory)
+            .cloned()
+            .or_else(|| self.context_decorator_generic_return(&factory))
+            .or_else(|| Self::known_stdlib_generic_return(&factory))?;
+        self.signature_from_generic_call(call, &generic)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4888,6 +5113,9 @@ impl<'a> CallChecker<'a> {
         let Expr::Await(ast::ExprAwait { value, .. }) = func else {
             return None;
         };
+        if let Some(signature) = self.generic_result_signature(value) {
+            return Some(signature);
+        }
         let Expr::Call(factory_call) = value.as_ref() else {
             return None;
         };
@@ -5186,6 +5414,12 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.identity_return_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.context_manager_enter_callable_result(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.context_decorator_call_result(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.operator_getitem_callable(func) {
                     return Some(callable);
                 }
@@ -5248,6 +5482,23 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if matches!(name.as_str(), "__enter__" | "__aenter__") {
+            if let Some(return_expr) = Self::single_return_expression(body) {
+                if let Some(callable) = self.resolve_callee(return_expr) {
+                    self.context_manager_enter_callables
+                        .insert(class_fullname.clone(), callable);
+                } else if let Expr::Lambda(lambda) = return_expr {
+                    let signature = lambda.parameters.as_deref().map_or_else(
+                        || Signature {
+                            parameters: Vec::new(),
+                        },
+                        signature_from_parameters,
+                    );
+                    self.context_manager_enter_signatures
+                        .insert(class_fullname.clone(), signature);
+                }
+            }
+        }
         if let Some(signature) = returns
             .as_deref()
             .and_then(Self::iterator_item_callable_signature)
