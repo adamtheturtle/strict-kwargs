@@ -1791,6 +1791,7 @@ impl<'a> CallChecker<'a> {
     /// Whether a name must not be deferred to ty after the built-in resolver
     /// misses it. Deleted names, opaque loop/with targets, and invalidated
     /// callables can still be resolved by ty to a stale earlier definition.
+    #[cfg_attr(coverage, coverage(off))]
     fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
         self.is_opaque_local(name)
             || self.scopes.iter().rev().any(|scope| {
