@@ -3309,3 +3309,81 @@ typing.assert_type(target, typing.Callable[[int], int])(1)
         "assert_type identity return must preserve callee: {messages:?}"
     );
 }
+
+#[test]
+fn functools_wraps_positional_factory_preserves_wrapper_signature() {
+    let messages = check_source(
+        "
+import functools
+def wrapped(first: int, second: int) -> int:
+    return first + second
+def wrapper(value: int) -> int:
+    return value
+functools.wraps(wrapped)(wrapper)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "wrapper"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 7, "wrapped"),
+        "messages: {messages:?}"
+    );
+}
+
+#[test]
+fn inner_rebinding_hides_outer_callable_list() {
+    let messages = check_source(
+        r"
+import heapq
+def f(value: int) -> None: ...
+heap = [f]
+def consume() -> None:
+    heap = [object()]
+    heapq.heappop(heap)(1)
+",
+    );
+    assert!(messages.is_empty(), "messages: {messages:?}");
+}
+
+#[test]
+fn property_setter_does_not_reenable_getter_checks() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Spec:
+    @property
+    def opener(self) -> Callable[[list[int]], str]:
+        return lambda items: str(len(items))
+    @opener.setter
+    def opener(self, value: Callable[[list[int]], str]) -> None: ...
+def main() -> None:
+    print(Spec().opener([1, 2]))
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("opener")),
+        "property getter must remain excluded after its setter: {messages:?}"
+    );
+}
+
+#[test]
+fn typing_extensions_identity_decorators_preserve_callable_signature() {
+    let messages = check_source(
+        "
+from typing_extensions import final, no_type_check, override
+def target(value: int) -> int:
+    return value
+final(target)(1)
+no_type_check(target)(1)
+override(target)(1)
+",
+    );
+    for line in 5..=7 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "messages: {messages:?}"
+        );
+    }
+}
