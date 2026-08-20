@@ -160,6 +160,42 @@ C().bound(1)
     );
 }
 
+/// A `for` target remains bound after the loop and invalidates an earlier
+/// function definition with the same name (issue #414).
+#[test]
+fn for_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+for f in [lambda *args: None]:
+    pass
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale loop-target function: {messages:?}"
+    );
+}
+
+/// A `with ... as` target remains bound after the statement and invalidates
+/// an earlier function definition with the same name (issue #415).
+#[test]
+fn with_as_target_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+class Manager:
+    def __enter__(self): return lambda *args: None
+    def __exit__(self, *args): pass
+with Manager() as f:
+    pass
+f(1)
+",
+    );
+    assert!(messages.is_empty(), "stale with-as function: {messages:?}");
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]
@@ -1078,6 +1114,25 @@ reduce(lambda left, right: left, [f, f])(1)
     );
 }
 
+/// A Generator send result retains the declared callable yield signature
+/// (issue #458).
+#[test]
+fn generator_send_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def functions() -> Generator[Callable[[int], None], None, None]: ...
+gen = functions()
+next(gen)
+gen.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "send() result"),
+        "expected generator send violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
@@ -1943,5 +1998,23 @@ atexit.register(target)(1)
     assert!(
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
+    );
+}
+
+/// `MethodType` binds the leading receiver of a concrete method signature
+/// (issue #460).
+#[test]
+fn method_type_result_preserves_bound_method_signature() {
+    let messages = check_source(
+        r"
+from types import MethodType
+class C:
+    def method(self, value: int) -> None: ...
+MethodType(C.method, C())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "MethodType"),
+        "expected bound method violation, got: {messages:?}"
     );
 }
