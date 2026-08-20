@@ -3407,6 +3407,32 @@ impl<'a> CallChecker<'a> {
         })
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn inspect_unwrap_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "unwrap"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("inspect")
+        {
+            return None;
+        }
+        let wrapped = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .keywords
+                .iter()
+                .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("func"))
+                .map(|keyword| &keyword.value)
+        })?;
+        self.resolve_callee(wrapped)
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -4688,6 +4714,9 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Call(constructor) => {
                 if let Some(callable) = self.atexit_register_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.inspect_unwrap_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.operator_getitem_callable(func) {

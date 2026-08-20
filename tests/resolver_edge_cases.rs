@@ -2018,3 +2018,17 @@ MethodType(C.method, C())(1)
         "expected bound method violation, got: {messages:?}"
     );
 }
+
+/// inspect.unwrap retains the concrete wrapped callable signature (issue
+/// #459).
+#[test]
+fn inspect_unwrap_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import inspect
+def f(value: int) -> None: ...
+inspect.unwrap(func=f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
+}
