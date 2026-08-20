@@ -2604,3 +2604,38 @@ async def main() -> None:
         );
     }
 }
+
+/// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
+/// are indexed for later generic-result checking.
+#[test]
+fn context_manager_enter_indexes_named_and_bare_lambda_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> int:
+    return value
+
+class NamedEnter:
+    def __enter__(self):
+        return target
+    def __exit__(self, *args: object) -> None:
+        pass
+
+class BareLambdaEnter:
+    def __enter__(self):
+        return lambda: 1
+    def __exit__(self, *args: object) -> None:
+        pass
+
+NamedEnter().__enter__()(1)
+BareLambdaEnter().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 17, "generic result"),
+        "expected violation for named enter callable, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 18, "generic result"),
+        "expected violation for bare-lambda enter result, got: {messages:?}"
+    );
+}
