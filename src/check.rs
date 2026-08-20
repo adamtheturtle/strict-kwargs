@@ -1412,6 +1412,8 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
+    /// Local list name -> one concrete callable shared by every element.
+    callable_list_elements: FxHashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1563,6 +1565,7 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(local_name);
         scope.callable_queue_items.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_list_elements.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1589,6 +1592,7 @@ impl<'a> CallChecker<'a> {
             scope.instances.remove(local_name);
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
+            scope.callable_list_elements.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1608,6 +1612,48 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    fn resolve_callable_list_element(&self, name: &str) -> Option<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.callable_list_elements.get(name).cloned())
+    }
+
+    fn record_callable_list(&mut self, name: &str, callable: Option<String>) {
+        let scope = self.current_scope();
+        if let Some(callable) = callable {
+            scope
+                .callable_list_elements
+                .insert(name.to_owned(), callable);
+        } else {
+            scope.callable_list_elements.remove(name);
+        }
+    }
+
+    fn homogeneous_callable_list(&self, value: &Expr) -> Option<String> {
+        let Expr::List(list) = value else {
+            return None;
+        };
+        let mut elements = list.elts.iter();
+        let first = self.resolve_callee(elements.next()?)?;
+        elements
+            .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
+    fn homogeneous_callable_sequence(&self, value: &Expr) -> Option<String> {
+        let elements = match value {
+            Expr::List(sequence) => &sequence.elts,
+            Expr::Tuple(sequence) => &sequence.elts,
+            _ => return None,
+        };
+        let mut elements = elements.iter();
+        let first = self.resolve_callee(elements.next()?)?;
+        elements
+            .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
     fn mark_param_opaque(&mut self, name: &str) {
         self.mark_opaque_local(name);
     }
@@ -1625,6 +1671,7 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_list_elements.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1643,6 +1690,7 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_list_elements.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -5320,6 +5368,201 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_setdefault_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "setdefault" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [key, default] = &*call.arguments.args else {
+            return None;
+        };
+        if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
+            return Some(existing);
+        }
+        let key_is_literal = matches!(
+            key,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NoneLiteral(_)
+        );
+        (key_is_literal
+            && dict.items.iter().all(|item| item.key.is_some())
+            && !dict.items.iter().any(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            }))
+        .then(|| self.resolve_callee(default))
+        .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn collections_mapping_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [key] = &*call.arguments.args else {
+            return None;
+        };
+        let class = self.class_from_constructor_func(&constructor.func)?;
+        if !matches!(
+            class.as_str(),
+            "collections.ChainMap" | "collections.UserDict"
+        ) || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [mapping] = &*constructor.arguments.args else {
+            return None;
+        };
+        self.resolve_literal_container_item(mapping, key)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn ordered_dict_popitem_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.args.is_empty()
+            || !popitem.arguments.keywords.is_empty()
+            || self
+                .class_from_constructor_func(&constructor.func)?
+                .as_str()
+                != "collections.OrderedDict"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [entries] = &*constructor.arguments.args else {
+            return None;
+        };
+        let entry_elements = match entries {
+            Expr::List(entries) => &entries.elts,
+            Expr::Tuple(entries) => &entries.elts,
+            _ => return None,
+        };
+        let Expr::Tuple(pair) = entry_elements.last()? else {
+            return None;
+        };
+        let [_, value] = &*pair.elts else {
+            return None;
+        };
+        self.resolve_callee(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn heapq_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_module(module.id.as_str()).as_deref() != Some("heapq")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match (attribute.attr.as_str(), &*call.arguments.args) {
+            ("heappop", [heap]) => match heap {
+                Expr::Name(name) => self.resolve_callable_list_element(name.id.as_str()),
+                Expr::List(_) => self.homogeneous_callable_list(heap),
+                _ => None,
+            },
+            ("heapreplace", [heap, replacement]) => {
+                let element = match heap {
+                    Expr::Name(name) => self.resolve_callable_list_element(name.id.as_str())?,
+                    Expr::List(_) => self.homogeneous_callable_list(heap)?,
+                    _ => return None,
+                };
+                (self.resolve_callee(replacement).as_deref() == Some(element.as_str()))
+                    .then_some(element)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn random_choice_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "choice"
+            || !call.arguments.keywords.is_empty()
+            || !matches!(
+                self.resolve_module(module.id.as_str()).as_deref(),
+                Some("random" | "secrets")
+            )
+        {
+            return None;
+        }
+        let [sequence] = &*call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(sequence)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn random_sample_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "sample"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("random")
+        {
+            return None;
+        }
+        let [sequence] = &*call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_callable_sequence(sequence)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn operator_getitem_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -5373,8 +5616,12 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| {
                             self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         })
+                        .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.random_sample_element_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
+                        .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.random_sample_element_callable(subscript))
                 }
             }
             Expr::Name(name) => {
@@ -5499,6 +5746,18 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.attrgetter_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_setdefault_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.collections_mapping_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.heapq_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.random_choice_callable(func) {
                     return Some(callable);
                 }
                 if let Some(result) =
@@ -6008,6 +6267,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
                 let is_collections_namedtuple = Self::is_collections_namedtuple(value);
+                let callable_list = self.homogeneous_callable_list(value);
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
@@ -6037,6 +6297,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
+                        self.record_callable_list(name.id.as_str(), callable_list.clone());
                         if let Some(signature) = &generator_yield {
                             self.callable_generator_yields
                                 .insert(name.id.to_string(), signature.clone());
