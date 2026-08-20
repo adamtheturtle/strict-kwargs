@@ -1075,6 +1075,38 @@ queue.get_nowait()(1)
     );
 }
 
+/// `multiprocessing.pool.Pool` map helpers preserve callback result types
+/// (issues #622-626).
+#[test]
+fn pool_map_results_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+
+def target(value: int) -> int: return value
+pool = Pool(1)
+Pool(1).map(func=lambda _: target, iterable=[None])[0](1)
+Pool(1).starmap(func=lambda: target, iterable=[()])[0](1)
+next(pool.imap(func=lambda _: target, iterable=[None]))(1)
+next(pool.imap_unordered(func=lambda _: target, iterable=[None]))(1)
+Pool(1).map_async(func=lambda _: target, iterable=[None]).get(timeout=1)[0](1)
+Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
+",
+    );
+    for line in [6, 7, 10, 11] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected pool map subscript violation on line {line}, got: {messages:?}"
+        );
+    }
+    for line in [8, 9] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected pool imap violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Awaiting an asyncio Queue get retains a callable item annotation
 /// (issue #445).
 #[test]
