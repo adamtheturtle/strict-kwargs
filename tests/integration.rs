@@ -1479,6 +1479,94 @@ fn assignment_from_call_is_not_an_alias() {
     assert!(messages.is_empty(), "got: {messages:?}");
 }
 
+#[test]
+fn adjacent_pyi_stub_wins_over_py_implementation() {
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "from dep import false_positive, source_only\n\nsource_only(1)\nfalse_positive(1)\n",
+        )],
+        &[
+            (
+                "dep.py",
+                "def source_only(*args: object) -> None: ...\ndef false_positive(value: int) -> None: ...\n",
+            ),
+            (
+                "dep.pyi",
+                "def source_only(value: int) -> None: ...\ndef false_positive(value: int, /) -> None: ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("source_only"),
+        "stub should require kwargs for source_only, got: {messages:?}"
+    );
+}
+
+#[test]
+fn package_wins_over_same_name_module_file() {
+    let messages = check_with_aux(
+        &[("app.py", "import collision\n\ncollision.target(1)\n")],
+        &[
+            ("collision.py", "def target(value: int, /) -> None: ...\n"),
+            (
+                "collision/__init__.py",
+                "def target(value: int) -> None: ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].starts_with("app.py:3:"));
+}
+
+#[test]
+fn star_reexport_honors_dunder_all() {
+    let messages = check_with_aux(
+        &[("app.py", "from facade import hidden\n\nhidden(1)\n")],
+        &[
+            (
+                "source.py",
+                "__all__ = [\"public\"]\n\
+                 def public(value: int, /) -> None: ...\n\
+                 def hidden(value: int) -> None: ...\n",
+            ),
+            ("facade.py", "from source import *\n"),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn star_reexport_omits_leading_underscore_names() {
+    let messages = check_with_aux(
+        &[("app.py", "from facade import _private\n\n_private(1)\n")],
+        &[
+            (
+                "source.py",
+                "def public(value: int, /) -> None: ...\n\
+                 def _private(value: int) -> None: ...\n",
+            ),
+            ("facade.py", "from source import *\n"),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn reexport_alias_invalidated_by_later_reassignment() {
+    let messages = check_with_aux(
+        &[("app.py", "from source import alias\n\nalias(1)\n")],
+        &[(
+            "source.py",
+            "def target(value: int) -> None: ...\n\
+                 alias = target\n\
+                 alias = lambda *args: None\n",
+        )],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
 // `ty` is a hard requirement (it is verified up front by
 // `check_paths`/`fix_paths`), so the whole suite - not just these
 // `ty_`-prefixed tests - needs `ty` on `PATH`. There is therefore no
