@@ -1399,6 +1399,9 @@ struct Scope {
     callable_queue_items: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Optional callable locals (`Callable[...] | None`) whose signature is
+    /// restored after an ``is not None`` / ``assert … is not None`` guard.
+    optional_callables: FxHashMap<String, Signature>,
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
@@ -1733,6 +1736,11 @@ impl<'a> CallChecker<'a> {
         self.mark_param_opaque(name);
         if let Some(annotation) = annotation {
             self.define_annotation(name, annotation);
+            if let Some(signature) = Self::optional_callable_signature(annotation) {
+                self.current_scope()
+                    .optional_callables
+                    .insert(name.to_string(), signature);
+            }
         }
     }
 
@@ -4065,13 +4073,83 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn optional_callable_signature(annotation: &Expr) -> Option<Signature> {
+        match annotation {
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::BitOr,
+                right,
+                ..
+            }) => {
+                let callable = if matches!(right.as_ref(), Expr::NoneLiteral(_)) {
+                    left.as_ref()
+                } else if matches!(left.as_ref(), Expr::NoneLiteral(_)) {
+                    right.as_ref()
+                } else {
+                    return None;
+                };
+                Self::callable_annotation_signature(callable)
+            }
+            Expr::Subscript(ast::ExprSubscript { value, slice, .. })
+                if Self::dotted_path(value)?
+                    .rsplit('.')
+                    .next()
+                    .is_some_and(|name| name == "Optional") =>
+            {
+                Self::callable_annotation_signature(slice)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_not_none_name(test: &Expr) -> Option<&str> {
+        let Expr::Compare(compare) = test else {
+            return None;
+        };
+        if compare.ops.len() != 1 || compare.comparators.len() != 1 {
+            return None;
+        }
+        if !matches!(compare.ops[0], ast::CmpOp::IsNot) {
+            return None;
+        }
+        if !matches!(compare.comparators[0], Expr::NoneLiteral(_)) {
+            return None;
+        }
+        let Expr::Name(name) = compare.left.as_ref() else {
+            return None;
+        };
+        Some(name.id.as_str())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn optional_callable_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let name = Self::is_not_none_name(test)?;
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.optional_callables.get(name) {
+                return Some((name.to_string(), signature.clone()));
+            }
+            if scope.names.contains_key(name)
+                || scope.opaque_locals.contains(name)
+                || scope.functions.contains_key(name)
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
-        (Self::dotted_path(value)?.rsplit('.').next() == Some("TypeGuard"))
-            .then(|| Self::callable_annotation_signature(slice))
-            .flatten()
+        matches!(
+            Self::dotted_path(value)?.rsplit('.').next(),
+            Some("TypeGuard" | "TypeIs")
+        )
+        .then(|| Self::callable_annotation_signature(slice))
+        .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5269,11 +5347,14 @@ impl<'a> CallChecker<'a> {
         } = if_stmt;
         self.visit_expr(test);
         let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
-            .then(|| self.callable_typeguard_narrowing(test))
+            .then(|| {
+                self.callable_typeguard_narrowing(test)
+                    .or_else(|| self.optional_callable_narrowing(test))
+            })
             .flatten();
         if let Some((name, signature)) = narrowing {
             self.push_scope();
-            self.define_function(&name, "TypeGuard narrowed callable".to_string(), signature);
+            self.define_function(&name, "narrowed callable".to_string(), signature);
             for inner in body {
                 self.visit_if_branch_stmt(inner, traversal);
             }
@@ -5362,6 +5443,10 @@ impl<'a> CallChecker<'a> {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody);
             }
+            Stmt::Assert(assert_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.apply_assert_optional_callable_narrowing(assert_stmt);
+            }
             Stmt::With(with_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_with_stmt(with_stmt);
@@ -5374,6 +5459,17 @@ impl<'a> CallChecker<'a> {
                 self.scan_stmt_for_hover_poison(stmt);
                 walk_stmt(self, stmt);
             }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn apply_assert_optional_callable_narrowing(&mut self, assert_stmt: &'a ast::StmtAssert) {
+        self.visit_expr(&assert_stmt.test);
+        if let Some((name, signature)) = self.optional_callable_narrowing(&assert_stmt.test) {
+            self.define_function(&name, "narrowed callable".to_string(), signature);
+        }
+        if let Some(msg) = &assert_stmt.msg {
+            self.visit_expr(msg);
         }
     }
 
