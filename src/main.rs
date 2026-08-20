@@ -137,9 +137,10 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<Path
 
     let start = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
     let root = find_project_root(&start);
+    let root_identity = project_root_identity(&root);
     for path in paths.iter().skip(1) {
         let other = find_project_root(path);
-        if other != root {
+        if project_root_identity(&other) != root_identity {
             return Err(CheckError::MultipleProjectRoots {
                 first: root,
                 second: other,
@@ -147,6 +148,17 @@ fn project_root_for(explicit: Option<PathBuf>, paths: &[PathBuf]) -> Result<Path
         }
     }
     Ok(root)
+}
+
+/// Compare roots by what they name, not by how they are spelled, so a relative
+/// and an absolute path to one project are not read as two projects.
+///
+/// The fallback covers a root that cannot be canonicalized, such as one deleted
+/// between discovery and this call; comparing the paths as written is then the
+/// best available answer.
+#[cfg_attr(coverage, coverage(off))]
+fn project_root_identity(root: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 fn resolve_configured_cache_dir(project_root: &std::path::Path, cache_dir: &PathBuf) -> PathBuf {
@@ -534,6 +546,37 @@ mod tests {
         let error = project_root_for(None, &[first.join("m.py"), second.join("m.py")])
             .expect_err("mixed roots must be rejected");
         assert!(matches!(error, CheckError::MultipleProjectRoots { .. }));
+    }
+
+    #[test]
+    fn project_root_accepts_sibling_paths_without_a_pyproject() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = dir.path().join("pkg");
+        std::fs::create_dir_all(&package).expect("mkdir");
+        let first = package.join("a.py");
+        let second = package.join("b.py");
+        std::fs::write(&first, "").expect("write");
+        std::fs::write(&second, "").expect("write");
+
+        // Without a ``pyproject.toml`` both files share the directory they sit
+        // in, so this is one project rather than two.
+        assert_eq!(
+            project_root_for(None, &[first, second]).expect("one project root"),
+            package
+        );
+    }
+
+    #[test]
+    fn project_root_accepts_equivalent_spellings_of_one_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").expect("write");
+        let package = dir.path().join("pkg");
+        std::fs::create_dir_all(&package).expect("mkdir");
+        let file = package.join("m.py");
+        std::fs::write(&file, "").expect("write");
+        let indirect = package.join("..").join("pkg").join("m.py");
+
+        assert!(project_root_for(None, &[file, indirect]).is_ok());
     }
 
     #[test]
