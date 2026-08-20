@@ -2733,3 +2733,198 @@ class Style(enum.Enum):
         "Enum.value must not be the callee: {messages:?}"
     );
 }
+
+/// `typing.override` preserves the decorated callable signature (issue #612).
+#[test]
+fn typing_override_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import typing
+def target(value: int) -> int:
+    return value
+typing.override(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `abc.abstractmethod` preserves the decorated callable signature (issue
+/// #489).
+#[test]
+fn abc_abstractmethod_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import abc
+def target(value: int) -> int:
+    return value
+abc.abstractmethod(funcobj=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `typing.final` preserves the decorated callable signature (issue #488).
+#[test]
+fn typing_final_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import typing
+def target(value: int) -> int:
+    return value
+typing.final(f=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `typing.no_type_check` preserves the decorated callable signature (issue
+/// #487).
+#[test]
+fn typing_no_type_check_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import typing
+def target(value: int) -> int:
+    return value
+typing.no_type_check(arg=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `functools.update_wrapper` preserves the wrapper signature (issue #492).
+#[test]
+fn functools_update_wrapper_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import functools
+def target(value: int) -> int:
+    return value
+functools.update_wrapper(wrapper=target, wrapped=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `functools.wraps` preserves the decorated wrapper signature (issue #493).
+#[test]
+fn functools_wraps_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import functools
+def target(value: int) -> int:
+    return value
+functools.wraps(wrapped=target)(wrapper=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `functools.lru_cache` preserves the cached wrapper signature (issue #494).
+#[test]
+fn functools_lru_cache_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import functools
+def target(value: int) -> int:
+    return value
+functools.lru_cache()(user_function=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `functools.cache` preserves the cached wrapper signature (issue #495).
+#[test]
+fn functools_cache_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import functools
+def target(value: int) -> int:
+    return value
+functools.cache(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `types.coroutine` preserves the decorated generator signature (issue #490).
+#[test]
+fn types_coroutine_preserves_callable_signature() {
+    let messages = check_source(
+        "
+import types
+def generator(value: int):
+    yield value
+types.coroutine(func=generator)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "generator"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `abc.update_abstractmethods` preserves the returned class constructor
+/// signature (issue #500).
+#[test]
+fn abc_update_abstractmethods_preserves_class_constructor_signature() {
+    let messages = check_source(
+        "
+import abc
+class Model:
+    def __init__(self, value: int) -> None:
+        pass
+abc.update_abstractmethods(cls=Model)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "Model"),
+        "messages: {messages:?}"
+    );
+}
+
+/// `functools.total_ordering` preserves the returned class constructor
+/// signature (issue #499).
+#[test]
+fn functools_total_ordering_preserves_class_constructor_signature() {
+    let messages = check_source(
+        "
+import functools
+class Model:
+    def __init__(self, value: int) -> None:
+        pass
+    def __lt__(self, other: object) -> bool:
+        return False
+functools.total_ordering(cls=Model)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "Model"),
+        "messages: {messages:?}"
+    );
+}
