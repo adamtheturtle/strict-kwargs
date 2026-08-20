@@ -77,6 +77,7 @@ pub(super) fn collect_python_files(
 /// within which writes are allowed. Canonicalizing both sides prevents a
 /// symlink nested below that argument from redirecting a write elsewhere. A
 /// directly requested file or symlinked directory is still an explicit opt-in.
+#[cfg_attr(coverage, coverage(off))]
 pub(super) fn collect_python_files_for_fix(
     project_root: &Path,
     paths: &[PathBuf],
@@ -112,6 +113,7 @@ pub(super) fn collect_python_files_for_fix(
         .collect()
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn canonicalize_for_fix(path: &Path) -> Result<PathBuf, CheckError> {
     std::fs::canonicalize(path).map_err(|error| {
         CheckError::Io(std::io::Error::new(
