@@ -2300,6 +2300,15 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
     })
 }
 
+fn has_property_accessor_decorator(decorator_list: &[ast::Decorator]) -> bool {
+    decorator_list.iter().any(|decorator| {
+        matches!(
+            decorator_reference(&decorator.expression).as_deref(),
+            Some([_, accessor]) if matches!(accessor.as_str(), "setter" | "deleter")
+        )
+    })
+}
+
 // Maintains statement-order import/alias bindings for synthesized constructor
 // base resolution. The user-visible behavior is covered by imported and
 // aliased dataclass-base integration tests; the branches here duplicate the
@@ -2907,7 +2916,7 @@ fn index_class_body(
                 }
                 if has_property_decorator(decorator_list) {
                     store.properties.insert(fullname.clone());
-                } else {
+                } else if !has_property_accessor_decorator(decorator_list) {
                     store.properties.remove(&fullname);
                 }
                 if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {
@@ -3103,7 +3112,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 }
                 if has_property_decorator(decorator_list) {
                     store.properties.insert(fullname.clone());
-                } else {
+                } else if !has_property_accessor_decorator(decorator_list) {
                     store.properties.remove(&fullname);
                 }
                 if name.as_str() == "__get__" && fullname_is_first_party(store, class_name) {

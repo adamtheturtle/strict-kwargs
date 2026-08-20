@@ -1616,10 +1616,15 @@ impl<'a> CallChecker<'a> {
     }
 
     fn resolve_callable_list_element(&self, name: &str) -> Option<String> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.callable_list_elements.get(name).cloned())
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.callable_list_elements.get(name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
     }
 
     fn record_callable_list(&mut self, name: &str, callable: Option<String>) {
@@ -3689,6 +3694,9 @@ impl<'a> CallChecker<'a> {
         "contextlib.ExitStack.callback",
         "contextlib._BaseExitStack.callback",
         "contextlib.AsyncExitStack.push_async_callback",
+        "typing_extensions.final",
+        "typing_extensions.no_type_check",
+        "typing_extensions.override",
         "unittest.skip",
         "unittest.skipIf",
         "unittest.skipUnless",
@@ -3741,7 +3749,7 @@ impl<'a> CallChecker<'a> {
         // Single application: ``override(target)(1)`` /
         // ``expectedFailure(test_item=target)(1)``.
         if let Some(factory) = self.resolve_callee(&call.func) {
-            if Self::is_identity_return_stdlib(&factory) {
+            if Self::is_identity_return_stdlib(&factory) && factory != "functools.wraps" {
                 if let Some(wrapped) = Self::wrapped_callable_argument(call) {
                     if let Some(resolved) = self.resolve_callee(wrapped) {
                         return Some(resolved);
@@ -5646,9 +5654,7 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [sequence] = &*call.arguments.args else {
-            return None;
-        };
+        let sequence = call.arguments.args.first()?;
         self.homogeneous_callable_sequence(sequence)
     }
 
