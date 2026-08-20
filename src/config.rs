@@ -213,31 +213,25 @@ impl<'a> SourceRoots<'a> {
             };
         }
 
+        // Preserve configured `src` order: import resolution walks roots like
+        // ``sys.path``. Do not sort by path; that would prefer ``zsrc`` over
+        // ``asrc`` and discard the user's search order (issue #633).
         let mut first_party = Vec::with_capacity(config.src.len() + 1);
         first_party.push(project_root.to_path_buf());
-        first_party.extend(
-            config
-                .src
-                .iter()
-                .map(|path| resolve_configured_path(project_root, path)),
-        );
-        first_party.sort();
-        first_party.dedup();
-        first_party.sort_by(|left, right| {
-            right
-                .components()
-                .count()
-                .cmp(&left.components().count())
-                .then_with(|| right.cmp(left))
-        });
+        for path in &config.src {
+            let resolved = resolve_configured_path(project_root, path);
+            if !first_party.iter().any(|root| root == &resolved) {
+                first_party.push(resolved);
+            }
+        }
 
-        let mut namespace_packages: Vec<PathBuf> = config
-            .namespace_packages
-            .iter()
-            .map(|path| resolve_configured_path(project_root, path))
-            .collect();
-        namespace_packages.sort();
-        namespace_packages.dedup();
+        let mut namespace_packages: Vec<PathBuf> = Vec::new();
+        for path in &config.namespace_packages {
+            let resolved = resolve_configured_path(project_root, path);
+            if !namespace_packages.iter().any(|root| root == &resolved) {
+                namespace_packages.push(resolved);
+            }
+        }
 
         Self {
             default_root: None,
@@ -267,10 +261,18 @@ impl<'a> SourceRoots<'a> {
         let relative = if let Some(root) = self.default_root {
             path.strip_prefix(root).unwrap_or(path)
         } else {
+            // Prefer the longest matching root so a nested configured `src/`
+            // still strips correctly even though resolution order is
+            // config-order rather than depth-order.
             self.first_party
                 .iter()
-                .find_map(|root| path.strip_prefix(root).ok())
-                .unwrap_or(path)
+                .filter_map(|root| {
+                    path.strip_prefix(root)
+                        .ok()
+                        .map(|relative| (root.components().count(), relative))
+                })
+                .max_by_key(|(depth, _)| *depth)
+                .map_or(path, |(_, relative)| relative)
         }
         .with_extension("");
         let mut parts: Vec<String> = relative
@@ -612,9 +614,9 @@ mod tests {
         assert_eq!(
             roots.first_party(),
             &[
-                dir.path().join("src"),
-                dir.path().join("lib"),
                 dir.path().to_path_buf(),
+                dir.path().join("lib"),
+                dir.path().join("src"),
             ]
         );
         assert_eq!(
@@ -632,6 +634,58 @@ mod tests {
         assert_eq!(
             roots.module_name_for_path(&dir.path().join("src/pkg/__init__.py")),
             "pkg"
+        );
+    }
+
+    #[test]
+    fn source_roots_preserve_configured_src_search_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            src: vec![PathBuf::from("asrc"), PathBuf::from("zsrc")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+        assert_eq!(
+            roots.first_party(),
+            &[
+                dir.path().to_path_buf(),
+                dir.path().join("asrc"),
+                dir.path().join("zsrc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_roots_dedupe_preserving_order_and_longest_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            src: vec![
+                PathBuf::from("asrc"),
+                PathBuf::from("asrc"),
+                PathBuf::from("zsrc"),
+            ],
+            namespace_packages: vec![PathBuf::from("ns"), PathBuf::from("ns")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+        assert_eq!(
+            roots.first_party(),
+            &[
+                dir.path().to_path_buf(),
+                dir.path().join("asrc"),
+                dir.path().join("zsrc"),
+            ]
+        );
+        assert_eq!(roots.namespace_packages(), &[dir.path().join("ns")]);
+        assert_eq!(
+            roots.module_name_for_path(&dir.path().join("asrc/pkg/mod.py")),
+            "pkg.mod"
+        );
+        // Relative path that is not under any configured root still strips via
+        // the unmatched-path fallback (covers map_or).
+        assert_eq!(
+            roots.module_name_for_path(Path::new("not-under-any-root/pkg/mod.py")),
+            "not-under-any-root.pkg.mod"
         );
     }
 
