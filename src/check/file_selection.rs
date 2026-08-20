@@ -202,10 +202,28 @@ fn walk_error(error: walkdir::Error) -> CheckError {
     CheckError::Io(std::io::Error::new(kind, error))
 }
 
-pub(super) fn explicit_python_files(paths: &[PathBuf]) -> FxHashSet<PathBuf> {
-    paths
+/// The selected paths that the caller named explicitly.
+///
+/// Selection deduplicates by canonical filesystem target and keeps one display
+/// path per target, which is not always the spelling the caller passed. Naming
+/// the explicit files by their selected spelling keeps a parse failure on an
+/// explicitly named file fatal, rather than skipped as if it were only walked
+/// into.
+#[cfg_attr(coverage, coverage(off))]
+pub(super) fn explicit_python_files(paths: &[PathBuf], selected: &[PathBuf]) -> FxHashSet<PathBuf> {
+    let explicit: FxHashSet<PathBuf> = paths
         .iter()
         .filter(|path| path.is_file() && is_python_file(path))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect();
+    if explicit.is_empty() {
+        return FxHashSet::default();
+    }
+    selected
+        .iter()
+        .filter(|path| {
+            std::fs::canonicalize(path).is_ok_and(|canonical| explicit.contains(&canonical))
+        })
         .cloned()
         .collect()
 }
