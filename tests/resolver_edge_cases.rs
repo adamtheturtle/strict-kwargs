@@ -435,6 +435,31 @@ namespace.call(1)
     );
 }
 
+/// `ContextVar` accepts its required name positionally and `get()` preserves
+/// the configured callable value type (issue #409).
+#[test]
+fn contextvar_constructor_and_get_callable_result() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+def f(value: int) -> None: ...
+current: ContextVar[Callable[[int], None]] = ContextVar("current", default=f)
+current.get()(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:5:")),
+        "ContextVar name must be allowed positionally: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "get() result"),
+        "expected ContextVar.get result violation, got: {messages:?}"
+    );
+}
+
 /// A dataclass constructor keyword directly supplies the corresponding field
 /// value, preserving a concrete callable's signature (issue #373).
 #[test]
