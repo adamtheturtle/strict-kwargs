@@ -685,7 +685,7 @@ mod tests {
         // the raw path components (leading `/` becomes an empty segment).
         assert_eq!(
             roots.module_name_for_path(Path::new("/unrelated/pkg/mod.py")),
-            ".unrelated.pkg.mod"
+            "/.unrelated.pkg.mod"
         );
     }
 
