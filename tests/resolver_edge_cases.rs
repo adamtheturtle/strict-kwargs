@@ -2639,3 +2639,27 @@ BareLambdaEnter().__enter__()(1)
         "expected violation for bare-lambda enter result, got: {messages:?}"
     );
 }
+
+/// When ``__enter__`` returns a name that is not a single indexed signature,
+/// resolution still flows through ``context_manager_enter_callable_result``
+/// in ``resolve_callee`` (rather than the generic-result signature path).
+#[test]
+fn context_manager_enter_unindexed_callable_resolves_via_callee() {
+    let messages = check_source(
+        r"
+class MysteryEnter:
+    def __enter__(self):
+        return missing_target
+    def __exit__(self, *args: object) -> None:
+        pass
+
+MysteryEnter().__enter__()(1)
+",
+    );
+    // No indexed signature means the call is deferred (ty) or left unresolved;
+    // either way it must not be reported as a generic-result arity error.
+    assert!(
+        !has_error_at(&messages, 9, "generic result"),
+        "unindexed enter callable must not use generic-result checking, got: {messages:?}"
+    );
+}
