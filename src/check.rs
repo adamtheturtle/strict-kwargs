@@ -3544,7 +3544,7 @@ impl<'a> CallChecker<'a> {
         Self::IDENTITY_RETURN_STDLIB.contains(&fullname)
     }
 
-    fn wrapped_callable_argument<'b>(call: &'b ast::ExprCall) -> Option<&'b Expr> {
+    fn wrapped_callable_argument(call: &ast::ExprCall) -> Option<&Expr> {
         if let Some(arg) = call.arguments.args.first() {
             return Some(arg);
         }
