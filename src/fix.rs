@@ -5,6 +5,7 @@
 //! applied in place or as a unified diff.
 
 use std::cmp::Reverse;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize as _;
@@ -188,6 +189,33 @@ pub fn apply_insertions(source: &str, insertions: &[Insertion]) -> String {
     out
 }
 
+fn git_diff_path(prefix: &str, path: &Path) -> String {
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.extend_from_slice(path.as_os_str().as_encoded_bytes());
+    if bytes
+        .iter()
+        .all(|byte| (b' '..=b'~').contains(byte) && !matches!(byte, b'"' | b'\\'))
+    {
+        return String::from_utf8_lossy(&bytes).into_owned();
+    }
+    let mut quoted = String::from("\"");
+    for byte in bytes {
+        match byte {
+            b'\n' => quoted.push_str("\\n"),
+            b'\r' => quoted.push_str("\\r"),
+            b'\t' => quoted.push_str("\\t"),
+            b'\\' => quoted.push_str("\\\\"),
+            b'"' => quoted.push_str("\\\""),
+            b' '..=b'~' => quoted.push(char::from(byte)),
+            _ => {
+                let _ = write!(quoted, "\\{byte:03o}");
+            }
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Render a unified diff between `original` and `fixed`.
 ///
 /// The fixer never adds or removes newlines, so the two share a line count and
@@ -219,14 +247,15 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
         }
     }
 
-    let display = path.display();
+    let old_path = git_diff_path("a/", path);
+    let new_path = git_diff_path("b/", path);
     let mut lines: Vec<String> = if color {
         vec![
-            format!("{}", format!("--- a/{display}").bold()),
-            format!("{}", format!("+++ b/{display}").bold()),
+            format!("{}", format!("--- {old_path}").bold()),
+            format!("{}", format!("+++ {new_path}").bold()),
         ]
     } else {
-        vec![format!("--- a/{display}"), format!("+++ b/{display}")]
+        vec![format!("--- {old_path}"), format!("+++ {new_path}")]
     };
     for (first, last) in groups {
         let start = first.saturating_sub(CONTEXT);
@@ -542,6 +571,23 @@ mod tests {
     }
 
     #[test]
+    fn unified_diff_quotes_unsafe_path_bytes() {
+        for (path, escaped) in [
+            ("line\nbreak.py", "line\\nbreak.py"),
+            ("tab\tname.py", "tab\\tname.py"),
+            ("back\\slash.py", "back\\\\slash.py"),
+            ("\"quote.py", "\\\"quote.py"),
+        ] {
+            let diff = unified_diff(Path::new(path), "f(1)\n", "f(x=1)\n", false);
+            let expected_old = format!("--- \"a/{escaped}\"");
+            let expected_new = format!("+++ \"b/{escaped}\"");
+            let mut lines = diff.lines();
+            assert_eq!(lines.next(), Some(expected_old.as_str()));
+            assert_eq!(lines.next(), Some(expected_new.as_str()));
+        }
+    }
+
+    #[test]
     fn unified_diff_color_contains_ansi_codes() {
         let original = "f(a)\n";
         let fixed = "f(x=a)\n";
@@ -572,5 +618,35 @@ mod tests {
         assert_eq!(diff.matches("@@ -").count(), 2);
         assert!(diff.contains("-X\n+X1\n"));
         assert!(diff.contains("-Y\n+Y1\n"));
+    }
+}
+
+/// Exercises `git_diff_path` under llvm-cov. The main `tests` module is
+/// `#[coverage(off)]`.
+#[cfg(test)]
+mod git_diff_path_coverage {
+    use super::{git_diff_path, unified_diff};
+    use std::path::Path;
+
+    #[test]
+    fn git_diff_path_keeps_safe_paths_unquoted() {
+        assert_eq!(
+            git_diff_path("a/", Path::new("pkg/main.py")),
+            "a/pkg/main.py"
+        );
+    }
+
+    #[test]
+    fn git_diff_path_quotes_control_bytes_with_octal_escapes() {
+        assert_eq!(
+            git_diff_path("a/", Path::new("ctrl\x01name.py")),
+            "\"a/ctrl\\001name.py\""
+        );
+    }
+
+    #[test]
+    fn git_diff_path_quotes_carriage_return() {
+        let diff = unified_diff(Path::new("line\rname.py"), "f(1)\n", "f(x=1)\n", false);
+        assert!(diff.starts_with("--- \"a/line\\rname.py\"\n"));
     }
 }
