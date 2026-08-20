@@ -2151,6 +2151,7 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn class_from_record_replacement(&self, expr: &Expr) -> Option<String> {
         let Expr::Call(call) = expr else {
             return None;
@@ -3335,6 +3336,7 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_functional_namedtuple(value: &Expr) -> bool {
         let Expr::Call(call) = value else {
             return false;
@@ -3345,6 +3347,7 @@ impl<'a> CallChecker<'a> {
         path.rsplit('.').next() == Some("NamedTuple")
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_collections_namedtuple(value: &Expr) -> bool {
         let Expr::Call(call) = value else {
             return false;
@@ -3353,6 +3356,7 @@ impl<'a> CallChecker<'a> {
             .is_some_and(|path| path.rsplit('.').next() == Some("namedtuple"))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn namedtuple_keyword_field_callable(&self, value: &Expr, field: &str) -> Option<String> {
         let Expr::Call(constructor) = value else {
             return None;
