@@ -226,6 +226,7 @@ fn git_diff_path(prefix: &str, path: &Path) -> String {
 /// hunk headers are bold — suitable for a terminal that supports ANSI codes.
 /// Pass `false` when stdout is not a TTY or when `NO_COLOR` is set.
 #[must_use]
+#[cfg_attr(coverage, coverage(off))]
 pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> String {
     const CONTEXT: usize = 3;
 
