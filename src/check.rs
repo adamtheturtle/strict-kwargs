@@ -5287,14 +5287,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
-<<<<<<< HEAD
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
                 } else {
                     None
                 };
-=======
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -5315,7 +5313,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             })
                         )
                     });
->>>>>>> b2d9166 (Tighten #561 invalidation so imports and for-targets stay checkable.)
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
