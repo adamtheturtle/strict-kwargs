@@ -2160,9 +2160,24 @@ impl<'a> CallChecker<'a> {
             if method.attr.as_str() == "_replace" {
                 return self.class_from_constructor(&method.value);
             }
+            // `dataclasses.replace(obj, field=...)` — avoid resolve_callee here so
+            // attribute resolution for unrelated constructor calls like `C().method`
+            // cannot re-enter and revive an excluded method signature.
+            if method.attr.as_str() == "replace" {
+                let Expr::Name(module) = method.value.as_ref() else {
+                    return None;
+                };
+                if self.resolve_module(module.id.as_str()).as_deref() != Some("dataclasses") {
+                    return None;
+                }
+                return self.class_from_constructor(call.arguments.args.first()?);
+            }
+            return None;
         }
-        let fullname = self.resolve_callee(&call.func)?;
-        if fullname != "dataclasses.replace" {
+        let Expr::Name(name) = call.func.as_ref() else {
+            return None;
+        };
+        if self.resolve_local(name.id.as_str()).as_deref() != Some("dataclasses.replace") {
             return None;
         }
         self.class_from_constructor(call.arguments.args.first()?)
