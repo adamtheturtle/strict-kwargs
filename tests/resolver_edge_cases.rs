@@ -218,6 +218,45 @@ def feed(lang: SearchLanguage, stemmed_word: str, extra: str) -> bool:
     );
 }
 
+/// Fresh lambda bindings are opaque but must still reach ty. Marking every
+/// lambda assignment as invalidated (rather than only those replacing a
+/// prior ``def``) silenced `CPython` helpers such as
+/// ``badvalue = lambda f: self.assertRaises(...)``.
+#[test]
+fn fresh_lambda_binding_still_defers_to_ty() {
+    let messages = check_source(
+        r"
+def test() -> None:
+    badvalue = lambda f: None
+    badvalue(lambda: None)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "Too many positional")
+            || messages
+                .iter()
+                .any(|m| m.contains("badvalue") || m.contains("lambda")),
+        "fresh lambda binding must still reach ty, got: {messages:?}"
+    );
+}
+
+/// A lambda that replaces an earlier ``def`` must not keep the stale
+/// signature (issue #412).
+#[test]
+fn lambda_replacement_invalidates_prior_function_signature() {
+    let messages = check_source(
+        r"
+def f(value: int) -> None: ...
+f = lambda *args: None
+f(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "stale lambda-replaced function: {messages:?}"
+    );
+}
+
 /// A named expression evaluates to its assigned value, so using one as the
 /// callee preserves the concrete function signature (issue #361).
 #[test]

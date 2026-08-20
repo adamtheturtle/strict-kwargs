@@ -5311,8 +5311,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 );
                             }
                         } else if is_callable_attribute_alias || is_lambda {
+                            let replaced_known_callable = is_lambda
+                                && self.scopes.last().is_some_and(|scope| {
+                                    scope.functions.contains_key(name.id.as_str())
+                                        || scope.names.contains_key(name.id.as_str())
+                                });
                             self.mark_opaque_local(name.id.as_str());
-                            if is_lambda {
+                            // Only block ty when a lambda *replaces* an earlier
+                            // callable binding (issue #412). Fresh lambda bindings
+                            // such as ``badvalue = lambda f: ...`` still need ty.
+                            if replaced_known_callable {
                                 self.current_scope()
                                     .invalidated_callables
                                     .insert(name.id.to_string());
