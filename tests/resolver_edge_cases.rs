@@ -606,8 +606,6 @@ def caller(value: Callable[[int], None] | None) -> None:
 }
 
 #[test]
-
-#[test]
 fn optional_typing_optional_narrowing_preserves_callable_signature() {
     let messages = check_source(
         r"
@@ -640,6 +638,7 @@ def caller(value: None | Callable[[int], None]) -> None:
     );
 }
 
+#[test]
 fn typeguard_narrowing_accepts_qualified_annotation() {
     let messages = check_source(
         r"
