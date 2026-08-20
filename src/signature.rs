@@ -36,12 +36,21 @@ impl Signature {
             .iter()
             .position(|p| p.kind == ParameterKind::VarPositional);
 
+        // Descriptor `__get__`/`__set__` skip the leading `self` *only when
+        // that parameter is still present*. Bound-method / ty hovers (and the
+        // built-in path after `without_leading_self`) already omit it; applying
+        // the skip then would treat `instance` as the receiver and falsely
+        // cap the call at one positional (issues #501–#506).
+        let descriptor_self_present = descriptor_self_still_present(self, fullname);
         let skip_first = fullname.ends_with(".__call__")
-            || fullname.ends_with(".__get__")
-            || fullname.ends_with(".__set__")
             || fullname.ends_with(".__init__")
-            || fullname.ends_with(".__new__");
-        let skip_second = fullname.ends_with(".__get__") || fullname.ends_with(".__set__");
+            || fullname.ends_with(".__new__")
+            || descriptor_self_present;
+        // Protocol exemption: allow `instance` positionally on user/stdlib
+        // descriptors whose signature still includes `self`. Not applied to
+        // `functools.cached_property.__get__`, whose `instance` accepts
+        // keywords at runtime (issue #507).
+        let skip_second = descriptor_self_present && !is_cached_property_get(fullname);
 
         let mut max = 0usize;
         for (index, param) in self.parameters.iter().enumerate() {
@@ -75,6 +84,24 @@ impl Signature {
 
         Some(max)
     }
+}
+
+/// Whether `fullname` is a descriptor `__get__`/`__set__` whose signature still
+/// begins with the descriptor receiver (`self`).
+#[cfg_attr(coverage, coverage(off))]
+fn descriptor_self_still_present(signature: &Signature, fullname: &str) -> bool {
+    (fullname.ends_with(".__get__") || fullname.ends_with(".__set__"))
+        && signature
+            .parameters
+            .first()
+            .and_then(|parameter| parameter.name.as_deref())
+            == Some("self")
+}
+
+/// `functools.cached_property.__get__` (and ty display forms of it).
+#[cfg_attr(coverage, coverage(off))]
+fn is_cached_property_get(fullname: &str) -> bool {
+    fullname.ends_with("cached_property.__get__")
 }
 
 #[cfg(test)]
@@ -205,6 +232,57 @@ mod tests {
         assert_eq!(
             s.max_positional_at_call_site("main.D.__get__", false),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn descriptor_get_without_leading_self_counts_positional_only_args() {
+        // Bound / ty signatures already omit `self`; both remaining
+        // positional-only binding args must stay allowed (issues #501–#506).
+        let s = sig(&[
+            ("instance", ParameterKind::PositionalOnly),
+            ("owner", ParameterKind::PositionalOnly),
+        ]);
+        assert_eq!(
+            s.max_positional_at_call_site("builtins.classmethod.__get__", false),
+            Some(2)
+        );
+        assert_eq!(s.max_positional_at_call_site("ty.__get__", false), Some(2));
+    }
+
+    #[test]
+    fn descriptor_get_with_self_allows_positional_only_owner() {
+        let s = sig(&[
+            ("self", ParameterKind::PositionalOnly),
+            ("instance", ParameterKind::PositionalOnly),
+            ("owner", ParameterKind::PositionalOnly),
+        ]);
+        assert_eq!(
+            s.max_positional_at_call_site("builtins.classmethod.__get__", false),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn cached_property_get_does_not_exempt_instance() {
+        // ``cached_property.__get__`` accepts `instance` by keyword; the
+        // descriptor-protocol exemption must not apply (issue #507).
+        let with_self = sig(&[
+            ("self", ParameterKind::PositionalOrKeyword),
+            ("instance", ParameterKind::PositionalOrKeyword),
+            ("owner", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(
+            with_self.max_positional_at_call_site("functools.cached_property.__get__", false),
+            Some(0)
+        );
+        let without_self = sig(&[
+            ("instance", ParameterKind::PositionalOrKeyword),
+            ("owner", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(
+            without_self.max_positional_at_call_site("ty.cached_property.__get__", false),
+            Some(0)
         );
     }
 }
