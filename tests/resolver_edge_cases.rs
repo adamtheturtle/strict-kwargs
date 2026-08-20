@@ -1358,6 +1358,62 @@ gen.send(None)(1)
     );
 }
 
+/// A `Generator.throw` result retains the declared callable yield signature
+/// (issue #656).
+#[test]
+fn generator_throw_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+generator: collections.abc.Generator[typing.Callable[[int], int], None, None]
+generator.throw(typ=RuntimeError)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "throw() result"),
+        "expected generator throw violation, got: {messages:?}"
+    );
+}
+
+/// An `AsyncGenerator.asend` result retains the declared callable yield signature
+/// (issue #657).
+#[test]
+fn async_generator_asend_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
+async def main() -> None:
+    (await agen.asend(value=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "asend() result"),
+        "expected async generator asend violation, got: {messages:?}"
+    );
+}
+
+/// An `AsyncGenerator.athrow` result retains the declared callable yield signature
+/// (issue #658).
+#[test]
+fn async_generator_athrow_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
+async def main() -> None:
+    (await agen.athrow(typ=RuntimeError))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "athrow() result"),
+        "expected async generator athrow violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
