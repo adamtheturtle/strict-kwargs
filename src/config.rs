@@ -681,11 +681,11 @@ mod tests {
             roots.module_name_for_path(&dir.path().join("asrc/pkg/mod.py")),
             "pkg.mod"
         );
-        // Path outside every configured root still produces a dotted name from
-        // the raw path components (leading `/` becomes an empty segment).
+        // Relative path that is not under any configured root still strips via
+        // the unmatched-path fallback (covers map_or).
         assert_eq!(
-            roots.module_name_for_path(Path::new("/unrelated/pkg/mod.py")),
-            "/.unrelated.pkg.mod"
+            roots.module_name_for_path(Path::new("not-under-any-root/pkg/mod.py")),
+            "not-under-any-root.pkg.mod"
         );
     }
 
