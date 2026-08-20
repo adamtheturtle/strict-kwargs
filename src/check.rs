@@ -2161,9 +2161,16 @@ impl<'a> CallChecker<'a> {
         if first_param != Some("self") {
             return false;
         }
-        let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
             return false;
         };
+        // `__get__`/`__set__` already skip their leading `self` in
+        // [`Signature::max_positional_at_call_site`]; stripping here would
+        // double-count and falsely limit descriptor binding args (issues
+        // #501–#506). Matches the unbound-class-method exclusion above.
+        if matches!(attr.as_str(), "__get__" | "__set__") {
+            return false;
+        }
         if Self::class_from_literal_expr(value).is_some() {
             return true;
         }

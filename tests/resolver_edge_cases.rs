@@ -866,6 +866,86 @@ C().call(1)
     );
 }
 
+/// `CPython` descriptor `__get__` methods reject keyword arguments, so both
+/// binding arguments must remain positional (issues #501–#506).
+#[test]
+fn stdlib_descriptor_get_positional_binding_args_are_allowed() {
+    let cases = [
+        (
+            "classmethod",
+            r"
+def target(cls, value: int) -> int:
+    return value
+
+classmethod(target).__get__(None, object)
+",
+        ),
+        (
+            "staticmethod",
+            r"
+def target(value: int) -> int:
+    return value
+
+staticmethod(target).__get__(None, object)
+",
+        ),
+        (
+            "property",
+            r"
+class Owner: pass
+prop = property(fget=lambda self: 1)
+prop.__get__(Owner(), Owner)
+",
+        ),
+        (
+            "function",
+            r"
+class Owner: pass
+
+def target(self, value: int) -> int:
+    return value
+
+target.__get__(Owner(), Owner)
+",
+        ),
+        ("method_descriptor", "str.upper.__get__(\"text\", str)()\n"),
+        (
+            "wrapper_descriptor",
+            r"
+class Owner: pass
+object.__str__.__get__(Owner(), Owner)()
+",
+        ),
+    ];
+    for (label, source) in cases {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "{label} __get__ falsely flagged: {messages:?}"
+        );
+    }
+}
+
+/// `functools.cached_property.__get__` accepts `instance` by keyword, so a
+/// positional pass must still emit KW001 (issue #507).
+#[test]
+fn cached_property_get_positional_instance_is_flagged() {
+    let messages = check_source(
+        r#"
+import functools
+
+class Owner: pass
+cached = functools.cached_property(func=lambda self: 1)
+cached.__set_name__(owner=Owner, name="cached")
+cached.__get__(Owner())
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 7, "__get__"),
+        "expected cached_property.__get__ violation, got: {messages:?}"
+    );
+}
+
 /// Callable-annotated instance fields retain the annotation's concrete
 /// signature when accessed on a newly constructed instance (issue #380).
 #[test]
