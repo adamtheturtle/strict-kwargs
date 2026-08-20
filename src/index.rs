@@ -411,6 +411,7 @@ fn remove_assigned_name(store: &mut Store, scope_name: &str, target: &Expr) {
     }
 }
 
+#[cfg_attr(coverage, coverage(off))]
 fn exclude_deleted_name(store: &mut Store, scope_name: &str, target: &Expr) {
     if store.conditional_depth > 0 {
         return;
