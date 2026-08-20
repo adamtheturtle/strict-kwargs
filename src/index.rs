@@ -3662,7 +3662,7 @@ class Child(Base):
 #[cfg(test)]
 mod exclude_deleted_name_coverage {
     use super::{index_module, Store};
-    use rustpython_ruff_python_parser::parse_module;
+    use ruff_python_parser::parse_module;
 
     #[test]
     fn delete_excludes_module_level_callable() {
