@@ -735,6 +735,41 @@ fn configured_src_layout_resolves_first_party_imports() {
 }
 
 #[test]
+fn configured_src_search_order_prefers_earlier_root() {
+    // Issue #633: configured `src` roots must keep user order for imports.
+    let temp = tempfile::Builder::new()
+        .prefix("strictkw")
+        .tempdir()
+        .expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nsrc = [\"asrc\", \"zsrc\"]\n",
+    )
+    .expect("write pyproject");
+    for (name, content) in [
+        ("asrc/orderdep.py", "def target(value, /) -> None: ...\n"),
+        ("zsrc/orderdep.py", "def target(value) -> None: ...\n"),
+        ("main.py", "from orderdep import target\n\ntarget(1)\n"),
+    ] {
+        let path = root.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("dirs");
+        }
+        std::fs::write(path, content).expect("write");
+    }
+
+    let config = Config::load(&root).expect("valid config");
+    let diagnostics =
+        check_paths(&root, &[root.join("main.py")], &config, None, None).expect("check");
+
+    assert!(
+        diagnostics.is_empty(),
+        "asrc's positional-only signature should win; got: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn configured_namespace_package_without_init_resolves_under_src_root() {
     let temp = tempfile::Builder::new()
         .prefix("strictkw")
