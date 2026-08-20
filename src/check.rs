@@ -4651,27 +4651,34 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn itertools_item_signature(&self, expr: &Expr) -> Option<Signature> {
+    fn itertools_item_signature(
+        &self,
+        expr: &Expr,
+        selected_index: Option<usize>,
+    ) -> Option<Signature> {
         if let Expr::Subscript(subscript) = expr {
-            return self.itertools_item_signature(&subscript.value);
+            return self.itertools_item_signature(&subscript.value, selected_index);
         }
         let Expr::Call(call) = expr else {
             return None;
         };
+        let first_named = |index: usize, name: &str| -> Option<&Expr> {
+            call.arguments.args.get(index).or_else(|| {
+                call.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
+                        .then_some(&keyword.value)
+                })
+            })
+        };
         match self.imported_callable_path(&call.func)?.as_str() {
-            "itertools.repeat" => {
-                let object = call.arguments.args.first().or_else(|| {
-                    call.arguments.keywords.iter().find_map(|keyword| {
-                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("object"))
-                            .then_some(&keyword.value)
-                    })
-                })?;
+            "itertools.repeat" if selected_index.is_none() => {
+                let object = first_named(0, "object")?;
                 self.unnamed_callable_signature(object)
             }
-            "itertools.cycle" | "itertools.tee" => {
+            "itertools.cycle" | "itertools.tee" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(call.arguments.args.first()?)
             }
-            "itertools.chain" => {
+            "itertools.chain" if selected_index.is_none() => {
                 let mut result = None;
                 for iterable in &call.arguments.args {
                     let signature = self.literal_iterable_callable_signature(iterable)?;
@@ -4684,6 +4691,26 @@ impl<'a> CallChecker<'a> {
                     result = Some(signature);
                 }
                 result
+            }
+            "itertools.accumulate" | "itertools.compress" | "itertools.islice"
+                if selected_index.is_none() =>
+            {
+                self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+            }
+            "itertools.dropwhile" | "itertools.takewhile" if selected_index.is_none() => {
+                self.literal_iterable_callable_signature(first_named(1, "iterable")?)
+            }
+            "itertools.pairwise"
+            | "itertools.permutations"
+            | "itertools.combinations"
+            | "itertools.combinations_with_replacement"
+                if selected_index.is_some() =>
+            {
+                self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+            }
+            "itertools.product" | "itertools.zip_longest" => {
+                let index = selected_index?;
+                self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
             _ => None,
         }
@@ -5119,7 +5146,7 @@ impl<'a> CallChecker<'a> {
         if let Some(signature) = self.dict_values_item_signature(iterator) {
             return Some(signature);
         }
-        if let Some(signature) = self.itertools_item_signature(iterator) {
+        if let Some(signature) = self.itertools_item_signature(iterator, selected_index) {
             return Some(signature);
         }
         if let Expr::Call(map_call) = iterator {
