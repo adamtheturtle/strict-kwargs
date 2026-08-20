@@ -2258,7 +2258,7 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
-/// reprlib.recursive_repr preserves the decorated callable signature (issue
+/// `reprlib.recursive_repr` preserves the decorated callable signature (issue
 /// #613).
 #[test]
 fn recursive_repr_preserves_callable_signature() {
@@ -2276,7 +2276,7 @@ reprlib.recursive_repr(fillvalue='...')(target)(1)
     );
 }
 
-/// unittest.skip preserves the decorated callable signature (issue #614).
+/// `unittest.skip` preserves the decorated callable signature (issue #614).
 #[test]
 fn unittest_skip_preserves_callable_signature() {
     let messages = check_source(
@@ -2293,7 +2293,7 @@ unittest.skip('skip')(target)(1)
     );
 }
 
-/// unittest.skipIf preserves the decorated callable signature (issue #615).
+/// `unittest.skipIf` preserves the decorated callable signature (issue #615).
 #[test]
 fn unittest_skip_if_preserves_callable_signature() {
     let messages = check_source(
@@ -2310,7 +2310,7 @@ unittest.skipIf(True, 'skip')(target)(1)
     );
 }
 
-/// unittest.skipUnless preserves the decorated callable signature (issue
+/// `unittest.skipUnless` preserves the decorated callable signature (issue
 /// #616).
 #[test]
 fn unittest_skip_unless_preserves_callable_signature() {
@@ -2328,7 +2328,7 @@ unittest.skipUnless(False, 'skip')(target)(1)
     );
 }
 
-/// unittest.expectedFailure preserves its identity return signature (issue
+/// `unittest.expectedFailure` preserves its identity return signature (issue
 /// #617).
 #[test]
 fn unittest_expected_failure_preserves_callable_signature() {
