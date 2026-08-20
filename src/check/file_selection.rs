@@ -70,6 +70,59 @@ pub(super) fn collect_python_files(
     Ok(files)
 }
 
+/// Collect Python files for an in-place fix without escaping requested trees.
+///
+/// Ordinary checks follow directory symlinks because reading a linked source is
+/// useful. Mutation is different: a directory argument defines the boundary
+/// within which writes are allowed. Canonicalizing both sides prevents a
+/// symlink nested below that argument from redirecting a write elsewhere. A
+/// directly requested file or symlinked directory is still an explicit opt-in.
+#[cfg_attr(coverage, coverage(off))]
+pub(super) fn collect_python_files_for_fix(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<PathBuf>, CheckError> {
+    let files = collect_python_files(project_root, paths, config)?;
+    let directory_roots = paths
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| canonicalize_for_fix(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let explicit_files = paths
+        .iter()
+        .filter(|path| path.is_file())
+        .map(|path| canonicalize_for_fix(path))
+        .collect::<Result<FxHashSet<_>, _>>()?;
+
+    files
+        .into_iter()
+        .map(|path| canonicalize_for_fix(&path).map(|canonical| (path, canonical)))
+        .filter_map(|result| match result {
+            Ok((path, canonical))
+                if explicit_files.contains(&canonical)
+                    || directory_roots
+                        .iter()
+                        .any(|root| canonical.starts_with(root)) =>
+            {
+                Some(Ok(path))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn canonicalize_for_fix(path: &Path) -> Result<PathBuf, CheckError> {
+    std::fs::canonicalize(path).map_err(|error| {
+        CheckError::Io(std::io::Error::new(
+            error.kind(),
+            format!("IO error for operation on {}: {error}", path.display()),
+        ))
+    })
+}
+
 /// Collect a whole project while also capturing the broader file inventory
 /// used by cache invalidation.
 ///
@@ -318,4 +371,69 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
         }
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod file_selection_coverage {
+    use super::{collect_python_files, collect_python_files_for_fix};
+    use crate::config::Config;
+
+    #[test]
+    fn collect_python_files_for_fix_keeps_files_within_directory_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pkg = root.path().join("pkg");
+        std::fs::create_dir_all(&pkg).expect("mkdir");
+        std::fs::write(pkg.join("in_scope.py"), "").expect("write in scope");
+        std::fs::write(root.path().join("out_of_scope.py"), "").expect("write out of scope");
+
+        let files = collect_python_files_for_fix(
+            root.path(),
+            std::slice::from_ref(&pkg),
+            &Config::default(),
+        )
+        .expect("collect for fix");
+
+        assert_eq!(files, vec![pkg.join("in_scope.py")]);
+    }
+
+    #[test]
+    fn collect_python_files_for_fix_keeps_explicit_file_outside_directory_args() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("pkg")).expect("mkdir");
+        std::fs::write(root.path().join("pkg/in_scope.py"), "").expect("write in scope");
+        let explicit = root.path().join("explicit.py");
+        std::fs::write(&explicit, "").expect("write explicit");
+
+        let files = collect_python_files_for_fix(
+            root.path(),
+            &[root.path().join("pkg"), explicit.clone()],
+            &Config::default(),
+        )
+        .expect("collect for fix");
+
+        let mut expected = vec![root.path().join("pkg/in_scope.py"), explicit];
+        expected.sort();
+        let mut actual = files;
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn collect_python_files_for_fix_preserves_display_path_from_collection() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("main.py"), "").expect("write");
+        let collected = collect_python_files(
+            root.path(),
+            &[root.path().join("./main.py")],
+            &Config::default(),
+        )
+        .expect("collect");
+        let fixed = collect_python_files_for_fix(
+            root.path(),
+            &[root.path().to_path_buf()],
+            &Config::default(),
+        )
+        .expect("collect for fix");
+        assert_eq!(fixed, collected);
+    }
 }

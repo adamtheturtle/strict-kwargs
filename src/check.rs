@@ -42,7 +42,8 @@ mod fix_runner;
 
 pub use file_selection::is_prunable_dir;
 use file_selection::{
-    collect_python_files, collect_python_files_with_project_inventory, explicit_python_files,
+    collect_python_files, collect_python_files_for_fix,
+    collect_python_files_with_project_inventory, explicit_python_files,
 };
 #[cfg(test)]
 use file_selection::{is_ignored_path, FileSelection};
