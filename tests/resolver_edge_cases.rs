@@ -3017,6 +3017,64 @@ secrets.choice((f,))(1)
     }
 }
 
+/// `statistics.mode` / `multimode` preserve callable element types (issue #515).
+#[test]
+fn statistics_selector_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import statistics
+def target(value: int) -> None: ...
+statistics.mode(data=[target])(1)
+statistics.multimode(data=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target") && has_error_at(&messages, 5, "target"),
+        "expected statistics selector violations, got: {messages:?}"
+    );
+}
+
+/// `Counter.most_common` preserves callable key types (issue #514).
+#[test]
+fn counter_most_common_preserves_callable_key_signatures() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter([target]).most_common(n=1)[0][0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter.most_common violation, got: {messages:?}"
+    );
+}
+
+/// Immediate and assigned `WeakSet` / annotated `WeakValueDictionary` pops
+/// preserve callable elements (issue #443).
+#[test]
+fn weak_container_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import weakref
+from collections.abc import Callable
+def f(value: int) -> None: ...
+values = weakref.WeakSet([f])
+values.pop()(1)
+mapping: weakref.WeakValueDictionary[str, Callable[[int], None]] = weakref.WeakValueDictionary()
+mapping['call'] = f
+mapping.pop('call')(1)
+weakref.WeakSet([f]).pop()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "f")
+            && has_error_at(&messages, 9, "pop() result")
+            && has_error_at(&messages, 10, "f"),
+        "expected weak-container violations, got: {messages:?}"
+    );
+}
+
 /// Annotated `Future[Callable[...]].result()` preserves the callable signature
 /// (issue #410).
 #[test]
