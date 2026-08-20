@@ -2928,3 +2928,84 @@ functools.total_ordering(cls=Model)(1)
         "messages: {messages:?}"
     );
 }
+
+/// A literal dictionary's `setdefault` returns either its known existing
+/// value or the supplied default, preserving either callable signature
+/// (issue #439).
+#[test]
+fn literal_dict_setdefault_preserves_callable_signatures() {
+    let messages = check_source(
+        r#"
+def existing(value: int) -> None: ...
+def fallback(value: int) -> None: ...
+{"call": existing}.setdefault("call", fallback)(1)
+{}.setdefault("call", fallback)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "existing"),
+        "expected existing-value violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "fallback"),
+        "expected default-value violation, got: {messages:?}"
+    );
+}
+
+/// Standard-library generic mappings retain the concrete callable value type
+/// through their result-returning methods (issue #440).
+#[test]
+fn collections_mapping_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict, UserDict
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+def third(value: int) -> None: ...
+ChainMap({"call": first}).pop("call")(1)
+OrderedDict([("call", second)]).popitem()[1](1)
+UserDict({"call": third}).pop("call")(1)
+"#,
+    );
+    for (line, callee) in [(6, "first"), (7, "second"), (8, "third")] {
+        assert!(
+            has_error_at(&messages, line, callee),
+            "expected {callee} violation, got: {messages:?}"
+        );
+    }
+}
+
+/// `heapq` functions returning a homogeneous list element retain its concrete
+/// callable signature (issue #441).
+#[test]
+fn heapq_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def f(value: int) -> None: ...
+heap = [f]
+heapq.heappop(heap)(1)
+heapq.heapreplace(heap, f)(1)
+",
+    );
+    assert!(has_error_at(&messages, 5, "f"), "messages: {messages:?}");
+    assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
+}
+
+/// Generic selectors in `random` and `secrets` retain their input element's
+/// concrete callable signature (issue #442).
+#[test]
+fn random_selector_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import random, secrets
+def f(value: int) -> None: ...
+random.choice([f])(1)
+random.sample([f], k=1)[0](1)
+secrets.choice([f])(1)
+",
+    );
+    for line in 4..=6 {
+        assert!(has_error_at(&messages, line, "f"), "messages: {messages:?}");
+    }
+}
