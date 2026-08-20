@@ -1039,6 +1039,22 @@ fn check_uses_cache_dir_from_environment() {
 }
 
 #[test]
+fn check_ignores_empty_cache_dir_environment_variable() {
+    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
+    let output = Command::new(BIN)
+        .args(["check", "main.py"])
+        .current_dir(&project.root)
+        .env(CACHE_DIR_ENV_VAR, "")
+        .output()
+        .expect("spawn strict-kwargs");
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        !project.root.join("diagnostics.json").exists(),
+        "empty STRICT_KWARGS_CACHE_DIR must not write cache into the project"
+    );
+}
+
+#[test]
 fn check_cache_dir_cli_overrides_config_and_environment() {
     let project = Project::new()
         .write(
