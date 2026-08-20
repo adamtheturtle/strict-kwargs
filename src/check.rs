@@ -2471,6 +2471,11 @@ impl<'a> CallChecker<'a> {
                 fullname: "Context.run() result".to_string(),
                 signature,
             })
+        } else if let Some(signature) = self.pool_apply_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Pool.apply() result".to_string(),
+                signature,
+            })
         } else if let Some((signature, label)) = self.generator_resume_result_signature(&call.func)
         {
             Some(LocalFunction {
@@ -4583,6 +4588,16 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn is_multiprocessing_pool_apply_method(fullname: &str) -> bool {
+        let Some((class, method)) = fullname.rsplit_once('.') else {
+            return false;
+        };
+        matches!(method, "apply" | "apply_async")
+            && class.contains("multiprocessing")
+            && (class.ends_with(".Pool") || class.ends_with(".ThreadPool"))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn pool_map_func_argument(call: &ast::ExprCall) -> Option<&Expr> {
         call.arguments.args.first().or_else(|| {
             call.arguments.keywords.iter().find_map(|keyword| {
@@ -4640,6 +4655,49 @@ impl<'a> CallChecker<'a> {
         match func {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
             _ => self.unnamed_callable_signature(func),
+        }
+    }
+
+    /// `Pool.apply` / `ApplyResult.get` preserve the callback result callable.
+    #[cfg_attr(coverage, coverage(off))]
+    fn pool_apply_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let apply_call = if let Expr::Attribute(method) = call.func.as_ref() {
+            if method.attr.as_str() == "get" {
+                let Expr::Call(async_call) = method.value.as_ref() else {
+                    return None;
+                };
+                let fullname = self.resolve_callee(&async_call.func)?;
+                let method_name = fullname.rsplit('.').next()?;
+                if !Self::is_multiprocessing_pool_apply_method(&fullname)
+                    || method_name != "apply_async"
+                {
+                    return None;
+                }
+                async_call
+            } else {
+                let fullname = self.resolve_callee(&call.func)?;
+                let method_name = fullname.rsplit('.').next()?;
+                if !Self::is_multiprocessing_pool_apply_method(&fullname) || method_name != "apply"
+                {
+                    return None;
+                }
+                call
+            }
+        } else {
+            let fullname = self.resolve_callee(&call.func)?;
+            let method_name = fullname.rsplit('.').next()?;
+            if !Self::is_multiprocessing_pool_apply_method(&fullname) || method_name != "apply" {
+                return None;
+            }
+            call
+        };
+        let callback = Self::pool_map_func_argument(apply_call)?;
+        match callback {
+            Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
+            _ => self.unnamed_callable_signature(callback),
         }
     }
 

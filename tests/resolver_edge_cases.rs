@@ -1190,6 +1190,27 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
     }
 }
 
+/// `Pool.apply` and `ApplyResult.get` preserve callback result callables
+/// (issues #520, #521).
+#[test]
+fn pool_apply_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+
+pool = Pool(1)
+def target(value: int) -> None: ...
+pool.apply(func=lambda: target)(1)
+pool.apply_async(func=lambda: target).get(timeout=1)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "apply() result")
+            && has_error_at(&messages, 7, "apply() result"),
+        "expected pool apply violations, got: {messages:?}"
+    );
+}
+
 /// Awaiting an asyncio Queue get retains a callable item annotation
 /// (issue #445).
 #[test]
