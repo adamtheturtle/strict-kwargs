@@ -656,6 +656,40 @@ mod tests {
     }
 
     #[test]
+    fn source_roots_dedupe_preserving_order_and_longest_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            src: vec![
+                PathBuf::from("asrc"),
+                PathBuf::from("asrc"),
+                PathBuf::from("zsrc"),
+            ],
+            namespace_packages: vec![PathBuf::from("ns"), PathBuf::from("ns")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+        assert_eq!(
+            roots.first_party(),
+            &[
+                dir.path().to_path_buf(),
+                dir.path().join("asrc"),
+                dir.path().join("zsrc"),
+            ]
+        );
+        assert_eq!(roots.namespace_packages(), &[dir.path().join("ns")]);
+        assert_eq!(
+            roots.module_name_for_path(&dir.path().join("asrc/pkg/mod.py")),
+            "pkg.mod"
+        );
+        // Path outside every configured root still produces a dotted name from
+        // the raw path components (leading `/` becomes an empty segment).
+        assert_eq!(
+            roots.module_name_for_path(Path::new("/unrelated/pkg/mod.py")),
+            ".unrelated.pkg.mod"
+        );
+    }
+
+    #[test]
     fn source_roots_support_namespace_packages_without_extra_source_roots() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = Config {
