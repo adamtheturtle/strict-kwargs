@@ -576,7 +576,7 @@ fn check_paths_impl(
     } else {
         (collect_python_files(project_root, paths, config)?, None)
     };
-    let explicit_files = explicit_python_files(paths);
+    let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
 
     // Optional persistent cache: dependency changes invalidate everything,
@@ -1118,6 +1118,9 @@ struct CallChecker<'a> {
     type_vars: FxHashSet<String>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
+    /// Names whose ``@overload`` group has been closed by its implementation,
+    /// so that a further definition replaces the group instead of extending it.
+    completed_overload_sets: FxHashSet<String>,
     local_function_scope_count: usize,
     class_body_depth: usize,
     /// Calls the built-in resolver couldn't resolve, deferred for a single
@@ -1375,6 +1378,9 @@ struct Scope {
     /// signature, so they are skipped rather than matched against a
     /// homonymous module-level or nested function (issue #71).
     opaque_locals: rustc_hash::FxHashSet<String>,
+    /// Callable names invalidated by an ambiguous reassignment. Do not defer
+    /// these to ty, which can resolve the earlier stale definition.
+    invalidated_callables: FxHashSet<String>,
     /// Simple local/parameter annotations, used only as a conservative
     /// overload-fix precondition. A union/`Any`/`object` annotation is not
     /// precise enough to prove one overload arm was selected.
@@ -1449,6 +1455,7 @@ impl<'a> CallChecker<'a> {
             generic_returns: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             callable_return_overloads: FxHashMap::default(),
+            completed_overload_sets: FxHashSet::default(),
             local_function_scope_count: 0,
             class_body_depth: 0,
             ty_pending: Vec::new(),
@@ -1532,6 +1539,7 @@ impl<'a> CallChecker<'a> {
             scope.imported_callables.remove(local_name);
         }
         scope.opaque_locals.remove(local_name);
+        scope.invalidated_callables.remove(local_name);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1553,6 +1561,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.opaque_locals.remove(local_name);
+            scope.invalidated_callables.remove(local_name);
             newly_active_scope
         };
         if newly_active_scope {
@@ -1769,6 +1778,18 @@ impl<'a> CallChecker<'a> {
             }
         }
         false
+    }
+
+    /// Whether a name must not be deferred to ty after the built-in resolver
+    /// misses it. Opaque loop/with targets and invalidated callables can still
+    /// be resolved by ty to a stale earlier definition.
+    fn is_invalidated_or_opaque_name(&self, name: &str) -> bool {
+        self.is_opaque_local(name)
+            || self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.invalidated_callables.contains(name))
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2165,20 +2186,29 @@ impl<'a> CallChecker<'a> {
             .unwrap_or(candidate)
     }
 
+    /// Whether `func` names one stdlib callable.
+    ///
+    /// Resolving the callee expression covers both `import operator` plus
+    /// `operator.f` and `from operator import f`, and lets a nearer binding of
+    /// the same name shadow the import, which matching an attribute on a module
+    /// name does not.
+    #[cfg_attr(coverage, coverage(off))]
+    fn names_stdlib_callable(&self, func: &Expr, fullname: &str) -> bool {
+        self.resolve_callee(func).is_some_and(|resolved| {
+            // A class resolves through its constructor, so `methodcaller`
+            // arrives as `operator.methodcaller.__init__`.
+            resolved == fullname
+                || resolved.strip_suffix(".__init__") == Some(fullname)
+                || resolved.strip_suffix(".__new__") == Some(fullname)
+        })
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn check_methodcaller_invocation(&mut self, call: &ast::ExprCall) -> bool {
         let Expr::Call(constructor) = call.func.as_ref() else {
             return false;
         };
-        let Expr::Attribute(factory) = constructor.func.as_ref() else {
-            return false;
-        };
-        let Expr::Name(module) = factory.value.as_ref() else {
-            return false;
-        };
-        if factory.attr.as_str() != "methodcaller"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("operator")
-        {
+        if !self.names_stdlib_callable(constructor.func.as_ref(), "operator.methodcaller") {
             return false;
         }
         let Some(Expr::StringLiteral(method_name)) = constructor.arguments.args.first() else {
@@ -2193,9 +2223,16 @@ impl<'a> CallChecker<'a> {
         let Some(fullname) = self.resolve_callee(target) else {
             return true;
         };
+        // The encoded call is still a call to `fullname`, so it takes the same
+        // exemptions a written-out call would: a `@singledispatch` callee whose
+        // first argument must stay positional, and a configured ignore name.
+        if self.index.is_excluded(&fullname) {
+            return true;
+        }
         let Some(signatures) = self.index.get(&fullname) else {
             return true;
         };
+        let ignored = callee_is_ignored(self.config, &fullname);
         let positional_count = constructor
             .arguments
             .args
@@ -2205,14 +2242,14 @@ impl<'a> CallChecker<'a> {
             .count();
         if positional_count == 0
             || signatures.iter().any(|signature| {
-                !call_exceeds_positional_limit(signature, &fullname, false, positional_count)
+                !call_exceeds_positional_limit(signature, &fullname, ignored, positional_count)
             })
         {
             return true;
         }
         let max_positional = signatures
             .iter()
-            .filter_map(|signature| signature.max_positional_at_call_site(&fullname, false))
+            .filter_map(|signature| signature.max_positional_at_call_site(&fullname, ignored))
             .max()
             .unwrap_or(0);
         let (line, column) = self.diagnostic_position(call.start());
@@ -2251,6 +2288,11 @@ impl<'a> CallChecker<'a> {
         let local_function = if let Some(signature) = self.overload_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "overload result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_queue_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.Queue.get() result".to_string(),
                 signature,
             })
         } else if let Some(signature) = self.queue_result_signature(&call.func) {
@@ -2314,6 +2356,11 @@ impl<'a> CallChecker<'a> {
             local_function.fullname.clone()
         } else {
             let Some(callee_fullname) = self.resolve_callee(&call.func) else {
+                if let Expr::Name(name) = call.func.as_ref() {
+                    if self.is_invalidated_or_opaque_name(name.id.as_str()) {
+                        return;
+                    }
+                }
                 // Built-in resolver couldn't resolve: defer to a pipelined ty
                 // query (handled once per file after the walk).
                 self.record_ty_pending(call);
@@ -3284,14 +3331,37 @@ impl<'a> CallChecker<'a> {
         };
         let local = name.id.as_str();
         for scope in self.scopes.iter().rev() {
+            if scope.opaque_locals.contains(local) || scope.invalidated_callables.contains(local) {
+                return None;
+            }
             if let Some(function) = scope.functions.get(local) {
                 return Some(function.clone());
             }
-            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
+            if scope.names.contains_key(local) {
                 return None;
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn atexit_register_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if attribute.attr.as_str() != "register"
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("atexit")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.resolve_callee(call.arguments.args.first()?)
     }
 
     fn current_lexical_scope(&self) -> &str {
@@ -3672,15 +3742,30 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    const fn literal_argument_type(argument: &Expr) -> Option<&'static str> {
+    const fn number_literal_type(number: &ast::ExprNumberLiteral) -> Option<&'static str> {
+        match number.value {
+            Number::Int(_) => Some("int"),
+            Number::Float(_) => Some("float"),
+            Number::Complex { .. } => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_argument_type(argument: &Expr) -> Option<&'static str> {
         match argument {
             Expr::StringLiteral(_) => Some("str"),
             Expr::BytesLiteral(_) => Some("bytes"),
             Expr::BooleanLiteral(_) => Some("bool"),
-            Expr::NumberLiteral(number) => match number.value {
-                Number::Int(_) => Some("int"),
-                Number::Float(_) => Some("float"),
-                Number::Complex { .. } => None,
+            Expr::NumberLiteral(number) => Self::number_literal_type(number),
+            // A negative or explicitly positive number is a unary operator
+            // applied to a literal, and still has the literal's type.
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::UAdd | ast::UnaryOp::USub,
+                operand,
+                ..
+            }) => match operand.as_ref() {
+                Expr::NumberLiteral(number) => Self::number_literal_type(number),
+                _ => None,
             },
             _ => None,
         }
@@ -3966,6 +4051,39 @@ impl<'a> CallChecker<'a> {
             }
             if scope.names.contains_key(receiver.id.as_str())
                 || scope.opaque_locals.contains(receiver.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaited_queue_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Await(awaited) = func else {
+            return None;
+        };
+        let Expr::Call(get_call) = awaited.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || !get_call.arguments.args.is_empty()
+            || !get_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Name(queue) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_queue_items.get(queue.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(queue.id.as_str())
+                || scope.opaque_locals.contains(queue.id.as_str())
             {
                 return None;
             }
@@ -4371,14 +4489,7 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let Expr::Attribute(attribute) = call.func.as_ref() else {
-            return None;
-        };
-        let Expr::Name(module) = attribute.value.as_ref() else {
-            return None;
-        };
-        if attribute.attr.as_str() != "getitem"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("operator")
+        if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem")
             || !call.arguments.keywords.is_empty()
         {
             return None;
@@ -4512,6 +4623,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.atexit_register_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.operator_getitem_callable(func) {
                     return Some(callable);
                 }
@@ -4850,6 +4964,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
                 {
+                    // A completed set is replaced, not extended, by a second
+                    // ``@overload`` group for the same name.
+                    if self.completed_overload_sets.remove(&fullname) {
+                        self.callable_return_overloads.remove(&fullname);
+                    }
                     if let Some(overload) =
                         Self::callable_return_overload(parameters, returns.as_deref())
                     {
@@ -4857,6 +4976,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .entry(fullname.clone())
                             .or_default()
                             .push(overload);
+                    }
+                } else if self.callable_return_overloads.contains_key(&fullname) {
+                    // The first plain ``def`` after an ``@overload`` group is
+                    // that group's implementation and closes it. A later one
+                    // redefines the name, so the recorded arms no longer apply.
+                    if self.completed_overload_sets.contains(&fullname) {
+                        self.callable_return_overloads.remove(&fullname);
+                        self.completed_overload_sets.remove(&fullname);
+                    } else {
+                        self.completed_overload_sets.insert(fullname.clone());
                     }
                 }
                 if let Some(class) = returns.as_deref().and_then(|annotation| {
@@ -4977,6 +5106,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else if is_callable_attribute_alias || is_lambda {
                             self.mark_opaque_local(name.id.as_str());
+                            if is_lambda {
+                                self.current_scope()
+                                    .invalidated_callables
+                                    .insert(name.id.to_string());
+                            }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
@@ -4989,6 +5123,42 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         }
                     }
                 }
+            }
+            Stmt::For(for_stmt) => {
+                if let Expr::Name(name) = for_stmt.target.as_ref() {
+                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                        scope.functions.contains_key(name.id.as_str())
+                            || scope.names.contains_key(name.id.as_str())
+                    });
+                    self.mark_opaque_local(name.id.as_str());
+                    if was_known_callable {
+                        self.current_scope()
+                            .invalidated_callables
+                            .insert(name.id.to_string());
+                    }
+                }
+                self.visit_for_stmt(for_stmt);
+            }
+            Stmt::With(with_stmt) => {
+                for target in with_stmt
+                    .items
+                    .iter()
+                    .filter_map(|item| item.optional_vars.as_deref())
+                {
+                    if let Expr::Name(name) = target {
+                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                            scope.functions.contains_key(name.id.as_str())
+                                || scope.names.contains_key(name.id.as_str())
+                        });
+                        self.mark_opaque_local(name.id.as_str());
+                        if was_known_callable {
+                            self.current_scope()
+                                .invalidated_callables
+                                .insert(name.id.to_string());
+                        }
+                    }
+                }
+                self.visit_with_stmt(with_stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -5046,10 +5216,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
-            Stmt::With(with_stmt) => {
-                self.visit_with_stmt(with_stmt);
-            }
-            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
