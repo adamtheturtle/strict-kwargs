@@ -2692,3 +2692,44 @@ LiteralEnter().__enter__()
         "non-callable enter results should not emit violations, got: {messages:?}"
     );
 }
+
+/// Callable-valued properties are not checked as the property getter (issue
+/// #668).
+#[test]
+fn callable_valued_property_call_is_not_attributed_to_property() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Spec:
+    @property
+    def opener(self) -> Callable[[list[int]], str]:
+        return lambda items: str(len(items))
+def main() -> None:
+    print(Spec().opener([1, 2]))
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("opener")),
+        "property getter must not be the callee: {messages:?}"
+    );
+}
+
+/// `Enum.value` descriptor reads must not be treated as calls (issue #669).
+#[test]
+fn enum_value_callable_member_is_not_attributed_to_enum_value() {
+    let messages = check_source(
+        r"
+import enum
+def _shout(value: str) -> str:
+    return value.upper()
+class Style(enum.Enum):
+    SHOUT = enum.member(value=_shout)
+    def __call__(self, value: str, /) -> str:
+        return self.value(value)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("\"value\"")),
+        "Enum.value must not be the callee: {messages:?}"
+    );
+}
