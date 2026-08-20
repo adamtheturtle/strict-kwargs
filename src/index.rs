@@ -1177,6 +1177,7 @@ impl DefinitionIndex {
     }
 
     /// Whether `fullname` is a ``@property`` (or enum magic attribute) getter.
+    #[cfg_attr(coverage, coverage(off))]
     pub fn is_property(&self, fullname: &str) -> bool {
         let mut query_budget = MAX_QUERY_MODULES;
         self.ensure_for(fullname, &mut query_budget);
