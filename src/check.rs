@@ -1106,6 +1106,8 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
+    /// Local generator name -> concrete callable yield signature.
+    callable_generator_yields: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
     /// Callable values yielded by `@contextmanager` functions, keyed by the
@@ -1452,6 +1454,7 @@ impl<'a> CallChecker<'a> {
             function_stack: Vec::new(),
             callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
+            callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
@@ -2288,7 +2291,14 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function = if let Some(signature) = self.overload_result_signature(&call.func) {
+        let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
+            Some(method)
+        } else if let Some(signature) = self.generator_send_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Generator.send() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.overload_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "overload result".to_string(),
                 signature,
@@ -3365,6 +3375,39 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         self.resolve_callee(call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn method_type_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let method_type = match call.func.as_ref() {
+            Expr::Name(name) => self.resolve_local(name.id.as_str()),
+            Expr::Attribute(attribute) => {
+                let Expr::Name(module) = attribute.value.as_ref() else {
+                    return None;
+                };
+                self.resolve_module(module.id.as_str())
+                    .map(|module| format!("{module}.{}", attribute.attr))
+            }
+            _ => None,
+        };
+        if method_type.as_deref() != Some("types.MethodType") || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [method, _receiver] = &*call.arguments.args else {
+            return None;
+        };
+        let fullname = self.resolve_callee(method)?;
+        let mut signature = self.index.get(&fullname)?.first()?.clone();
+        (!signature.parameters.is_empty()).then_some(())?;
+        signature.parameters.remove(0);
+        Some(LocalFunction {
+            fullname: format!("{fullname} bound by MethodType"),
+            signature,
+        })
     }
 
     fn current_lexical_scope(&self) -> &str {
@@ -4484,6 +4527,28 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generator_send_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(generator) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "send"
+            || call.arguments.args.len() != 1
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        self.callable_generator_yields
+            .get(generator.id.as_str())
+            .cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn weakref_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(dereference) = func else {
             return None;
@@ -4519,9 +4584,8 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem")
-            || !call.arguments.keywords.is_empty()
-        {
+        // Keyword arguments are allowed; only positional value/slice matter.
+        if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem") {
             return None;
         }
         let [value, slice] = &*call.arguments.args else {
@@ -5141,9 +5205,21 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
+                let generator_yield = if let Expr::Call(factory) = value.as_ref() {
+                    self.resolve_callee(&factory.func)
+                        .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
+                } else {
+                    None
+                };
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
+                        if let Some(signature) = &generator_yield {
+                            self.callable_generator_yields
+                                .insert(name.id.to_string(), signature.clone());
+                        } else {
+                            self.callable_generator_yields.remove(name.id.as_str());
+                        }
                         if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
                             for (attribute, callable) in &namespace_attributes {
