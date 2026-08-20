@@ -1101,6 +1101,8 @@ struct CallChecker<'a> {
     scopes: Vec<Scope>,
     class_stack: Vec<String>,
     function_stack: Vec<String>,
+    /// Local names bound by functional NamedTuple/namedtuple factories.
+    functional_namedtuple_names: FxHashSet<String>,
     /// Local factory fullname -> callable instance class declared by its
     /// return annotation.
     callable_factory_returns: FxHashMap<String, String>,
@@ -1459,6 +1461,7 @@ impl<'a> CallChecker<'a> {
             scopes: vec![Scope::default()],
             class_stack: Vec::new(),
             function_stack: Vec::new(),
+            functional_namedtuple_names: FxHashSet::default(),
             callable_factory_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
             callable_generator_yields: FxHashMap::default(),
@@ -2157,6 +2160,38 @@ impl<'a> CallChecker<'a> {
             Expr::Call(ast::ExprCall { func, .. }) => self.class_from_constructor_func(func),
             _ => None,
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_record_replacement(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        if let Expr::Attribute(method) = call.func.as_ref() {
+            if method.attr.as_str() == "_replace" {
+                return self.class_from_constructor(&method.value);
+            }
+            // `dataclasses.replace(obj, field=...)` — avoid resolve_callee here so
+            // attribute resolution for unrelated constructor calls like `C().method`
+            // cannot re-enter and revive an excluded method signature.
+            if method.attr.as_str() == "replace" {
+                let Expr::Name(module) = method.value.as_ref() else {
+                    return None;
+                };
+                if self.resolve_module(module.id.as_str()).as_deref() != Some("dataclasses") {
+                    return None;
+                }
+                return self.class_from_constructor(call.arguments.args.first()?);
+            }
+            return None;
+        }
+        let Expr::Name(name) = call.func.as_ref() else {
+            return None;
+        };
+        if self.resolve_local(name.id.as_str()).as_deref() != Some("dataclasses.replace") {
+            return None;
+        }
+        self.class_from_constructor(call.arguments.args.first()?)
     }
 
     const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
@@ -3330,6 +3365,45 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_functional_namedtuple(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        let Some(path) = Self::dotted_path(&call.func) else {
+            return false;
+        };
+        path.rsplit('.').next() == Some("NamedTuple")
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_collections_namedtuple(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        Self::dotted_path(&call.func)
+            .is_some_and(|path| path.rsplit('.').next() == Some("namedtuple"))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn namedtuple_keyword_field_callable(&self, value: &Expr, field: &str) -> Option<String> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let Expr::Name(class) = constructor.func.as_ref() else {
+            return None;
+        };
+        if !self.functional_namedtuple_names.contains(class.id.as_str()) {
+            return None;
+        }
+        constructor
+            .arguments
+            .keywords
+            .iter()
+            .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(field))
+            .and_then(|keyword| self.resolve_callee(&keyword.value))
     }
 
     /// Resolve a deeper attribute chain (`os.path.join` -> the joined
@@ -4758,12 +4832,18 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                if let Some(class_fullname) = self.class_from_record_replacement(value) {
+                    return Some(self.resolve_instance_method(&class_fullname, attr_name));
+                }
                 if let Some(callable) = self.dataclass_constructor_field_callable(value, attr_name)
                 {
                     return Some(callable);
                 }
                 if let Some(callable) = self.namedtuple_constructor_field_callable(value, attr_name)
                 {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
                     return Some(callable);
                 }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
@@ -5301,6 +5381,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
+                let is_functional_namedtuple = Self::is_functional_namedtuple(value);
+                let is_collections_namedtuple = Self::is_collections_namedtuple(value);
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
@@ -5316,7 +5398,15 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         } else {
                             self.callable_generator_yields.remove(name.id.as_str());
                         }
-                        if let Some(class_fullname) = &class_fullname {
+                        if is_functional_namedtuple || is_collections_namedtuple {
+                            self.functional_namedtuple_names.insert(name.id.to_string());
+                        }
+                        if is_functional_namedtuple {
+                            self.define(
+                                name.id.as_str(),
+                                format!("{}.{}", self.current_lexical_scope(), name.id),
+                            );
+                        } else if let Some(class_fullname) = &class_fullname {
                             self.record_instance(name.id.as_str(), class_fullname.clone());
                             for (attribute, callable) in &namespace_attributes {
                                 self.define(

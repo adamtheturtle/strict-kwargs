@@ -2084,11 +2084,66 @@ fn dataclass_explicit_init_wins_over_synthesis() {
 }
 
 #[test]
-fn functional_namedtuple_form_out_of_scope() {
-    // The functional `NamedTuple("N", [...])` form is not synthesized; no
-    // false positive for the surrounding call.
-    assert_ok(
-        "from typing import NamedTuple\n\nNT = NamedTuple(\"NT\", [(\"a\", int), (\"b\", int)])\n",
+fn functional_namedtuple_constructor_and_callable_field_are_modeled() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from typing import NamedTuple
+Point = NamedTuple("Point", [("call", Callable[[int], None])])
+def f(value: int) -> None: ...
+Point(f).call(1)
+"#,
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "Point""#)),
+        "got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "call" of "Point""#)),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
+fn record_replacements_preserve_callable_field_signatures() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass, replace
+from collections.abc import Callable
+from typing import NamedTuple
+@dataclass
+class D: call: Callable[[int], None]
+class N(NamedTuple): call: Callable[[int], None]
+def f(value: int) -> None: ...
+replace(D(call=f)).call(1)
+N(call=f)._replace().call(1)
+",
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(messages
+        .iter()
+        .any(|message| message.starts_with("main:9:")));
+    assert!(messages
+        .iter()
+        .any(|message| message.starts_with("main:10:")));
+}
+
+#[test]
+fn collections_namedtuple_keyword_field_preserves_callable_signature() {
+    assert_error(
+        r#"
+from collections import namedtuple
+Point = namedtuple("Point", ["call"])
+def f(value: int) -> None: ...
+Point(call=f).call(1)
+"#,
+        5,
+        r#"for "f" (got 1, maximum 0)"#,
     );
 }
 
