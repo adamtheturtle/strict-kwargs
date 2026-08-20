@@ -1114,6 +1114,25 @@ reduce(lambda left, right: left, [f, f])(1)
     );
 }
 
+/// A Generator send result retains the declared callable yield signature
+/// (issue #458).
+#[test]
+fn generator_send_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def functions() -> Generator[Callable[[int], None], None, None]: ...
+gen = functions()
+next(gen)
+gen.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "send() result"),
+        "expected generator send violation, got: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
