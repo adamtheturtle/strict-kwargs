@@ -3725,6 +3725,9 @@ impl<'a> CallChecker<'a> {
         "builtins.classmethod",
         "builtins.staticmethod",
         "abc.update_abstractmethods",
+        "contextlib.asynccontextmanager",
+        "contextlib.contextmanager",
+        "dataclasses.dataclass",
         "functools.cache",
         "functools.lru_cache",
         "functools.total_ordering",
@@ -3750,6 +3753,7 @@ impl<'a> CallChecker<'a> {
         "unittest.case.skipIf",
         "unittest.case.skipUnless",
         "unittest.case.expectedFailure",
+        "weakref.proxy",
     ];
 
     #[cfg_attr(coverage, coverage(off))]

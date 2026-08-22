@@ -3609,3 +3609,75 @@ target(1)
         "no-else False must keep prior: {messages:?}"
     );
 }
+
+/// `weakref.proxy` preserves the proxied callable signature (issue #450).
+#[test]
+fn weakref_proxy_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def f(value: int) -> None: ...
+weakref.proxy(f)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "f"),
+        "expected weakref.proxy violation, got: {messages:?}"
+    );
+}
+
+/// `contextlib.contextmanager` preserves the wrapped factory signature
+/// (issue #496).
+#[test]
+fn contextmanager_preserves_factory_signature() {
+    let messages = check_source(
+        r"
+import contextlib
+def manager(value: int):
+    yield value
+contextlib.contextmanager(func=manager)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "manager"),
+        "expected contextmanager factory violation, got: {messages:?}"
+    );
+}
+
+/// `contextlib.asynccontextmanager` preserves the wrapped factory signature
+/// (issue #497).
+#[test]
+fn asynccontextmanager_preserves_factory_signature() {
+    let messages = check_source(
+        r"
+import contextlib
+async def manager(value: int):
+    yield value
+contextlib.asynccontextmanager(func=manager)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "manager"),
+        "expected asynccontextmanager factory violation, got: {messages:?}"
+    );
+}
+
+/// Dynamic `dataclasses.dataclass` returns keep the class constructor
+/// signature (issue #498).
+#[test]
+fn dataclass_decorator_preserves_class_constructor_signature() {
+    let messages = check_source(
+        r"
+import dataclasses
+class Model:
+    def __init__(self, value: int) -> None:
+        pass
+dataclasses.dataclass(Model)(1)
+dataclasses.dataclass()(Model)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "Model") && has_error_at(&messages, 7, "Model"),
+        "expected dataclass identity-return violations, got: {messages:?}"
+    );
+}
