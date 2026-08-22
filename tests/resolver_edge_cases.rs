@@ -1085,6 +1085,24 @@ for call in reversed(calls):
     );
 }
 
+/// ``async for`` preserves an annotated async iterator's callable item type
+/// (issue #455).
+#[test]
+fn async_for_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
+    async for call in values:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "async-for item"),
+        "expected async-for item violation, got: {messages:?}"
+    );
+}
+
 /// Generic functions that return the same `TypeVar` accepted by their
 /// arguments preserve an unambiguous concrete callable (issue #386).
 #[test]

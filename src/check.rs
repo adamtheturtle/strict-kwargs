@@ -1897,6 +1897,11 @@ impl<'a> CallChecker<'a> {
                     .optional_callables
                     .insert(name.to_string(), signature);
             }
+            if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
+                self.current_scope()
+                    .callable_iterable_items
+                    .insert(name.to_string(), signature);
+            }
         }
     }
 
@@ -5407,9 +5412,27 @@ impl<'a> CallChecker<'a> {
         };
         matches!(
             Self::dotted_path(value)?.rsplit('.').next(),
-            Some("list" | "List" | "Sequence" | "Iterable")
+            Some("list" | "List" | "Sequence" | "Iterable" | "Iterator" | "AsyncIterator")
         )
         .then(|| Self::callable_annotation_signature(slice))?
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn for_loop_item_signature(&self, iterable: &Expr) -> Option<Signature> {
+        let Expr::Name(source) = iterable else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(source.id.as_str())
+                || scope.opaque_locals.contains(source.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6919,11 +6942,21 @@ impl<'a> CallChecker<'a> {
             return;
         }
         self.visit_expr(&for_stmt.target);
+        let item_label = if for_stmt.is_async {
+            "async-for item"
+        } else {
+            "for-loop item"
+        };
         if let (Expr::Name(target), Some(signature)) = (
             for_stmt.target.as_ref(),
             self.reversed_item_signature(&for_stmt.iter),
         ) {
             self.define_function(target.id.as_str(), "reversed item".to_string(), signature);
+        } else if let (Expr::Name(target), Some(signature)) = (
+            for_stmt.target.as_ref(),
+            self.for_loop_item_signature(&for_stmt.iter),
+        ) {
+            self.define_function(target.id.as_str(), item_label.to_string(), signature);
         }
         for inner in &for_stmt.body {
             self.visit_stmt(inner);
