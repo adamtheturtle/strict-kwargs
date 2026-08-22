@@ -25,8 +25,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
-    build_index_with_sources, is_package_init, module_name_for_path, relative_base,
-    DefinitionIndex, IndexedFile,
+    build_index_with_sources, definite_empty_iterable, is_package_init, module_name_for_path,
+    relative_base, DefinitionIndex, IndexedFile,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -6904,6 +6904,9 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn visit_for_stmt(&mut self, for_stmt: &'a ast::StmtFor) {
         self.visit_expr(&for_stmt.iter);
+        if definite_empty_iterable(for_stmt.iter.as_ref()) {
+            return;
+        }
         self.visit_expr(&for_stmt.target);
         if let (Expr::Name(target), Some(signature)) = (
             for_stmt.target.as_ref(),
@@ -7310,16 +7313,18 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
             }
             Stmt::For(for_stmt) => {
-                if let Expr::Name(name) = for_stmt.target.as_ref() {
-                    let was_known_callable = self.scopes.last().is_some_and(|scope| {
-                        scope.functions.contains_key(name.id.as_str())
-                            || scope.names.contains_key(name.id.as_str())
-                    });
-                    self.mark_opaque_local(name.id.as_str());
-                    if was_known_callable {
-                        self.current_scope()
-                            .invalidated_callables
-                            .insert(name.id.to_string());
+                if !definite_empty_iterable(for_stmt.iter.as_ref()) {
+                    if let Expr::Name(name) = for_stmt.target.as_ref() {
+                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                            scope.functions.contains_key(name.id.as_str())
+                                || scope.names.contains_key(name.id.as_str())
+                        });
+                        self.mark_opaque_local(name.id.as_str());
+                        if was_known_callable {
+                            self.current_scope()
+                                .invalidated_callables
+                                .insert(name.id.to_string());
+                        }
                     }
                 }
                 self.visit_for_stmt(for_stmt);

@@ -2299,6 +2299,27 @@ const fn definite_bool(expr: &Expr) -> Option<bool> {
     }
 }
 
+/// Whether a ``for`` loop's iterable is syntactically known to yield zero
+/// iterations (empty literal container or zero-argument ``set()``/``dict()``
+/// factory).
+#[cfg_attr(coverage, coverage(off))]
+pub fn definite_empty_iterable(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(list) => list.elts.is_empty(),
+        Expr::Tuple(tuple) => tuple.elts.is_empty(),
+        Expr::Dict(dict) => dict.items.is_empty(),
+        Expr::Set(set) => set.elts.is_empty(),
+        Expr::StringLiteral(literal) => literal.value.to_str().is_empty(),
+        Expr::BytesLiteral(literal) => literal.value.is_empty(),
+        Expr::Call(call)
+            if call.arguments.args.is_empty() && call.arguments.keywords.is_empty() =>
+        {
+            matches!(callee_tail(&call.func), Some("set" | "dict" | "frozenset"))
+        }
+        _ => false,
+    }
+}
+
 fn has_overload_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list
         .iter()
@@ -2697,7 +2718,9 @@ fn index_stmt(
                 store.conditional_depth -= 1;
             }
         },
-        Stmt::For(ast::StmtFor { target, body, .. }) => {
+        Stmt::For(ast::StmtFor {
+            target, iter, body, ..
+        }) => {
             if let Expr::Name(name) = target.as_ref() {
                 let fullname = format!("{scope_name}.{}", name.id);
                 if store.signatures.contains_key(&fullname) {
@@ -2705,7 +2728,16 @@ fn index_stmt(
                 }
             }
             exclude_assigned_attribute(store, scope_name, target, Some(bindings));
-            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            if !definite_empty_iterable(iter.as_ref()) {
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    body,
+                    bindings,
+                );
+            }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
             for target in items
@@ -2884,7 +2916,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 store.conditional_depth -= 1;
             }
         },
-        Stmt::For(ast::StmtFor { target, body, .. }) => {
+        Stmt::For(ast::StmtFor {
+            target, iter, body, ..
+        }) => {
             if let Expr::Name(name) = target.as_ref() {
                 let fullname = format!("{scope_name}.{}", name.id);
                 if store.signatures.contains_key(&fullname) {
@@ -2892,7 +2926,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 }
             }
             exclude_assigned_attribute(store, scope_name, target, None);
-            index_module_fast(store, module_name, scope_name, body);
+            if !definite_empty_iterable(iter.as_ref()) {
+                index_module_fast(store, module_name, scope_name, body);
+            }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
             for target in items
@@ -3093,9 +3129,17 @@ fn index_class_body(
                 }
                 store.conditional_depth -= 1;
             }
-            Stmt::While(ast::StmtWhile { body, .. })
-            | Stmt::For(ast::StmtFor { body, .. })
-            | Stmt::With(ast::StmtWith { body, .. }) => {
+            Stmt::While(ast::StmtWhile { test, body, .. }) => {
+                if definite_bool(test) != Some(false) {
+                    index_class_body(store, module_name, is_package, class_name, body, bindings);
+                }
+            }
+            Stmt::For(ast::StmtFor { iter, body, .. }) => {
+                if !definite_empty_iterable(iter.as_ref()) {
+                    index_class_body(store, module_name, is_package, class_name, body, bindings);
+                }
+            }
+            Stmt::With(ast::StmtWith { body, .. }) => {
                 index_class_body(store, module_name, is_package, class_name, body, bindings);
             }
             Stmt::Try(ast::StmtTry {
@@ -3256,9 +3300,17 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 }
                 store.conditional_depth -= 1;
             }
-            Stmt::While(ast::StmtWhile { body, .. })
-            | Stmt::For(ast::StmtFor { body, .. })
-            | Stmt::With(ast::StmtWith { body, .. }) => {
+            Stmt::While(ast::StmtWhile { test, body, .. }) => {
+                if definite_bool(test) != Some(false) {
+                    index_class_body_fast(store, module_name, class_name, body);
+                }
+            }
+            Stmt::For(ast::StmtFor { iter, body, .. }) => {
+                if !definite_empty_iterable(iter.as_ref()) {
+                    index_class_body_fast(store, module_name, class_name, body);
+                }
+            }
+            Stmt::With(ast::StmtWith { body, .. }) => {
                 index_class_body_fast(store, module_name, class_name, body);
             }
             Stmt::Try(ast::StmtTry {
