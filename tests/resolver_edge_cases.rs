@@ -1103,6 +1103,53 @@ async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
     );
 }
 
+/// ``async with`` preserves a context manager's ``__aenter__`` return type
+/// (issue #454).
+#[test]
+fn async_with_preserves_callable_aenter_result_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+
+class Manager:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args: object) -> None: ...
+
+async def caller(manager: Manager) -> None:
+    async with manager as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "async-with context result"),
+        "expected async-with binding violation, got: {messages:?}"
+    );
+}
+
+/// ``singledispatch.register`` returns the registered implementation
+/// (issue #483).
+#[test]
+fn singledispatch_register_preserves_implementation_callable_signature() {
+    let messages = check_source(
+        r"
+from functools import singledispatch
+
+@singledispatch
+def generic(value: object) -> object:
+    return value
+
+def target(value: int) -> int:
+    return value
+
+generic.register(int, target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "target"),
+        "expected singledispatch.register violation, got: {messages:?}"
+    );
+}
+
 /// Generic functions that return the same `TypeVar` accepted by their
 /// arguments preserve an unambiguous concrete callable (issue #386).
 #[test]

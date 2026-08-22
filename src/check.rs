@@ -3763,6 +3763,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_register_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "register" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let generic_fullname = self.resolve_callee(method.value.as_ref())?;
+        if !self.index.is_excluded(&generic_fullname) {
+            return None;
+        }
+        let [_, implementation] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(implementation)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn method_type_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
         let Expr::Call(call) = func else {
             return None;
@@ -4139,7 +4160,16 @@ impl<'a> CallChecker<'a> {
                 return self.signature_from_generic_call(constructor, &generic);
             }
         }
-        let class = self.class_from_constructor(expr)?;
+        let class = self.class_from_constructor(expr).or_else(|| {
+            let Expr::Name(name) = expr else {
+                return None;
+            };
+            if self.binding_is_instance(name.id.as_str()) {
+                self.resolve_local(name.id.as_str())
+            } else {
+                self.class_from_name_annotation(name.id.as_str())
+            }
+        })?;
         if let Some(signature) = self.context_manager_enter_signatures.get(&class) {
             return Some(signature.clone());
         }
@@ -4157,7 +4187,16 @@ impl<'a> CallChecker<'a> {
                 return self.callable_from_generic_constructor(constructor, &generic);
             }
         }
-        let class = self.class_from_constructor(expr)?;
+        let class = self.class_from_constructor(expr).or_else(|| {
+            let Expr::Name(name) = expr else {
+                return None;
+            };
+            if self.binding_is_instance(name.id.as_str()) {
+                self.resolve_local(name.id.as_str())
+            } else {
+                self.class_from_name_annotation(name.id.as_str())
+            }
+        })?;
         self.context_manager_enter_callables.get(&class).cloned()
     }
 
@@ -6665,6 +6704,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.singledispatch_register_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.atexit_register_callable(func) {
                     return Some(callable);
                 }
@@ -6764,7 +6806,13 @@ impl<'a> CallChecker<'a> {
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
-            if let Some(return_expr) = Self::single_return_expression(body) {
+            if let Some(signature) = returns
+                .as_deref()
+                .and_then(Self::callable_annotation_signature)
+            {
+                self.context_manager_enter_signatures
+                    .insert(class_fullname.clone(), signature);
+            } else if let Some(return_expr) = Self::single_return_expression(body) {
                 if let Some(callable) = self.resolve_callee(return_expr) {
                     self.context_manager_enter_callables
                         .insert(class_fullname.clone(), callable);
@@ -6916,18 +6964,29 @@ impl<'a> CallChecker<'a> {
                 continue;
             };
             self.visit_expr(target);
-            let (Expr::Name(name), Expr::Call(manager_call)) = (target, &item.context_expr) else {
+            let Expr::Name(name) = target else {
                 continue;
             };
-            let Some(factory) = self.resolve_callee(&manager_call.func) else {
+            if let Expr::Call(manager_call) = &item.context_expr {
+                let Some(factory) = self.resolve_callee(&manager_call.func) else {
+                    continue;
+                };
+                if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
+                    self.define_function(
+                        name.id.as_str(),
+                        format!("{factory} context result"),
+                        signature,
+                    );
+                }
                 continue;
-            };
-            if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
-                self.define_function(
-                    name.id.as_str(),
-                    format!("{factory} context result"),
-                    signature,
-                );
+            }
+            if let Some(signature) = self.context_manager_enter_signature(&item.context_expr) {
+                let label = if with_stmt.is_async {
+                    "async-with context result"
+                } else {
+                    "with context result"
+                };
+                self.define_function(name.id.as_str(), label.to_string(), signature);
             }
         }
         for inner in &with_stmt.body {
