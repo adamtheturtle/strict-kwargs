@@ -2421,6 +2421,25 @@ impl<'a> CallChecker<'a> {
         self.class_from_constructor(call.arguments.args.first()?)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_replacement_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
+        let Expr::Call(replace_call) = value else {
+            return None;
+        };
+        let instance = if let Expr::Attribute(method) = replace_call.func.as_ref() {
+            match method.attr.as_str() {
+                "_replace" => method.value.as_ref(),
+                "replace" => replace_call.arguments.args.first()?,
+                _ => return None,
+            }
+        } else {
+            replace_call.arguments.args.first()?
+        };
+        self.dataclass_constructor_field_callable(instance, attr)
+            .or_else(|| self.namedtuple_constructor_field_callable(instance, attr))
+            .or_else(|| self.namedtuple_keyword_field_callable(instance, attr))
+    }
+
     const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
         match expr {
             Expr::StringLiteral(_) => Some("builtins.str"),
@@ -6714,6 +6733,10 @@ impl<'a> CallChecker<'a> {
                     return self.resolve_callee(value);
                 }
                 if let Some(class_fullname) = self.class_from_record_replacement(value) {
+                    if let Some(callable) = self.record_replacement_field_callable(value, attr_name)
+                    {
+                        return Some(callable);
+                    }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
                 if let Some(callable) = self.dataclass_constructor_field_callable(value, attr_name)

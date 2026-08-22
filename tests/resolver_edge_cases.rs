@@ -803,6 +803,34 @@ Holder(call=f).call(1)
     );
 }
 
+/// ``dataclasses.replace`` and ``NamedTuple._replace`` preserve callable fields
+/// (issue #457).
+#[test]
+fn record_replacement_preserves_callable_field_signatures() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass, replace
+from collections.abc import Callable
+from typing import NamedTuple
+
+@dataclass
+class D:
+    call: Callable[[int], None]
+
+class N(NamedTuple):
+    call: Callable[[int], None]
+
+def f(value: int) -> None: ...
+replace(D(call=f)).call(1)
+N(call=f)._replace().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 14, "f") && has_error_at(&messages, 15, "f"),
+        "expected replace/_replace field violations, got: {messages:?}"
+    );
+}
+
 /// A literal `operator.attrgetter` applied to a receiver with a known
 /// callable attribute preserves that attribute's signature (issue #375).
 #[test]
