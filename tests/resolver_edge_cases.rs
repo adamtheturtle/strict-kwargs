@@ -1235,6 +1235,9 @@ fn comprehension_target_shadows_outer_function_signature() {
         r"
 def target(value: int) -> None: ...
 [target(1) for target in [lambda *args: None]]
+{target(1) for target in [lambda *args: None]}
+{target(1): None for target in [lambda *args: None]}
+(target(1) for target in [lambda *args: None])
 ",
     );
     assert!(
