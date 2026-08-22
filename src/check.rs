@@ -1412,6 +1412,14 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
+    /// ``ContextVar.set()`` token locals and the callable value signature
+    /// carried by ``Token.old_value``.
+    contextvar_token_callables: FxHashMap<String, Signature>,
+    /// ``TopologicalSorter`` instance locals and a homogeneous callable drawn
+    /// from their constructor ``graph`` keys.
+    topological_sorter_nodes: FxHashMap<String, String>,
+    /// Annotated ``MappingProxyType[K, V]`` locals when ``V`` is callable.
+    mapping_proxy_callables: FxHashMap<String, Signature>,
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
@@ -1668,18 +1676,60 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn weakset_initializer_callable(&self, value: &Expr) -> Option<String> {
+    fn homogeneous_callable_dict_keys(&self, value: &Expr) -> Option<String> {
+        let Expr::Dict(dict) = value else {
+            return None;
+        };
+        if !dict.items.iter().all(|item| item.key.is_some()) {
+            return None;
+        }
+        let mut items = dict.items.iter();
+        let first_key = items.next()?.key.as_ref()?;
+        let first = self.resolve_callee(first_key)?;
+        items
+            .all(|item| {
+                item.key
+                    .as_ref()
+                    .and_then(|key| self.resolve_callee(key))
+                    .as_deref()
+                    == Some(first.as_str())
+            })
+            .then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn topological_sorter_graph_callable(&self, value: &Expr) -> Option<String> {
         let Expr::Call(constructor) = value else {
             return None;
         };
-        let class = self.resolve_callee(&constructor.func)?;
-        if !matches!(
-            class.as_str(),
-            "weakref.WeakSet" | "weakref.WeakSet.__init__" | "weakref.WeakSet.__new__"
-        ) {
+        if self
+            .class_from_constructor_func(&constructor.func)?
+            .as_str()
+            != "graphlib.TopologicalSorter"
+        {
             return None;
         }
-        self.homogeneous_callable_sequence(constructor.arguments.args.first()?)
+        let graph = constructor
+            .arguments
+            .find_keyword("graph")
+            .map(|keyword| &keyword.value)
+            .or_else(|| constructor.arguments.args.first())?;
+        self.homogeneous_callable_dict_keys(graph)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dict_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("WeakKeyDictionary") {
+            return None;
+        }
+        let Expr::Tuple(tuple) = slice.as_ref() else {
+            return None;
+        };
+        let key_type = tuple.elts.first()?;
+        Self::callable_annotation_signature(key_type)
     }
 
     fn mark_param_opaque(&mut self, name: &str) {
@@ -1700,10 +1750,28 @@ impl<'a> CallChecker<'a> {
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.contextvar_token_callables.remove(name);
+        scope.topological_sorter_nodes.remove(name);
+        scope.mapping_proxy_callables.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
         scope.opaque_locals.insert(name.to_string());
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weakset_initializer_callable(&self, value: &Expr) -> Option<String> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        if !matches!(
+            class.as_str(),
+            "weakref.WeakSet" | "weakref.WeakSet.__init__" | "weakref.WeakSet.__new__"
+        ) {
+            return None;
+        }
+        self.homogeneous_callable_sequence(constructor.arguments.args.first()?)
     }
 
     fn clear_instance_binding(&mut self, name: &str) {
@@ -1719,6 +1787,9 @@ impl<'a> CallChecker<'a> {
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.contextvar_token_callables.remove(name);
+        scope.topological_sorter_nodes.remove(name);
+        scope.mapping_proxy_callables.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2487,6 +2558,21 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "ContextVar.get() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.contextvar_token_old_value_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "Token.old_value".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.mapping_proxy_get_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "MappingProxyType.get() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.weak_key_dict_popitem_key_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "WeakKeyDictionary.popitem() key".to_string(),
                 signature,
             })
         } else if let Some(signature) = self.future_result_signature(&call.func) {
@@ -5075,6 +5161,126 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_set_token_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(set_call) = value else {
+            return None;
+        };
+        let Expr::Attribute(method) = set_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "set" {
+            return None;
+        }
+        let Expr::Name(var) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.contextvar_callables.get(var.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(var.id.as_str())
+                || scope.opaque_locals.contains(var.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_token_old_value_assignment_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Attribute(attribute) = value else {
+            return None;
+        };
+        if attribute.attr.as_str() != "old_value" {
+            return None;
+        }
+        let Expr::Name(token) = attribute.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.contextvar_token_callables.get(token.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(token.id.as_str())
+                || scope.opaque_locals.contains(token.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_token_old_value_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Attribute(attribute) = func else {
+            return None;
+        };
+        if attribute.attr.as_str() != "old_value" {
+            return None;
+        }
+        let Expr::Name(token) = attribute.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.contextvar_token_callables.get(token.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(token.id.as_str())
+                || scope.opaque_locals.contains(token.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn mapping_proxy_callable_signature(annotation: &Expr) -> Option<Signature> {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return None;
+        };
+        if Self::dotted_path(value)?.rsplit('.').next() != Some("MappingProxyType") {
+            return None;
+        }
+        let Expr::Tuple(tuple) = slice.as_ref() else {
+            return None;
+        };
+        let value_type = tuple.elts.get(1)?;
+        Self::callable_annotation_signature(value_type)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn mapping_proxy_get_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        if !get_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = get_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get" {
+            return None;
+        }
+        let Expr::Name(mapping) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.mapping_proxy_callables.get(mapping.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(mapping.id.as_str())
+                || scope.opaque_locals.contains(mapping.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn future_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(result_call) = func else {
             return None;
@@ -6077,6 +6283,114 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn topological_sorter_get_ready_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        Self::literal_sequence_index(&subscript.slice, 1)?;
+        let Expr::Call(get_ready) = subscript.value.as_ref() else {
+            return None;
+        };
+        if !get_ready.arguments.args.is_empty() || !get_ready.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = get_ready.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get_ready" {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Name(receiver) => {
+                for scope in self.scopes.iter().rev() {
+                    if let Some(callable) = scope.topological_sorter_nodes.get(receiver.id.as_str())
+                    {
+                        return Some(callable.clone());
+                    }
+                    if scope.names.contains_key(receiver.id.as_str())
+                        || scope.opaque_locals.contains(receiver.id.as_str())
+                    {
+                        return None;
+                    }
+                }
+                None
+            }
+            other => self.topological_sorter_graph_callable(other),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dict_popitem_key_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 0).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.args.is_empty()
+            || !popitem.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if self
+            .class_from_constructor_func(&constructor.func)?
+            .as_str()
+            != "weakref.WeakKeyDictionary"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [entries] = &*constructor.arguments.args else {
+            return None;
+        };
+        let entry_elements = match entries {
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => &dict.items,
+            _ => return None,
+        };
+        let last = entry_elements.last()?;
+        self.resolve_callee(last.key.as_ref()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dict_popitem_key_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Subscript(subscript) = func else {
+            return None;
+        };
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 0).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.args.is_empty()
+            || !popitem.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Name(mapping) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_iterable_items.get(mapping.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(mapping.id.as_str())
+                || scope.opaque_locals.contains(mapping.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn weakset_pop_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(pop_call) = func else {
             return None;
@@ -6207,12 +6521,16 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.topological_sorter_get_ready_callable(subscript))
+                        .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.topological_sorter_get_ready_callable(subscript))
+                        .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                 }
             }
             Expr::Name(name) => {
@@ -6864,6 +7182,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
                 let popped_signature = self.annotated_list_pop_signature(value);
+                let contextvar_token_signature = self.contextvar_set_token_signature(value);
+                let contextvar_old_value_signature =
+                    self.contextvar_token_old_value_assignment_signature(value);
+                let mapping_get_signature = self.mapping_proxy_get_signature(value);
+                let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
@@ -6947,6 +7270,30 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 "list pop result".to_string(),
                                 signature.clone(),
                             );
+                        }
+                        if let Some(signature) = &contextvar_token_signature {
+                            self.current_scope()
+                                .contextvar_token_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
+                        if let Some(signature) = &contextvar_old_value_signature {
+                            self.define_function(
+                                name.id.as_str(),
+                                "Token.old_value".to_string(),
+                                signature.clone(),
+                            );
+                        }
+                        if let Some(signature) = &mapping_get_signature {
+                            self.define_function(
+                                name.id.as_str(),
+                                "MappingProxyType.get() result".to_string(),
+                                signature.clone(),
+                            );
+                        }
+                        if let Some(callable) = &topological_sorter_node {
+                            self.current_scope()
+                                .topological_sorter_nodes
+                                .insert(name.id.to_string(), callable.clone());
                         }
                     }
                 }
@@ -7042,6 +7389,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_queue_items
                             .insert(name.id.to_string(), signature);
                     }
+                    if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_iterable_items
+                            .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                        self.current_scope()
+                            .mapping_proxy_callables
+                            .insert(name.id.to_string(), signature);
+                    }
                     if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
                         self.current_scope()
                             .callable_iterable_items
@@ -7071,6 +7428,16 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     if let Some(signature) = Self::weak_value_dict_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items
+                            .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_iterable_items
+                            .insert(name.id.to_string(), signature);
+                    }
+                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                        self.current_scope()
+                            .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::contextvar_callable_signature(annotation) {
