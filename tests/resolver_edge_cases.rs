@@ -1228,6 +1228,39 @@ generic.dispatch(cls=int)(1)
     );
 }
 
+/// Comprehension targets shadow same-named outer functions (issue #512).
+#[test]
+fn comprehension_target_shadows_outer_function_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target(1) for target in [lambda *args: None]]
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "comprehension target must shadow outer function: {messages:?}"
+    );
+}
+
+/// ``callable()`` narrowing preserves optional handler signatures (issue #484).
+#[test]
+fn callable_builtin_narrowing_preserves_signal_handler_signature() {
+    let messages = check_source(
+        r"
+import signal
+
+handler = signal.getsignal(signal.SIGINT)
+if callable(handler):
+    handler(signal.SIGINT, None)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed") || has_error_at(&messages, 6, "Too many"),
+        "expected callable() narrowed handler violation, got: {messages:?}"
+    );
+}
+
 /// Generic functions that return the same `TypeVar` accepted by their
 /// arguments preserve an unambiguous concrete callable (issue #386).
 #[test]

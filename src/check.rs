@@ -4831,6 +4831,130 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn callable_builtin_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let Expr::Call(call) = test else {
+            return None;
+        };
+        if !self.names_stdlib_callable(call.func.as_ref(), "builtins.callable")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Name(name)] = &*call.arguments.args else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.optional_callables.get(name.id.as_str()) {
+                return Some((name.id.to_string(), signature.clone()));
+            }
+            if scope.names.contains_key(name.id.as_str())
+                || scope.opaque_locals.contains(name.id.as_str())
+                || scope.functions.contains_key(name.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn signal_getsignal_result_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        let fullname = self.resolve_callee(&call.func)?;
+        if !matches!(fullname.as_str(), "signal.getsignal" | "signal.signal") {
+            return None;
+        }
+        Some(Signature {
+            parameters: vec![
+                Parameter {
+                    name: None,
+                    kind: ParameterKind::PositionalOrKeyword,
+                },
+                Parameter {
+                    name: None,
+                    kind: ParameterKind::PositionalOrKeyword,
+                },
+            ],
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn shadow_loop_target(&mut self, target: &Expr) {
+        if let Expr::Name(name) = target {
+            let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                scope.functions.contains_key(name.id.as_str())
+                    || scope.names.contains_key(name.id.as_str())
+            });
+            self.mark_opaque_local(name.id.as_str());
+            if was_known_callable {
+                self.current_scope()
+                    .invalidated_callables
+                    .insert(name.id.to_string());
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn bind_comprehension_target(&mut self, target: &Expr, iter: &Expr) {
+        let Expr::Name(name) = target else {
+            return;
+        };
+        if let Some(signature) = self
+            .reversed_item_signature(iter)
+            .or_else(|| self.for_loop_item_signature(iter))
+        {
+            self.define_function(
+                name.id.as_str(),
+                "comprehension item".to_string(),
+                signature,
+            );
+            return;
+        }
+        if let Expr::List(list) = iter {
+            if let [Expr::Lambda(lambda)] = &*list.elts {
+                let signature = lambda.parameters.as_deref().map_or_else(
+                    || Signature {
+                        parameters: Vec::new(),
+                    },
+                    signature_from_parameters,
+                );
+                self.define_function(
+                    name.id.as_str(),
+                    "comprehension item".to_string(),
+                    signature,
+                );
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_comprehension_from(
+        &mut self,
+        generators: &'a [ast::Comprehension],
+        index: usize,
+        body: &[&'a Expr],
+    ) {
+        if index >= generators.len() {
+            for expr in body {
+                self.visit_expr(expr);
+            }
+            return;
+        }
+        let generator = &generators[index];
+        self.visit_expr(&generator.iter);
+        self.push_scope();
+        self.shadow_loop_target(&generator.target);
+        self.bind_comprehension_target(&generator.target, &generator.iter);
+        for if_clause in &generator.ifs {
+            self.visit_expr(if_clause);
+        }
+        self.visit_comprehension_from(generators, index + 1, body);
+        self.pop_scope();
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -7019,12 +7143,16 @@ impl<'a> CallChecker<'a> {
             ..
         } = if_stmt;
         self.visit_expr(test);
-        let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
-            .then(|| {
-                self.callable_typeguard_narrowing(test)
-                    .or_else(|| self.optional_callable_narrowing(test))
-            })
-            .flatten();
+        let narrowing = match traversal {
+            IfBranchTraversal::LocalBody => self
+                .callable_typeguard_narrowing(test)
+                .or_else(|| self.callable_builtin_narrowing(test))
+                .or_else(|| self.optional_callable_narrowing(test)),
+            IfBranchTraversal::Module => self
+                .callable_builtin_narrowing(test)
+                .or_else(|| self.optional_callable_narrowing(test)),
+            IfBranchTraversal::ClassBody => None,
+        };
         if let Some((name, signature)) = narrowing {
             self.push_scope();
             self.define_function(&name, "narrowed callable".to_string(), signature);
@@ -7162,7 +7290,10 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn apply_assert_optional_callable_narrowing(&mut self, assert_stmt: &'a ast::StmtAssert) {
         self.visit_expr(&assert_stmt.test);
-        if let Some((name, signature)) = self.optional_callable_narrowing(&assert_stmt.test) {
+        if let Some((name, signature)) = self
+            .optional_callable_narrowing(&assert_stmt.test)
+            .or_else(|| self.callable_builtin_narrowing(&assert_stmt.test))
+        {
             self.define_function(&name, "narrowed callable".to_string(), signature);
         }
         if let Some(msg) = &assert_stmt.msg {
@@ -7385,6 +7516,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let contextvar_old_value_signature =
                     self.contextvar_token_old_value_assignment_signature(value);
                 let mapping_get_signature = self.mapping_proxy_get_signature(value);
+                let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
@@ -7490,6 +7622,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 signature.clone(),
                             );
                         }
+                        if let Some(signature) = &signal_handler_signature {
+                            self.current_scope()
+                                .optional_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
                         if let Some(callable) = &topological_sorter_node {
                             self.current_scope()
                                 .topological_sorter_nodes
@@ -7511,18 +7648,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::For(for_stmt) => {
                 if !definite_empty_iterable(for_stmt.iter.as_ref()) {
-                    if let Expr::Name(name) = for_stmt.target.as_ref() {
-                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
-                            scope.functions.contains_key(name.id.as_str())
-                                || scope.names.contains_key(name.id.as_str())
-                        });
-                        self.mark_opaque_local(name.id.as_str());
-                        if was_known_callable {
-                            self.current_scope()
-                                .invalidated_callables
-                                .insert(name.id.to_string());
-                        }
-                    }
+                    self.shadow_loop_target(for_stmt.target.as_ref());
                 }
                 self.visit_for_stmt(for_stmt);
             }
@@ -7727,6 +7853,26 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Expr::If(ternary) => {
                 self.poison_hover_bare_receiver(&ternary.test);
+            }
+            Expr::ListComp(list_comp) => {
+                self.visit_comprehension_from(&list_comp.generators, 0, &[list_comp.elt.as_ref()]);
+                return;
+            }
+            Expr::SetComp(set_comp) => {
+                self.visit_comprehension_from(&set_comp.generators, 0, &[set_comp.elt.as_ref()]);
+                return;
+            }
+            Expr::DictComp(dict_comp) => {
+                self.visit_comprehension_from(
+                    &dict_comp.generators,
+                    0,
+                    &[dict_comp.key.as_ref(), dict_comp.value.as_ref()],
+                );
+                return;
+            }
+            Expr::Generator(generator) => {
+                self.visit_comprehension_from(&generator.generators, 0, &[generator.elt.as_ref()]);
+                return;
             }
             _ => {}
         }
