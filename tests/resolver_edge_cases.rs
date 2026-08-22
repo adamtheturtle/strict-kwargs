@@ -3521,3 +3521,91 @@ asyncio.Runner().run(coro=factory())(1)
         "expected Runner.run violation, got: {messages:?}"
     );
 }
+
+/// Definite `if True` keeps the taken branch signature (issue #508).
+#[test]
+fn definite_true_if_branch_signature_is_kept() {
+    let messages = check_source(
+        r"
+if True:
+    def target(value: int) -> None: ...
+else:
+    def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "True branch must win: {messages:?}"
+    );
+}
+
+/// Unreachable `while False` must not overwrite a live signature (issue #638).
+#[test]
+fn unreachable_while_false_does_not_overwrite_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+while False:
+    def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "while False must not overwrite: {messages:?}"
+    );
+}
+
+/// Definite `if False` uses the else branch signature (issue #508).
+#[test]
+fn definite_false_if_branch_uses_else_signature() {
+    let messages = check_source(
+        r"
+if False:
+    def target(value: int, /) -> None: ...
+else:
+    def target(value: int) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "else branch must win: {messages:?}"
+    );
+}
+
+/// `if None` is definitely false and uses the else branch.
+#[test]
+fn definite_none_if_branch_uses_else_signature() {
+    let messages = check_source(
+        r"
+if None:
+    def target(value: int, /) -> None: ...
+else:
+    def target(value: int) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "None is falsey for definite if: {messages:?}"
+    );
+}
+
+/// `if False` without else leaves the prior signature intact.
+#[test]
+fn definite_false_if_without_else_keeps_prior_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+if False:
+    def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "no-else False must keep prior: {messages:?}"
+    );
+}
