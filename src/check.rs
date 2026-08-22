@@ -7029,11 +7029,7 @@ impl<'a> CallChecker<'a> {
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
-            self.index_context_manager_enter_method(
-                &class_fullname,
-                returns.as_deref(),
-                body,
-            );
+            self.index_context_manager_enter_method(&class_fullname, returns.as_deref(), body);
         }
         if let Some(signature) = returns
             .as_deref()
@@ -7153,10 +7149,7 @@ impl<'a> CallChecker<'a> {
         class_fullname: &str,
         returns: Option<&Expr>,
     ) -> bool {
-        if let Some(signature) = returns
-            .as_deref()
-            .and_then(Self::callable_annotation_signature)
-        {
+        if let Some(signature) = returns.and_then(Self::callable_annotation_signature) {
             self.context_manager_enter_signatures
                 .insert(class_fullname.to_string(), signature);
             true
@@ -7921,10 +7914,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             Expr::If(ternary) => {
                 self.poison_hover_bare_receiver(&ternary.test);
             }
-            Expr::ListComp(_)
-            | Expr::SetComp(_)
-            | Expr::DictComp(_)
-            | Expr::Generator(_) => {
+            Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_) | Expr::Generator(_) => {
                 self.visit_comprehension_expr(expr);
                 return;
             }

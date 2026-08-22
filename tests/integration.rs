@@ -3464,14 +3464,8 @@ fn partial_cache_preflight_propagates_io_error_on_explicit_unreadable_file() {
 
     let config = Config::load(root).expect("config");
     let cache_dir = root.join(".cache");
-    check_paths(
-        root,
-        &[root.to_path_buf()],
-        &config,
-        None,
-        Some(&cache_dir),
-    )
-    .expect("cold check caches cached.py");
+    check_paths(root, &[root.to_path_buf()], &config, None, Some(&cache_dir))
+        .expect("cold check caches cached.py");
 
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let error = check_paths(
