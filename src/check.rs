@@ -1128,6 +1128,8 @@ struct CallChecker<'a> {
     context_manager_enter_signatures: FxHashMap<String, Signature>,
     /// Locally declared `TypeVar` names eligible for generic propagation.
     type_vars: FxHashSet<String>,
+    /// ``@singledispatch`` generic fullname -> registered type name -> impl.
+    singledispatch_registrations: FxHashMap<String, FxHashMap<String, String>>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
     /// `TypeGuard` function fullname -> callable signature asserted when true.
@@ -1494,6 +1496,7 @@ impl<'a> CallChecker<'a> {
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
+            singledispatch_registrations: FxHashMap::default(),
             callable_return_overloads: FxHashMap::default(),
             callable_typeguards: FxHashMap::default(),
             completed_overload_sets: FxHashSet::default(),
@@ -3781,6 +3784,70 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         self.resolve_callee(implementation)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_type_key(ty: &Expr) -> Option<String> {
+        match ty {
+            Expr::Name(name) => Some(name.id.to_string()),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_singledispatch_registration(&mut self, call: &ast::ExprCall) {
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return;
+        };
+        if method.attr.as_str() != "register" || !call.arguments.keywords.is_empty() {
+            return;
+        }
+        let Some(generic_fullname) = self.resolve_callee(method.value.as_ref()) else {
+            return;
+        };
+        if !self.index.is_excluded(&generic_fullname) {
+            return;
+        }
+        let [type_expr, implementation] = &*call.arguments.args else {
+            return;
+        };
+        let Some(type_key) = Self::singledispatch_type_key(type_expr) else {
+            return;
+        };
+        let Some(implementation) = self.resolve_callee(implementation) else {
+            return;
+        };
+        self.singledispatch_registrations
+            .entry(generic_fullname)
+            .or_default()
+            .insert(type_key, implementation);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_dispatch_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "dispatch" {
+            return None;
+        }
+        let generic_fullname = self.resolve_callee(method.value.as_ref())?;
+        if !self.index.is_excluded(&generic_fullname) {
+            return None;
+        }
+        let type_expr = call
+            .arguments
+            .find_keyword("cls")
+            .map(|keyword| &keyword.value)
+            .or_else(|| call.arguments.args.first())?;
+        let type_key = Self::singledispatch_type_key(type_expr)?;
+        self.singledispatch_registrations
+            .get(&generic_fullname)?
+            .get(&type_key)
+            .cloned()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6704,6 +6771,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.singledispatch_dispatch_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.singledispatch_register_callable(func) {
                     return Some(callable);
                 }
@@ -7585,6 +7655,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         match expr {
             Expr::Call(call) => {
+                self.record_singledispatch_registration(call);
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);
                 }

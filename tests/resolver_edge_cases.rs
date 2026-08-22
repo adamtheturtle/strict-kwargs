@@ -1175,6 +1175,31 @@ Dispatcher.method.register(int, target)(1)
     );
 }
 
+/// ``singledispatch.dispatch`` returns a previously registered implementation
+/// (issue #649).
+#[test]
+fn singledispatch_dispatch_preserves_registered_implementation_signature() {
+    let messages = check_source(
+        r"
+import functools
+
+@functools.singledispatch
+def generic(value: object) -> object:
+    return value
+
+def target(value: int) -> int:
+    return value
+
+generic.register(int, target)
+generic.dispatch(cls=int)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "target"),
+        "expected singledispatch.dispatch violation, got: {messages:?}"
+    );
+}
+
 /// Generic functions that return the same `TypeVar` accepted by their
 /// arguments preserve an unambiguous concrete callable (issue #386).
 #[test]
