@@ -157,7 +157,13 @@ impl Store {
             self.insert(fullname, signature);
         } else if !self.pending_overloads.remove(&fullname) {
             self.excluded.remove(&fullname);
-            self.signatures.insert(fullname, vec![signature]);
+            // Under control flow, keep sibling-branch signatures rather than
+            // letting traversal order alone decide (issues #508–#648).
+            if self.conditional_depth > 0 {
+                self.signatures.entry(fullname).or_default().push(signature);
+            } else {
+                self.signatures.insert(fullname, vec![signature]);
+            }
         }
     }
 
@@ -2284,6 +2290,15 @@ fn has_singledispatch_decorator(
     })
 }
 
+#[cfg_attr(coverage, coverage(off))]
+const fn definite_bool(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::BooleanLiteral(ast::ExprBooleanLiteral { value, .. }) => Some(*value),
+        Expr::NoneLiteral(_) => Some(false),
+        _ => None,
+    }
+}
+
 fn has_overload_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list
         .iter()
@@ -2632,24 +2647,56 @@ fn index_stmt(
             }
         }
         Stmt::If(ast::StmtIf {
+            test,
             body,
             elif_else_clauses,
             ..
-        }) => {
-            store.conditional_depth += 1;
-            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
-            for clause in elif_else_clauses {
+        }) => match definite_bool(test) {
+            Some(true) => {
                 index_module_with_bindings(
                     store,
                     module_name,
                     is_package,
                     scope_name,
-                    &clause.body,
+                    body,
                     bindings,
                 );
             }
-            store.conditional_depth -= 1;
-        }
+            Some(false) => {
+                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        &clause.body,
+                        bindings,
+                    );
+                }
+            }
+            None => {
+                store.conditional_depth += 1;
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    body,
+                    bindings,
+                );
+                for clause in elif_else_clauses {
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        &clause.body,
+                        bindings,
+                    );
+                }
+                store.conditional_depth -= 1;
+            }
+        },
         Stmt::For(ast::StmtFor { target, body, .. }) => {
             if let Expr::Name(name) = target.as_ref() {
                 let fullname = format!("{scope_name}.{}", name.id);
@@ -2675,8 +2722,17 @@ fn index_stmt(
             }
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
         }
-        Stmt::While(ast::StmtWhile { body, .. }) => {
-            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+        Stmt::While(ast::StmtWhile { test, body, .. }) => {
+            if definite_bool(test) != Some(false) {
+                index_module_with_bindings(
+                    store,
+                    module_name,
+                    is_package,
+                    scope_name,
+                    body,
+                    bindings,
+                );
+            }
         }
         Stmt::Try(ast::StmtTry {
             body,
@@ -2806,17 +2862,28 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
         }
         Stmt::If(ast::StmtIf {
+            test,
             body,
             elif_else_clauses,
             ..
-        }) => {
-            store.conditional_depth += 1;
-            index_module_fast(store, module_name, scope_name, body);
-            for clause in elif_else_clauses {
-                index_module_fast(store, module_name, scope_name, &clause.body);
+        }) => match definite_bool(test) {
+            Some(true) => {
+                index_module_fast(store, module_name, scope_name, body);
             }
-            store.conditional_depth -= 1;
-        }
+            Some(false) => {
+                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                    index_module_fast(store, module_name, scope_name, &clause.body);
+                }
+            }
+            None => {
+                store.conditional_depth += 1;
+                index_module_fast(store, module_name, scope_name, body);
+                for clause in elif_else_clauses {
+                    index_module_fast(store, module_name, scope_name, &clause.body);
+                }
+                store.conditional_depth -= 1;
+            }
+        },
         Stmt::For(ast::StmtFor { target, body, .. }) => {
             if let Expr::Name(name) = target.as_ref() {
                 let fullname = format!("{scope_name}.{}", name.id);
@@ -2842,8 +2909,10 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
             index_module_fast(store, module_name, scope_name, body);
         }
-        Stmt::While(ast::StmtWhile { body, .. }) => {
-            index_module_fast(store, module_name, scope_name, body);
+        Stmt::While(ast::StmtWhile { test, body, .. }) => {
+            if definite_bool(test) != Some(false) {
+                index_module_fast(store, module_name, scope_name, body);
+            }
         }
         Stmt::Try(ast::StmtTry {
             body,
