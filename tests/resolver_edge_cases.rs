@@ -3197,6 +3197,84 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
+/// (issue #659).
+#[test]
+fn contextvar_token_old_value_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+import contextvars
+from collections.abc import Callable
+var: contextvars.ContextVar[Callable[[int], int]]
+token = var.set(lambda value: value)
+old = token.old_value
+if old is not contextvars.Token.MISSING:
+    old(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "old"),
+        "expected Token.old_value violation, got: {messages:?}"
+    );
+}
+
+/// ``MappingProxyType.get`` preserves generic mapping value types (issue #660).
+#[test]
+fn mapping_proxy_get_preserves_callable_value_signatures() {
+    let messages = check_source(
+        r"
+import types
+from collections.abc import Callable
+mapping: types.MappingProxyType[str, Callable[[int], int]]
+value = mapping.get('key')
+value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "get() result"),
+        "expected MappingProxyType.get violation, got: {messages:?}"
+    );
+}
+
+/// ``TopologicalSorter.get_ready`` preserves callable graph node types
+/// (issue #516).
+#[test]
+fn topological_sorter_get_ready_preserves_callable_node_signatures() {
+    let messages = check_source(
+        r"
+from graphlib import TopologicalSorter
+def target(value: int) -> None: ...
+sorter = TopologicalSorter(graph={target: set()})
+sorter.prepare()
+sorter.get_ready()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected TopologicalSorter.get_ready violation, got: {messages:?}"
+    );
+}
+
+/// Annotated ``WeakKeyDictionary.popitem`` preserves callable key types
+/// (issue #517).
+#[test]
+fn weak_key_dictionary_popitem_preserves_callable_key_signatures() {
+    let messages = check_source(
+        r"
+import weakref
+from collections.abc import Callable
+keys: weakref.WeakKeyDictionary[Callable[[int], None], int] = weakref.WeakKeyDictionary()
+def target(value: int) -> None: ...
+keys[target] = 1
+keys.popitem()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "popitem() key"),
+        "expected WeakKeyDictionary.popitem key violation, got: {messages:?}"
+    );
+}
+
 /// Immediate and assigned `WeakSet` / annotated `WeakValueDictionary` pops
 /// preserve callable elements (issue #443).
 #[test]
