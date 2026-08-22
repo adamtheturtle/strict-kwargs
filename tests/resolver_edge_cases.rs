@@ -3654,6 +3654,41 @@ target(1)
     );
 }
 
+/// Zero-iteration `for` loops must not overwrite a live signature (issue #639).
+#[test]
+fn zero_iteration_for_does_not_overwrite_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+for _ in []:
+    def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "empty for must not overwrite: {messages:?}"
+    );
+}
+
+/// Zero-iteration class-body `for` loops must not overwrite methods (issue #644).
+#[test]
+fn zero_iteration_class_for_does_not_overwrite_method() {
+    let messages = check_source(
+        r"
+class Owner:
+    def method(self, value: int) -> None: ...
+    for _ in []:
+        def method(self, value: int, /) -> None: ...
+Owner().method(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("method")),
+        "empty class for must not overwrite method: {messages:?}"
+    );
+}
+
 /// Definite `if False` uses the else branch signature (issue #508).
 #[test]
 fn definite_false_if_branch_uses_else_signature() {
