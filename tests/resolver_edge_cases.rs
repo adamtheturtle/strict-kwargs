@@ -3387,3 +3387,55 @@ override(target)(1)
         );
     }
 }
+
+/// Direct `staticmethod` objects keep the wrapped callable (issue #650).
+#[test]
+fn direct_staticmethod_preserves_wrapped_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> int:
+    return value
+staticmethod(target)(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "staticmethod identity return must preserve callee: {messages:?}"
+    );
+}
+
+/// Bound-method `__func__` keeps the unbound method signature (issue #651).
+#[test]
+fn bound_method_func_preserves_unbound_method_signature() {
+    let messages = check_source(
+        r"
+class Owner:
+    def method(self, value: int) -> int:
+        return value
+Owner().method.__func__(Owner(), 1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("method")),
+        "__func__ must preserve unbound method: {messages:?}"
+    );
+}
+
+/// `property.fget` returns the getter; its result keeps a callable signature
+/// (issue #652).
+#[test]
+fn property_fget_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner:
+    pass
+def target(value: int) -> int:
+    return value
+property(fget=lambda self: target).fget(self=Owner())(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "property.fget result must preserve callee: {messages:?}"
+    );
+}

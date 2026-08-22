@@ -3712,6 +3712,8 @@ impl<'a> CallChecker<'a> {
     /// Stdlib callables typed as returning their wrapped argument unchanged.
     const IDENTITY_RETURN_STDLIB: &'static [&'static str] = &[
         "abc.abstractmethod",
+        "builtins.classmethod",
+        "builtins.staticmethod",
         "abc.update_abstractmethods",
         "functools.cache",
         "functools.lru_cache",
@@ -3743,6 +3745,12 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn is_identity_return_stdlib(fullname: &str) -> bool {
         Self::IDENTITY_RETURN_STDLIB.contains(&fullname)
+            || fullname.ends_with(".staticmethod")
+            || fullname.ends_with(".classmethod")
+            || fullname.ends_with(".staticmethod.__init__")
+            || fullname.ends_with(".classmethod.__init__")
+            || fullname.ends_with(".staticmethod.__new__")
+            || fullname.ends_with(".classmethod.__new__")
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -3771,6 +3779,43 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
+    /// that names a callable is resolved for the subsequent call (issue #652).
+    #[cfg_attr(coverage, coverage(off))]
+    fn property_fget_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(fget_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(fget_attr) = fget_call.func.as_ref() else {
+            return None;
+        };
+        if fget_attr.attr.as_str() != "fget" {
+            return None;
+        }
+        let Expr::Call(property_call) = fget_attr.value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&property_call.func)?;
+        if !(factory.ends_with("property")
+            || factory.ends_with("property.__init__")
+            || factory.ends_with("property.__new__"))
+        {
+            return None;
+        }
+        let getter = property_call.arguments.args.first().or_else(|| {
+            property_call
+                .arguments
+                .keywords
+                .iter()
+                .find(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("fget"))
+                .map(|keyword| &keyword.value)
+        })?;
+        match getter {
+            Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
+            _ => None,
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6059,6 +6104,10 @@ impl<'a> CallChecker<'a> {
             }
             Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                 let attr_name = attr.id.as_str();
+                // Bound-method `__func__` is the underlying function (issue #651).
+                if attr_name == "__func__" {
+                    return self.resolve_callee(value);
+                }
                 if let Some(class_fullname) = self.class_from_record_replacement(value) {
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
@@ -6124,6 +6173,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.identity_return_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.property_fget_result_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.context_manager_enter_callable_result(func) {
