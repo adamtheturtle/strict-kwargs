@@ -3422,6 +3422,65 @@ fn cache_notices_when_skipped_file_becomes_valid_with_same_mtime() {
     );
 }
 
+/// Project-wide collection errors propagate through `check_paths` when a
+/// cache directory is configured (covers the `?` on inventory collection).
+#[test]
+fn check_with_cache_dir_propagates_invalid_extend_exclude() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[tool.strict_kwargs]\nextend_exclude = [\"[z-a]\"]\n",
+    )
+    .expect("write pyproject");
+    std::fs::write(root.join("main.py"), "def f(a: int) -> None: ...\n").expect("write main");
+    let config = Config::load(root).expect("config");
+    let cache_dir = root.join(".cache");
+    let result = check_paths(root, &[root.to_path_buf()], &config, None, Some(&cache_dir));
+    assert!(
+        result.is_err(),
+        "invalid extend_exclude must fail before checking when cache is enabled"
+    );
+}
+
+/// Partial-cache skip preflight propagates I/O errors for explicit unreadable
+/// misses (covers the `?` on `skipped_cache_miss_warnings`).
+#[cfg(unix)]
+#[test]
+fn partial_cache_preflight_propagates_io_error_on_explicit_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"t\"\nversion = \"0\"\n",
+    )
+    .expect("write pyproject");
+    let cached = root.join("cached.py");
+    let unreadable = root.join("unreadable.py");
+    std::fs::write(&cached, "def f(a: int) -> None: ...\n").expect("write cached");
+    std::fs::write(&unreadable, "def g(a: int) -> None: ...\n").expect("write unreadable");
+
+    let config = Config::load(root).expect("config");
+    let cache_dir = root.join(".cache");
+    check_paths(root, &[root.to_path_buf()], &config, None, Some(&cache_dir))
+        .expect("cold check caches cached.py");
+
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let error = check_paths(
+        root,
+        std::slice::from_ref(&unreadable),
+        &config,
+        None,
+        Some(&cache_dir),
+    )
+    .expect_err("unreadable explicit cache miss must fail");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).expect("restore");
+
+    assert!(matches!(error, CheckError::Io(_)));
+}
+
 /// If the cache-dir path already exists as a regular file, opening the cache
 /// fails and `check_paths` propagates the I/O error.
 #[test]

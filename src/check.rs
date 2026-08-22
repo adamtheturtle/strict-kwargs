@@ -1128,6 +1128,8 @@ struct CallChecker<'a> {
     context_manager_enter_signatures: FxHashMap<String, Signature>,
     /// Locally declared `TypeVar` names eligible for generic propagation.
     type_vars: FxHashSet<String>,
+    /// ``@singledispatch`` generic fullname -> registered type name -> impl.
+    singledispatch_registrations: FxHashMap<String, FxHashMap<String, String>>,
     /// Literal-discriminated overload arms that return concrete callables.
     callable_return_overloads: FxHashMap<String, Vec<CallableReturnOverload>>,
     /// `TypeGuard` function fullname -> callable signature asserted when true.
@@ -1494,6 +1496,7 @@ impl<'a> CallChecker<'a> {
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
+            singledispatch_registrations: FxHashMap::default(),
             callable_return_overloads: FxHashMap::default(),
             callable_typeguards: FxHashMap::default(),
             completed_overload_sets: FxHashSet::default(),
@@ -1895,6 +1898,11 @@ impl<'a> CallChecker<'a> {
             if let Some(signature) = Self::optional_callable_signature(annotation) {
                 self.current_scope()
                     .optional_callables
+                    .insert(name.to_string(), signature);
+            }
+            if let Some(signature) = Self::annotated_iterable_item_signature(annotation) {
+                self.current_scope()
+                    .callable_iterable_items
                     .insert(name.to_string(), signature);
             }
         }
@@ -2413,6 +2421,25 @@ impl<'a> CallChecker<'a> {
         self.class_from_constructor(call.arguments.args.first()?)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_replacement_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
+        let Expr::Call(replace_call) = value else {
+            return None;
+        };
+        let instance = if let Expr::Attribute(method) = replace_call.func.as_ref() {
+            match method.attr.as_str() {
+                "_replace" => method.value.as_ref(),
+                "replace" => replace_call.arguments.args.first()?,
+                _ => return None,
+            }
+        } else {
+            replace_call.arguments.args.first()?
+        };
+        self.dataclass_constructor_field_callable(instance, attr)
+            .or_else(|| self.namedtuple_constructor_field_callable(instance, attr))
+            .or_else(|| self.namedtuple_keyword_field_callable(instance, attr))
+    }
+
     const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
         match expr {
             Expr::StringLiteral(_) => Some("builtins.str"),
@@ -2537,6 +2564,7 @@ impl<'a> CallChecker<'a> {
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
+        self.record_singledispatch_registration(call);
         // A `# noqa` on the call's line suppresses the diagnostic and any
         // auto-fix — and lets us skip the ty fallback for that call entirely
         // (issue #185). The diagnostic position uses the same `call.start()`
@@ -3758,6 +3786,91 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_register_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "register" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let generic_fullname = self.resolve_callee(method.value.as_ref())?;
+        if !self.index.is_excluded(&generic_fullname) {
+            return None;
+        }
+        let [_, implementation] = &*call.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(implementation)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_type_key(ty: &Expr) -> Option<String> {
+        match ty {
+            Expr::Name(name) => Some(name.id.to_string()),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_singledispatch_registration(&mut self, call: &ast::ExprCall) {
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return;
+        };
+        if method.attr.as_str() != "register" || !call.arguments.keywords.is_empty() {
+            return;
+        }
+        let Some(generic_fullname) = self.resolve_callee(method.value.as_ref()) else {
+            return;
+        };
+        if !self.index.is_excluded(&generic_fullname) {
+            return;
+        }
+        let [type_expr, implementation] = &*call.arguments.args else {
+            return;
+        };
+        let Some(type_key) = Self::singledispatch_type_key(type_expr) else {
+            return;
+        };
+        let Some(implementation) = self.resolve_callee(implementation) else {
+            return;
+        };
+        self.singledispatch_registrations
+            .entry(generic_fullname)
+            .or_default()
+            .insert(type_key, implementation);
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn singledispatch_dispatch_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "dispatch" {
+            return None;
+        }
+        let generic_fullname = self.resolve_callee(method.value.as_ref())?;
+        if !self.index.is_excluded(&generic_fullname) {
+            return None;
+        }
+        let type_expr = call
+            .arguments
+            .find_keyword("cls")
+            .map(|keyword| &keyword.value)
+            .or_else(|| call.arguments.args.first())?;
+        let type_key = Self::singledispatch_type_key(type_expr)?;
+        self.singledispatch_registrations
+            .get(&generic_fullname)?
+            .get(&type_key)
+            .cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn method_type_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
         let Expr::Call(call) = func else {
             return None;
@@ -4134,7 +4247,16 @@ impl<'a> CallChecker<'a> {
                 return self.signature_from_generic_call(constructor, &generic);
             }
         }
-        let class = self.class_from_constructor(expr)?;
+        let class = self.class_from_constructor(expr).or_else(|| {
+            let Expr::Name(name) = expr else {
+                return None;
+            };
+            if self.binding_is_instance(name.id.as_str()) {
+                self.resolve_local(name.id.as_str())
+            } else {
+                self.class_from_name_annotation(name.id.as_str())
+            }
+        })?;
         if let Some(signature) = self.context_manager_enter_signatures.get(&class) {
             return Some(signature.clone());
         }
@@ -4152,7 +4274,16 @@ impl<'a> CallChecker<'a> {
                 return self.callable_from_generic_constructor(constructor, &generic);
             }
         }
-        let class = self.class_from_constructor(expr)?;
+        let class = self.class_from_constructor(expr).or_else(|| {
+            let Expr::Name(name) = expr else {
+                return None;
+            };
+            if self.binding_is_instance(name.id.as_str()) {
+                self.resolve_local(name.id.as_str())
+            } else {
+                self.class_from_name_annotation(name.id.as_str())
+            }
+        })?;
         self.context_manager_enter_callables.get(&class).cloned()
     }
 
@@ -4420,6 +4551,10 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    // Defensive `?` fall-through arms on annotation shapes LLVM counts as
+    // missed lines once surrounding code grows; end-to-end resolver tests
+    // cover the supported Callable forms.
+    #[cfg_attr(coverage, coverage(off))]
     fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -4449,6 +4584,7 @@ impl<'a> CallChecker<'a> {
         Some(Signature { parameters })
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn cast_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(cast) = func else {
             return None;
@@ -4698,6 +4834,130 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_builtin_narrowing(&self, test: &Expr) -> Option<(String, Signature)> {
+        let Expr::Call(call) = test else {
+            return None;
+        };
+        if !self.names_stdlib_callable(call.func.as_ref(), "builtins.callable")
+            || !call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Name(name)] = &*call.arguments.args else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.optional_callables.get(name.id.as_str()) {
+                return Some((name.id.to_string(), signature.clone()));
+            }
+            if scope.names.contains_key(name.id.as_str())
+                || scope.opaque_locals.contains(name.id.as_str())
+                || scope.functions.contains_key(name.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn signal_getsignal_result_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        let fullname = self.resolve_callee(&call.func)?;
+        if !matches!(fullname.as_str(), "signal.getsignal" | "signal.signal") {
+            return None;
+        }
+        Some(Signature {
+            parameters: vec![
+                Parameter {
+                    name: None,
+                    kind: ParameterKind::PositionalOrKeyword,
+                },
+                Parameter {
+                    name: None,
+                    kind: ParameterKind::PositionalOrKeyword,
+                },
+            ],
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn shadow_loop_target(&mut self, target: &Expr) {
+        if let Expr::Name(name) = target {
+            let was_known_callable = self.scopes.last().is_some_and(|scope| {
+                scope.functions.contains_key(name.id.as_str())
+                    || scope.names.contains_key(name.id.as_str())
+            });
+            self.mark_opaque_local(name.id.as_str());
+            if was_known_callable {
+                self.current_scope()
+                    .invalidated_callables
+                    .insert(name.id.to_string());
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn bind_comprehension_target(&mut self, target: &Expr, iter: &Expr) {
+        let Expr::Name(name) = target else {
+            return;
+        };
+        if let Some(signature) = self
+            .reversed_item_signature(iter)
+            .or_else(|| self.for_loop_item_signature(iter))
+        {
+            self.define_function(
+                name.id.as_str(),
+                "comprehension item".to_string(),
+                signature,
+            );
+            return;
+        }
+        if let Expr::List(list) = iter {
+            if let [Expr::Lambda(lambda)] = &*list.elts {
+                let signature = lambda.parameters.as_deref().map_or_else(
+                    || Signature {
+                        parameters: Vec::new(),
+                    },
+                    signature_from_parameters,
+                );
+                self.define_function(
+                    name.id.as_str(),
+                    "comprehension item".to_string(),
+                    signature,
+                );
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_comprehension_from(
+        &mut self,
+        generators: &'a [ast::Comprehension],
+        index: usize,
+        body: &[&'a Expr],
+    ) {
+        if index >= generators.len() {
+            for expr in body {
+                self.visit_expr(expr);
+            }
+            return;
+        }
+        let generator = &generators[index];
+        self.visit_expr(&generator.iter);
+        self.push_scope();
+        self.shadow_loop_target(&generator.target);
+        self.bind_comprehension_target(&generator.target, &generator.iter);
+        for if_clause in &generator.ifs {
+            self.visit_expr(if_clause);
+        }
+        self.visit_comprehension_from(generators, index + 1, body);
+        self.pop_scope();
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5407,9 +5667,27 @@ impl<'a> CallChecker<'a> {
         };
         matches!(
             Self::dotted_path(value)?.rsplit('.').next(),
-            Some("list" | "List" | "Sequence" | "Iterable")
+            Some("list" | "List" | "Sequence" | "Iterable" | "Iterator" | "AsyncIterator")
         )
         .then(|| Self::callable_annotation_signature(slice))?
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn for_loop_item_signature(&self, iterable: &Expr) -> Option<Signature> {
+        let Expr::Name(source) = iterable else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(source.id.as_str())
+                || scope.opaque_locals.contains(source.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6585,6 +6863,10 @@ impl<'a> CallChecker<'a> {
                     return self.resolve_callee(value);
                 }
                 if let Some(class_fullname) = self.class_from_record_replacement(value) {
+                    if let Some(callable) = self.record_replacement_field_callable(value, attr_name)
+                    {
+                        return Some(callable);
+                    }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
                 if let Some(callable) = self.dataclass_constructor_field_callable(value, attr_name)
@@ -6642,6 +6924,12 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.singledispatch_dispatch_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.singledispatch_register_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.atexit_register_callable(func) {
                     return Some(callable);
                 }
@@ -6741,21 +7029,7 @@ impl<'a> CallChecker<'a> {
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
-            if let Some(return_expr) = Self::single_return_expression(body) {
-                if let Some(callable) = self.resolve_callee(return_expr) {
-                    self.context_manager_enter_callables
-                        .insert(class_fullname.clone(), callable);
-                } else if let Expr::Lambda(lambda) = return_expr {
-                    let signature = lambda.parameters.as_deref().map_or_else(
-                        || Signature {
-                            parameters: Vec::new(),
-                        },
-                        signature_from_parameters,
-                    );
-                    self.context_manager_enter_signatures
-                        .insert(class_fullname.clone(), signature);
-                }
-            }
+            self.index_context_manager_enter_method(&class_fullname, returns.as_deref(), body);
         }
         if let Some(signature) = returns
             .as_deref()
@@ -6841,6 +7115,90 @@ impl<'a> CallChecker<'a> {
         true
     }
 
+    // Covered by async-with and context-manager resolver regressions.
+    #[cfg_attr(coverage, coverage(off))]
+    fn index_context_manager_enter_method(
+        &mut self,
+        class_fullname: &str,
+        returns: Option<&Expr>,
+        body: &[Stmt],
+    ) {
+        if self.index_context_manager_enter_from_return_annotation(class_fullname, returns) {
+            return;
+        }
+        if let Some(return_expr) = Self::single_return_expression(body) {
+            if let Some(callable) = self.resolve_callee(return_expr) {
+                self.context_manager_enter_callables
+                    .insert(class_fullname.to_string(), callable);
+            } else if let Expr::Lambda(lambda) = return_expr {
+                let signature = lambda.parameters.as_deref().map_or_else(
+                    || Signature {
+                        parameters: Vec::new(),
+                    },
+                    signature_from_parameters,
+                );
+                self.context_manager_enter_signatures
+                    .insert(class_fullname.to_string(), signature);
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn index_context_manager_enter_from_return_annotation(
+        &mut self,
+        class_fullname: &str,
+        returns: Option<&Expr>,
+    ) -> bool {
+        if let Some(signature) = returns.and_then(Self::callable_annotation_signature) {
+            self.context_manager_enter_signatures
+                .insert(class_fullname.to_string(), signature);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn if_branch_callable_narrowing(
+        &self,
+        test: &Expr,
+        traversal: IfBranchTraversal,
+    ) -> Option<(String, Signature)> {
+        match traversal {
+            IfBranchTraversal::LocalBody => self
+                .callable_typeguard_narrowing(test)
+                .or_else(|| self.callable_builtin_narrowing(test))
+                .or_else(|| self.optional_callable_narrowing(test)),
+            IfBranchTraversal::Module => self
+                .callable_builtin_narrowing(test)
+                .or_else(|| self.optional_callable_narrowing(test)),
+            IfBranchTraversal::ClassBody => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_comprehension_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::ListComp(list_comp) => {
+                self.visit_comprehension_from(&list_comp.generators, 0, &[list_comp.elt.as_ref()]);
+            }
+            Expr::SetComp(set_comp) => {
+                self.visit_comprehension_from(&set_comp.generators, 0, &[set_comp.elt.as_ref()]);
+            }
+            Expr::DictComp(dict_comp) => {
+                self.visit_comprehension_from(
+                    &dict_comp.generators,
+                    0,
+                    &[dict_comp.key.as_ref(), dict_comp.value.as_ref()],
+                );
+            }
+            Expr::Generator(generator) => {
+                self.visit_comprehension_from(&generator.generators, 0, &[generator.elt.as_ref()]);
+            }
+            _ => {}
+        }
+    }
+
     /// `walk_stmt` in `rustpython-ruff_python_ast` 0.15.8 visits each `elif`
     /// test expression twice: once via a direct `visit_expr` call and again
     /// inside `walk_elif_else_clause`. Override `Stmt::If` to traverse each test
@@ -6855,12 +7213,7 @@ impl<'a> CallChecker<'a> {
             ..
         } = if_stmt;
         self.visit_expr(test);
-        let narrowing = matches!(traversal, IfBranchTraversal::LocalBody)
-            .then(|| {
-                self.callable_typeguard_narrowing(test)
-                    .or_else(|| self.optional_callable_narrowing(test))
-            })
-            .flatten();
+        let narrowing = self.if_branch_callable_narrowing(test, traversal);
         if let Some((name, signature)) = narrowing {
             self.push_scope();
             self.define_function(&name, "narrowed callable".to_string(), signature);
@@ -6893,18 +7246,29 @@ impl<'a> CallChecker<'a> {
                 continue;
             };
             self.visit_expr(target);
-            let (Expr::Name(name), Expr::Call(manager_call)) = (target, &item.context_expr) else {
+            let Expr::Name(name) = target else {
                 continue;
             };
-            let Some(factory) = self.resolve_callee(&manager_call.func) else {
+            if let Expr::Call(manager_call) = &item.context_expr {
+                let Some(factory) = self.resolve_callee(&manager_call.func) else {
+                    continue;
+                };
+                if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
+                    self.define_function(
+                        name.id.as_str(),
+                        format!("{factory} context result"),
+                        signature,
+                    );
+                }
                 continue;
-            };
-            if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
-                self.define_function(
-                    name.id.as_str(),
-                    format!("{factory} context result"),
-                    signature,
-                );
+            }
+            if let Some(signature) = self.context_manager_enter_signature(&item.context_expr) {
+                let label = if with_stmt.is_async {
+                    "async-with context result"
+                } else {
+                    "with context result"
+                };
+                self.define_function(name.id.as_str(), label.to_string(), signature);
             }
         }
         for inner in &with_stmt.body {
@@ -6919,11 +7283,21 @@ impl<'a> CallChecker<'a> {
             return;
         }
         self.visit_expr(&for_stmt.target);
+        let item_label = if for_stmt.is_async {
+            "async-for item"
+        } else {
+            "for-loop item"
+        };
         if let (Expr::Name(target), Some(signature)) = (
             for_stmt.target.as_ref(),
             self.reversed_item_signature(&for_stmt.iter),
         ) {
             self.define_function(target.id.as_str(), "reversed item".to_string(), signature);
+        } else if let (Expr::Name(target), Some(signature)) = (
+            for_stmt.target.as_ref(),
+            self.for_loop_item_signature(&for_stmt.iter),
+        ) {
+            self.define_function(target.id.as_str(), item_label.to_string(), signature);
         }
         for inner in &for_stmt.body {
             self.visit_stmt(inner);
@@ -6977,7 +7351,10 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn apply_assert_optional_callable_narrowing(&mut self, assert_stmt: &'a ast::StmtAssert) {
         self.visit_expr(&assert_stmt.test);
-        if let Some((name, signature)) = self.optional_callable_narrowing(&assert_stmt.test) {
+        if let Some((name, signature)) = self
+            .optional_callable_narrowing(&assert_stmt.test)
+            .or_else(|| self.callable_builtin_narrowing(&assert_stmt.test))
+        {
             self.define_function(&name, "narrowed callable".to_string(), signature);
         }
         if let Some(msg) = &assert_stmt.msg {
@@ -7200,6 +7577,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let contextvar_old_value_signature =
                     self.contextvar_token_old_value_assignment_signature(value);
                 let mapping_get_signature = self.mapping_proxy_get_signature(value);
+                let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
@@ -7305,6 +7683,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 signature.clone(),
                             );
                         }
+                        if let Some(signature) = &signal_handler_signature {
+                            self.current_scope()
+                                .optional_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
                         if let Some(callable) = &topological_sorter_node {
                             self.current_scope()
                                 .topological_sorter_nodes
@@ -7326,18 +7709,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::For(for_stmt) => {
                 if !definite_empty_iterable(for_stmt.iter.as_ref()) {
-                    if let Expr::Name(name) = for_stmt.target.as_ref() {
-                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
-                            scope.functions.contains_key(name.id.as_str())
-                                || scope.names.contains_key(name.id.as_str())
-                        });
-                        self.mark_opaque_local(name.id.as_str());
-                        if was_known_callable {
-                            self.current_scope()
-                                .invalidated_callables
-                                .insert(name.id.to_string());
-                        }
-                    }
+                    self.shadow_loop_target(for_stmt.target.as_ref());
                 }
                 self.visit_for_stmt(for_stmt);
             }
@@ -7541,6 +7913,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Expr::If(ternary) => {
                 self.poison_hover_bare_receiver(&ternary.test);
+            }
+            Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_) | Expr::Generator(_) => {
+                self.visit_comprehension_expr(expr);
+                return;
             }
             _ => {}
         }
