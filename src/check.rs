@@ -3667,6 +3667,17 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn is_make_dataclass(value: &Expr) -> bool {
+        let Expr::Call(call) = value else {
+            return false;
+        };
+        let Some(path) = Self::dotted_path(&call.func) else {
+            return false;
+        };
+        path.rsplit('.').next() == Some("make_dataclass")
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn namedtuple_keyword_field_callable(&self, value: &Expr, field: &str) -> Option<String> {
         let Expr::Call(constructor) = value else {
             return None;
@@ -7194,6 +7205,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 let is_functional_namedtuple = Self::is_functional_namedtuple(value);
                 let is_collections_namedtuple = Self::is_collections_namedtuple(value);
+                let is_make_dataclass = Self::is_make_dataclass(value);
                 let callable_list = self
                     .homogeneous_callable_list(value)
                     .or_else(|| self.weakset_initializer_callable(value));
@@ -7235,7 +7247,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if is_functional_namedtuple || is_collections_namedtuple {
                             self.functional_namedtuple_names.insert(name.id.to_string());
                         }
-                        if is_functional_namedtuple {
+                        if is_functional_namedtuple || is_make_dataclass {
                             self.define(
                                 name.id.as_str(),
                                 format!("{}.{}", self.current_lexical_scope(), name.id),

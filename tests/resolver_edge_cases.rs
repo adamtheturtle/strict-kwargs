@@ -764,6 +764,25 @@ Holder(call=f).call(1)
     );
 }
 
+/// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
+#[test]
+fn make_dataclass_preserves_callable_field_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import make_dataclass
+
+Point = make_dataclass(cls_name='Point', fields=[('call', Callable[[int], None])])
+def f(value: int) -> None: ...
+Point(f).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "f"),
+        "expected make_dataclass field violation, got: {messages:?}"
+    );
+}
+
 /// A `NamedTuple` constructor keyword directly supplies the corresponding
 /// callable field value (issue #374).
 #[test]

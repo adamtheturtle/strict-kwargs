@@ -2233,6 +2233,32 @@ Point(f).call(1)
 }
 
 #[test]
+fn make_dataclass_constructor_and_callable_field_are_modeled() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+from dataclasses import make_dataclass
+Point = make_dataclass(cls_name="Point", fields=[("call", Callable[[int], None])])
+def f(value: int) -> None: ...
+Point(f).call(1)
+"#,
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "Point""#)),
+        "got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(r#"for "call" of "Point""#)),
+        "got: {messages:?}"
+    );
+}
+
+#[test]
 fn record_replacements_preserve_callable_field_signatures() {
     let messages = check_source(
         r"
