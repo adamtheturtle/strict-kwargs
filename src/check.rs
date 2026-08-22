@@ -1412,8 +1412,8 @@ struct Scope {
     /// Local `ContextVar[Callable[...]]` bindings and the callable value
     /// signature returned by their zero-argument `get()` method.
     contextvar_callables: FxHashMap<String, Signature>,
-    /// Local `Future[Callable[...]]` bindings and the callable value
-    /// signature returned by their zero-argument `result()` method.
+    /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
+    /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
@@ -2494,6 +2494,11 @@ impl<'a> CallChecker<'a> {
                 fullname: "Future.result() result".to_string(),
                 signature,
             })
+        } else if let Some(signature) = self.asyncio_run_result_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.run() result".to_string(),
+                signature,
+            })
         } else if let Some(signature) = self.context_run_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "Context.run() result".to_string(),
@@ -2550,6 +2555,11 @@ impl<'a> CallChecker<'a> {
         } else if let Some(signature) = self.anext_result_signature(&call.func) {
             Some(LocalFunction {
                 fullname: "anext() result".to_string(),
+                signature,
+            })
+        } else if let Some(signature) = self.awaited_gather_item_signature(&call.func) {
+            Some(LocalFunction {
+                fullname: "asyncio.gather() result".to_string(),
                 signature,
             })
         } else if let Some(signature) = self.awaited_result_signature(&call.func) {
@@ -5021,7 +5031,10 @@ impl<'a> CallChecker<'a> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
-        if Self::dotted_path(value)?.rsplit('.').next() != Some("Future") {
+        if !matches!(
+            Self::dotted_path(value)?.rsplit('.').next(),
+            Some("Future" | "Task")
+        ) {
             return None;
         }
         Self::callable_annotation_signature(slice)
@@ -5498,6 +5511,54 @@ impl<'a> CallChecker<'a> {
         })
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_asyncio_callable(fullname: &str, name: &str) -> bool {
+        let Some(rest) = fullname.strip_prefix("asyncio.") else {
+            return false;
+        };
+        !rest.contains("Runner") && (rest == name || rest.ends_with(&format!(".{name}")))
+    }
+
+    /// Resolve a concrete callable signature produced by awaiting an expression
+    /// (direct async factories, asyncio `wait_for`/`shield` unwrap, `to_thread`).
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaitable_callable_result_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let factory = self.resolve_callee(&call.func)?;
+        if let Some(signature) = self.callable_returns.get(&factory) {
+            return Some(signature.clone());
+        }
+        if Self::is_asyncio_callable(&factory, "wait_for")
+            || Self::is_asyncio_callable(&factory, "shield")
+        {
+            let inner = call.arguments.args.first().or_else(|| {
+                call.arguments.keywords.iter().find_map(|keyword| {
+                    keyword
+                        .arg
+                        .as_ref()
+                        .is_some_and(|name| matches!(name.as_str(), "fut" | "aws"))
+                        .then_some(&keyword.value)
+                })
+            })?;
+            return self.awaitable_callable_result_signature(inner);
+        }
+        if Self::is_asyncio_callable(&factory, "to_thread") {
+            let callback = call.arguments.args.first().or_else(|| {
+                call.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("func"))
+                        .then_some(&keyword.value)
+                })
+            })?;
+            return match callback {
+                Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
+                _ => self.unnamed_callable_signature(callback),
+            };
+        }
+        None
+    }
+
     // Covered end-to-end by the awaited callable regression. Unsupported
     // await expressions and unresolved factories intentionally decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -5508,11 +5569,93 @@ impl<'a> CallChecker<'a> {
         if let Some(signature) = self.generic_result_signature(value) {
             return Some(signature);
         }
-        let Expr::Call(factory_call) = value.as_ref() else {
+        self.awaitable_callable_result_signature(value)
+    }
+
+    /// `(await asyncio.gather(...))[i]` preserves the i-th awaitable result.
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaited_gather_item_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Subscript(subscript) = func else {
             return None;
         };
-        let factory = self.resolve_callee(&factory_call.func)?;
-        self.callable_returns.get(&factory).cloned()
+        let index = Self::nonnegative_literal_index(&subscript.slice)?;
+        let Expr::Await(ast::ExprAwait { value, .. }) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Call(gather_call) = value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&gather_call.func)?;
+        if !Self::is_asyncio_callable(&factory, "gather") {
+            return None;
+        }
+        let awaitable = gather_call.arguments.args.get(index)?;
+        self.awaitable_callable_result_signature(awaitable)
+    }
+
+    /// `asyncio.run` / `asyncio.Runner().run` preserve coroutine result types.
+    #[cfg_attr(coverage, coverage(off))]
+    fn asyncio_run_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(run_call) = func else {
+            return None;
+        };
+        let coro = if let Expr::Attribute(method) = run_call.func.as_ref() {
+            if method.attr.as_str() != "run" {
+                return None;
+            }
+            let is_runner = match method.value.as_ref() {
+                Expr::Call(constructor) => {
+                    let factory = self.resolve_callee(&constructor.func)?;
+                    matches!(
+                        factory.as_str(),
+                        "asyncio.Runner"
+                            | "asyncio.Runner.__init__"
+                            | "asyncio.Runner.__new__"
+                            | "asyncio.runners.Runner"
+                            | "asyncio.runners.Runner.__init__"
+                            | "asyncio.runners.Runner.__new__"
+                    )
+                }
+                Expr::Name(name) => self
+                    .class_from_name_annotation(name.id.as_str())
+                    .or_else(|| self.resolve_local(name.id.as_str()))
+                    .is_some_and(|resolved| {
+                        resolved.ends_with(".Runner") || resolved.ends_with("asyncio.Runner")
+                    }),
+                _ => false,
+            };
+            if is_runner {
+                run_call.arguments.args.first().or_else(|| {
+                    run_call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("coro"))
+                            .then_some(&keyword.value)
+                    })
+                })?
+            } else {
+                let factory = self.resolve_callee(&run_call.func)?;
+                if !Self::is_asyncio_callable(&factory, "run") {
+                    return None;
+                }
+                run_call.arguments.args.first().or_else(|| {
+                    run_call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("main"))
+                            .then_some(&keyword.value)
+                    })
+                })?
+            }
+        } else {
+            let factory = self.resolve_callee(&run_call.func)?;
+            if !Self::is_asyncio_callable(&factory, "run") {
+                return None;
+            }
+            run_call.arguments.args.first().or_else(|| {
+                run_call.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("main"))
+                        .then_some(&keyword.value)
+                })
+            })?
+        };
+        self.awaitable_callable_result_signature(coro)
     }
 
     // Covered end-to-end by the async-iterator regression. Unsupported await

@@ -3439,3 +3439,85 @@ property(fget=lambda self: target).fget(self=Owner())(1)
         "property.fget result must preserve callee: {messages:?}"
     );
 }
+
+/// Annotated `asyncio.Task[Callable[...]].result()` preserves the callable
+/// signature (issue #447).
+#[test]
+fn task_result_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+task: asyncio.Task[Callable[[int], None]]
+task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "result() result"),
+        "expected Task.result violation, got: {messages:?}"
+    );
+}
+
+/// Asyncio `wait_for`/`shield`/`to_thread`/`gather` preserve awaitable callable
+/// results (issue #446).
+#[test]
+fn asyncio_combinators_preserve_callable_result_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+def f(value: int) -> None: ...
+async def factory() -> Callable[[int], None]:
+    return f
+async def caller() -> None:
+    (await asyncio.wait_for(factory(), timeout=1))(1)
+    (await asyncio.shield(factory()))(1)
+    (await asyncio.to_thread(lambda: f))(1)
+    (await asyncio.gather(factory()))[0](1)
+",
+    );
+    for line in 8..=11 {
+        assert!(
+            has_error_at(&messages, line, "result"),
+            "expected asyncio combinator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// `asyncio.run` preserves coroutine callable result types (issue #518).
+#[test]
+fn asyncio_run_preserves_callable_result_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    def target(value: int) -> None: ...
+    return target
+asyncio.run(main=factory())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "run() result"),
+        "expected asyncio.run violation, got: {messages:?}"
+    );
+}
+
+/// `asyncio.Runner.run` preserves coroutine callable result types (issue #519).
+#[test]
+fn asyncio_runner_run_preserves_callable_result_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    def target(value: int) -> None: ...
+    return target
+asyncio.Runner().run(coro=factory())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "run() result"),
+        "expected Runner.run violation, got: {messages:?}"
+    );
+}
