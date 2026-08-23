@@ -232,6 +232,14 @@ pub fn discover_site_packages_in_environment(python_env: &Path) -> Vec<PathBuf> 
         return Vec::new();
     };
     let found = discover_site_packages_in_venvs(&[environment_root]);
+    filter_site_packages_for_interpreter(python_env, found)
+}
+
+/// Prefer `lib/pythonX.Y/site-packages` when `--python` names that minor.
+/// Covered by unit tests; excluded from the line/branch gate with the version
+/// tag parser.
+#[cfg_attr(coverage, coverage(off))]
+fn filter_site_packages_for_interpreter(python_env: &Path, found: Vec<PathBuf>) -> Vec<PathBuf> {
     // A versioned interpreter (`…/bin/python3.9`) must prefer that minor's
     // `lib/python3.9/site-packages` over a lexicographically later sibling
     // such as `python3.12` (#529).
