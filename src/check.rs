@@ -1132,8 +1132,6 @@ struct CallChecker<'a> {
     class_type_params: FxHashMap<String, Vec<String>>,
     /// Method fullname -> class type-parameter name returned by that method.
     method_typevar_returns: FxHashMap<String, String>,
-    /// Local instance name -> type-parameter name -> concrete callable signature.
-    instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
     /// Class fullname -> type-parameter name -> concrete callable from base
     /// specialization (`class Child(Base[Callable[...]])`).
     class_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
@@ -1436,6 +1434,8 @@ struct Scope {
     future_callables: FxHashMap<String, Signature>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
+    /// Local instance name -> type-parameter name -> concrete callable signature.
+    instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1507,7 +1507,6 @@ impl<'a> CallChecker<'a> {
             type_vars: FxHashSet::default(),
             class_type_params: FxHashMap::default(),
             method_typevar_returns: FxHashMap::default(),
-            instance_type_args: FxHashMap::default(),
             class_type_args: FxHashMap::default(),
             singledispatch_registrations: FxHashMap::default(),
             callable_return_overloads: FxHashMap::default(),
@@ -1593,6 +1592,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_queue_items.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.instance_type_args.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1620,6 +1620,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.callable_list_elements.remove(local_name);
+            scope.instance_type_args.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1766,6 +1767,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -1803,6 +1805,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -4463,9 +4466,9 @@ impl<'a> CallChecker<'a> {
         match receiver {
             Expr::Name(name) => {
                 let local = name.id.as_str();
-                if let Some(args) = self.instance_type_args.get(local) {
+                if let Some(args) = self.instance_type_args(local) {
                     let class = self.class_from_name_annotation(local)?;
-                    return Some((class, args.clone()));
+                    return Some((class, args));
                 }
                 if let Some(class) = self.class_from_name_annotation(local) {
                     if let Some(args) = self.class_type_args.get(&class) {
@@ -4569,8 +4572,20 @@ impl<'a> CallChecker<'a> {
             }
         }
         if !mapping.is_empty() {
-            self.instance_type_args.insert(name.to_string(), mapping);
+            self.current_scope()
+                .instance_type_args
+                .insert(name.to_string(), mapping);
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn instance_type_args(&self, local: &str) -> Option<FxHashMap<String, Signature>> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(args) = scope.instance_type_args.get(local) {
+                return Some(args.clone());
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
