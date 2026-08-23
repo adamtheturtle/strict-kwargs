@@ -142,17 +142,23 @@ fn run_repository_case(case: RepositoryCase) {
         .difference(&observed)
         .cloned()
         .collect::<BTreeSet<_>>();
+    // CPython's floor is noisy across CI days; Sphinx stays a hard zero-miss gate.
+    let miss_budget = if case.id == CPYTHON.id {
+        CPYTHON_MISSING_BUDGET
+    } else {
+        0
+    };
     assert!(
-        missing.len() <= MISSING_BUDGET,
-        "{} diagnostics are missing required snapshot entries ({} > budget {MISSING_BUDGET}):\n{}",
+        missing.len() <= miss_budget,
+        "{} diagnostics are missing required snapshot entries ({} > budget {miss_budget}):\n{}",
         repository.name,
         missing.len(),
         format_diagnostic_set("", &missing)
     );
 }
 
-/// See the miss-budget comment in [`run_repository_case`].
-const MISSING_BUDGET: usize = 100;
+/// Tolerated `CPython` floor misses; Sphinx uses a hard zero via [`run_repository_case`].
+const CPYTHON_MISSING_BUDGET: usize = 100;
 
 const fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
     if cfg!(target_os = "macos") {
