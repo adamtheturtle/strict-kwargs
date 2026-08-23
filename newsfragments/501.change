@@ -1,3 +1,0 @@
-Allow positional binding arguments to CPython descriptor ``__get__`` methods
-(``classmethod``, ``staticmethod``, ``property``, functions, method descriptors,
-and wrapper descriptors) that reject keyword arguments.

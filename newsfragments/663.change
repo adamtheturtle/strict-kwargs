@@ -1,2 +1,0 @@
-Apply the ``ignore_names`` and ``@singledispatch`` exemptions to a call
-encoded as ``operator.methodcaller("__call__", ...)``.

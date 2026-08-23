@@ -1,2 +1,0 @@
-Stop selecting an ``@overload`` arm that a later definition of the same name
-has replaced.

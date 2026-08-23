@@ -1,2 +1,0 @@
-Flag positional ``instance`` arguments to ``functools.cached_property.__get__``,
-which accepts that parameter by keyword.

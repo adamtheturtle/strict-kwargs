@@ -3,6 +3,35 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.23
+---------
+
+- Allow positional binding arguments to CPython descriptor ``__get__`` methods
+  (``classmethod``, ``staticmethod``, ``property``, functions, method descriptors,
+  and wrapper descriptors) that reject keyword arguments.
+
+- Flag positional ``instance`` arguments to ``functools.cached_property.__get__``,
+  which accepts that parameter by keyword.
+
+- Check paths that share a directory as one project when no ``pyproject.toml``
+  is found, and compare discovered project roots by what they name rather than
+  by how they are spelled.
+
+- Resolve ``operator.getitem`` and ``operator.methodcaller`` through either
+  import style, and let a nearer binding of the same name shadow the import.
+
+- Apply the ``ignore_names`` and ``@singledispatch`` exemptions to a call
+  encoded as ``operator.methodcaller("__call__", ...)``.
+
+- Stop selecting an ``@overload`` arm that a later definition of the same name
+  has replaced.
+
+- Select numeric ``@overload`` arms for negative and explicitly positive number
+  literals.
+
+- Keep a parse failure fatal for a file named on the command line even when
+  selection reached it under a different spelling.
+
 2026.8.16
 ---------
 
