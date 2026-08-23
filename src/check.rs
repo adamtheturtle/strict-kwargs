@@ -8486,9 +8486,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 value: None,
                 ..
             }) => {
-                if let Expr::Name(name) = &**target {
-                    self.invalidate_nonlocal_name(name.id.as_str());
-                }
+                // Annotation-only form does not rebind at runtime, so leave any
+                // enclosing ``nonlocal`` callable intact (Bugbot on #726).
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.mark_opaque_local(name.id.as_str());
