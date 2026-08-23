@@ -3747,8 +3747,9 @@ call(1)
 ",
     );
     assert!(
-        !messages.iter().any(|message| message.contains("list pop result")
-            && message.contains(":7:")),
+        !messages
+            .iter()
+            .any(|message| message.contains("list pop result") && message.contains(":7:")),
         "WeakKeyDictionary.pop must not be tracked as list pop: {messages:?}"
     );
     assert!(
