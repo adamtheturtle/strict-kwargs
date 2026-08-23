@@ -1370,6 +1370,30 @@ Concrete().get()(1)
     );
 }
 
+/// Nested scopes must not leak instance type-arg specializations (Bugbot on #709).
+#[test]
+fn nested_instance_type_args_do_not_clobber_outer() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    def get(self) -> T: ...
+box: Box[Callable[[int], None]]
+def inner() -> None:
+    box: Box[Callable[[], None]]
+    box.get()()
+inner()
+box.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "generic result"),
+        "outer specialization must survive nested rebind: {messages:?}"
+    );
+}
+
 /// An immediately constructed and dereferenced `weakref.ref` preserves its
 /// referent callable's signature (issue #387).
 #[test]
