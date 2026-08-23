@@ -1,0 +1,174 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+fail_fast = false
+default_install_hook_types = [
+  "pre-commit",
+  "pre-push"
+  ]
+
+[[repos]]
+repo = "meta"
+hooks = [
+  {
+    id = "check-useless-excludes",
+    stages = ["pre-commit"]
+  }
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+  {
+    id = "check-added-large-files",
+    stages = ["pre-commit"],
+    exclude = '^tests/snapshots/.*\.snap$'
+  },
+  {
+    id = "check-case-conflict",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-executables-have-shebangs",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-shebang-scripts-are-executable",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-merge-conflict",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-symlinks",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-vcs-permalinks",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-json",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-toml",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "check-yaml",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "end-of-file-fixer",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "mixed-line-ending",
+    stages = ["pre-commit"],
+    args = ["--fix=lf"]
+  },
+  {
+    id = "trailing-whitespace",
+    stages = ["pre-commit"]
+  }
+]
+
+[[repos]]
+repo = "https://github.com/crate-ci/typos"
+rev = "v1.49.0"
+hooks = [
+  {
+    id = "typos",
+    stages = ["pre-commit"],
+    args = [
+    ],
+    exclude = '^(vendored/|Cargo\.lock$|uv\.lock$)'
+  }
+]
+
+[[repos]]
+repo = "https://github.com/rhysd/actionlint"
+rev = "v1.7.12"
+hooks = [
+  {
+    id = "actionlint",
+    stages = ["pre-commit"]
+  }
+]
+
+[[repos]]
+repo = "https://github.com/woodruffw/zizmor-pre-commit"
+rev = "v1.29.0"
+hooks = [
+  {
+    id = "zizmor",
+    stages = ["pre-commit"]
+  }
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "uv-lock",
+    name = "uv lock",
+    stages = ["pre-commit"],
+    entry = "uv lock --check",
+    language = "system",
+    files = '^(pyproject\.toml|uv\.lock)$',
+    pass_filenames = false
+  },
+  {
+    id = "cargo-fmt",
+    name = "cargo fmt",
+    stages = ["pre-push"],
+    entry = "cargo fmt --all -- --check",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false
+  },
+  {
+    id = "cargo-clippy",
+    name = "cargo clippy",
+    stages = ["pre-push"],
+    entry = "cargo clippy --locked --all-targets --all-features -- -D warnings",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false
+  },
+  {
+    id = "no-defaults",
+    name = "no-defaults",
+    entry = "uvx no-defaults@1.0.1",
+    language = "system",
+    types = ["python"],
+    exclude = "^vendored/typeshed/",
+    stages = ["pre-commit"]
+  },
+  {
+    id = "vale-sync",
+    name = "vale sync",
+    entry = "uvx --with docutils vale@3.13.0.0 sync",
+    language = "system",
+    files = '(\.(rst|md)$|^\.vale\.ini$)',
+    pass_filenames = false,
+    stages = ["pre-commit"]
+  },
+  {
+    id = "vale",
+    name = "vale",
+    entry = "uvx --with docutils vale@3.13.0.0",
+    language = "system",
+    types_or = [
+      "rst",
+      "markdown"
+    ],
+    exclude = "^vendored/",
+    require_serial = true,
+    stages = ["pre-commit"]
+  }
+]
