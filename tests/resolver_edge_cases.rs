@@ -3868,6 +3868,217 @@ Owner().method(1)
     );
 }
 
+/// Nested `if True` keeps the taken branch signature (issue #645).
+#[test]
+fn local_definite_true_if_keeps_nested_signature() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    if True:
+        def target(value: int) -> None: ...
+    else:
+        def target(value: int, /) -> None: ...
+    target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "local if True must win: {messages:?}"
+    );
+}
+
+/// Nested `while False` must not overwrite a live nested signature (issue #646).
+#[test]
+fn local_while_false_does_not_overwrite_nested_signature() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    def target(value: int) -> None: ...
+    while False:
+        def target(value: int, /) -> None: ...
+    target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "local while False must not overwrite: {messages:?}"
+    );
+}
+
+/// Nested try/except: try-body `def` wins over the handler (issue #647).
+#[test]
+fn local_try_body_signature_beats_handler() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    try:
+        def target(value: int) -> None: ...
+    except Exception:
+        def target(value: int, /) -> None: ...
+    target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "local try body must win: {messages:?}"
+    );
+}
+
+/// Nested match: definite first case wins (issue #648).
+#[test]
+fn local_definite_match_case_keeps_nested_signature() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    match 1:
+        case 1:
+            def target(value: int) -> None: ...
+        case _:
+            def target(value: int, /) -> None: ...
+    target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "local match case must win: {messages:?}"
+    );
+}
+
+/// Module try/except: try-body `def` wins (issue #509).
+#[test]
+fn try_body_signature_beats_handler() {
+    let messages = check_source(
+        r"
+try:
+    def target(value: int) -> None: ...
+except Exception:
+    def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "try body must win: {messages:?}"
+    );
+}
+
+/// Module match: definite first case wins (issue #510).
+#[test]
+fn definite_match_case_keeps_signature() {
+    let messages = check_source(
+        r"
+match 1:
+    case 1:
+        def target(value: int) -> None: ...
+    case _:
+        def target(value: int, /) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "match case must win: {messages:?}"
+    );
+}
+
+/// Class-body `if True` keeps the taken method (issue #511).
+#[test]
+fn class_definite_true_if_keeps_method_signature() {
+    let messages = check_source(
+        r"
+class Owner:
+    if True:
+        def target(self, value: int) -> None: ...
+    else:
+        def target(self, value: int, /) -> None: ...
+Owner().target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "class if True must win: {messages:?}"
+    );
+}
+
+/// `if True` class definitions keep the taken constructor (issue #640).
+#[test]
+fn definite_true_if_keeps_class_constructor() {
+    let messages = check_source(
+        r"
+if True:
+    class Model:
+        def __init__(self, value: int) -> None: ...
+else:
+    class Model:
+        def __init__(self, value: int, /) -> None: ...
+Model(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("Model")),
+        "if True class must win: {messages:?}"
+    );
+}
+
+/// Try-body class constructor beats the handler (issue #641).
+#[test]
+fn try_body_class_constructor_beats_handler() {
+    let messages = check_source(
+        r"
+try:
+    class Model:
+        def __init__(self, value: int) -> None: ...
+except Exception:
+    class Model:
+        def __init__(self, value: int, /) -> None: ...
+Model(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("Model")),
+        "try body class must win: {messages:?}"
+    );
+}
+
+/// Definite match keeps the selected class constructor (issue #642).
+#[test]
+fn definite_match_keeps_class_constructor() {
+    let messages = check_source(
+        r"
+match 1:
+    case 1:
+        class Model:
+            def __init__(self, value: int) -> None: ...
+    case _:
+        class Model:
+            def __init__(self, value: int, /) -> None: ...
+Model(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("Model")),
+        "match class must win: {messages:?}"
+    );
+}
+
+/// Class-body `while False` must not overwrite methods (issue #643).
+#[test]
+fn class_while_false_does_not_overwrite_method() {
+    let messages = check_source(
+        r"
+class Owner:
+    def method(self, value: int) -> None: ...
+    while False:
+        def method(self, value: int, /) -> None: ...
+Owner().method(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("method")),
+        "class while False must not overwrite: {messages:?}"
+    );
+}
+
 /// Definite `if False` uses the else branch signature (issue #508).
 #[test]
 fn definite_false_if_branch_uses_else_signature() {
