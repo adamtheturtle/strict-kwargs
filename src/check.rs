@@ -5096,6 +5096,14 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
             return;
         };
+        // Normal method bodies assign through ``self`` / ``cls``; only module-
+        // or class-level attribute rebinding can leave a stale indexed method.
+        if matches!(
+            value.as_ref(),
+            Expr::Name(name) if matches!(name.id.as_str(), "self" | "cls")
+        ) {
+            return;
+        }
         let Some(class_fullname) = (match value.as_ref() {
             Expr::Name(name) => self
                 .resolve_local(name.id.as_str())
