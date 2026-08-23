@@ -3629,7 +3629,7 @@ import random, secrets
 def f(value: int) -> None: ...
 random.choice([f])(1)
 random.choice((f,))(1)
-random.sample([f], k=1)[0](1)
+random.sample([f], 1)[0](1)
 random.sample((f,), k=1)[0](1)
 secrets.choice([f])(1)
 secrets.choice((f,))(1)
@@ -3841,6 +3841,27 @@ weakref.WeakSet([f]).pop()(1)
     );
 }
 
+/// Annotated `WeakValueDictionary` must not share queue `.get()` tracking
+/// (issue #729).
+#[test]
+fn weak_value_dictionary_get_is_not_queue_result() {
+    let messages = check_source(
+        r"
+import weakref
+from collections.abc import Callable
+def f(value: int) -> None: ...
+mapping: weakref.WeakValueDictionary[str, Callable[[int], None]] = weakref.WeakValueDictionary()
+mapping.get('missing')(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result") || message.contains("queue")),
+        "WeakValueDictionary.get must not use queue-item storage: {messages:?}"
+    );
+}
+
 /// Annotated `Future[Callable[...]].result()` preserves the callable signature
 /// (issue #410).
 #[test]
@@ -3860,6 +3881,28 @@ future.result()(1)
     );
 }
 
+/// Rebinding a Future local must drop the annotated `future_callables` entry
+/// (issue #737).
+#[test]
+fn future_result_signature_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from concurrent.futures import Future
+def f(value: int) -> None: ...
+future: Future[Callable[[int], None]] = Future()
+future = object()
+future.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound future must not keep annotated result callable: {messages:?}"
+    );
+}
+
 /// `Context.run` preserves a lambda callback result callable signature
 /// (issue #480).
 #[test]
@@ -3875,6 +3918,24 @@ contextvars.copy_context().run(lambda: target)(1)
     assert!(
         has_error_at(&messages, 5, "run() result"),
         "expected Context.run violation, got: {messages:?}"
+    );
+}
+
+/// Assigned ``copy_context()`` results are recognized as ``Context`` (issue #738).
+#[test]
+fn stored_copy_context_run_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+import contextvars
+def target(value: int) -> int:
+    return value
+ctx = contextvars.copy_context()
+ctx.run(lambda: target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "run() result"),
+        "stored copy_context result must preserve Context.run: {messages:?}"
     );
 }
 
@@ -3926,6 +3987,23 @@ typing.assert_type(target, typing.Callable[[int], int])(1)
     assert!(
         messages.iter().any(|message| message.contains("target")),
         "assert_type identity return must preserve callee: {messages:?}"
+    );
+}
+
+/// ``typing_extensions.assert_type`` is dual-handled with ``typing`` (issue #739).
+#[test]
+fn typing_extensions_assert_type_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import typing_extensions
+def target(value: int) -> int:
+    return value
+typing_extensions.assert_type(target, object)(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "typing_extensions.assert_type must preserve callee: {messages:?}"
     );
 }
 
@@ -4138,6 +4216,29 @@ asyncio.Runner().run(coro=factory())(1)
     assert!(
         has_error_at(&messages, 7, "run() result"),
         "expected Runner.run violation, got: {messages:?}"
+    );
+}
+
+/// Only ``asyncio.Runner`` unwraps ``run`` results — not every ``*.Runner``
+/// (issue #743).
+#[test]
+fn non_asyncio_runner_run_is_not_treated_as_asyncio() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Runner:
+    def run(self, coro: object) -> Callable[[int], None]:
+        def target(value: int) -> None: ...
+        return target
+runner = Runner()
+runner.run(object())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("run() result")),
+        "user Runner.run must not use asyncio unwrap: {messages:?}"
     );
 }
 
