@@ -1287,6 +1287,89 @@ choose(f, g)(1)
     );
 }
 
+/// Generic instance method returns substitute class type arguments (issue #522).
+#[test]
+fn generic_instance_method_return_substitutes_callable_type_arg() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    def get(self) -> T: ...
+box: Box[Callable[[int], None]]
+box.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result"),
+        "expected specialized method result violation, got: {messages:?}"
+    );
+}
+
+/// Generic classmethod returns substitute class type arguments (issue #523).
+#[test]
+fn generic_classmethod_return_substitutes_callable_type_arg() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    @classmethod
+    def get(cls) -> T: ...
+box: Box[Callable[[int], None]]
+box.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "generic result"),
+        "expected classmethod specialized result violation, got: {messages:?}"
+    );
+}
+
+/// Generic staticmethod returns substitute class type arguments (issue #524).
+#[test]
+fn generic_staticmethod_return_substitutes_callable_type_arg() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    @staticmethod
+    def get() -> T: ...
+box: Box[Callable[[int], None]]
+box.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "generic result"),
+        "expected staticmethod specialized result violation, got: {messages:?}"
+    );
+}
+
+/// Inherited generic method specializations keep callable returns (issue #525).
+#[test]
+fn inherited_generic_method_specialization_preserves_callable_return() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Base(Generic[T]):
+    def get(self) -> T: ...
+class Concrete(Base[Callable[[int], None]]):
+    pass
+Concrete().get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "generic result"),
+        "expected inherited specialized result violation, got: {messages:?}"
+    );
+}
+
 /// An immediately constructed and dereferenced `weakref.ref` preserves its
 /// referent callable's signature (issue #387).
 #[test]
