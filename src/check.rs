@@ -1128,6 +1128,15 @@ struct CallChecker<'a> {
     context_manager_enter_signatures: FxHashMap<String, Signature>,
     /// Locally declared `TypeVar` names eligible for generic propagation.
     type_vars: FxHashSet<String>,
+    /// Class fullname -> type-parameter names from `Generic[T, ...]`.
+    class_type_params: FxHashMap<String, Vec<String>>,
+    /// Method fullname -> class type-parameter name returned by that method.
+    method_typevar_returns: FxHashMap<String, String>,
+    /// Local instance name -> type-parameter name -> concrete callable signature.
+    instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
+    /// Class fullname -> type-parameter name -> concrete callable from base
+    /// specialization (`class Child(Base[Callable[...]])`).
+    class_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
     /// ``@singledispatch`` generic fullname -> registered type name -> impl.
     singledispatch_registrations: FxHashMap<String, FxHashMap<String, String>>,
     /// Literal-discriminated overload arms that return concrete callables.
@@ -1496,6 +1505,10 @@ impl<'a> CallChecker<'a> {
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
+            class_type_params: FxHashMap::default(),
+            method_typevar_returns: FxHashMap::default(),
+            instance_type_args: FxHashMap::default(),
+            class_type_args: FxHashMap::default(),
             singledispatch_registrations: FxHashMap::default(),
             callable_return_overloads: FxHashMap::default(),
             callable_typeguards: FxHashMap::default(),
@@ -4400,6 +4413,9 @@ impl<'a> CallChecker<'a> {
         if let Some(signature) = self.context_manager_enter_result_signature(func) {
             return Some(signature);
         }
+        if let Some(signature) = self.specialized_generic_method_result_signature(func) {
+            return Some(signature);
+        }
         let Expr::Call(call) = func else {
             return None;
         };
@@ -4413,6 +4429,148 @@ impl<'a> CallChecker<'a> {
             .or_else(|| self.context_decorator_generic_return(&factory))
             .or_else(|| Self::known_stdlib_generic_return(&factory))?;
         self.signature_from_generic_call(call, &generic)
+    }
+
+    /// `receiver.method()` where `method` returns a class `TypeVar` specialized
+    /// to a concrete `Callable` on the receiver (issues #522–#525).
+    #[cfg_attr(coverage, coverage(off))]
+    fn specialized_generic_method_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = call.func.as_ref() else {
+            return None;
+        };
+        let (class_fullname, type_args) = self.receiver_generic_specialization(value)?;
+        let method_fullname = self.resolve_instance_method(&class_fullname, attr.as_str());
+        let type_var = self
+            .method_typevar_returns
+            .get(&method_fullname)
+            .or_else(|| {
+                // Inherited method recorded on the defining base.
+                self.index
+                    .resolve_method(&class_fullname, attr.as_str())
+                    .and_then(|resolved| self.method_typevar_returns.get(&resolved))
+            })?;
+        type_args.get(type_var).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn receiver_generic_specialization(
+        &self,
+        receiver: &Expr,
+    ) -> Option<(String, FxHashMap<String, Signature>)> {
+        match receiver {
+            Expr::Name(name) => {
+                let local = name.id.as_str();
+                if let Some(args) = self.instance_type_args.get(local) {
+                    let class = self.class_from_name_annotation(local)?;
+                    return Some((class, args.clone()));
+                }
+                if let Some(class) = self.class_from_name_annotation(local) {
+                    if let Some(args) = self.class_type_args.get(&class) {
+                        return Some((class, args.clone()));
+                    }
+                }
+                if let Some(resolved) = self.resolve_local(local) {
+                    if let Some(args) = self.class_type_args.get(&resolved) {
+                        return Some((resolved, args.clone()));
+                    }
+                }
+                None
+            }
+            Expr::Call(constructor) => {
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                let args = self.class_type_args.get(&class)?.clone();
+                Some((class, args))
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_class_generic_bases(&mut self, class_fullname: &str, bases: &[Expr]) {
+        for base in bases {
+            if let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = base {
+                if Self::dotted_path(value)
+                    .as_deref()
+                    .is_some_and(|path| path.rsplit('.').next() == Some("Generic"))
+                {
+                    let params = match slice.as_ref() {
+                        Expr::Tuple(tuple) => tuple
+                            .elts
+                            .iter()
+                            .filter_map(|elt| match elt {
+                                Expr::Name(name) => Some(name.id.to_string()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                        Expr::Name(name) => vec![name.id.to_string()],
+                        _ => Vec::new(),
+                    };
+                    if !params.is_empty() {
+                        self.class_type_params
+                            .insert(class_fullname.to_string(), params);
+                    }
+                    continue;
+                }
+                // `Base[Callable[[int], None]]` — specialize inherited params.
+                let Some(base_class) = self.class_from_annotation(&self.source[value.range()])
+                else {
+                    continue;
+                };
+                let Some(params) = self.class_type_params.get(&base_class).cloned() else {
+                    continue;
+                };
+                let args = match slice.as_ref() {
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                    other => std::slice::from_ref(other),
+                };
+                let mut mapping = FxHashMap::default();
+                for (param, arg) in params.iter().zip(args) {
+                    if let Some(signature) = Self::callable_annotation_signature(arg) {
+                        mapping.insert(param.clone(), signature);
+                    }
+                }
+                if !mapping.is_empty() {
+                    self.class_type_args
+                        .entry(class_fullname.to_string())
+                        .or_default()
+                        .extend(mapping);
+                    // Child also exposes the same parameter names for further
+                    // subclassing / annotation lookup.
+                    self.class_type_params
+                        .entry(class_fullname.to_string())
+                        .or_insert(params);
+                }
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_annotated_generic_instance(&mut self, name: &str, annotation: &Expr) {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
+            return;
+        };
+        let Some(class) = self.class_from_annotation(&self.source[value.range()]) else {
+            return;
+        };
+        let Some(params) = self.class_type_params.get(&class).cloned() else {
+            return;
+        };
+        let args = match slice.as_ref() {
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        let mut mapping = FxHashMap::default();
+        for (param, arg) in params.iter().zip(args) {
+            if let Some(signature) = Self::callable_annotation_signature(arg) {
+                mapping.insert(param.clone(), signature);
+            }
+        }
+        if !mapping.is_empty() {
+            self.instance_type_args.insert(name.to_string(), mapping);
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7038,6 +7196,16 @@ impl<'a> CallChecker<'a> {
             self.callable_iterator_items
                 .insert(method_fullname.clone(), signature);
         }
+        if let Some(Expr::Name(return_name)) = returns.as_deref() {
+            if self
+                .class_type_params
+                .get(&class_fullname)
+                .is_some_and(|params| params.iter().any(|param| param == return_name.id.as_str()))
+            {
+                self.method_typevar_returns
+                    .insert(method_fullname.clone(), return_name.id.to_string());
+            }
+        }
         self.push_scope();
         self.function_stack.push(method_fullname);
         let binds_instance_self = !has_staticmethod_or_classmethod_decorator(decorator_list);
@@ -7674,6 +7842,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 name,
                 body,
                 decorator_list,
+                arguments,
                 ..
             }) => {
                 for decorator in decorator_list {
@@ -7681,6 +7850,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let class_fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.define(name, class_fullname.clone());
+                if let Some(arguments) = arguments.as_ref() {
+                    self.record_class_generic_bases(&class_fullname, &arguments.args);
+                }
                 self.class_stack.push(class_fullname);
                 self.push_scope();
                 self.enter_hover_scope(true);
@@ -7876,6 +8048,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
+                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
@@ -7938,6 +8111,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     self.mark_opaque_local(name.id.as_str());
                     self.define_annotation(name.id.as_str(), annotation);
+                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items
