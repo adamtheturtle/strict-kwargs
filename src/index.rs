@@ -1312,6 +1312,7 @@ impl DefinitionIndex {
         for subclass in subclasses {
             inner.store.exclude(format!("{subclass}.{method}"));
         }
+        drop(inner);
     }
 
     fn inherits_from_bases_map(
