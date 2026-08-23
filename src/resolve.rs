@@ -647,6 +647,10 @@ mod tests {
         assert!(all
             .iter()
             .any(|path| path.ends_with("python3.12/site-packages")));
+
+        // Versioned interpreter with no matching layout keeps every site-packages.
+        let missing = discover_site_packages_in_environment(&dir.path().join("bin/python3.11"));
+        assert_eq!(missing.len(), 2);
     }
 
     /// Run `f` with `VIRTUAL_ENV` set to `value` (or removed when `None`),
