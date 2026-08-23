@@ -157,7 +157,7 @@ fn run_repository_case(case: RepositoryCase) {
     );
 }
 
-/// Tolerated CPython floor misses; Sphinx uses a hard zero via [`run_repository_case`].
+/// Tolerated `CPython` floor misses; Sphinx uses a hard zero via [`run_repository_case`].
 const CPYTHON_MISSING_BUDGET: usize = 100;
 
 const fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
