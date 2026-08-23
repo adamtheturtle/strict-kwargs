@@ -427,8 +427,11 @@ fn git_diff_path(prefix: &str, path: &Path) -> String {
 pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> String {
     const CONTEXT: usize = 3;
 
-    let before: Vec<&str> = original.split('\n').collect();
-    let after: Vec<&str> = fixed.split('\n').collect();
+    // `str::split('\n')` yields a trailing empty segment for ordinary
+    // newline-terminated files; that phantom line must not be counted or
+    // emitted, or `git apply` rejects the hunk (#526).
+    let before = split_physical_lines(original);
+    let after = split_physical_lines(fixed);
     let line_count = before.len().min(after.len());
     let changed: Vec<usize> = (0..line_count).filter(|&i| before[i] != after[i]).collect();
     if changed.is_empty() {
@@ -496,6 +499,17 @@ pub fn unified_diff(path: &Path, original: &str, fixed: &str, color: bool) -> St
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Split into physical lines without the empty segment `split('\n')` adds
+/// after a trailing newline.
+#[cfg_attr(coverage, coverage(off))]
+fn split_physical_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -802,18 +816,47 @@ mod tests {
             diff,
             "--- a/pkg/m.py\n\
              +++ b/pkg/m.py\n\
-             @@ -1,6 +1,6 @@\n\
+             @@ -1,5 +1,5 @@\n\
              \u{20}l1\n\
              \u{20}l2\n\
              -f(a)\n\
              +f(x=a)\n\
              \u{20}l4\n\
-             \u{20}l5\n\
-             \u{20}\n"
+             \u{20}l5\n"
         );
         // Context window clamps at the start (`saturating_sub`) and end
         // (`min(line_count - 1)`).
-        assert!(diff.starts_with("--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1,6"));
+        assert!(diff.starts_with("--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1,5"));
+    }
+
+    #[test]
+    fn unified_diff_newline_terminated_file_applies_with_git() {
+        // Issue #526: trailing-newline files must not emit a phantom blank
+        // context line that makes `git apply` reject the patch.
+        let original = "def target(value: int) -> None: ...\ntarget(1)\n";
+        let fixed = "def target(value: int) -> None: ...\ntarget(value=1)\n";
+        let diff = unified_diff(Path::new("main.py"), original, fixed, false);
+        assert!(
+            diff.contains("@@ -1,2 +1,2 @@\n"),
+            "unexpected hunk header in: {diff}"
+        );
+        assert!(
+            !diff.ends_with(" \n\n") && !diff.contains("\n \n"),
+            "phantom blank context line in: {diff:?}"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.py");
+        std::fs::write(&path, original).expect("write");
+        let patch_path = dir.path().join("fix.patch");
+        std::fs::write(&patch_path, &diff).expect("write patch");
+        let status = std::process::Command::new("git")
+            .args(["apply", "--check", "--unsafe-paths"])
+            .arg(&patch_path)
+            .current_dir(dir.path())
+            .status()
+            .expect("git apply");
+        assert!(status.success(), "git apply --check failed for: {diff}");
     }
 
     #[test]
