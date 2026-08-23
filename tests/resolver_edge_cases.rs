@@ -803,6 +803,34 @@ Holder(call=f).call(1)
     );
 }
 
+/// ``dataclasses.replace`` and ``NamedTuple._replace`` preserve callable fields
+/// (issue #457).
+#[test]
+fn record_replacement_preserves_callable_field_signatures() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass, replace
+from collections.abc import Callable
+from typing import NamedTuple
+
+@dataclass
+class D:
+    call: Callable[[int], None]
+
+class N(NamedTuple):
+    call: Callable[[int], None]
+
+def f(value: int) -> None: ...
+replace(D(call=f)).call(1)
+N(call=f)._replace().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 14, "f") && has_error_at(&messages, 15, "f"),
+        "expected replace/_replace field violations, got: {messages:?}"
+    );
+}
+
 /// A literal `operator.attrgetter` applied to a receiver with a known
 /// callable attribute preserves that attribute's signature (issue #375).
 #[test]
@@ -1082,6 +1110,157 @@ for call in reversed(calls):
     assert!(
         has_error_at(&messages, 6, "reversed item"),
         "expected reversed-item violation, got: {messages:?}"
+    );
+}
+
+/// ``async for`` preserves an annotated async iterator's callable item type
+/// (issue #455).
+#[test]
+fn async_for_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
+    async for call in values:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "async-for item"),
+        "expected async-for item violation, got: {messages:?}"
+    );
+}
+
+/// ``async with`` preserves a context manager's ``__aenter__`` return type
+/// (issue #454).
+#[test]
+fn async_with_preserves_callable_aenter_result_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+
+class Manager:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args: object) -> None: ...
+
+async def caller(manager: Manager) -> None:
+    async with manager as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "async-with context result"),
+        "expected async-with binding violation, got: {messages:?}"
+    );
+}
+
+/// ``singledispatch.register`` returns the registered implementation
+/// (issue #483).
+#[test]
+fn singledispatch_register_preserves_implementation_callable_signature() {
+    let messages = check_source(
+        r"
+from functools import singledispatch
+
+@singledispatch
+def generic(value: object) -> object:
+    return value
+
+def target(value: int) -> int:
+    return value
+
+generic.register(int, target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "target"),
+        "expected singledispatch.register violation, got: {messages:?}"
+    );
+}
+
+/// ``singledispatchmethod.register`` returns the registered implementation
+/// (issue #611).
+#[test]
+fn singledispatchmethod_register_preserves_implementation_callable_signature() {
+    let messages = check_source(
+        r"
+import functools
+
+class Dispatcher:
+    @functools.singledispatchmethod
+    def method(self, value: object) -> object:
+        return value
+
+def target(value: int) -> int:
+    return value
+
+Dispatcher.method.register(int, target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "target"),
+        "expected singledispatchmethod.register violation, got: {messages:?}"
+    );
+}
+
+/// ``singledispatch.dispatch`` returns a previously registered implementation
+/// (issue #649).
+#[test]
+fn singledispatch_dispatch_preserves_registered_implementation_signature() {
+    let messages = check_source(
+        r"
+import functools
+
+@functools.singledispatch
+def generic(value: object) -> object:
+    return value
+
+def target(value: int) -> int:
+    return value
+
+generic.register(int, target)
+generic.dispatch(cls=int)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 12, "target"),
+        "expected singledispatch.dispatch violation, got: {messages:?}"
+    );
+}
+
+/// Comprehension targets shadow same-named outer functions (issue #512).
+#[test]
+fn comprehension_target_shadows_outer_function_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target(1) for target in [lambda *args: None]]
+{target(1) for target in [lambda *args: None]}
+{target(1): None for target in [lambda *args: None]}
+(target(1) for target in [lambda *args: None])
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "comprehension target must shadow outer function: {messages:?}"
+    );
+}
+
+/// ``callable()`` narrowing preserves optional handler signatures (issue #484).
+#[test]
+fn callable_builtin_narrowing_preserves_signal_handler_signature() {
+    let messages = check_source(
+        r"
+import signal
+
+handler = signal.getsignal(signal.SIGINT)
+if callable(handler):
+    handler(signal.SIGINT, None)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed") || has_error_at(&messages, 6, "Too many"),
+        "expected callable() narrowed handler violation, got: {messages:?}"
     );
 }
 
