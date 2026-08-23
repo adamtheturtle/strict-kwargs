@@ -371,6 +371,11 @@ fn dynamic_rebinding_invalidates_prior_function_signatures() {
         "class C:\n    def method(self, value: int) -> None: ...\nsetattr(C, \"method\", lambda *args: None)\nC().method(1)\n",
         "class Base:\n    def method(self, value: int) -> None: ...\nclass Child(Base): ...\nBase.method = lambda *args: None\nChild().method(1)\n",
         "def outer() -> None:\n    def f(value: int) -> None: ...\n    def replace() -> None:\n        nonlocal f\n        f = lambda *args: None\n    replace()\n    f(1)\nouter()\n",
+        // Nested ``globals()`` must clear the module binding, not only the
+        // current function scope (Bugbot on #720).
+        "def f(value: int) -> None: ...\ndef rebind() -> None:\n    globals()[\"f\"] = lambda *args: None\nrebind()\nf(1)\n",
+        // ``nonlocal`` via annotated / augmented assign (Bugbot on #720).
+        "def outer() -> None:\n    def f(value: int) -> None: ...\n    def replace() -> None:\n        nonlocal f\n        f: object = lambda *args: None\n    replace()\n    f(1)\nouter()\n",
     ] {
         let messages = check_source(source);
         assert!(
@@ -3721,6 +3726,70 @@ keys.popitem()[0](1)
     assert!(
         has_error_at(&messages, 7, "popitem() key"),
         "expected WeakKeyDictionary.popitem key violation, got: {messages:?}"
+    );
+}
+
+/// ``WeakKeyDictionary`` key signatures must not feed the list ``.pop()``
+/// tracker (Bugbot on #704).
+#[test]
+fn weak_key_dictionary_pop_does_not_reuse_key_signature() {
+    let messages = check_source(
+        r"
+import weakref
+from collections.abc import Callable
+def target(value: int) -> None: ...
+keys: weakref.WeakKeyDictionary[Callable[[int], None], int] = weakref.WeakKeyDictionary()
+keys[target] = 1
+value = keys.pop(target)
+calls: list[Callable[[int], None]] = [target]
+call = calls.pop()
+call(1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("list pop result")
+            && message.contains(":7:")),
+        "WeakKeyDictionary.pop must not be tracked as list pop: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 10, "list pop result"),
+        "list.pop must still preserve callable items: {messages:?}"
+    );
+}
+
+/// Rebinding a former token / sorter clears stale callable tracking (Bugbot on #704).
+#[test]
+fn token_and_sorter_rebind_clears_stale_callables() {
+    let messages = check_source(
+        r"
+import contextvars
+from collections.abc import Callable
+from graphlib import TopologicalSorter
+var: contextvars.ContextVar[Callable[[int], int]]
+token = var.set(lambda value: value)
+class Holder: ...
+token = Holder()
+old = token.old_value
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "rebound token must not keep Token.old_value: {messages:?}"
+    );
+
+    let messages = check_source(
+        r"
+from graphlib import TopologicalSorter
+def target(value: int) -> None: ...
+sorter = TopologicalSorter(graph={target: set()})
+class Holder: ...
+sorter = Holder()
+sorter.get_ready()[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "rebound sorter must not keep get_ready callable: {messages:?}"
     );
 }
 

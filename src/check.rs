@@ -1440,6 +1440,10 @@ struct Scope {
     callable_queue_items: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Annotated ``WeakKeyDictionary[K, V]`` locals when ``K`` is callable.
+    /// Kept separate from [`Self::callable_iterable_items`] so ``.pop()``
+    /// (value) is not confused with list-item / ``popitem`` key tracking.
+    weak_key_dict_callables: FxHashMap<String, Signature>,
     /// Optional callable locals (`Callable[...] | None`) whose signature is
     /// restored after an ``is not None`` / ``assert … is not None`` guard.
     optional_callables: FxHashMap<String, Signature>,
@@ -1619,8 +1623,12 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(local_name);
         scope.callable_queue_items.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.contextvar_token_callables.remove(local_name);
+        scope.topological_sorter_nodes.remove(local_name);
+        scope.mapping_proxy_callables.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1647,8 +1655,12 @@ impl<'a> CallChecker<'a> {
             scope.instances.remove(local_name);
             scope.callable_queue_items.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
+            scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
             scope.instance_type_args.remove(local_name);
+            scope.contextvar_token_callables.remove(local_name);
+            scope.topological_sorter_nodes.remove(local_name);
+            scope.mapping_proxy_callables.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1794,6 +1806,7 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
@@ -1832,6 +1845,7 @@ impl<'a> CallChecker<'a> {
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
@@ -2138,6 +2152,14 @@ impl<'a> CallChecker<'a> {
         remove_function_binding(scope, local_name);
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
+        scope.callable_queue_items.remove(local_name);
+        scope.callable_iterable_items.remove(local_name);
+        scope.weak_key_dict_callables.remove(local_name);
+        scope.callable_list_elements.remove(local_name);
+        scope.instance_type_args.remove(local_name);
+        scope.contextvar_token_callables.remove(local_name);
+        scope.topological_sorter_nodes.remove(local_name);
+        scope.mapping_proxy_callables.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -5105,7 +5127,9 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_local_name_if_callable(&mut self, name: &str) {
         let was_known_callable = self.scopes.last().is_some_and(|scope| {
-            scope.functions.contains_key(name) || scope.names.contains_key(name)
+            scope.functions.contains_key(name)
+                || scope.names.contains_key(name)
+                || scope.modules.contains_key(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);
@@ -5215,7 +5239,43 @@ impl<'a> CallChecker<'a> {
         let Expr::StringLiteral(key) = slice.as_ref() else {
             return;
         };
-        self.invalidate_local_name_if_callable(key.value.to_str());
+        self.invalidate_module_name_if_callable(key.value.to_str());
+    }
+
+    /// Invalidate a module-scope callable rebinding (for ``globals()`` writes).
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_module_name_if_callable(&mut self, name: &str) {
+        let Some(scope) = self.scopes.first_mut() else {
+            return;
+        };
+        let was_known = scope.functions.contains_key(name)
+            || scope.names.contains_key(name)
+            || scope.modules.contains_key(name);
+        if !was_known {
+            return;
+        }
+        let plan_fixes = self.plan_fixes;
+        let attribute_prefix = format!("{name}.");
+        scope
+            .names
+            .retain(|bound, _| !bound.starts_with(&attribute_prefix));
+        scope.names.remove(name);
+        remove_function_binding(scope, name);
+        scope.modules.remove(name);
+        scope.instances.remove(name);
+        scope.callable_queue_items.remove(name);
+        scope.callable_iterable_items.remove(name);
+        scope.weak_key_dict_callables.remove(name);
+        scope.callable_list_elements.remove(name);
+        scope.instance_type_args.remove(name);
+        scope.contextvar_token_callables.remove(name);
+        scope.topological_sorter_nodes.remove(name);
+        scope.mapping_proxy_callables.remove(name);
+        if plan_fixes {
+            scope.imported_callables.remove(name);
+        }
+        scope.opaque_locals.insert(name.to_string());
+        scope.invalidated_callables.insert(name.to_string());
     }
 
     /// Conservative ``exec("name = …")`` / ``exec('name = …')`` invalidation.
@@ -7050,7 +7110,7 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         for scope in self.scopes.iter().rev() {
-            if let Some(signature) = scope.callable_iterable_items.get(mapping.id.as_str()) {
+            if let Some(signature) = scope.weak_key_dict_callables.get(mapping.id.as_str()) {
                 return Some(signature.clone());
             }
             if scope.names.contains_key(mapping.id.as_str())
@@ -8315,6 +8375,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
             }
             Stmt::AugAssign(ast::StmtAugAssign { target, value, .. }) => {
+                if let Expr::Name(name) = target.as_ref() {
+                    self.invalidate_nonlocal_name(name.id.as_str());
+                }
                 self.invalidate_bound_callable_targets(target);
                 self.visit_expr(value);
                 self.visit_expr(target);
@@ -8335,6 +8398,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         let was_known_callable = self.scopes.last().is_some_and(|scope| {
                             scope.functions.contains_key(name.id.as_str())
                                 || scope.names.contains_key(name.id.as_str())
+                                || scope.modules.contains_key(name.id.as_str())
                         });
                         self.mark_opaque_local(name.id.as_str());
                         if was_known_callable {
@@ -8352,6 +8416,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 value: Some(value),
                 ..
             }) => {
+                if let Expr::Name(name) = &**target {
+                    self.invalidate_nonlocal_name(name.id.as_str());
+                }
                 let class_fullname = self.class_from_obvious_instance(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -8394,7 +8461,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                     if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
                         self.current_scope()
-                            .callable_iterable_items
+                            .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
@@ -8419,6 +8486,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 value: None,
                 ..
             }) => {
+                if let Expr::Name(name) = &**target {
+                    self.invalidate_nonlocal_name(name.id.as_str());
+                }
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.mark_opaque_local(name.id.as_str());
@@ -8436,7 +8506,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                     if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
                         self.current_scope()
-                            .callable_iterable_items
+                            .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
