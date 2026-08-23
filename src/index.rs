@@ -64,6 +64,9 @@ struct Store {
     /// a conditional branch are not definite rebindings, so they must not
     /// invalidate signatures from an alternative branch.
     conditional_depth: usize,
+    /// Target Python version used to pick typeshed ``sys.version_info``
+    /// branches (issue #407).
+    python_version: PythonVersion,
     /// Functions whose decorators may replace the written definition with a
     /// different runtime callable. Calls to these must not use the
     /// undecorated parameters stored above.
@@ -561,13 +564,15 @@ impl Drop for ModuleIndexClaim<'_> {
 }
 
 impl DefinitionIndex {
-    fn new(resolver: ModuleResolver) -> Self {
+    fn new(resolver: ModuleResolver, python_version: PythonVersion) -> Self {
+        let mut inner = Inner {
+            budget: MODULE_BUDGET,
+            ..Inner::default()
+        };
+        inner.store.python_version = python_version;
         Self {
             resolver: Some(resolver),
-            inner: RwLock::new(Inner {
-                budget: MODULE_BUDGET,
-                ..Inner::default()
-            }),
+            inner: RwLock::new(inner),
         }
     }
 
@@ -1459,8 +1464,12 @@ pub fn build_index_with_sources(
     python_files: &[PathBuf],
     source_roots: &SourceRoots,
     python_env: Option<&Path>,
+    python_version: PythonVersion,
 ) -> (DefinitionIndex, FxHashMap<PathBuf, IndexedFile>) {
-    let index = DefinitionIndex::new(ModuleResolver::new(project_root, source_roots, python_env));
+    let index = DefinitionIndex::new(
+        ModuleResolver::new(project_root, source_roots, python_env),
+        python_version,
+    );
     let mut indexed_files = FxHashMap::default();
 
     // Builtins come from vendored typeshed ``stdlib/builtins.pyi``. Resolved
@@ -2349,6 +2358,109 @@ pub const fn definite_bool(expr: &Expr) -> Option<bool> {
     }
 }
 
+/// Target `CPython` minor used when selecting typeshed version gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythonVersion {
+    /// Major version component (`3` for `CPython` 3.x).
+    pub major: u8,
+    /// Minor version component (`14` for 3.14).
+    pub minor: u8,
+}
+
+impl Default for PythonVersion {
+    fn default() -> Self {
+        // Conservative default matching common deployment floors; projects on
+        // newer runtimes should set ``target-version`` or pass ``--python``.
+        Self {
+            major: 3,
+            minor: 12,
+        }
+    }
+}
+
+impl PythonVersion {
+    /// Parse ``"3.14"`` / ``"3.14.0"`` style version strings.
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.trim().split('.');
+        let major: u8 = parts.next()?.parse().ok()?;
+        let minor: u8 = parts.next()?.parse().ok()?;
+        Some(Self { major, minor })
+    }
+
+    /// Prefer an interpreter basename tag (`python3.14`) when present.
+    #[cfg_attr(coverage, coverage(off))]
+    pub fn from_interpreter_path(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?;
+        let tag = name.strip_prefix("python")?;
+        Self::parse(tag)
+    }
+}
+
+/// Definite ``if`` test including typeshed ``sys.version_info`` comparisons.
+#[cfg_attr(coverage, coverage(off))]
+pub fn definite_if_test(expr: &Expr, version: PythonVersion) -> Option<bool> {
+    definite_bool(expr).or_else(|| version_info_condition(expr, version))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn is_sys_version_info(expr: &Expr) -> bool {
+    let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = expr else {
+        return false;
+    };
+    attr.as_str() == "version_info"
+        && matches!(value.as_ref(), Expr::Name(name) if name.id.as_str() == "sys")
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn tuple_version_bound(expr: &Expr) -> Option<(u8, u8)> {
+    let Expr::Tuple(tuple) = expr else {
+        return None;
+    };
+    if tuple.elts.len() < 2 {
+        return None;
+    }
+    let major = int_literal(&tuple.elts[0])?;
+    let minor = int_literal(&tuple.elts[1])?;
+    Some((major, minor))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn int_literal(expr: &Expr) -> Option<u8> {
+    let Expr::NumberLiteral(ast::ExprNumberLiteral {
+        value: ast::Number::Int(value),
+        ..
+    }) = expr
+    else {
+        return None;
+    };
+    u8::try_from(value.as_i64()?).ok()
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn version_info_condition(expr: &Expr, version: PythonVersion) -> Option<bool> {
+    let Expr::Compare(compare) = expr else {
+        return None;
+    };
+    if compare.ops.len() != 1 || compare.comparators.len() != 1 {
+        return None;
+    }
+    if !is_sys_version_info(compare.left.as_ref()) {
+        return None;
+    }
+    let bound = tuple_version_bound(&compare.comparators[0])?;
+    let current = (version.major, version.minor);
+    Some(match compare.ops[0] {
+        ast::CmpOp::Gt => current > bound,
+        ast::CmpOp::GtE => current >= bound,
+        ast::CmpOp::Lt => current < bound,
+        ast::CmpOp::LtE => current <= bound,
+        ast::CmpOp::Eq => current == bound,
+        ast::CmpOp::NotEq => current != bound,
+        _ => return None,
+    })
+}
+
 /// Reachable `elif`/`else` bodies after a definitely-false leading `if` test.
 #[derive(Debug)]
 pub enum TakenElifElse<'a> {
@@ -2365,7 +2477,10 @@ pub enum TakenElifElse<'a> {
 
 /// Select which `elif`/`else` suites remain after `if False` / `if None`.
 #[cfg_attr(coverage, coverage(off))]
-pub fn taken_elif_else_after_false(elif_else_clauses: &[ast::ElifElseClause]) -> TakenElifElse<'_> {
+pub fn taken_elif_else_after_false(
+    elif_else_clauses: &[ast::ElifElseClause],
+    version: PythonVersion,
+) -> TakenElifElse<'_> {
     for (index, clause) in elif_else_clauses.iter().enumerate() {
         match &clause.test {
             None => {
@@ -2374,7 +2489,7 @@ pub fn taken_elif_else_after_false(elif_else_clauses: &[ast::ElifElseClause]) ->
                     body: &clause.body,
                 };
             }
-            Some(test) => match definite_bool(test) {
+            Some(test) => match definite_if_test(test, version) {
                 Some(true) => {
                     return TakenElifElse::Definite {
                         test: Some(test),
@@ -2825,7 +2940,7 @@ fn index_stmt(
             body,
             elif_else_clauses,
             ..
-        }) => match definite_bool(test) {
+        }) => match definite_if_test(test, store.python_version) {
             Some(true) => {
                 index_module_with_bindings(
                     store,
@@ -2836,33 +2951,35 @@ fn index_stmt(
                     bindings,
                 );
             }
-            Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
-                TakenElifElse::Definite { body: taken, .. } => {
-                    index_module_with_bindings(
-                        store,
-                        module_name,
-                        is_package,
-                        scope_name,
-                        taken,
-                        bindings,
-                    );
-                }
-                TakenElifElse::Uncertain(clauses) => {
-                    store.conditional_depth += 1;
-                    for clause in clauses {
+            Some(false) => {
+                match taken_elif_else_after_false(elif_else_clauses, store.python_version) {
+                    TakenElifElse::Definite { body: taken, .. } => {
                         index_module_with_bindings(
                             store,
                             module_name,
                             is_package,
                             scope_name,
-                            &clause.body,
+                            taken,
                             bindings,
                         );
                     }
-                    store.conditional_depth -= 1;
+                    TakenElifElse::Uncertain(clauses) => {
+                        store.conditional_depth += 1;
+                        for clause in clauses {
+                            index_module_with_bindings(
+                                store,
+                                module_name,
+                                is_package,
+                                scope_name,
+                                &clause.body,
+                                bindings,
+                            );
+                        }
+                        store.conditional_depth -= 1;
+                    }
+                    TakenElifElse::Empty => {}
                 }
-                TakenElifElse::Empty => {}
-            },
+            }
             None => {
                 store.conditional_depth += 1;
                 index_module_with_bindings(
@@ -3084,23 +3201,25 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             body,
             elif_else_clauses,
             ..
-        }) => match definite_bool(test) {
+        }) => match definite_if_test(test, store.python_version) {
             Some(true) => {
                 index_module_fast(store, module_name, scope_name, body);
             }
-            Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
-                TakenElifElse::Definite { body: taken, .. } => {
-                    index_module_fast(store, module_name, scope_name, taken);
-                }
-                TakenElifElse::Uncertain(clauses) => {
-                    store.conditional_depth += 1;
-                    for clause in clauses {
-                        index_module_fast(store, module_name, scope_name, &clause.body);
+            Some(false) => {
+                match taken_elif_else_after_false(elif_else_clauses, store.python_version) {
+                    TakenElifElse::Definite { body: taken, .. } => {
+                        index_module_fast(store, module_name, scope_name, taken);
                     }
-                    store.conditional_depth -= 1;
+                    TakenElifElse::Uncertain(clauses) => {
+                        store.conditional_depth += 1;
+                        for clause in clauses {
+                            index_module_fast(store, module_name, scope_name, &clause.body);
+                        }
+                        store.conditional_depth -= 1;
+                    }
+                    TakenElifElse::Empty => {}
                 }
-                TakenElifElse::Empty => {}
-            },
+            }
             None => {
                 store.conditional_depth += 1;
                 index_module_fast(store, module_name, scope_name, body);
@@ -3318,37 +3437,39 @@ fn index_class_body(
                 body,
                 elif_else_clauses,
                 ..
-            }) => match definite_bool(test) {
+            }) => match definite_if_test(test, store.python_version) {
                 Some(true) => {
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
                 }
-                Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
-                    TakenElifElse::Definite { body: taken, .. } => {
-                        index_class_body(
-                            store,
-                            module_name,
-                            is_package,
-                            class_name,
-                            taken,
-                            bindings,
-                        );
-                    }
-                    TakenElifElse::Uncertain(clauses) => {
-                        store.conditional_depth += 1;
-                        for clause in clauses {
+                Some(false) => {
+                    match taken_elif_else_after_false(elif_else_clauses, store.python_version) {
+                        TakenElifElse::Definite { body: taken, .. } => {
                             index_class_body(
                                 store,
                                 module_name,
                                 is_package,
                                 class_name,
-                                &clause.body,
+                                taken,
                                 bindings,
                             );
                         }
-                        store.conditional_depth -= 1;
+                        TakenElifElse::Uncertain(clauses) => {
+                            store.conditional_depth += 1;
+                            for clause in clauses {
+                                index_class_body(
+                                    store,
+                                    module_name,
+                                    is_package,
+                                    class_name,
+                                    &clause.body,
+                                    bindings,
+                                );
+                            }
+                            store.conditional_depth -= 1;
+                        }
+                        TakenElifElse::Empty => {}
                     }
-                    TakenElifElse::Empty => {}
-                },
+                }
                 None => {
                     store.conditional_depth += 1;
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
@@ -3545,23 +3666,25 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 body,
                 elif_else_clauses,
                 ..
-            }) => match definite_bool(test) {
+            }) => match definite_if_test(test, store.python_version) {
                 Some(true) => {
                     index_class_body_fast(store, module_name, class_name, body);
                 }
-                Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
-                    TakenElifElse::Definite { body: taken, .. } => {
-                        index_class_body_fast(store, module_name, class_name, taken);
-                    }
-                    TakenElifElse::Uncertain(clauses) => {
-                        store.conditional_depth += 1;
-                        for clause in clauses {
-                            index_class_body_fast(store, module_name, class_name, &clause.body);
+                Some(false) => {
+                    match taken_elif_else_after_false(elif_else_clauses, store.python_version) {
+                        TakenElifElse::Definite { body: taken, .. } => {
+                            index_class_body_fast(store, module_name, class_name, taken);
                         }
-                        store.conditional_depth -= 1;
+                        TakenElifElse::Uncertain(clauses) => {
+                            store.conditional_depth += 1;
+                            for clause in clauses {
+                                index_class_body_fast(store, module_name, class_name, &clause.body);
+                            }
+                            store.conditional_depth -= 1;
+                        }
+                        TakenElifElse::Empty => {}
                     }
-                    TakenElifElse::Empty => {}
-                },
+                }
                 None => {
                     store.conditional_depth += 1;
                     index_class_body_fast(store, module_name, class_name, body);
@@ -3697,7 +3820,7 @@ mod tests {
 
     use super::{
         extend_unique, index_module, resolve_reference, DefinitionIndex, IndexedFile, ModuleState,
-        Store,
+        PythonVersion, Store,
     };
     use crate::config::{Config, SourceRoots};
     use crate::resolve::ModuleResolver;
@@ -3898,7 +4021,7 @@ mod tests {
         let config = Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
         let resolver = ModuleResolver::new(root, &source_roots, None);
-        let index = DefinitionIndex::new(resolver);
+        let index = DefinitionIndex::new(resolver, PythonVersion::default());
         assert!(
             index.get("facade.hidden").is_none(),
             "expected None, got {:?}",
@@ -4004,7 +4127,10 @@ class Mid(Base):
         .expect("write mid");
         let config = Config::default();
         let source_roots = SourceRoots::from_config(root, &config);
-        let index = DefinitionIndex::new(ModuleResolver::new(root, &source_roots, None));
+        let index = DefinitionIndex::new(
+            ModuleResolver::new(root, &source_roots, None),
+            PythonVersion::default(),
+        );
         let parsed = parse_module(
             r"
 from mid import Mid

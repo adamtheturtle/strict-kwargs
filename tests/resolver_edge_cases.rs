@@ -1422,6 +1422,39 @@ Concrete().get()(1)
     );
 }
 
+/// Typeshed ``sys.version_info`` gates select signatures for ``target_version``
+/// (issue #407). On 3.14+, ``functools.reduce``'s ``initial`` is keyword-only.
+#[test]
+fn target_version_selects_version_gated_stdlib_signature() {
+    let messages = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n[tool.strict_kwargs]\ntarget_version = \"3.14\"\n")
+        .main(
+            r"
+from functools import reduce
+reduce(lambda left, right: left + right, [1, 2], 0)
+",
+        )
+        .check();
+    assert!(
+        messages.iter().any(|message| message.contains("reduce")),
+        "3.14 reduce initial must be keyword-only: {messages:?}"
+    );
+
+    let messages = TestProject::new()
+        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n[tool.strict_kwargs]\ntarget_version = \"3.12\"\n")
+        .main(
+            r"
+from functools import reduce
+reduce(lambda left, right: left + right, [1, 2], 0)
+",
+        )
+        .check();
+    assert!(
+        messages.is_empty(),
+        "3.12 reduce initial stays positional: {messages:?}"
+    );
+}
+
 /// Nested scopes must not leak instance type-arg specializations (Bugbot on #709).
 #[test]
 fn nested_instance_type_args_do_not_clobber_outer() {

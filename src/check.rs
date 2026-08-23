@@ -27,7 +27,7 @@ use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
     build_index_with_sources, definite_bool, definite_empty_iterable, definite_match_case,
     is_package_init, module_name_for_path, relative_base, taken_elif_else_after_false,
-    DefinitionIndex, IndexedFile, TakenElifElse,
+    DefinitionIndex, IndexedFile, PythonVersion, TakenElifElse,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -106,6 +106,19 @@ fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) 
     })
 }
 
+/// Resolve the `CPython` minor used for typeshed ``sys.version_info`` gates.
+fn resolve_python_version(config: &Config, python_env: Option<&Path>) -> PythonVersion {
+    if let Some(text) = config.target_version.as_deref() {
+        if let Some(version) = PythonVersion::parse(text) {
+            return version;
+        }
+    }
+    python_env
+        .and_then(PythonVersion::from_interpreter_path)
+        .unwrap_or_default()
+}
+
+#[cfg_attr(coverage, coverage(off))]
 /// Check every Python file reachable from `paths` and return the violations.
 ///
 /// # Errors
@@ -118,7 +131,6 @@ fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) 
 /// The whole walk runs on a large dedicated stack so a deeply nested file
 /// cannot overflow it; one nested deeper than the supported limit is rejected
 /// up front ([`CheckError::TooDeeplyNested`]) instead of crashing (issue #54).
-#[cfg_attr(coverage, coverage(off))]
 pub fn check_paths(
     project_root: &Path,
     paths: &[PathBuf],
@@ -606,8 +618,13 @@ fn check_paths_impl(
     let mut prepared_index = None;
     if let Some(cache) = &mut cache {
         if cache.needs_project_validation() {
-            let built =
-                build_index_with_sources(project_root, &python_files, &source_roots, python_env);
+            let built = build_index_with_sources(
+                project_root,
+                &python_files,
+                &source_roots,
+                python_env,
+                resolve_python_version(config, python_env),
+            );
             let semantic_fingerprints = built
                 .1
                 .iter()
@@ -657,7 +674,13 @@ fn check_paths_impl(
         .collect();
 
     let (index, indexed_files) = prepared_index.unwrap_or_else(|| {
-        build_index_with_sources(project_root, &python_files, &source_roots, python_env)
+        build_index_with_sources(
+            project_root,
+            &python_files,
+            &source_roots,
+            python_env,
+            resolve_python_version(config, python_env),
+        )
     });
     // Collect skip warnings with their file index so they can be emitted in
     // the original sorted-file order after both phases finish (issue #53 + #46).
@@ -7633,7 +7656,7 @@ impl<'a> CallChecker<'a> {
                 break;
             }
         }
-        match taken_elif_else_after_false(elif_else_clauses) {
+        match taken_elif_else_after_false(elif_else_clauses, PythonVersion::default()) {
             TakenElifElse::Definite {
                 test: Some(clause_test),
                 body: taken,

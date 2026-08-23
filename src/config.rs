@@ -88,6 +88,11 @@ pub struct Config {
     /// found, so it is omitted from cache fingerprints.
     #[serde(default, skip_serializing)]
     pub output_format: OutputFormat,
+    /// Target `CPython` version for selecting typeshed `sys.version_info`
+    /// branches (e.g. `"3.14"`). When unset, defaults to `3.12`, or the
+    /// minor encoded in `--python` when that path is versioned.
+    #[serde(default)]
+    pub target_version: Option<String>,
 }
 
 impl Config {

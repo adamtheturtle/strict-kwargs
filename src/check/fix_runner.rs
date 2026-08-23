@@ -225,8 +225,15 @@ fn fix_paths_impl(
     let python_files = collect_python_files_for_fix(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
-    let (index, indexed_files) =
-        build_index_with_sources(project_root, &python_files, &source_roots, python_env);
+    let (index, indexed_files) = build_index_with_sources(
+        project_root,
+        &python_files,
+        &source_roots,
+        python_env,
+        crate::index::PythonVersion::parse(config.target_version.as_deref().unwrap_or(""))
+            .or_else(|| python_env.and_then(crate::index::PythonVersion::from_interpreter_path))
+            .unwrap_or_default(),
+    );
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each
     // file. Rewrites are planned serially below after the ty fallback has a
