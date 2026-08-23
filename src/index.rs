@@ -64,10 +64,10 @@ struct Store {
     /// a conditional branch are not definite rebindings, so they must not
     /// invalidate signatures from an alternative branch.
     conditional_depth: usize,
-    /// Names defined in the current conditional branch body. A later ``def``
-    /// of the same name in this branch replaces the prior arm; sibling
-    /// branches still union (issue #741).
-    conditional_branch_defs: FxHashSet<String>,
+    /// Per nested conditional/loop frame: names defined in that frame. A later
+    /// ``def`` of the same name in the frame replaces the prior arm; sibling
+    /// frames and nested loops still union (issues #741, Bugbot on #748).
+    conditional_branch_defs: Vec<FxHashSet<String>>,
     /// Target Python version used to pick typeshed ``sys.version_info``
     /// branches (issue #407).
     python_version: PythonVersion,
@@ -166,17 +166,19 @@ impl Store {
             self.excluded.remove(&fullname);
             // Under control flow, keep sibling-branch signatures rather than
             // letting traversal order alone decide (issues #508–#648). A later
-            // ``def`` in the *same* branch supersedes the earlier one (#741).
+            // ``def`` in the *same* frame supersedes the earlier one (#741).
             if self.conditional_depth > 0 {
-                if self.conditional_branch_defs.contains(&fullname) {
+                let frame = self
+                    .conditional_branch_defs
+                    .last_mut()
+                    .expect("conditional frame while depth > 0");
+                if frame.contains(&fullname) {
                     let entry = self.signatures.entry(fullname).or_default();
-                    if let Some(last) = entry.last_mut() {
-                        *last = signature;
-                    } else {
-                        entry.push(signature);
-                    }
+                    // ``contains`` above means we already pushed once in this
+                    // frame, so ``last_mut`` is present.
+                    *entry.last_mut().expect("same-frame def has a signature") = signature;
                 } else {
-                    self.conditional_branch_defs.insert(fullname.clone());
+                    frame.insert(fullname.clone());
                     self.signatures.entry(fullname).or_default().push(signature);
                 }
             } else {
@@ -184,6 +186,23 @@ impl Store {
                 self.signatures.insert(fullname, vec![signature]);
             }
         }
+    }
+
+    fn push_conditional_frame(&mut self) {
+        self.conditional_depth += 1;
+        self.conditional_branch_defs.push(FxHashSet::default());
+    }
+
+    fn pop_conditional_frame(&mut self) {
+        self.conditional_branch_defs.pop();
+        self.conditional_depth = self.conditional_depth.saturating_sub(1);
+    }
+
+    fn clear_conditional_frame(&mut self) {
+        self.conditional_branch_defs
+            .last_mut()
+            .expect("conditional frame")
+            .clear();
     }
 
     fn insert_runtime_definition(&mut self, fullname: String, signature: Signature) {
@@ -1473,6 +1492,10 @@ struct Collected {
     /// When false, assignment aliases in control-flow branches add edges
     /// without clearing prior sibling-branch reexports (issue #734).
     invalidate_reexports: bool,
+    /// Locals assigned as reexports in the current control-flow branch. A
+    /// later same-branch assignment still clears prior edges for that name
+    /// (Bugbot on #748).
+    reexport_branch_names: FxHashSet<String>,
     reexports: Vec<(String, String)>,
     star_imports: Vec<(String, String)>,
     exports: ModuleExports,
@@ -1838,6 +1861,7 @@ fn collect_scoped_without_reexport_invalidation(
 ) {
     let previous = out.invalidate_reexports;
     out.invalidate_reexports = false;
+    out.reexport_branch_names.clear();
     collect_scoped(
         stmts,
         module_name,
@@ -1934,11 +1958,13 @@ fn collect_scoped(
                 for target in targets {
                     if let Expr::Name(name) = target {
                         let dst = format!("{module_name}.{}", name.id);
-                        if out.invalidate_reexports {
+                        let local = name.id.as_str();
+                        if out.invalidate_reexports || out.reexport_branch_names.contains(local) {
                             clear_reexports_to(out, &dst);
                         }
+                        out.reexport_branch_names.insert(local.to_string());
                         if reference_path(value).is_none() {
-                            bindings.remove(name.id.as_str());
+                            bindings.remove(local);
                         }
                     }
                 }
@@ -1967,11 +1993,14 @@ fn collect_scoped(
             }) if module_scope => {
                 out.has_attribute_rebindings |= matches!(target.as_ref(), Expr::Attribute(_));
                 if let Expr::Name(name) = target.as_ref() {
-                    if out.invalidate_reexports {
-                        clear_reexports_to(out, &format!("{module_name}.{}", name.id));
+                    let local = name.id.as_str();
+                    let dst = format!("{module_name}.{local}");
+                    if out.invalidate_reexports || out.reexport_branch_names.contains(local) {
+                        clear_reexports_to(out, &dst);
                     }
+                    out.reexport_branch_names.insert(local.to_string());
                     if reference_path(value).is_none() {
-                        bindings.remove(name.id.as_str());
+                        bindings.remove(local);
                     }
                 }
                 if let (Expr::Name(name), Some(src)) = (
@@ -3035,9 +3064,9 @@ fn index_stmt(
                         );
                     }
                     TakenElifElse::Uncertain(clauses) => {
-                        store.conditional_depth += 1;
+                        store.push_conditional_frame();
                         for clause in clauses {
-                            store.conditional_branch_defs.clear();
+                            store.clear_conditional_frame();
                             index_module_with_bindings(
                                 store,
                                 module_name,
@@ -3047,14 +3076,13 @@ fn index_stmt(
                                 bindings,
                             );
                         }
-                        store.conditional_depth -= 1;
+                        store.pop_conditional_frame();
                     }
                     TakenElifElse::Empty => {}
                 }
             }
             None => {
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -3064,7 +3092,7 @@ fn index_stmt(
                     bindings,
                 );
                 for clause in elif_else_clauses {
-                    store.conditional_branch_defs.clear();
+                    store.clear_conditional_frame();
                     index_module_with_bindings(
                         store,
                         module_name,
@@ -3074,7 +3102,7 @@ fn index_stmt(
                         bindings,
                     );
                 }
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
             }
         },
         Stmt::For(ast::StmtFor {
@@ -3088,6 +3116,10 @@ fn index_stmt(
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -3096,6 +3128,9 @@ fn index_stmt(
                     body,
                     bindings,
                 );
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
@@ -3111,10 +3146,21 @@ fn index_stmt(
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             }
+            let nest_loop = store.conditional_depth > 0;
+            if nest_loop {
+                store.push_conditional_frame();
+            }
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
+            if nest_loop {
+                store.pop_conditional_frame();
+            }
         }
         Stmt::While(ast::StmtWhile { test, body, .. }) => {
             if definite_bool(test) != Some(false) {
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -3123,6 +3169,9 @@ fn index_stmt(
                     body,
                     bindings,
                 );
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
         }
         Stmt::Try(ast::StmtTry {
@@ -3133,12 +3182,12 @@ fn index_stmt(
             ..
         }) => {
             index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
-            store.conditional_depth += 1;
-            store.conditional_branch_defs.clear();
+            store.push_conditional_frame();
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
                 // Handler `def`/`class` must not replace try-body signatures
                 // when the try suite cannot raise (issues #509, #641).
+                store.clear_conditional_frame();
                 for stmt in &handler.body {
                     if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                         continue;
@@ -3161,7 +3210,7 @@ fn index_stmt(
                 orelse,
                 bindings,
             );
-            store.conditional_depth -= 1;
+            store.pop_conditional_frame();
             index_module_with_bindings(
                 store,
                 module_name,
@@ -3182,10 +3231,9 @@ fn index_stmt(
                     bindings,
                 );
             } else {
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 for case in cases {
-                    store.conditional_branch_defs.clear();
+                    store.clear_conditional_frame();
                     index_module_with_bindings(
                         store,
                         module_name,
@@ -3195,7 +3243,7 @@ fn index_stmt(
                         bindings,
                     );
                 }
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
             }
         }
         _ => {}
@@ -3288,25 +3336,24 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                         index_module_fast(store, module_name, scope_name, taken);
                     }
                     TakenElifElse::Uncertain(clauses) => {
-                        store.conditional_depth += 1;
+                        store.push_conditional_frame();
                         for clause in clauses {
-                            store.conditional_branch_defs.clear();
+                            store.clear_conditional_frame();
                             index_module_fast(store, module_name, scope_name, &clause.body);
                         }
-                        store.conditional_depth -= 1;
+                        store.pop_conditional_frame();
                     }
                     TakenElifElse::Empty => {}
                 }
             }
             None => {
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 index_module_fast(store, module_name, scope_name, body);
                 for clause in elif_else_clauses {
-                    store.conditional_branch_defs.clear();
+                    store.clear_conditional_frame();
                     index_module_fast(store, module_name, scope_name, &clause.body);
                 }
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
             }
         },
         Stmt::For(ast::StmtFor {
@@ -3320,7 +3367,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_module_fast(store, module_name, scope_name, body);
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
@@ -3336,11 +3390,25 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
             }
+            let nest_loop = store.conditional_depth > 0;
+            if nest_loop {
+                store.push_conditional_frame();
+            }
             index_module_fast(store, module_name, scope_name, body);
+            if nest_loop {
+                store.pop_conditional_frame();
+            }
         }
         Stmt::While(ast::StmtWhile { test, body, .. }) => {
             if definite_bool(test) != Some(false) {
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_module_fast(store, module_name, scope_name, body);
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
         }
         Stmt::Try(ast::StmtTry {
@@ -3351,8 +3419,7 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             ..
         }) => {
             index_module_fast(store, module_name, scope_name, body);
-            store.conditional_depth += 1;
-            store.conditional_branch_defs.clear();
+            store.push_conditional_frame();
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
                 for stmt in &handler.body {
@@ -3363,20 +3430,19 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 }
             }
             index_module_fast(store, module_name, scope_name, orelse);
-            store.conditional_depth -= 1;
+            store.pop_conditional_frame();
             index_module_fast(store, module_name, scope_name, finalbody);
         }
         Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
             if let Some(case) = definite_match_case(subject, cases) {
                 index_module_fast(store, module_name, scope_name, &case.body);
             } else {
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 for case in cases {
-                    store.conditional_branch_defs.clear();
+                    store.clear_conditional_frame();
                     index_module_fast(store, module_name, scope_name, &case.body);
                 }
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
             }
         }
         _ => {}
@@ -3537,9 +3603,9 @@ fn index_class_body(
                             );
                         }
                         TakenElifElse::Uncertain(clauses) => {
-                            store.conditional_depth += 1;
+                            store.push_conditional_frame();
                             for clause in clauses {
-                                store.conditional_branch_defs.clear();
+                                store.clear_conditional_frame();
                                 index_class_body(
                                     store,
                                     module_name,
@@ -3549,17 +3615,16 @@ fn index_class_body(
                                     bindings,
                                 );
                             }
-                            store.conditional_depth -= 1;
+                            store.pop_conditional_frame();
                         }
                         TakenElifElse::Empty => {}
                     }
                 }
                 None => {
-                    store.conditional_depth += 1;
-                    store.conditional_branch_defs.clear();
+                    store.push_conditional_frame();
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
                     for clause in elif_else_clauses {
-                        store.conditional_branch_defs.clear();
+                        store.clear_conditional_frame();
                         index_class_body(
                             store,
                             module_name,
@@ -3569,21 +3634,42 @@ fn index_class_body(
                             bindings,
                         );
                     }
-                    store.conditional_depth -= 1;
+                    store.pop_conditional_frame();
                 }
             },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
+                    let nest_loop = store.conditional_depth > 0;
+                    if nest_loop {
+                        store.push_conditional_frame();
+                    }
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
+                    if nest_loop {
+                        store.pop_conditional_frame();
+                    }
                 }
             }
             Stmt::For(ast::StmtFor { iter, body, .. }) => {
                 if !definite_empty_iterable(iter.as_ref()) {
+                    let nest_loop = store.conditional_depth > 0;
+                    if nest_loop {
+                        store.push_conditional_frame();
+                    }
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
+                    if nest_loop {
+                        store.pop_conditional_frame();
+                    }
                 }
             }
             Stmt::With(ast::StmtWith { body, .. }) => {
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_class_body(store, module_name, is_package, class_name, body, bindings);
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
             Stmt::Try(ast::StmtTry {
                 body,
@@ -3593,8 +3679,7 @@ fn index_class_body(
                 ..
             }) => {
                 index_class_body(store, module_name, is_package, class_name, body, bindings);
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
                     for stmt in &handler.body {
@@ -3612,7 +3697,7 @@ fn index_class_body(
                     }
                 }
                 index_class_body(store, module_name, is_package, class_name, orelse, bindings);
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
                 index_class_body(
                     store,
                     module_name,
@@ -3633,10 +3718,9 @@ fn index_class_body(
                         bindings,
                     );
                 } else {
-                    store.conditional_depth += 1;
-                    store.conditional_branch_defs.clear();
+                    store.push_conditional_frame();
                     for case in cases {
-                        store.conditional_branch_defs.clear();
+                        store.clear_conditional_frame();
                         index_class_body(
                             store,
                             module_name,
@@ -3646,7 +3730,7 @@ fn index_class_body(
                             bindings,
                         );
                     }
-                    store.conditional_depth -= 1;
+                    store.pop_conditional_frame();
                 }
             }
             _ => {}
@@ -3765,39 +3849,59 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                             index_class_body_fast(store, module_name, class_name, taken);
                         }
                         TakenElifElse::Uncertain(clauses) => {
-                            store.conditional_depth += 1;
+                            store.push_conditional_frame();
                             for clause in clauses {
-                                store.conditional_branch_defs.clear();
+                                store.clear_conditional_frame();
                                 index_class_body_fast(store, module_name, class_name, &clause.body);
                             }
-                            store.conditional_depth -= 1;
+                            store.pop_conditional_frame();
                         }
                         TakenElifElse::Empty => {}
                     }
                 }
                 None => {
-                    store.conditional_depth += 1;
-                    store.conditional_branch_defs.clear();
+                    store.push_conditional_frame();
                     index_class_body_fast(store, module_name, class_name, body);
                     for clause in elif_else_clauses {
-                        store.conditional_branch_defs.clear();
+                        store.clear_conditional_frame();
                         index_class_body_fast(store, module_name, class_name, &clause.body);
                     }
-                    store.conditional_depth -= 1;
+                    store.pop_conditional_frame();
                 }
             },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
+                    let nest_loop = store.conditional_depth > 0;
+                    if nest_loop {
+                        store.push_conditional_frame();
+                    }
                     index_class_body_fast(store, module_name, class_name, body);
+                    if nest_loop {
+                        store.pop_conditional_frame();
+                    }
                 }
             }
             Stmt::For(ast::StmtFor { iter, body, .. }) => {
                 if !definite_empty_iterable(iter.as_ref()) {
+                    let nest_loop = store.conditional_depth > 0;
+                    if nest_loop {
+                        store.push_conditional_frame();
+                    }
                     index_class_body_fast(store, module_name, class_name, body);
+                    if nest_loop {
+                        store.pop_conditional_frame();
+                    }
                 }
             }
             Stmt::With(ast::StmtWith { body, .. }) => {
+                let nest_loop = store.conditional_depth > 0;
+                if nest_loop {
+                    store.push_conditional_frame();
+                }
                 index_class_body_fast(store, module_name, class_name, body);
+                if nest_loop {
+                    store.pop_conditional_frame();
+                }
             }
             Stmt::Try(ast::StmtTry {
                 body,
@@ -3807,8 +3911,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 ..
             }) => {
                 index_class_body_fast(store, module_name, class_name, body);
-                store.conditional_depth += 1;
-                store.conditional_branch_defs.clear();
+                store.push_conditional_frame();
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
                     for stmt in &handler.body {
@@ -3824,20 +3927,19 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                     }
                 }
                 index_class_body_fast(store, module_name, class_name, orelse);
-                store.conditional_depth -= 1;
+                store.pop_conditional_frame();
                 index_class_body_fast(store, module_name, class_name, finalbody);
             }
             Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
                 if let Some(case) = definite_match_case(subject, cases) {
                     index_class_body_fast(store, module_name, class_name, &case.body);
                 } else {
-                    store.conditional_depth += 1;
-                    store.conditional_branch_defs.clear();
+                    store.push_conditional_frame();
                     for case in cases {
-                        store.conditional_branch_defs.clear();
+                        store.clear_conditional_frame();
                         index_class_body_fast(store, module_name, class_name, &case.body);
                     }
-                    store.conditional_depth -= 1;
+                    store.pop_conditional_frame();
                 }
             }
             _ => {}
@@ -4237,6 +4339,41 @@ mod tests {
         assert_eq!(
             signatures[0].parameters[0].kind,
             ParameterKind::PositionalOrKeyword
+        );
+    }
+
+    #[test]
+    fn conditional_same_branch_reexport_supersedes_earlier_edge() {
+        let index = index_source_of(
+            "def left(value: int) -> None: ...\n\
+             def right(value: int, extra: int) -> None: ...\n\
+             if flag:\n    alias = left\n    alias = right\n",
+        );
+        let sources = {
+            let inner = index.read();
+            inner
+                .by_dst
+                .get("main.alias")
+                .cloned()
+                .expect("reexport edges")
+        };
+        assert_eq!(
+            sources,
+            vec!["main.right".to_string()],
+            "same-branch reassignment must drop the earlier edge: {sources:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_loop_def_does_not_supersede_outer_branch() {
+        let index = index_source_of(
+            "if flag:\n    def target(value: int, /) -> None: ...\n    for _ in items:\n        def target(value: int) -> None: ...\n",
+        );
+        let signatures = index.get("main.target").expect("target");
+        assert_eq!(
+            signatures.len(),
+            2,
+            "loop body must union with outer branch, got {signatures:?}"
         );
     }
 
