@@ -26,7 +26,8 @@ use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
     build_index_with_sources, definite_bool, definite_empty_iterable, definite_match_case,
-    is_package_init, module_name_for_path, relative_base, DefinitionIndex, IndexedFile,
+    is_package_init, module_name_for_path, relative_base, taken_elif_else_after_false,
+    DefinitionIndex, IndexedFile, TakenElifElse,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -7389,23 +7390,73 @@ impl<'a> CallChecker<'a> {
                 self.visit_if_branch_body(test, body, traversal);
             }
             Some(false) => {
-                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
-                    for inner in &clause.body {
-                        self.visit_if_branch_stmt(inner, traversal);
-                    }
-                }
+                self.visit_elif_else_after_false(elif_else_clauses, traversal);
             }
             None => {
                 self.visit_if_branch_body(test, body, traversal);
                 for clause in elif_else_clauses {
                     if let Some(clause_test) = &clause.test {
                         self.visit_expr(clause_test);
-                    }
-                    for inner in &clause.body {
-                        self.visit_if_branch_stmt(inner, traversal);
+                        self.visit_if_branch_body(clause_test, &clause.body, traversal);
+                    } else {
+                        for inner in &clause.body {
+                            self.visit_if_branch_stmt(inner, traversal);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// Walk `elif`/`else` after a definitely-false `if`, including taken `elif`
+    /// suites that the previous "else-only" path skipped.
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_elif_else_after_false(
+        &mut self,
+        elif_else_clauses: &'a [ast::ElifElseClause],
+        traversal: IfBranchTraversal,
+    ) {
+        // Visit skipped definite-false `elif` tests so nested calls still check.
+        for clause in elif_else_clauses {
+            if let Some(clause_test) = &clause.test {
+                if definite_bool(clause_test) == Some(false) {
+                    self.visit_expr(clause_test);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        match taken_elif_else_after_false(elif_else_clauses) {
+            TakenElifElse::Definite {
+                test: Some(clause_test),
+                body: taken,
+            } => {
+                self.visit_expr(clause_test);
+                self.visit_if_branch_body(clause_test, taken, traversal);
+            }
+            TakenElifElse::Definite {
+                test: None,
+                body: taken,
+            } => {
+                for inner in taken {
+                    self.visit_if_branch_stmt(inner, traversal);
+                }
+            }
+            TakenElifElse::Uncertain(clauses) => {
+                for clause in clauses {
+                    if let Some(clause_test) = &clause.test {
+                        self.visit_expr(clause_test);
+                        self.visit_if_branch_body(clause_test, &clause.body, traversal);
+                    } else {
+                        for inner in &clause.body {
+                            self.visit_if_branch_stmt(inner, traversal);
+                        }
+                    }
+                }
+            }
+            TakenElifElse::Empty => {}
         }
     }
 

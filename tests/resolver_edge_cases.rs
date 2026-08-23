@@ -4180,6 +4180,46 @@ target(1)
     );
 }
 
+/// Definite `if False` / `elif True` uses the elif body (Bugbot on #708).
+#[test]
+fn definite_false_if_uses_taken_elif_signature() {
+    let messages = check_source(
+        r"
+if False:
+    def target(value: int, /) -> None: ...
+elif True:
+    def target(value: int) -> None: ...
+else:
+    def target(value: int, /, extra: int) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "taken elif must win: {messages:?}"
+    );
+}
+
+/// Nested definite-false elifs still reach a later taken elif.
+#[test]
+fn definite_false_elif_chain_reaches_later_true() {
+    let messages = check_source(
+        r"
+if False:
+    def target(value: int, /) -> None: ...
+elif False:
+    def target(value: int, /, unused: int) -> None: ...
+elif True:
+    def target(value: int) -> None: ...
+target(1)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("target")),
+        "later elif True must win: {messages:?}"
+    );
+}
+
 /// `if None` is definitely false and uses the else branch.
 #[test]
 fn definite_none_if_branch_uses_else_signature() {
