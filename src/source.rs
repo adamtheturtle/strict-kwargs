@@ -417,6 +417,8 @@ mod tests {
             Ok(b"x = 1\n".to_vec())
         );
         assert!(encode_python_source(b"# coding: shift_jis\n", "x = '\u{e9}'\n").is_err());
+        // Non-ASCII original under an unsupported codec: same decline as decode.
+        assert!(encode_python_source(b"# coding: shift_jis\nx = \xff\n", "x = 1\n").is_err());
     }
 
     #[test]
