@@ -1538,6 +1538,23 @@ fn star_reexport_honors_dunder_all() {
 }
 
 #[test]
+fn star_reexport_honors_annotated_dunder_all() {
+    let messages = check_with_aux(
+        &[("app.py", "from facade import hidden\n\nhidden(1)\n")],
+        &[
+            (
+                "source.py",
+                "__all__: list[str] = [\"public\"]\n\
+                 def public(value: int, /) -> None: ...\n\
+                 def hidden(value: int) -> None: ...\n",
+            ),
+            ("facade.py", "from source import *\n"),
+        ],
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
 fn star_reexport_omits_leading_underscore_names() {
     let messages = check_with_aux(
         &[("app.py", "from facade import _private\n\n_private(1)\n")],

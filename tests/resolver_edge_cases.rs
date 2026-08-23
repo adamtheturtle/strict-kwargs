@@ -1068,6 +1068,30 @@ object.__str__.__get__(Owner(), Owner)()
     }
 }
 
+/// Multi-level unbound descriptor calls must keep the protocol exemption
+/// (issue #742).
+#[test]
+fn multi_level_descriptor_get_positional_binding_args_are_allowed() {
+    let messages = TestProject::new()
+        .pyproject(DEFAULT_PYPROJECT)
+        .file(
+            "desc.py",
+            "class Desc:\n\
+             def __get__(self, instance, owner=None):\n\
+                 return instance\n",
+        )
+        .main(
+            "import desc\n\
+             class Owner: pass\n\
+             desc.Desc.__get__(desc.Desc(), Owner(), Owner)\n",
+        )
+        .check();
+    assert!(
+        messages.is_empty(),
+        "pkg.Desc.__get__ falsely flagged: {messages:?}"
+    );
+}
+
 /// `functools.cached_property.__get__` accepts `instance` by keyword, so a
 /// positional pass must still emit KW001 (issue #507).
 #[test]
