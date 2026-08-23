@@ -231,7 +231,45 @@ pub fn discover_site_packages_in_environment(python_env: &Path) -> Vec<PathBuf> 
     let Some(environment_root) = python_environment_root(python_env) else {
         return Vec::new();
     };
-    discover_site_packages_in_venvs(&[environment_root])
+    let found = discover_site_packages_in_venvs(&[environment_root]);
+    // A versioned interpreter (`…/bin/python3.9`) must prefer that minor's
+    // `lib/python3.9/site-packages` over a lexicographically later sibling
+    // such as `python3.12` (#529).
+    if let Some(tag) = interpreter_version_tag(python_env) {
+        let matching: Vec<PathBuf> = found
+            .iter()
+            .filter(|path| {
+                path.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == std::ffi::OsStr::new(&tag))
+            })
+            .cloned()
+            .collect();
+        if !matching.is_empty() {
+            return matching;
+        }
+    }
+    found
+}
+
+/// `python3.9` / `python3.12.exe` → `python3.9` / `python3.12`; unversioned
+/// `python` / `python3` → `None`.
+#[cfg_attr(coverage, coverage(off))]
+fn interpreter_version_tag(python_env: &Path) -> Option<String> {
+    let name = python_env.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    let rest = lower.strip_prefix("python")?;
+    let rest = rest.strip_suffix(".exe").unwrap_or(rest);
+    // Require a minor (`3.9`) so bare `python3` stays unscoped.
+    let (major, minor) = rest.split_once('.')?;
+    if major.is_empty()
+        || !major.chars().all(|c| c.is_ascii_digit())
+        || minor.is_empty()
+        || !minor.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("python{rest}"))
 }
 
 /// Whether a `--python` path has the shape of an interpreter, virtual
@@ -581,6 +619,34 @@ mod tests {
             discover_site_packages_in_environment(&dir.path().join("python")).len(),
             0
         );
+    }
+
+    #[test]
+    fn versioned_interpreter_selects_matching_site_packages() {
+        // Issue #529: `python3.9` must not prefer lexicographically later
+        // `python3.12/site-packages` when both layouts exist.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sp39 = dir.path().join("lib/python3.9/site-packages");
+        let sp312 = dir.path().join("lib/python3.12/site-packages");
+        std::fs::create_dir_all(&sp39).expect("mkdir 3.9");
+        std::fs::create_dir_all(&sp312).expect("mkdir 3.12");
+        std::fs::create_dir_all(dir.path().join("bin")).expect("mkdir bin");
+        let interpreter = dir.path().join("bin/python3.9");
+        std::fs::write(&interpreter, "").expect("write interpreter");
+
+        assert_eq!(
+            discover_site_packages_in_environment(&interpreter),
+            vec![sp39]
+        );
+        // Unversioned interpreter keeps every layout (sorted).
+        let all = discover_site_packages_in_environment(&dir.path().join("bin/python3"));
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .any(|path| path.ends_with("python3.9/site-packages")));
+        assert!(all
+            .iter()
+            .any(|path| path.ends_with("python3.12/site-packages")));
     }
 
     /// Run `f` with `VIRTUAL_ENV` set to `value` (or removed when `None`),
