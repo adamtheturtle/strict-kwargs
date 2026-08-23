@@ -1437,6 +1437,9 @@ struct Scope {
     callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
     instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
+    /// Names declared ``nonlocal`` in this scope; assignments rebind an outer
+    /// function binding rather than creating a local one.
+    nonlocal_names: FxHashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -5131,6 +5134,129 @@ impl<'a> CallChecker<'a> {
         self.index.exclude_rebinding(&method);
     }
 
+    /// ``setattr(C, "method", …)`` with a resolvable class and literal name.
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_setattr_call(&self, call: &ast::ExprCall) {
+        let is_setattr = matches!(
+            call.func.as_ref(),
+            Expr::Name(name) if name.id.as_str() == "setattr"
+                && self.resolve_local(name.id.as_str()).is_none()
+                && self.resolve_module(name.id.as_str()).is_none()
+        ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.setattr");
+        if !is_setattr {
+            return;
+        }
+        if call.arguments.args.len() < 2 {
+            return;
+        }
+        let obj = &call.arguments.args[0];
+        let attr = &call.arguments.args[1];
+        let Expr::StringLiteral(attr_literal) = attr else {
+            return;
+        };
+        let attr_name = attr_literal.value.to_str();
+        let Some(class_fullname) = (match obj {
+            Expr::Name(name) => self
+                .resolve_local(name.id.as_str())
+                .or_else(|| self.class_from_name_annotation(name.id.as_str())),
+            _ => None,
+        }) else {
+            return;
+        };
+        self.index
+            .exclude_rebinding(&format!("{class_fullname}.{attr_name}"));
+    }
+
+    /// ``globals()["f"] = …`` / ``globals()['f'] = …`` rebinds a module-level name.
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_globals_subscript_target(&mut self, target: &Expr) {
+        let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = target else {
+            return;
+        };
+        let Expr::Call(call) = value.as_ref() else {
+            return;
+        };
+        let is_globals = matches!(
+            call.func.as_ref(),
+            Expr::Name(name) if name.id.as_str() == "globals"
+                && self.resolve_local(name.id.as_str()).is_none()
+        ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.globals");
+        if !is_globals || !call.arguments.args.is_empty() || !call.arguments.keywords.is_empty() {
+            return;
+        }
+        let Expr::StringLiteral(key) = slice.as_ref() else {
+            return;
+        };
+        self.invalidate_local_name_if_callable(key.value.to_str());
+    }
+
+    /// Conservative ``exec("name = …")`` / ``exec('name = …')`` invalidation.
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_exec_literal_assignment(&mut self, call: &ast::ExprCall) {
+        let is_exec = matches!(
+            call.func.as_ref(),
+            Expr::Name(name) if name.id.as_str() == "exec"
+                && self.resolve_local(name.id.as_str()).is_none()
+        ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.exec");
+        if !is_exec {
+            return;
+        }
+        let Some(Expr::StringLiteral(source)) = call.arguments.args.first() else {
+            return;
+        };
+        for line in source.value.to_str().lines() {
+            let trimmed = line.trim();
+            if let Some(name) =
+                trimmed
+                    .split_once('=')
+                    .map(|(left, _)| left.trim())
+                    .filter(|left| {
+                        !left.is_empty()
+                            && left
+                                .chars()
+                                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    })
+            {
+                self.invalidate_local_name_if_callable(name);
+            }
+        }
+    }
+
+    /// Rebind a ``nonlocal`` name in the nearest enclosing scope that owns it.
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_nonlocal_name(&mut self, name: &str) {
+        let is_nonlocal = self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.nonlocal_names.contains(name));
+        if !is_nonlocal {
+            return;
+        }
+        // Skip the current (nested) scope; invalidate the enclosing binding.
+        for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            let owns = self.scopes[index].functions.contains_key(name)
+                || self.scopes[index].names.contains_key(name);
+            if !owns {
+                continue;
+            }
+            remove_function_binding(&mut self.scopes[index], name);
+            self.scopes[index].names.remove(name);
+            self.scopes[index]
+                .invalidated_callables
+                .insert(name.to_string());
+            self.scopes[index].opaque_locals.insert(name.to_string());
+            return;
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_nonlocal_names(&mut self, names: &[ast::Identifier]) {
+        let scope = self.current_scope();
+        for name in names {
+            scope.nonlocal_names.insert(name.as_str().to_string());
+        }
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn bind_comprehension_target(&mut self, target: &Expr, iter: &Expr) {
         let Expr::Name(name) = target else {
@@ -7734,6 +7860,10 @@ impl<'a> CallChecker<'a> {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.apply_assert_optional_callable_narrowing(assert_stmt);
             }
+            Stmt::Nonlocal(nonlocal_stmt) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.record_nonlocal_names(&nonlocal_stmt.names);
+            }
             Stmt::With(with_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_with_stmt(with_stmt);
@@ -8009,6 +8139,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     // ``Name = …`` is handled below (including lambda replace).
                     if !matches!(target, Expr::Name(_)) {
                         self.invalidate_bound_callable_targets(target);
+                        self.invalidate_globals_subscript_target(target);
+                    } else if let Expr::Name(name) = target {
+                        self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
                 if let ([Expr::Name(target)], Expr::Call(call)) =
@@ -8379,6 +8512,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
+            Stmt::Nonlocal(nonlocal_stmt) => self.record_nonlocal_names(&nonlocal_stmt.names),
             _ => walk_stmt(self, stmt),
         }
     }
@@ -8389,6 +8523,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         match expr {
             Expr::Call(call) => {
+                self.invalidate_setattr_call(call);
+                self.invalidate_exec_literal_assignment(call);
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);
                 }

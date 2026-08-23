@@ -344,6 +344,25 @@ C().method(1)
     assert!(messages.is_empty(), "stale augmented method: {messages:?}");
 }
 
+/// Literal ``globals()`` / ``exec`` / ``setattr`` / ``nonlocal`` mutations
+/// invalidate prior callable signatures (issues #422–#425).
+#[test]
+fn dynamic_rebinding_invalidates_prior_function_signatures() {
+    for source in [
+        "def f(value: int) -> None: ...\nglobals()[\"f\"] = lambda *args: None\nf(1)\n",
+        "def f(value: int) -> None: ...\nexec(\"f = lambda *args: None\")\nf(1)\n",
+        "class C:\n    def method(self, value: int) -> None: ...\nsetattr(C, \"method\", lambda *args: None)\nC().method(1)\n",
+        "class Base:\n    def method(self, value: int) -> None: ...\nclass Child(Base): ...\nBase.method = lambda *args: None\nChild().method(1)\n",
+        "def outer() -> None:\n    def f(value: int) -> None: ...\n    def replace() -> None:\n        nonlocal f\n        f = lambda *args: None\n    replace()\n    f(1)\nouter()\n",
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "expected no stale KW001 for {source:?}, got {messages:?}"
+        );
+    }
+}
+
 /// A try/except import fallback lambda must not suppress calls through the
 /// successfully imported name (``_tuplegetter`` pattern in `CPython`).
 #[test]

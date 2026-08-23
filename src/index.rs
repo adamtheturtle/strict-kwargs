@@ -1294,8 +1294,52 @@ impl DefinitionIndex {
 
     /// Drop an indexed callable after an observed rebinding (`C.method += …`,
     /// `setattr`, …) so later calls are not checked against the stale signature.
+    /// Also excludes the same attribute on indexed subclasses so inherited
+    /// lookups cannot keep the stale base signature (issue #424).
     pub fn exclude_rebinding(&self, fullname: &str) {
-        self.write().store.exclude(fullname.to_string());
+        let Some((class, method)) = fullname.rsplit_once('.') else {
+            self.write().store.exclude(fullname.to_string());
+            return;
+        };
+        let bases = self.read().store.class_bases.clone();
+        let subclasses: Vec<String> = bases
+            .keys()
+            .filter(|subclass| Self::inherits_from_bases_map(&bases, subclass, class))
+            .cloned()
+            .collect();
+        let mut inner = self.write();
+        inner.store.exclude(fullname.to_string());
+        for subclass in subclasses {
+            inner.store.exclude(format!("{subclass}.{method}"));
+        }
+        drop(inner);
+    }
+
+    fn inherits_from_bases_map(
+        bases: &FxHashMap<String, Vec<String>>,
+        class_fullname: &str,
+        base_fullname: &str,
+    ) -> bool {
+        let mut visited = FxHashSet::default();
+        Self::inherits_from_bases_map_inner(bases, class_fullname, base_fullname, &mut visited)
+    }
+
+    fn inherits_from_bases_map_inner(
+        bases: &FxHashMap<String, Vec<String>>,
+        class_fullname: &str,
+        base_fullname: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> bool {
+        if !visited.insert(class_fullname.to_string()) {
+            return false;
+        }
+        let Some(direct) = bases.get(class_fullname) else {
+            return false;
+        };
+        direct.iter().any(|base| {
+            base == base_fullname
+                || Self::inherits_from_bases_map_inner(bases, base, base_fullname, visited)
+        })
     }
 
     /// Whether `fullname` is a ``@property`` (or enum magic attribute) getter.
