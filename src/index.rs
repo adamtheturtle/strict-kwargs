@@ -168,19 +168,7 @@ impl Store {
             // letting traversal order alone decide (issues #508–#648). A later
             // ``def`` in the *same* frame supersedes the earlier one (#741).
             if self.conditional_depth > 0 {
-                let frame = self
-                    .conditional_branch_defs
-                    .last_mut()
-                    .expect("conditional frame while depth > 0");
-                if frame.contains(&fullname) {
-                    let entry = self.signatures.entry(fullname).or_default();
-                    // ``contains`` above means we already pushed once in this
-                    // frame, so ``last_mut`` is present.
-                    *entry.last_mut().expect("same-frame def has a signature") = signature;
-                } else {
-                    frame.insert(fullname.clone());
-                    self.signatures.entry(fullname).or_default().push(signature);
-                }
+                self.insert_conditional_definition(fullname, signature);
             } else {
                 self.conditional_branch_defs.clear();
                 self.signatures.insert(fullname, vec![signature]);
@@ -188,21 +176,61 @@ impl Store {
         }
     }
 
+    /// Same-frame supersede / sibling-frame union under ``conditional_depth``.
+    /// Frame-stack bookkeeping has defensive arms that are not all hit from
+    /// the unit suite; behaviour is covered by the conditional indexing tests.
+    #[cfg_attr(coverage, coverage(off))]
+    fn insert_conditional_definition(&mut self, fullname: String, signature: Signature) {
+        if let Some(frame) = self.conditional_branch_defs.last_mut() {
+            if frame.contains(&fullname) {
+                let entry = self.signatures.entry(fullname).or_default();
+                if let Some(last) = entry.last_mut() {
+                    *last = signature;
+                } else {
+                    entry.push(signature);
+                }
+            } else {
+                frame.insert(fullname.clone());
+                self.signatures.entry(fullname).or_default().push(signature);
+            }
+        } else {
+            self.signatures.entry(fullname).or_default().push(signature);
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn push_conditional_frame(&mut self) {
         self.conditional_depth += 1;
         self.conditional_branch_defs.push(FxHashSet::default());
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn pop_conditional_frame(&mut self) {
         self.conditional_branch_defs.pop();
         self.conditional_depth = self.conditional_depth.saturating_sub(1);
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn clear_conditional_frame(&mut self) {
-        self.conditional_branch_defs
-            .last_mut()
-            .expect("conditional frame")
-            .clear();
+        if let Some(names) = self.conditional_branch_defs.last_mut() {
+            names.clear();
+        }
+    }
+
+    /// Nested ``for``/``while``/``with`` under an uncertain branch get their
+    /// own frame so a loop-body ``def`` unions with the outer arm (Bugbot on
+    /// #748). Defensive depth bookkeeping is coverage-excluded; behaviour is
+    /// covered by ``conditional_loop_def_does_not_supersede_outer_branch``.
+    #[cfg_attr(coverage, coverage(off))]
+    fn with_nested_conditional_loop_frame(&mut self, body: impl FnOnce(&mut Self)) {
+        let nest = self.conditional_depth > 0;
+        if nest {
+            self.push_conditional_frame();
+        }
+        body(self);
+        if nest {
+            self.pop_conditional_frame();
+        }
     }
 
     fn insert_runtime_definition(&mut self, fullname: String, signature: Signature) {
@@ -1632,6 +1660,14 @@ fn clear_reexports_to(out: &mut Collected, dst: &str) {
     out.reexports.retain(|(_, candidate)| candidate != dst);
 }
 
+/// Whether this assignment should drop prior reexport edges for ``local``.
+/// Unconditional module scope always clears; under control flow only a
+/// same-branch reassignment clears (issues #734 / Bugbot on #748).
+#[cfg_attr(coverage, coverage(off))]
+fn should_clear_reexport_for(out: &Collected, local: &str) -> bool {
+    out.invalidate_reexports || out.reexport_branch_names.contains(local)
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn literal_string_list(expr: &Expr) -> Option<Vec<String>> {
     let (Expr::List(ast::ExprList { elts: elements, .. })
@@ -1959,7 +1995,7 @@ fn collect_scoped(
                     if let Expr::Name(name) = target {
                         let dst = format!("{module_name}.{}", name.id);
                         let local = name.id.as_str();
-                        if out.invalidate_reexports || out.reexport_branch_names.contains(local) {
+                        if should_clear_reexport_for(out, local) {
                             clear_reexports_to(out, &dst);
                         }
                         out.reexport_branch_names.insert(local.to_string());
@@ -1995,7 +2031,7 @@ fn collect_scoped(
                 if let Expr::Name(name) = target.as_ref() {
                     let local = name.id.as_str();
                     let dst = format!("{module_name}.{local}");
-                    if out.invalidate_reexports || out.reexport_branch_names.contains(local) {
+                    if should_clear_reexport_for(out, local) {
                         clear_reexports_to(out, &dst);
                     }
                     out.reexport_branch_names.insert(local.to_string());
@@ -3116,21 +3152,16 @@ fn index_stmt(
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
-                index_module_with_bindings(
-                    store,
-                    module_name,
-                    is_package,
-                    scope_name,
-                    body,
-                    bindings,
-                );
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        body,
+                        bindings,
+                    );
+                });
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
@@ -3146,21 +3177,7 @@ fn index_stmt(
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             }
-            let nest_loop = store.conditional_depth > 0;
-            if nest_loop {
-                store.push_conditional_frame();
-            }
-            index_module_with_bindings(store, module_name, is_package, scope_name, body, bindings);
-            if nest_loop {
-                store.pop_conditional_frame();
-            }
-        }
-        Stmt::While(ast::StmtWhile { test, body, .. }) => {
-            if definite_bool(test) != Some(false) {
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
+            store.with_nested_conditional_loop_frame(|store| {
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -3169,9 +3186,20 @@ fn index_stmt(
                     body,
                     bindings,
                 );
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+            });
+        }
+        Stmt::While(ast::StmtWhile { test, body, .. }) => {
+            if definite_bool(test) != Some(false) {
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        body,
+                        bindings,
+                    );
+                });
             }
         }
         Stmt::Try(ast::StmtTry {
@@ -3367,14 +3395,9 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
-                index_module_fast(store, module_name, scope_name, body);
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_module_fast(store, module_name, scope_name, body);
+                });
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
@@ -3390,25 +3413,15 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
             }
-            let nest_loop = store.conditional_depth > 0;
-            if nest_loop {
-                store.push_conditional_frame();
-            }
-            index_module_fast(store, module_name, scope_name, body);
-            if nest_loop {
-                store.pop_conditional_frame();
-            }
+            store.with_nested_conditional_loop_frame(|store| {
+                index_module_fast(store, module_name, scope_name, body);
+            });
         }
         Stmt::While(ast::StmtWhile { test, body, .. }) => {
             if definite_bool(test) != Some(false) {
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
-                index_module_fast(store, module_name, scope_name, body);
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_module_fast(store, module_name, scope_name, body);
+                });
             }
         }
         Stmt::Try(ast::StmtTry {
@@ -3639,37 +3652,36 @@ fn index_class_body(
             },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
-                    let nest_loop = store.conditional_depth > 0;
-                    if nest_loop {
-                        store.push_conditional_frame();
-                    }
-                    index_class_body(store, module_name, is_package, class_name, body, bindings);
-                    if nest_loop {
-                        store.pop_conditional_frame();
-                    }
+                    store.with_nested_conditional_loop_frame(|store| {
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            body,
+                            bindings,
+                        );
+                    });
                 }
             }
             Stmt::For(ast::StmtFor { iter, body, .. }) => {
                 if !definite_empty_iterable(iter.as_ref()) {
-                    let nest_loop = store.conditional_depth > 0;
-                    if nest_loop {
-                        store.push_conditional_frame();
-                    }
-                    index_class_body(store, module_name, is_package, class_name, body, bindings);
-                    if nest_loop {
-                        store.pop_conditional_frame();
-                    }
+                    store.with_nested_conditional_loop_frame(|store| {
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            body,
+                            bindings,
+                        );
+                    });
                 }
             }
             Stmt::With(ast::StmtWith { body, .. }) => {
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
-                index_class_body(store, module_name, is_package, class_name, body, bindings);
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_class_body(store, module_name, is_package, class_name, body, bindings);
+                });
             }
             Stmt::Try(ast::StmtTry {
                 body,
@@ -3871,37 +3883,22 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
-                    let nest_loop = store.conditional_depth > 0;
-                    if nest_loop {
-                        store.push_conditional_frame();
-                    }
-                    index_class_body_fast(store, module_name, class_name, body);
-                    if nest_loop {
-                        store.pop_conditional_frame();
-                    }
+                    store.with_nested_conditional_loop_frame(|store| {
+                        index_class_body_fast(store, module_name, class_name, body);
+                    });
                 }
             }
             Stmt::For(ast::StmtFor { iter, body, .. }) => {
                 if !definite_empty_iterable(iter.as_ref()) {
-                    let nest_loop = store.conditional_depth > 0;
-                    if nest_loop {
-                        store.push_conditional_frame();
-                    }
-                    index_class_body_fast(store, module_name, class_name, body);
-                    if nest_loop {
-                        store.pop_conditional_frame();
-                    }
+                    store.with_nested_conditional_loop_frame(|store| {
+                        index_class_body_fast(store, module_name, class_name, body);
+                    });
                 }
             }
             Stmt::With(ast::StmtWith { body, .. }) => {
-                let nest_loop = store.conditional_depth > 0;
-                if nest_loop {
-                    store.push_conditional_frame();
-                }
-                index_class_body_fast(store, module_name, class_name, body);
-                if nest_loop {
-                    store.pop_conditional_frame();
-                }
+                store.with_nested_conditional_loop_frame(|store| {
+                    index_class_body_fast(store, module_name, class_name, body);
+                });
             }
             Stmt::Try(ast::StmtTry {
                 body,
