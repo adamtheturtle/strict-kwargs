@@ -2299,6 +2299,46 @@ pub const fn definite_bool(expr: &Expr) -> Option<bool> {
     }
 }
 
+/// Reachable `elif`/`else` bodies after a definitely-false leading `if` test.
+#[derive(Debug)]
+pub enum TakenElifElse<'a> {
+    /// A definite `elif True` or bare `else` body.
+    Definite {
+        test: Option<&'a Expr>,
+        body: &'a [Stmt],
+    },
+    /// First uncertain clause and every clause after it (conditional merge).
+    Uncertain(&'a [ast::ElifElseClause]),
+    /// Every `elif` was definite-false and there was no `else`.
+    Empty,
+}
+
+/// Select which `elif`/`else` suites remain after `if False` / `if None`.
+#[cfg_attr(coverage, coverage(off))]
+pub fn taken_elif_else_after_false(elif_else_clauses: &[ast::ElifElseClause]) -> TakenElifElse<'_> {
+    for (index, clause) in elif_else_clauses.iter().enumerate() {
+        match &clause.test {
+            None => {
+                return TakenElifElse::Definite {
+                    test: None,
+                    body: &clause.body,
+                };
+            }
+            Some(test) => match definite_bool(test) {
+                Some(true) => {
+                    return TakenElifElse::Definite {
+                        test: Some(test),
+                        body: &clause.body,
+                    };
+                }
+                Some(false) => {}
+                None => return TakenElifElse::Uncertain(&elif_else_clauses[index..]),
+            },
+        }
+    }
+    TakenElifElse::Empty
+}
+
 /// When `subject` is a literal, return the first case that definitely matches
 /// it (no guard), so later cases cannot overwrite its definitions.
 #[cfg_attr(coverage, coverage(off))]
@@ -2746,18 +2786,33 @@ fn index_stmt(
                     bindings,
                 );
             }
-            Some(false) => {
-                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+            Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
+                TakenElifElse::Definite { body: taken, .. } => {
                     index_module_with_bindings(
                         store,
                         module_name,
                         is_package,
                         scope_name,
-                        &clause.body,
+                        taken,
                         bindings,
                     );
                 }
-            }
+                TakenElifElse::Uncertain(clauses) => {
+                    store.conditional_depth += 1;
+                    for clause in clauses {
+                        index_module_with_bindings(
+                            store,
+                            module_name,
+                            is_package,
+                            scope_name,
+                            &clause.body,
+                            bindings,
+                        );
+                    }
+                    store.conditional_depth -= 1;
+                }
+                TakenElifElse::Empty => {}
+            },
             None => {
                 store.conditional_depth += 1;
                 index_module_with_bindings(
@@ -2983,11 +3038,19 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             Some(true) => {
                 index_module_fast(store, module_name, scope_name, body);
             }
-            Some(false) => {
-                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
-                    index_module_fast(store, module_name, scope_name, &clause.body);
+            Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
+                TakenElifElse::Definite { body: taken, .. } => {
+                    index_module_fast(store, module_name, scope_name, taken);
                 }
-            }
+                TakenElifElse::Uncertain(clauses) => {
+                    store.conditional_depth += 1;
+                    for clause in clauses {
+                        index_module_fast(store, module_name, scope_name, &clause.body);
+                    }
+                    store.conditional_depth -= 1;
+                }
+                TakenElifElse::Empty => {}
+            },
             None => {
                 store.conditional_depth += 1;
                 index_module_fast(store, module_name, scope_name, body);
@@ -3209,18 +3272,33 @@ fn index_class_body(
                 Some(true) => {
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
                 }
-                Some(false) => {
-                    if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
+                    TakenElifElse::Definite { body: taken, .. } => {
                         index_class_body(
                             store,
                             module_name,
                             is_package,
                             class_name,
-                            &clause.body,
+                            taken,
                             bindings,
                         );
                     }
-                }
+                    TakenElifElse::Uncertain(clauses) => {
+                        store.conditional_depth += 1;
+                        for clause in clauses {
+                            index_class_body(
+                                store,
+                                module_name,
+                                is_package,
+                                class_name,
+                                &clause.body,
+                                bindings,
+                            );
+                        }
+                        store.conditional_depth -= 1;
+                    }
+                    TakenElifElse::Empty => {}
+                },
                 None => {
                     store.conditional_depth += 1;
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
@@ -3421,11 +3499,19 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 Some(true) => {
                     index_class_body_fast(store, module_name, class_name, body);
                 }
-                Some(false) => {
-                    if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
-                        index_class_body_fast(store, module_name, class_name, &clause.body);
+                Some(false) => match taken_elif_else_after_false(elif_else_clauses) {
+                    TakenElifElse::Definite { body: taken, .. } => {
+                        index_class_body_fast(store, module_name, class_name, taken);
                     }
-                }
+                    TakenElifElse::Uncertain(clauses) => {
+                        store.conditional_depth += 1;
+                        for clause in clauses {
+                            index_class_body_fast(store, module_name, class_name, &clause.body);
+                        }
+                        store.conditional_depth -= 1;
+                    }
+                    TakenElifElse::Empty => {}
+                },
                 None => {
                     store.conditional_depth += 1;
                     index_class_body_fast(store, module_name, class_name, body);
