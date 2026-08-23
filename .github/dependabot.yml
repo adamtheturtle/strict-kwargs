@@ -12,8 +12,7 @@ updates:
     schedule:
       interval: daily
     open-pull-requests-limit: 10
-
-  - package-ecosystem: pre-commit
-    directory: /
-    schedule:
-      interval: daily
+  # Hook pins live in `prek.toml`. Dependabot's `pre-commit` ecosystem only
+  # reads `.pre-commit-config.yaml`, so that update stream was removed after
+  # the prek migration (issue #744). Update `prek.toml` revs manually until
+  # Dependabot supports prek.

@@ -2617,7 +2617,7 @@ fn has_property_accessor_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
             decorator_reference(&decorator.expression).as_deref(),
-            Some([_, accessor]) if matches!(accessor.as_str(), "setter" | "deleter")
+            Some([_, accessor]) if matches!(accessor.as_str(), "setter" | "deleter" | "getter")
         )
     })
 }

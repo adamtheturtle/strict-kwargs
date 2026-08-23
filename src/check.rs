@@ -1438,6 +1438,10 @@ struct Scope {
     annotations: FxHashMap<String, String>,
     /// Queue-like local binding -> concrete callable item signature.
     callable_queue_items: FxHashMap<String, Signature>,
+    /// Annotated ``WeakValueDictionary[K, V]`` locals when ``V`` is callable.
+    /// Kept separate from [`Self::callable_queue_items`] so ``.get()`` is not
+    /// confused with queue ``get`` / ``get_nowait`` tracking.
+    weak_value_dict_callables: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
     /// Annotated ``WeakKeyDictionary[K, V]`` locals when ``K`` is callable.
@@ -1629,6 +1633,9 @@ impl<'a> CallChecker<'a> {
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
+        scope.weak_value_dict_callables.remove(local_name);
+        scope.optional_callables.remove(local_name);
+        scope.future_callables.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1661,6 +1668,9 @@ impl<'a> CallChecker<'a> {
             scope.contextvar_token_callables.remove(local_name);
             scope.topological_sorter_nodes.remove(local_name);
             scope.mapping_proxy_callables.remove(local_name);
+            scope.weak_value_dict_callables.remove(local_name);
+            scope.optional_callables.remove(local_name);
+            scope.future_callables.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1812,6 +1822,9 @@ impl<'a> CallChecker<'a> {
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
+        scope.weak_value_dict_callables.remove(name);
+        scope.optional_callables.remove(name);
+        scope.future_callables.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1851,6 +1864,9 @@ impl<'a> CallChecker<'a> {
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
+        scope.weak_value_dict_callables.remove(name);
+        scope.optional_callables.remove(name);
+        scope.future_callables.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2160,6 +2176,9 @@ impl<'a> CallChecker<'a> {
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
+        scope.weak_value_dict_callables.remove(local_name);
+        scope.optional_callables.remove(local_name);
+        scope.future_callables.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -2453,7 +2472,20 @@ impl<'a> CallChecker<'a> {
 
     fn class_from_constructor(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Call(ast::ExprCall { func, .. }) => self.class_from_constructor_func(func),
+            Expr::Call(ast::ExprCall { func, .. }) => self
+                .class_from_constructor_func(func)
+                .or_else(|| self.class_from_known_instance_factory(func)),
+            _ => None,
+        }
+    }
+
+    /// Factories that return a known class instance (for example
+    /// ``contextvars.copy_context()`` → ``contextvars.Context``).
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_known_instance_factory(&self, func: &Expr) -> Option<String> {
+        let factory = self.resolve_callee(func)?;
+        match factory.as_str() {
+            "contextvars.copy_context" => Some("contextvars.Context".to_string()),
             _ => None,
         }
     }
@@ -4021,6 +4053,7 @@ impl<'a> CallChecker<'a> {
         "contextlib.ExitStack.callback",
         "contextlib._BaseExitStack.callback",
         "contextlib.AsyncExitStack.push_async_callback",
+        "typing_extensions.assert_type",
         "typing_extensions.final",
         "typing_extensions.no_type_check",
         "typing_extensions.override",
@@ -4038,12 +4071,15 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn is_identity_return_stdlib(fullname: &str) -> bool {
         Self::IDENTITY_RETURN_STDLIB.contains(&fullname)
-            || fullname.ends_with(".staticmethod")
-            || fullname.ends_with(".classmethod")
-            || fullname.ends_with(".staticmethod.__init__")
-            || fullname.ends_with(".classmethod.__init__")
-            || fullname.ends_with(".staticmethod.__new__")
-            || fullname.ends_with(".classmethod.__new__")
+            || matches!(
+                fullname,
+                "builtins.staticmethod"
+                    | "builtins.classmethod"
+                    | "builtins.staticmethod.__init__"
+                    | "builtins.classmethod.__init__"
+                    | "builtins.staticmethod.__new__"
+                    | "builtins.classmethod.__new__"
+            )
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4091,10 +4127,11 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let factory = self.resolve_callee(&property_call.func)?;
-        if !(factory.ends_with("property")
-            || factory.ends_with("property.__init__")
-            || factory.ends_with("property.__new__"))
-        {
+        let factory_base = factory
+            .strip_suffix(".__init__")
+            .or_else(|| factory.strip_suffix(".__new__"))
+            .unwrap_or(factory.as_str());
+        if !matches!(factory_base, "builtins.property" | "property") {
             return None;
         }
         let getter = property_call.arguments.args.first().or_else(|| {
@@ -5271,6 +5308,9 @@ impl<'a> CallChecker<'a> {
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
+        scope.weak_value_dict_callables.remove(name);
+        scope.optional_callables.remove(name);
+        scope.future_callables.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -6050,7 +6090,12 @@ impl<'a> CallChecker<'a> {
                 self.resolve_local(name.id.as_str())
                     .as_deref()
                     .is_some_and(|resolved| {
-                        resolved.ends_with(".Context") || resolved.ends_with("contextvars.Context")
+                        matches!(
+                            resolved,
+                            "contextvars.Context"
+                                | "contextvars.Context.__init__"
+                                | "contextvars.Context.__new__"
+                        )
                     })
             }
             _ => false,
@@ -6562,7 +6607,15 @@ impl<'a> CallChecker<'a> {
                     .class_from_name_annotation(name.id.as_str())
                     .or_else(|| self.resolve_local(name.id.as_str()))
                     .is_some_and(|resolved| {
-                        resolved.ends_with(".Runner") || resolved.ends_with("asyncio.Runner")
+                        matches!(
+                            resolved.as_str(),
+                            "asyncio.Runner"
+                                | "asyncio.runners.Runner"
+                                | "asyncio.Runner.__init__"
+                                | "asyncio.Runner.__new__"
+                                | "asyncio.runners.Runner.__init__"
+                                | "asyncio.runners.Runner.__new__"
+                        )
                     }),
                 _ => false,
             };
@@ -6897,7 +6950,9 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let sequence = call.arguments.args.first()?;
+        let [sequence] = &*call.arguments.args else {
+            return None;
+        };
         self.homogeneous_callable_sequence(sequence)
     }
 
@@ -6917,8 +6972,14 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [sequence] = &*call.arguments.args else {
-            return None;
+        // ``sample(population, k)`` / ``sample(population, k=…)`` / ``sample(population=…, k=…)``.
+        let sequence = match &*call.arguments.args {
+            [sequence] | [sequence, _] => sequence,
+            [] => call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("population"))
+                    .then_some(&keyword.value)
+            })?,
+            _ => return None,
         };
         self.homogeneous_callable_sequence(sequence)
     }
@@ -7182,8 +7243,7 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         for scope in self.scopes.iter().rev() {
-            if let Some(signature) = scope.callable_queue_items.get(mapping.id.as_str()) {
-                // Reuse queue-item storage for annotated WeakValueDictionary values.
+            if let Some(signature) = scope.weak_value_dict_callables.get(mapping.id.as_str()) {
                 return Some(signature.clone());
             }
             if scope.names.contains_key(mapping.id.as_str())
@@ -8426,6 +8486,15 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
+                    if let Some(class_fullname) = class_fullname {
+                        self.record_instance(name.id.as_str(), class_fullname);
+                    } else if is_callable_attribute_alias || is_lambda {
+                        self.mark_opaque_local(name.id.as_str());
+                    } else {
+                        self.clear_instance_binding(name.id.as_str());
+                    }
+                    // After clear/opaque so specialization is not wiped (Bugbot on #718).
+                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
@@ -8440,15 +8509,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .insert(name.id.to_string(), signature);
                         }
                     }
-                    if let Some(class_fullname) = class_fullname {
-                        self.record_instance(name.id.as_str(), class_fullname);
-                    } else if is_callable_attribute_alias || is_lambda {
-                        self.mark_opaque_local(name.id.as_str());
-                    } else {
-                        self.clear_instance_binding(name.id.as_str());
-                    }
-                    // After clear/opaque so specialization is not wiped (Bugbot on #718).
-                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items
@@ -8456,7 +8516,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                     if let Some(signature) = Self::weak_value_dict_callable_signature(annotation) {
                         self.current_scope()
-                            .callable_queue_items
+                            .weak_value_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
@@ -8500,7 +8560,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                     if let Some(signature) = Self::weak_value_dict_callable_signature(annotation) {
                         self.current_scope()
-                            .callable_queue_items
+                            .weak_value_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::weak_key_dict_callable_signature(annotation) {
