@@ -312,6 +312,22 @@ f(1)
     );
 }
 
+/// Fresh imports must stay module-resolvable for attribute calls (regression
+/// from marking every import opaque during rebinding invalidation).
+#[test]
+fn imported_module_attributes_remain_checkable() {
+    let messages = check_source(
+        r"
+from functools import reduce
+reduce(lambda left, right: left + right, [1, 2], 0, 0)
+",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("reduce")),
+        "expected reduce signature check after import, got {messages:?}"
+    );
+}
+
 /// Augmented assignment, import-as, match capture, walrus, except-as cleanup,
 /// destructuring, and empty-for else suites invalidate prior callables
 /// (issues #416–#421, #427).

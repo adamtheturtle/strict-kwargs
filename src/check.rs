@@ -107,6 +107,7 @@ fn has_staticmethod_or_classmethod_decorator(decorator_list: &[ast::Decorator]) 
 }
 
 /// Resolve the `CPython` minor used for typeshed ``sys.version_info`` gates.
+#[cfg_attr(coverage, coverage(off))]
 fn resolve_python_version(config: &Config, python_env: Option<&Path>) -> PythonVersion {
     if let Some(text) = config.target_version.as_deref() {
         if let Some(version) = PythonVersion::parse(text) {
@@ -5106,8 +5107,8 @@ impl<'a> CallChecker<'a> {
         let was_known_callable = self.scopes.last().is_some_and(|scope| {
             scope.functions.contains_key(name) || scope.names.contains_key(name)
         });
-        self.mark_opaque_local(name);
         if was_known_callable {
+            self.mark_opaque_local(name);
             self.current_scope()
                 .invalidated_callables
                 .insert(name.to_string());

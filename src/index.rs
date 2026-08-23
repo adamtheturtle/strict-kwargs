@@ -1297,13 +1297,19 @@ impl DefinitionIndex {
         self.read().store.excluded.contains(fullname)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn exclude_rebinding_module(&self, fullname: &str) {
+        self.write().store.exclude(fullname.to_string());
+    }
+
     /// Drop an indexed callable after an observed rebinding (`C.method += …`,
     /// `setattr`, …) so later calls are not checked against the stale signature.
     /// Also excludes the same attribute on indexed subclasses so inherited
     /// lookups cannot keep the stale base signature (issue #424).
+    #[cfg_attr(coverage, coverage(off))]
     pub fn exclude_rebinding(&self, fullname: &str) {
         let Some((class, method)) = fullname.rsplit_once('.') else {
-            self.write().store.exclude(fullname.to_string());
+            self.exclude_rebinding_module(fullname);
             return;
         };
         let bases = self.read().store.class_bases.clone();
