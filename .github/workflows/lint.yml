@@ -58,7 +58,7 @@ jobs:
         run: cargo audit --deny warnings
 
   pre-commit:
-    # Runs the explicit prek stages documented in `.pre-commit-config.yaml`.
+    # Runs the explicit prek stages documented in `prek.toml`.
     # `pre-commit` owns file hygiene and workflow checks; `pre-push` owns
     # `cargo fmt` and `cargo clippy`.
     strategy:
