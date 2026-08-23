@@ -16,10 +16,13 @@
 //!
 //! Only the encodings that cover the overwhelming majority of real source —
 //! `utf-8`, `latin-1`/`iso-8859-1`, and `ascii` — are decoded directly (no
-//! third-party codec dependency). Any other *declared* encoding degrades to
-//! the same graceful skip: still robust (no crash, no masking), just not
-//! analysed. A genuine filesystem error (missing file, permission denied) is
-//! still surfaced — that is a real error, not a stray file.
+//! third-party codec dependency). Any other *declared* encoding with
+//! non-ASCII bytes degrades to the same graceful skip: still robust (no
+//! crash, no masking), just not analysed. When the declared codec is
+//! unsupported but the file body is pure ASCII, check and fix both accept
+//! the file (ASCII is unambiguous across ASCII-compatible codecs). A genuine
+//! filesystem error (missing file, permission denied) is still surfaced —
+//! that is a real error, not a stray file.
 //!
 //! [PEP 263]: https://peps.python.org/pep-0263/
 
@@ -204,8 +207,16 @@ pub fn encode_python_source(original_bytes: &[u8], source: &str) -> Result<Vec<u
 
     let codec = match sniff_coding(original_bytes) {
         None => Codec::Utf8,
-        Some(name) => codec_for(&name)
-            .ok_or_else(|| format!("unsupported PEP 263 encoding declaration `{name}`"))?,
+        Some(name) => match codec_for(&name) {
+            Some(codec) => codec,
+            // Mirror `decode_python_source`: ASCII-only source under an
+            // ASCII-compatible declared codec (e.g. cp1252) is accepted for
+            // checking, so the same files must remain fixable (#528).
+            None if original_bytes.is_ascii() && source.is_ascii() => Codec::Ascii,
+            None => {
+                return Err(format!("unsupported PEP 263 encoding declaration `{name}`"));
+            }
+        },
     };
     match codec {
         Codec::Utf8 => Ok(source.as_bytes().to_vec()),
@@ -397,7 +408,17 @@ mod tests {
 
         assert!(encode_python_source(b"# coding: latin-1\n", "x = '\u{100}'\n").is_err());
         assert!(encode_python_source(b"# coding: ascii\n", "x = '\u{e9}'\n").is_err());
-        assert!(encode_python_source(b"# coding: shift_jis\n", "x = 1\n").is_err());
+        assert_eq!(
+            encode_python_source(b"# coding: cp1252\nx = 1\n", "# coding: cp1252\nx = 2\n"),
+            Ok(b"# coding: cp1252\nx = 2\n".to_vec())
+        );
+        assert_eq!(
+            encode_python_source(b"# coding: shift_jis\n", "x = 1\n"),
+            Ok(b"x = 1\n".to_vec())
+        );
+        assert!(encode_python_source(b"# coding: shift_jis\n", "x = '\u{e9}'\n").is_err());
+        // Non-ASCII original under an unsupported codec: same decline as decode.
+        assert!(encode_python_source(b"# coding: shift_jis\nx = \xff\n", "x = 1\n").is_err());
     }
 
     #[test]
