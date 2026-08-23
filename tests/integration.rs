@@ -3447,8 +3447,9 @@ fn check_with_cache_dir_propagates_invalid_extend_exclude() {
 /// misses (covers the `?` on `skipped_cache_miss_warnings`).
 ///
 /// The preflight only runs when some paths are cache hits and others are
-/// misses (`files_to_scan.len() < python_files.len()`). Rewrite the miss so its
-/// content fingerprint no longer matches the manifest, then make it unreadable.
+/// misses (`files_to_scan.len() < python_files.len()`). Leave the miss contents
+/// unchanged and only deny reads so project validation can keep the warm hit
+/// while preflight's `?` fires on the miss.
 #[cfg(unix)]
 #[test]
 fn partial_cache_preflight_propagates_io_error_on_explicit_unreadable_file() {
@@ -3471,9 +3472,9 @@ fn partial_cache_preflight_propagates_io_error_on_explicit_unreadable_file() {
     check_paths(root, &[root.to_path_buf()], &config, None, Some(&cache_dir))
         .expect("cold check caches both files");
 
-    // Invalidate only the miss entry, then deny reads so preflight's `?` fires
-    // while `cached.py` remains a hit.
-    std::fs::write(&unreadable, "def g(a: int) -> None:\n    return\n").expect("rewrite miss");
+    // Deny reads on the miss only. Do not rewrite contents: a content change
+    // plus an unreadable fingerprint used to clear every cache entry and skip
+    // the partial-cache preflight path (Bugbot on #707).
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let error = check_paths(root, &[root.to_path_buf()], &config, None, Some(&cache_dir))
         .expect_err("unreadable cache miss must fail during partial-cache preflight");

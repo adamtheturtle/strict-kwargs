@@ -2394,12 +2394,14 @@ impl PythonVersion {
         Some(Self { major, minor })
     }
 
-    /// Prefer an interpreter basename tag (`python3.14`) when present.
+    /// Prefer an interpreter basename tag (`python3.14` / `python3.14.exe`).
     #[cfg_attr(coverage, coverage(off))]
     pub fn from_interpreter_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_str()?;
-        let tag = name.strip_prefix("python")?;
-        Self::parse(tag)
+        let lower = name.to_ascii_lowercase();
+        let rest = lower.strip_prefix("python")?;
+        let rest = rest.strip_suffix(".exe").unwrap_or(rest);
+        Self::parse(rest)
     }
 }
 
@@ -3012,14 +3014,14 @@ fn index_stmt(
         Stmt::For(ast::StmtFor {
             target, iter, body, ..
         }) => {
-            if let Expr::Name(name) = target.as_ref() {
-                let fullname = format!("{scope_name}.{}", name.id);
-                if store.signatures.contains_key(&fullname) {
-                    store.exclude(fullname);
-                }
-            }
-            exclude_assigned_attribute(store, scope_name, target, Some(bindings));
             if !definite_empty_iterable(iter.as_ref()) {
+                if let Expr::Name(name) = target.as_ref() {
+                    let fullname = format!("{scope_name}.{}", name.id);
+                    if store.signatures.contains_key(&fullname) {
+                        store.exclude(fullname);
+                    }
+                }
+                exclude_assigned_attribute(store, scope_name, target, Some(bindings));
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -3238,14 +3240,14 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
         Stmt::For(ast::StmtFor {
             target, iter, body, ..
         }) => {
-            if let Expr::Name(name) = target.as_ref() {
-                let fullname = format!("{scope_name}.{}", name.id);
-                if store.signatures.contains_key(&fullname) {
-                    store.exclude(fullname);
-                }
-            }
-            exclude_assigned_attribute(store, scope_name, target, None);
             if !definite_empty_iterable(iter.as_ref()) {
+                if let Expr::Name(name) = target.as_ref() {
+                    let fullname = format!("{scope_name}.{}", name.id);
+                    if store.signatures.contains_key(&fullname) {
+                        store.exclude(fullname);
+                    }
+                }
+                exclude_assigned_attribute(store, scope_name, target, None);
                 index_module_fast(store, module_name, scope_name, body);
             }
         }
@@ -3845,6 +3847,29 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn interpreter_path_parses_windows_and_cased_tags() {
+        use std::path::Path;
+        assert_eq!(
+            PythonVersion::from_interpreter_path(Path::new("python3.14.exe")),
+            Some(PythonVersion {
+                major: 3,
+                minor: 14
+            })
+        );
+        assert_eq!(
+            PythonVersion::from_interpreter_path(Path::new("Python3.12")),
+            Some(PythonVersion {
+                major: 3,
+                minor: 12
+            })
+        );
+        assert_eq!(
+            PythonVersion::from_interpreter_path(Path::new("python3")),
+            None
+        );
     }
 
     fn index_of(pairs: &[(&str, usize)]) -> DefinitionIndex {

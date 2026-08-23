@@ -677,8 +677,39 @@ impl DiagnosticCache {
                 current_paths.contains(path.as_path())
                     && old_metadata.get(path) == current_metadata.get(path)
             });
-        } else {
+        } else if !same_paths {
+            // Added/removed project paths can change import resolution globally.
             self.entries.clear();
+        } else {
+            // A readable file whose tokens changed can invalidate dependents in
+            // other files, so clear everything. An unreadable miss has no new
+            // semantic fingerprint — drop only that entry and keep warm hits so
+            // the partial-cache preflight can still surface the I/O error.
+            let readable_semantic_drift = current_metadata.iter().any(|(path, metadata)| {
+                if old_metadata.get(path) == Some(metadata) {
+                    return false;
+                }
+                let Some(&current_sem) = current_semantic_fingerprints.get(path) else {
+                    return false;
+                };
+                self.entries
+                    .get(path)
+                    .is_none_or(|entry| entry.semantic_fingerprint != Some(current_sem))
+            });
+            if readable_semantic_drift {
+                self.entries.clear();
+            } else {
+                let current_paths: std::collections::BTreeSet<_> =
+                    current_files.iter().map(PathBuf::as_path).collect();
+                self.entries.retain(|path, entry| {
+                    if !current_paths.contains(path.as_path()) {
+                        return false;
+                    }
+                    old_metadata.get(path) == current_metadata.get(path)
+                        || entry.semantic_fingerprint
+                            == current_semantic_fingerprints.get(path).copied()
+                });
+            }
         }
         self.previous_project_files = self.project_files.clone();
         self.needs_project_validation = false;
