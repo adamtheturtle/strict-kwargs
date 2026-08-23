@@ -10454,6 +10454,14 @@ mod tests {
         )
         .expect("collect whole project with inventory");
         assert_eq!(shared, expected);
+        let inventory = inventory.expect("inventory");
+        assert!(
+            inventory.iter().any(|file| {
+                file.path()
+                    .ends_with(std::path::Path::new("scan/linked-dir/module.py"))
+            }),
+            "inventory must include files reached through directory symlinks (#527)"
+        );
 
         let walked = crate::cache::compute_global_fingerprint(root.path(), "{}", None, &[]);
         let shared_fingerprint = crate::cache::compute_global_fingerprint_with_project_files(
@@ -10461,7 +10469,7 @@ mod tests {
             "{}",
             None,
             &[],
-            inventory.as_deref(),
+            Some(&inventory),
         );
         assert_eq!(shared_fingerprint, walked);
 

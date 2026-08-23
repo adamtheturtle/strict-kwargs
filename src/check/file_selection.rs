@@ -126,12 +126,13 @@ fn canonicalize_for_fix(path: &Path) -> Result<PathBuf, CheckError> {
 /// Collect a whole project while also capturing the broader file inventory
 /// used by cache invalidation.
 ///
-/// Selection normally follows symlinked directories and prunes configured
-/// exclusions, while fingerprinting intentionally does neither. A no-follow
-/// project walk can serve both purposes: selected entries are filtered, all
-/// Python entries are inventoried, and symlinked directories get a separate
-/// selection-only walk. Other path shapes keep the established collector and
-/// fingerprint walk.
+/// Selection follows symlinked directories and prunes configured exclusions.
+/// The inventory must include the same followed targets so cache fingerprints
+/// invalidate when a normally edited file behind a directory symlink changes
+/// (#527). A no-follow project walk still inventories non-symlink entries;
+/// each followed symlink directory is walked separately for both selection and
+/// inventory. Other path shapes keep the established collector and fingerprint
+/// walk.
 ///
 /// Excluded from the coverage gate because traversal errors require
 /// platform-specific filesystem faults. Deterministic selection, exclusion,
@@ -215,13 +216,16 @@ pub(super) fn collect_python_files_with_project_inventory(
         for entry in walk {
             let entry = entry.map_err(walk_error)?;
             if entry.file_type().is_file() && is_python_file(entry.path()) {
-                files.push(entry.path().to_path_buf());
+                let path = entry.path().to_path_buf();
+                inventory.push(FingerprintFile::from_path(path.clone()));
+                files.push(path);
             }
         }
     }
 
     deduplicate_files(&mut files)?;
     inventory.sort_by(|left, right| left.path().cmp(right.path()));
+    inventory.dedup_by(|left, right| left.path() == right.path());
     Ok((files, Some(inventory)))
 }
 

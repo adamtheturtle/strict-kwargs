@@ -215,6 +215,7 @@ fn hash_ty_binary(h: &mut FnvHasher) {
 #[cfg_attr(coverage, coverage(off))]
 fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
     let mut py_files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|e| e.depth() == 0 || !is_prunable_dir(e))
         .filter_map(|entry| {
@@ -246,27 +247,19 @@ fn hash_py_file_mtimes(root: &Path, h: &mut FnvHasher) {
 /// `descendant`.
 ///
 /// A lexical prefix is insufficient: the walk deliberately prunes dot
-/// directories, `venv`, and `__pycache__`, and does not follow symlinked
-/// directories. An explicitly configured source root below one of those
-/// boundaries still needs its own walk.
+/// directories, `venv`, and `__pycache__`. Symlinked directories are followed
+/// (matching file selection), so a path behind a directory symlink is still
+/// covered by the ancestor walk (#527).
 fn fingerprint_walk_covers(ancestor: &Path, descendant: &Path) -> bool {
     let Ok(relative) = descendant.strip_prefix(ancestor) else {
         return false;
     };
-    let mut current = ancestor.to_path_buf();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
             return false;
         };
-        current.push(name);
         let name = name.to_string_lossy();
         if name.starts_with('.') || name == "venv" || name == "__pycache__" {
-            return false;
-        }
-        if current
-            .symlink_metadata()
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
             return false;
         }
     }
@@ -1436,7 +1429,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fingerprint_walk_does_not_cover_a_symlinked_directory() {
+    fn fingerprint_walk_covers_a_symlinked_directory() {
         use std::os::unix::fs::symlink;
 
         let project = tempdir().expect("project tempdir");
@@ -1444,7 +1437,33 @@ mod tests {
         let linked = project.path().join("linked");
         symlink(external.path(), &linked).expect("create directory symlink");
 
-        assert!(!fingerprint_walk_covers(project.path(), &linked));
+        assert!(fingerprint_walk_covers(project.path(), &linked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_invalidates_when_file_behind_directory_symlink_changes() {
+        // Issue #527: selection follows `src` → `external/`, so fingerprinting
+        // must include those reached files.
+        use std::os::unix::fs::symlink;
+
+        let project = tempdir().expect("project tempdir");
+        let external = tempdir().expect("external tempdir");
+        std::fs::write(
+            external.path().join("main.py"),
+            "def target(value): ...\ntarget(1)\n",
+        )
+        .expect("write");
+        symlink(external.path(), project.path().join("src")).expect("symlink dir");
+
+        let before = compute_global_fingerprint(project.path(), "{}", None, &[]);
+        std::fs::write(
+            external.path().join("main.py"),
+            "def target(value, /): ...\ntarget(1)\n",
+        )
+        .expect("rewrite");
+        let after = compute_global_fingerprint(project.path(), "{}", None, &[]);
+        assert_ne!(before, after);
     }
 
     #[test]
