@@ -90,5 +90,10 @@ export STRICT_KWARGS_COMPLETENESS_RUNS="${STRICT_KWARGS_COMPLETENESS_RUNS:-3}"
 export STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1
 export INSTA_UPDATE=always
 
+# On macOS, default snapshot selection follows the host platform. Set
+# STRICT_KWARGS_COMPLETENESS_FORCE_LINUX_SNAPSHOT=1 to refresh the linux
+# oracle from a macOS host (for example: regenerate both CPython snapshots
+# with `cpython` here, then rerun with FORCE_LINUX_SNAPSHOT=1).
+
 cargo test --locked --test completeness \
   "$TEST_NAME" -- --ignored --nocapture
