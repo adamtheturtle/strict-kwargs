@@ -7047,10 +7047,6 @@ impl<'a> CallChecker<'a> {
                 if self.is_opaque_local(local) {
                     return None;
                 }
-                // ``import mod as name`` binds a module, not the earlier ``def``.
-                if self.resolve_module(local).is_some() {
-                    return None;
-                }
                 if let Some(resolved) = self.resolve_local(local) {
                     if self.binding_is_instance(local) {
                         let dunder_call = format!("{resolved}.__call__");
