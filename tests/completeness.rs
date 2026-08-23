@@ -382,9 +382,11 @@ fn collect_stable(
 
 fn collect_diagnostics(root: &Path, repository: &PinnedRepository) -> BTreeSet<DiagnosticKey> {
     let mut config = Config::load(root).expect("load pinned repository config");
-    // Third-party trees ship ``sys.version_info``-gated branches for unreleased
-    // runtimes; the oracle snapshot was built with every branch indexed.
-    config.target_version = Some(COMPLETENESS_TARGET_VERSION.to_string());
+    // Sphinx ships ``sys.version_info``-gated branches for unreleased runtimes;
+    // its oracle snapshot was built with every branch indexed.
+    if repository.case.id == SPHINX.id {
+        config.target_version = Some(COMPLETENESS_TARGET_VERSION.to_string());
+    }
     let paths = [root.to_path_buf()];
     let python_env =
         repository_env_os(repository.case, "PYTHON_ENV", PYTHON_ENV).map(PathBuf::from);
