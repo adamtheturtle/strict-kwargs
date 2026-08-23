@@ -4591,6 +4591,10 @@ impl<'a> CallChecker<'a> {
             if let Some(args) = scope.instance_type_args.get(local) {
                 return Some(args.clone());
             }
+            // Inner rebinds without a specialization must not leak outer args.
+            if scope.names.contains_key(local) || scope.opaque_locals.contains(local) {
+                return None;
+            }
         }
         None
     }
@@ -8331,7 +8335,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
                     self.define_annotation(name.id.as_str(), annotation);
-                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
@@ -8353,6 +8356,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                    // After clear/opaque so specialization is not wiped (Bugbot on #718).
+                    self.record_annotated_generic_instance(name.id.as_str(), annotation);
                     if let Some(signature) = Self::queue_item_callable_signature(annotation) {
                         self.current_scope()
                             .callable_queue_items

@@ -325,6 +325,7 @@ fn rebinding_forms_invalidate_prior_function_signatures() {
         "def f(value: int) -> None: ...\ntry:\n    raise ValueError\nexcept ValueError as f:\n    pass\nf(1)\n",
         "def f(value: int) -> None: ...\n(f,) = (lambda *args: None,)\nf(1)\n",
         "def f(value: int) -> None: ...\nfor _ in []:\n    pass\nelse:\n    f = lambda *args: None\nf(1)\n",
+        "def f(value: int) -> None: ...\nwhile False:\n    pass\nelse:\n    f = lambda *args: None\nf(1)\n",
     ] {
         let messages = check_source(source);
         assert!(
@@ -1442,6 +1443,49 @@ box.get()(1)
     assert!(
         has_error_at(&messages, 12, "generic result"),
         "outer specialization must survive nested rebind: {messages:?}"
+    );
+}
+
+/// Annotated assignment with a non-constructor value must keep the
+/// specialization recorded after binding clear (Bugbot on #718).
+#[test]
+fn annotated_assign_with_value_keeps_instance_type_args() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    def get(self) -> T: ...
+def make() -> object: ...
+box: Box[Callable[[int], None]] = make()  # type: ignore[assignment]
+box.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "generic result"),
+        "ann-assign value must not wipe specialization: {messages:?}"
+    );
+}
+
+/// Inner opaque rebind must not leak an outer instance specialization (Bugbot on #718).
+#[test]
+fn nested_opaque_rebind_hides_outer_instance_type_args() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    def get(self) -> T: ...
+box: Box[Callable[[int], None]]
+def inner(box: object) -> None:
+    box.get()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "inner param must hide outer specialization: {messages:?}"
     );
 }
 
