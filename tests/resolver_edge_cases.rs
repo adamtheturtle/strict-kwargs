@@ -385,6 +385,28 @@ fn dynamic_rebinding_invalidates_prior_function_signatures() {
     }
 }
 
+/// Annotation-only ``AnnAssign`` must not clear an enclosing ``nonlocal``
+/// callable (Bugbot on #726).
+#[test]
+fn annotation_only_nonlocal_does_not_clear_enclosing_callable() {
+    let messages = check_source(
+        r"
+def outer() -> None:
+    def f(value: int) -> None: ...
+    def annotate() -> None:
+        nonlocal f
+        f: object
+    annotate()
+    f(1)
+outer()
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "f"),
+        "annotation-only nonlocal must keep enclosing callable: {messages:?}"
+    );
+}
+
 /// A try/except import fallback lambda must not suppress calls through the
 /// successfully imported name (``_tuplegetter`` pattern in `CPython`).
 #[test]
