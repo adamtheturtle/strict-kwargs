@@ -677,8 +677,23 @@ impl DiagnosticCache {
                 current_paths.contains(path.as_path())
                     && old_metadata.get(path) == current_metadata.get(path)
             });
-        } else {
+        } else if !same_paths {
+            // Added/removed project paths can change import resolution globally.
             self.entries.clear();
+        } else {
+            // Same path set, but some files cannot prove semantic equivalence
+            // (for example an unreadable miss). Keep individually stable
+            // neighbors so a partial-cache preflight can still run.
+            let current_paths: std::collections::BTreeSet<_> =
+                current_files.iter().map(PathBuf::as_path).collect();
+            self.entries.retain(|path, entry| {
+                if !current_paths.contains(path.as_path()) {
+                    return false;
+                }
+                old_metadata.get(path) == current_metadata.get(path)
+                    || entry.semantic_fingerprint
+                        == current_semantic_fingerprints.get(path).copied()
+            });
         }
         self.previous_project_files = self.project_files.clone();
         self.needs_project_validation = false;
