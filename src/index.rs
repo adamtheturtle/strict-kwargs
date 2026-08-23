@@ -1297,17 +1297,18 @@ impl DefinitionIndex {
     /// Also excludes the same attribute on indexed subclasses so inherited
     /// lookups cannot keep the stale base signature (issue #424).
     pub fn exclude_rebinding(&self, fullname: &str) {
-        let mut inner = self.write();
-        inner.store.exclude(fullname.to_string());
         let Some((class, method)) = fullname.rsplit_once('.') else {
+            self.write().store.exclude(fullname.to_string());
             return;
         };
-        let bases = inner.store.class_bases.clone();
+        let bases = self.read().store.class_bases.clone();
         let subclasses: Vec<String> = bases
             .keys()
             .filter(|subclass| Self::inherits_from_bases_map(&bases, subclass, class))
             .cloned()
             .collect();
+        let mut inner = self.write();
+        inner.store.exclude(fullname.to_string());
         for subclass in subclasses {
             inner.store.exclude(format!("{subclass}.{method}"));
         }
