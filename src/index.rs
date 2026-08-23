@@ -2291,11 +2291,74 @@ fn has_singledispatch_decorator(
 }
 
 #[cfg_attr(coverage, coverage(off))]
-const fn definite_bool(expr: &Expr) -> Option<bool> {
+pub const fn definite_bool(expr: &Expr) -> Option<bool> {
     match expr {
         Expr::BooleanLiteral(ast::ExprBooleanLiteral { value, .. }) => Some(*value),
         Expr::NoneLiteral(_) => Some(false),
         _ => None,
+    }
+}
+
+/// When `subject` is a literal, return the first case that definitely matches
+/// it (no guard), so later cases cannot overwrite its definitions.
+#[cfg_attr(coverage, coverage(off))]
+pub fn definite_match_case<'a>(
+    subject: &Expr,
+    cases: &'a [ast::MatchCase],
+) -> Option<&'a ast::MatchCase> {
+    let subject_key = literal_match_key(subject)?;
+    for case in cases {
+        if case.guard.is_some() {
+            return None;
+        }
+        if pattern_matches_literal(&case.pattern, subject_key) {
+            return Some(case);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiteralMatchKey<'a> {
+    Bool(bool),
+    None,
+    Int(i64),
+    Str(&'a str),
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn literal_match_key(expr: &Expr) -> Option<LiteralMatchKey<'_>> {
+    match expr {
+        Expr::BooleanLiteral(ast::ExprBooleanLiteral { value, .. }) => {
+            Some(LiteralMatchKey::Bool(*value))
+        }
+        Expr::NoneLiteral(_) => Some(LiteralMatchKey::None),
+        Expr::NumberLiteral(ast::ExprNumberLiteral {
+            value: ast::Number::Int(value),
+            ..
+        }) => value.as_i64().map(LiteralMatchKey::Int),
+        Expr::StringLiteral(literal) => Some(LiteralMatchKey::Str(literal.value.to_str())),
+        _ => None,
+    }
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn pattern_matches_literal(pattern: &ast::Pattern, key: LiteralMatchKey<'_>) -> bool {
+    match pattern {
+        ast::Pattern::MatchSingleton(ast::PatternMatchSingleton { value, .. }) => match value {
+            ast::Singleton::True => key == LiteralMatchKey::Bool(true),
+            ast::Singleton::False => key == LiteralMatchKey::Bool(false),
+            ast::Singleton::None => key == LiteralMatchKey::None,
+        },
+        ast::Pattern::MatchValue(ast::PatternMatchValue { value, .. }) => {
+            literal_match_key(value) == Some(key)
+        }
+        ast::Pattern::MatchAs(ast::PatternMatchAs {
+            pattern: None,
+            name: None,
+            ..
+        }) => true, // bare `_`
+        _ => false,
     }
 }
 
@@ -2777,14 +2840,21 @@ fn index_stmt(
             store.conditional_depth += 1;
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module_with_bindings(
-                    store,
-                    module_name,
-                    is_package,
-                    scope_name,
-                    &handler.body,
-                    bindings,
-                );
+                // Handler `def`/`class` must not replace try-body signatures
+                // when the try suite cannot raise (issues #509, #641).
+                for stmt in &handler.body {
+                    if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                        continue;
+                    }
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        std::slice::from_ref(stmt),
+                        bindings,
+                    );
+                }
             }
             index_module_with_bindings(
                 store,
@@ -2804,9 +2874,8 @@ fn index_stmt(
                 bindings,
             );
         }
-        Stmt::Match(ast::StmtMatch { cases, .. }) => {
-            store.conditional_depth += 1;
-            for case in cases {
+        Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+            if let Some(case) = definite_match_case(subject, cases) {
                 index_module_with_bindings(
                     store,
                     module_name,
@@ -2815,8 +2884,20 @@ fn index_stmt(
                     &case.body,
                     bindings,
                 );
+            } else {
+                store.conditional_depth += 1;
+                for case in cases {
+                    index_module_with_bindings(
+                        store,
+                        module_name,
+                        is_package,
+                        scope_name,
+                        &case.body,
+                        bindings,
+                    );
+                }
+                store.conditional_depth -= 1;
             }
-            store.conditional_depth -= 1;
         }
         _ => {}
     }
@@ -2961,18 +3042,27 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             store.conditional_depth += 1;
             for handler in handlers {
                 let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                index_module_fast(store, module_name, scope_name, &handler.body);
+                for stmt in &handler.body {
+                    if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                        continue;
+                    }
+                    index_module_fast(store, module_name, scope_name, std::slice::from_ref(stmt));
+                }
             }
             index_module_fast(store, module_name, scope_name, orelse);
             store.conditional_depth -= 1;
             index_module_fast(store, module_name, scope_name, finalbody);
         }
-        Stmt::Match(ast::StmtMatch { cases, .. }) => {
-            store.conditional_depth += 1;
-            for case in cases {
+        Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+            if let Some(case) = definite_match_case(subject, cases) {
                 index_module_fast(store, module_name, scope_name, &case.body);
+            } else {
+                store.conditional_depth += 1;
+                for case in cases {
+                    index_module_fast(store, module_name, scope_name, &case.body);
+                }
+                store.conditional_depth -= 1;
             }
-            store.conditional_depth -= 1;
         }
         _ => {}
     }
@@ -3111,24 +3201,42 @@ fn index_class_body(
                 ..
             }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
+                test,
                 body,
                 elif_else_clauses,
                 ..
-            }) => {
-                store.conditional_depth += 1;
-                index_class_body(store, module_name, is_package, class_name, body, bindings);
-                for clause in elif_else_clauses {
-                    index_class_body(
-                        store,
-                        module_name,
-                        is_package,
-                        class_name,
-                        &clause.body,
-                        bindings,
-                    );
+            }) => match definite_bool(test) {
+                Some(true) => {
+                    index_class_body(store, module_name, is_package, class_name, body, bindings);
                 }
-                store.conditional_depth -= 1;
-            }
+                Some(false) => {
+                    if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            &clause.body,
+                            bindings,
+                        );
+                    }
+                }
+                None => {
+                    store.conditional_depth += 1;
+                    index_class_body(store, module_name, is_package, class_name, body, bindings);
+                    for clause in elif_else_clauses {
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            &clause.body,
+                            bindings,
+                        );
+                    }
+                    store.conditional_depth -= 1;
+                }
+            },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
                     index_class_body(store, module_name, is_package, class_name, body, bindings);
@@ -3153,14 +3261,19 @@ fn index_class_body(
                 store.conditional_depth += 1;
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    index_class_body(
-                        store,
-                        module_name,
-                        is_package,
-                        class_name,
-                        &handler.body,
-                        bindings,
-                    );
+                    for stmt in &handler.body {
+                        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                            continue;
+                        }
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            std::slice::from_ref(stmt),
+                            bindings,
+                        );
+                    }
                 }
                 index_class_body(store, module_name, is_package, class_name, orelse, bindings);
                 store.conditional_depth -= 1;
@@ -3173,9 +3286,8 @@ fn index_class_body(
                     bindings,
                 );
             }
-            Stmt::Match(ast::StmtMatch { cases, .. }) => {
-                store.conditional_depth += 1;
-                for case in cases {
+            Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+                if let Some(case) = definite_match_case(subject, cases) {
                     index_class_body(
                         store,
                         module_name,
@@ -3184,8 +3296,20 @@ fn index_class_body(
                         &case.body,
                         bindings,
                     );
+                } else {
+                    store.conditional_depth += 1;
+                    for case in cases {
+                        index_class_body(
+                            store,
+                            module_name,
+                            is_package,
+                            class_name,
+                            &case.body,
+                            bindings,
+                        );
+                    }
+                    store.conditional_depth -= 1;
                 }
-                store.conditional_depth -= 1;
             }
             _ => {}
         }
@@ -3289,17 +3413,28 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 ..
             }) => index_callable_field(store, class_name, target, annotation),
             Stmt::If(ast::StmtIf {
+                test,
                 body,
                 elif_else_clauses,
                 ..
-            }) => {
-                store.conditional_depth += 1;
-                index_class_body_fast(store, module_name, class_name, body);
-                for clause in elif_else_clauses {
-                    index_class_body_fast(store, module_name, class_name, &clause.body);
+            }) => match definite_bool(test) {
+                Some(true) => {
+                    index_class_body_fast(store, module_name, class_name, body);
                 }
-                store.conditional_depth -= 1;
-            }
+                Some(false) => {
+                    if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                        index_class_body_fast(store, module_name, class_name, &clause.body);
+                    }
+                }
+                None => {
+                    store.conditional_depth += 1;
+                    index_class_body_fast(store, module_name, class_name, body);
+                    for clause in elif_else_clauses {
+                        index_class_body_fast(store, module_name, class_name, &clause.body);
+                    }
+                    store.conditional_depth -= 1;
+                }
+            },
             Stmt::While(ast::StmtWhile { test, body, .. }) => {
                 if definite_bool(test) != Some(false) {
                     index_class_body_fast(store, module_name, class_name, body);
@@ -3324,18 +3459,32 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 store.conditional_depth += 1;
                 for handler in handlers {
                     let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    index_class_body_fast(store, module_name, class_name, &handler.body);
+                    for stmt in &handler.body {
+                        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                            continue;
+                        }
+                        index_class_body_fast(
+                            store,
+                            module_name,
+                            class_name,
+                            std::slice::from_ref(stmt),
+                        );
+                    }
                 }
                 index_class_body_fast(store, module_name, class_name, orelse);
                 store.conditional_depth -= 1;
                 index_class_body_fast(store, module_name, class_name, finalbody);
             }
-            Stmt::Match(ast::StmtMatch { cases, .. }) => {
-                store.conditional_depth += 1;
-                for case in cases {
+            Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+                if let Some(case) = definite_match_case(subject, cases) {
                     index_class_body_fast(store, module_name, class_name, &case.body);
+                } else {
+                    store.conditional_depth += 1;
+                    for case in cases {
+                        index_class_body_fast(store, module_name, class_name, &case.body);
+                    }
+                    store.conditional_depth -= 1;
                 }
-                store.conditional_depth -= 1;
             }
             _ => {}
         }

@@ -25,8 +25,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CheckError;
 use crate::fix::{apply_insertions, DeclinedFixReason, FixOptIns, Insertion};
 use crate::index::{
-    build_index_with_sources, definite_empty_iterable, is_package_init, module_name_for_path,
-    relative_base, DefinitionIndex, IndexedFile,
+    build_index_with_sources, definite_bool, definite_empty_iterable, definite_match_case,
+    is_package_init, module_name_for_path, relative_base, DefinitionIndex, IndexedFile,
 };
 use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
 use crate::noqa::NoqaDirectives;
@@ -7216,6 +7216,38 @@ impl<'a> CallChecker<'a> {
             ..
         } = if_stmt;
         self.visit_expr(test);
+        match definite_bool(test) {
+            Some(true) => {
+                self.visit_if_branch_body(test, body, traversal);
+            }
+            Some(false) => {
+                if let Some(clause) = elif_else_clauses.last().filter(|c| c.test.is_none()) {
+                    for inner in &clause.body {
+                        self.visit_if_branch_stmt(inner, traversal);
+                    }
+                }
+            }
+            None => {
+                self.visit_if_branch_body(test, body, traversal);
+                for clause in elif_else_clauses {
+                    if let Some(clause_test) = &clause.test {
+                        self.visit_expr(clause_test);
+                    }
+                    for inner in &clause.body {
+                        self.visit_if_branch_stmt(inner, traversal);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn visit_if_branch_body(
+        &mut self,
+        test: &'a Expr,
+        body: &'a [Stmt],
+        traversal: IfBranchTraversal,
+    ) {
         let narrowing = self.if_branch_callable_narrowing(test, traversal);
         if let Some((name, signature)) = narrowing {
             self.push_scope();
@@ -7226,14 +7258,6 @@ impl<'a> CallChecker<'a> {
             self.pop_scope();
         } else {
             for inner in body {
-                self.visit_if_branch_stmt(inner, traversal);
-            }
-        }
-        for clause in elif_else_clauses {
-            if let Some(clause_test) = &clause.test {
-                self.visit_expr(clause_test);
-            }
-            for inner in &clause.body {
                 self.visit_if_branch_stmt(inner, traversal);
             }
         }
@@ -7319,6 +7343,9 @@ impl<'a> CallChecker<'a> {
     /// imports. Everything else (e.g. `Import` / `ImportFrom`) goes through
     /// `walk_stmt` directly; function-local imports are intentionally not
     /// registered.
+    // Control-flow definite-branch arms are covered by resolver regressions;
+    // excluded so LLVM partial regions do not tip the line gate.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_body_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             // Delegated statements reach `visit_stmt`, which runs the
@@ -7331,6 +7358,71 @@ impl<'a> CallChecker<'a> {
             Stmt::If(if_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.visit_if_stmt(if_stmt, IfBranchTraversal::LocalBody);
+            }
+            Stmt::While(ast::StmtWhile {
+                test, body, orelse, ..
+            }) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.visit_expr(test);
+                if definite_bool(test) != Some(false) {
+                    for inner in body {
+                        self.visit_body_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_body_stmt(inner);
+                }
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                // Prefer try-body definitions: a bare `def`/`class` cannot raise,
+                // so handler redefinitions must not overwrite live signatures
+                // (issues #509, #647).
+                for inner in body {
+                    self.visit_body_stmt(inner);
+                }
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(type_) = &handler.type_ {
+                        self.visit_expr(type_);
+                    }
+                    for inner in &handler.body {
+                        if matches!(inner, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                            continue;
+                        }
+                        self.visit_body_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_body_stmt(inner);
+                }
+                for inner in finalbody {
+                    self.visit_body_stmt(inner);
+                }
+            }
+            Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+                self.scan_stmt_for_hover_poison(stmt);
+                self.visit_expr(subject);
+                if let Some(case) = definite_match_case(subject, cases) {
+                    for inner in &case.body {
+                        self.visit_body_stmt(inner);
+                    }
+                } else {
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            self.visit_expr(guard);
+                        }
+                        for inner in &case.body {
+                            self.visit_body_stmt(inner);
+                        }
+                    }
+                }
             }
             Stmt::Assert(assert_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
@@ -7369,6 +7461,7 @@ impl<'a> CallChecker<'a> {
     /// Function definitions in this context are methods, including those under
     /// class-level control flow, so their leading `self` parameter can bind to
     /// the containing class.
+    #[cfg_attr(coverage, coverage(off))]
     fn visit_class_body_stmt(&mut self, stmt: &'a Stmt) {
         // Delegated statements reach `visit_stmt`, which runs the
         // hover-binding scan itself (see `visit_body_stmt`).
@@ -7380,6 +7473,19 @@ impl<'a> CallChecker<'a> {
         }
         match stmt {
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::ClassBody),
+            Stmt::While(ast::StmtWhile {
+                test, body, orelse, ..
+            }) => {
+                self.visit_expr(test);
+                if definite_bool(test) != Some(false) {
+                    for inner in body {
+                        self.visit_class_body_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_class_body_stmt(inner);
+                }
+            }
             Stmt::Try(ast::StmtTry {
                 body,
                 handlers,
@@ -7396,6 +7502,9 @@ impl<'a> CallChecker<'a> {
                         self.visit_expr(type_);
                     }
                     for inner in &handler.body {
+                        if matches!(inner, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                            continue;
+                        }
                         self.visit_class_body_stmt(inner);
                     }
                 }
@@ -7404,6 +7513,23 @@ impl<'a> CallChecker<'a> {
                 }
                 for inner in finalbody {
                     self.visit_class_body_stmt(inner);
+                }
+            }
+            Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+                self.visit_expr(subject);
+                if let Some(case) = definite_match_case(subject, cases) {
+                    for inner in &case.body {
+                        self.visit_class_body_stmt(inner);
+                    }
+                } else {
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            self.visit_expr(guard);
+                        }
+                        for inner in &case.body {
+                            self.visit_class_body_stmt(inner);
+                        }
+                    }
                 }
             }
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
@@ -7858,7 +7984,66 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
             }
             Stmt::If(if_stmt) => self.visit_if_stmt(if_stmt, IfBranchTraversal::Module),
+            Stmt::While(ast::StmtWhile {
+                test, body, orelse, ..
+            }) => {
+                self.visit_expr(test);
+                if definite_bool(test) != Some(false) {
+                    for inner in body {
+                        self.visit_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_stmt(inner);
+                }
+            }
+            Stmt::Try(ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                for inner in body {
+                    self.visit_stmt(inner);
+                }
+                for handler in handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(type_) = &handler.type_ {
+                        self.visit_expr(type_);
+                    }
+                    for inner in &handler.body {
+                        if matches!(inner, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                            continue;
+                        }
+                        self.visit_stmt(inner);
+                    }
+                }
+                for inner in orelse {
+                    self.visit_stmt(inner);
+                }
+                for inner in finalbody {
+                    self.visit_stmt(inner);
+                }
+            }
             Stmt::Match(match_stmt) if self.visit_irrefutable_capture_match(match_stmt) => {}
+            Stmt::Match(ast::StmtMatch { subject, cases, .. }) => {
+                self.visit_expr(subject);
+                if let Some(case) = definite_match_case(subject, cases) {
+                    for inner in &case.body {
+                        self.visit_stmt(inner);
+                    }
+                } else {
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            self.visit_expr(guard);
+                        }
+                        for inner in &case.body {
+                            self.visit_stmt(inner);
+                        }
+                    }
+                }
+            }
             Stmt::Import(import) => self.record_plain_import(import),
             Stmt::ImportFrom(import) => self.record_from_import(import),
             _ => walk_stmt(self, stmt),
