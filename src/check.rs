@@ -2044,11 +2044,13 @@ impl<'a> CallChecker<'a> {
             let dotted = alias.name.as_str();
             if let Some(asname) = &alias.asname {
                 // ``import a.b as c`` binds ``c`` -> ``a.b``.
+                self.invalidate_local_name_if_callable(asname.as_str());
                 self.define_module(asname.as_str(), dotted.to_string());
             } else {
                 // ``import a.b`` binds the top-level ``a``; attribute access
                 // uses the full dotted path.
                 let top = dotted.split('.').next().unwrap_or(dotted);
+                self.invalidate_local_name_if_callable(top);
                 self.define_module(top, top.to_string());
             }
         }
@@ -2078,6 +2080,7 @@ impl<'a> CallChecker<'a> {
             };
             // The imported name may be a submodule or a callable; bind both
             // interpretations so attribute and direct calls work.
+            self.invalidate_local_name_if_callable(local);
             self.define_imported_name_and_module(local, fullname);
         }
     }
@@ -5047,18 +5050,62 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn shadow_loop_target(&mut self, target: &Expr) {
-        if let Expr::Name(name) = target {
-            let was_known_callable = self.scopes.last().is_some_and(|scope| {
-                scope.functions.contains_key(name.id.as_str())
-                    || scope.names.contains_key(name.id.as_str())
-            });
-            self.mark_opaque_local(name.id.as_str());
-            if was_known_callable {
-                self.current_scope()
-                    .invalidated_callables
-                    .insert(name.id.to_string());
-            }
+        self.invalidate_bound_callable_targets(target);
+    }
+
+    /// Drop a prior function/import binding when an assignment target rebinds
+    /// the same local name (augmented assign, destructuring, match capture,
+    /// walrus, etc.).
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_local_name_if_callable(&mut self, name: &str) {
+        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+            scope.functions.contains_key(name) || scope.names.contains_key(name)
+        });
+        self.mark_opaque_local(name);
+        if was_known_callable {
+            self.current_scope()
+                .invalidated_callables
+                .insert(name.to_string());
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_bound_callable_targets(&mut self, target: &Expr) {
+        match target {
+            Expr::Name(name) => self.invalidate_local_name_if_callable(name.id.as_str()),
+            Expr::Tuple(tuple) => {
+                for elt in &tuple.elts {
+                    self.invalidate_bound_callable_targets(elt);
+                }
+            }
+            Expr::List(list) => {
+                for elt in &list.elts {
+                    self.invalidate_bound_callable_targets(elt);
+                }
+            }
+            Expr::Starred(starred) => self.invalidate_bound_callable_targets(&starred.value),
+            Expr::Attribute(_) => self.invalidate_attribute_callable(target),
+            _ => {}
+        }
+    }
+
+    /// Attribute rebinding (`C.method += ...` / `C.method = ...`) drops the
+    /// indexed method signature so later calls are not checked against it.
+    #[cfg_attr(coverage, coverage(off))]
+    fn invalidate_attribute_callable(&self, target: &Expr) {
+        let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = target else {
+            return;
+        };
+        let Some(class_fullname) = (match value.as_ref() {
+            Expr::Name(name) => self
+                .resolve_local(name.id.as_str())
+                .or_else(|| self.class_from_name_annotation(name.id.as_str())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let method = format!("{class_fullname}.{}", attr.as_str());
+        self.index.exclude_rebinding(&method);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6991,10 +7038,17 @@ impl<'a> CallChecker<'a> {
                 {
                     return None;
                 }
+                if self.is_invalidated_callable_name(local) {
+                    return None;
+                }
                 // A parameter or other opaque local cannot be resolved to a
                 // concrete indexed definition — skip it to avoid false
                 // positives from a same-named function elsewhere (issue #71).
                 if self.is_opaque_local(local) {
+                    return None;
+                }
+                // ``import mod as name`` binds a module, not the earlier ``def``.
+                if self.resolve_module(local).is_some() {
                     return None;
                 }
                 if let Some(resolved) = self.resolve_local(local) {
@@ -7270,11 +7324,13 @@ impl<'a> CallChecker<'a> {
         else {
             return false;
         };
-        let Some(callable) = self.resolve_callee(&match_stmt.subject) else {
-            return false;
-        };
+        // Capture always rebinds the name (issue #418), even when the subject
+        // is not a resolvable callable we can forward.
+        self.invalidate_local_name_if_callable(name.as_str());
         self.visit_expr(&match_stmt.subject);
-        self.define(name.as_str(), callable);
+        if let Some(callable) = self.resolve_callee(&match_stmt.subject) {
+            self.define(name.as_str(), callable);
+        }
         if let Some(guard) = &case.guard {
             self.visit_expr(guard);
         }
@@ -7526,6 +7582,11 @@ impl<'a> CallChecker<'a> {
     fn visit_for_stmt(&mut self, for_stmt: &'a ast::StmtFor) {
         self.visit_expr(&for_stmt.iter);
         if definite_empty_iterable(for_stmt.iter.as_ref()) {
+            // An empty iterable never enters the body, but the `else` suite
+            // still runs (issue #427).
+            for inner in &for_stmt.orelse {
+                self.visit_stmt(inner);
+            }
             return;
         }
         self.visit_expr(&for_stmt.target);
@@ -7611,11 +7672,18 @@ impl<'a> CallChecker<'a> {
                     if let Some(type_) = &handler.type_ {
                         self.visit_expr(type_);
                     }
+                    if let Some(name) = &handler.name {
+                        self.invalidate_local_name_if_callable(name.as_str());
+                    }
                     for inner in &handler.body {
                         if matches!(inner, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                             continue;
                         }
                         self.visit_body_stmt(inner);
+                    }
+                    if let Some(name) = &handler.name {
+                        self.mark_opaque_local(name.as_str());
+                        self.current_scope().deleted_names.insert(name.to_string());
                     }
                 }
                 for inner in orelse {
@@ -7917,6 +7985,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.class_stack.pop();
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
+                for target in targets {
+                    // Destructuring / attribute targets always rebind; simple
+                    // ``Name = …`` is handled below (including lambda replace).
+                    if !matches!(target, Expr::Name(_)) {
+                        self.invalidate_bound_callable_targets(target);
+                    }
+                }
                 if let ([Expr::Name(target)], Expr::Call(call)) =
                     (targets.as_slice(), value.as_ref())
                 {
@@ -8058,6 +8133,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                 }
                 walk_stmt(self, stmt);
+            }
+            Stmt::AugAssign(ast::StmtAugAssign { target, value, .. }) => {
+                self.invalidate_bound_callable_targets(target);
+                self.visit_expr(value);
+                self.visit_expr(target);
             }
             Stmt::For(for_stmt) => {
                 if !definite_empty_iterable(for_stmt.iter.as_ref()) {
@@ -8237,11 +8317,20 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     if let Some(type_) = &handler.type_ {
                         self.visit_expr(type_);
                     }
+                    if let Some(name) = &handler.name {
+                        // ``except E as f`` rebinds ``f`` for the suite, then
+                        // deletes it (issue #420).
+                        self.invalidate_local_name_if_callable(name.as_str());
+                    }
                     for inner in &handler.body {
                         if matches!(inner, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                             continue;
                         }
                         self.visit_stmt(inner);
+                    }
+                    if let Some(name) = &handler.name {
+                        self.mark_opaque_local(name.as_str());
+                        self.current_scope().deleted_names.insert(name.to_string());
                     }
                 }
                 for inner in orelse {
@@ -8297,6 +8386,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 walk_expr(self, expr);
                 self.exit_hover_scope();
+                return;
+            }
+            Expr::Named(ast::ExprNamed { target, value, .. }) => {
+                // Walrus rebinding (issue #419).
+                self.invalidate_bound_callable_targets(target);
+                self.visit_expr(value);
+                self.visit_expr(target);
                 return;
             }
             Expr::Attribute(attr) => {

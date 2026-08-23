@@ -312,6 +312,38 @@ f(1)
     );
 }
 
+/// Augmented assignment, import-as, match capture, walrus, except-as cleanup,
+/// destructuring, and empty-for else suites invalidate prior callables
+/// (issues #416–#421, #427).
+#[test]
+fn rebinding_forms_invalidate_prior_function_signatures() {
+    for source in [
+        "def f(value: int) -> None: ...\nf += None\nf(1)\n",
+        "def target(value: int) -> None: ...\nimport sys as target\ntarget(1)\n",
+        "def f(value: int) -> None: ...\nmatch (lambda *args: None):\n    case f:\n        pass\nf(1)\n",
+        "def f(value: int) -> None: ...\n(f := lambda *args: None)\nf(1)\n",
+        "def f(value: int) -> None: ...\ntry:\n    raise ValueError\nexcept ValueError as f:\n    pass\nf(1)\n",
+        "def f(value: int) -> None: ...\n(f,) = (lambda *args: None,)\nf(1)\n",
+        "def f(value: int) -> None: ...\nfor _ in []:\n    pass\nelse:\n    f = lambda *args: None\nf(1)\n",
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "expected no stale KW001 for {source:?}, got {messages:?}"
+        );
+    }
+
+    let messages = check_source(
+        r"
+class C:
+    def method(self, value: int) -> None: ...
+C.method += None
+C().method(1)
+",
+    );
+    assert!(messages.is_empty(), "stale augmented method: {messages:?}");
+}
+
 /// A try/except import fallback lambda must not suppress calls through the
 /// successfully imported name (``_tuplegetter`` pattern in `CPython`).
 #[test]

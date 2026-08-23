@@ -1292,6 +1292,12 @@ impl DefinitionIndex {
         self.read().store.excluded.contains(fullname)
     }
 
+    /// Drop an indexed callable after an observed rebinding (`C.method += …`,
+    /// `setattr`, …) so later calls are not checked against the stale signature.
+    pub fn exclude_rebinding(&self, fullname: &str) {
+        self.write().store.exclude(fullname.to_string());
+    }
+
     /// Whether `fullname` is a ``@property`` (or enum magic attribute) getter.
     #[cfg_attr(coverage, coverage(off))]
     pub fn is_property(&self, fullname: &str) -> bool {
