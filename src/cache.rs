@@ -1304,6 +1304,50 @@ mod tests {
         assert!(!cache.contains(&path));
     }
 
+    /// An unreadable neighbor must not wipe warm hits, and entries outside the
+    /// current selection are dropped in that partial-retain path.
+    #[test]
+    fn project_validation_keeps_warm_hits_when_neighbor_lacks_semantics() {
+        let dir = tempdir().expect("tempdir");
+        let safe = PathBuf::from("safe.py");
+        let broken = PathBuf::from("broken.py");
+        let ghost = PathBuf::from("ghost.py");
+        let old_files = vec![
+            fingerprint_file("safe.py", 1),
+            fingerprint_file("broken.py", 1),
+        ];
+        let old_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 20,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), old_fingerprints, Some(&old_files)).expect("open");
+        cache.put_all(vec![
+            (safe.clone(), Vec::new(), Some(100)),
+            (broken.clone(), Vec::new(), Some(200)),
+            (ghost.clone(), Vec::new(), Some(300)),
+        ]);
+
+        let new_files = vec![
+            fingerprint_file("safe.py", 1),
+            fingerprint_file("broken.py", 2),
+        ];
+        let new_fingerprints = CacheFingerprints {
+            dependency: 10,
+            project: 21,
+        };
+        let mut cache =
+            DiagnosticCache::open(dir.path(), new_fingerprints, Some(&new_files)).expect("reopen");
+        // No semantic fingerprint for `broken` — as when the file is unreadable.
+        assert!(!cache.validate_project(
+            &[safe.clone(), broken.clone()],
+            &BTreeMap::from([(safe.clone(), 100)])
+        ));
+        assert!(cache.contains(&safe));
+        assert!(!cache.contains(&broken));
+        assert!(!cache.contains(&ghost));
+    }
+
     #[test]
     fn cache_file_selection_mismatch_is_a_miss() {
         let dir = tempdir().expect("tempdir");
