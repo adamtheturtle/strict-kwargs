@@ -2286,7 +2286,12 @@ impl<'a> CallChecker<'a> {
             // if the leftmost name resolves as a module, the expression
             // denotes a class reached through a module path, making the
             // call unbound.  Non-dotted-path bases (e.g. `f().m(self, …)`)
-            // are not unbound calls.
+            // are not unbound calls. Descriptor ``__get__``/``__set__`` keep
+            // the protocol exemption (issue #742); other dunder receivers
+            // still strip here like ordinary unbound methods.
+            if matches!(attr.as_str(), "__get__" | "__set__") {
+                return false;
+            }
             let Some(chain) = Self::dotted_path(value) else {
                 return false;
             };
