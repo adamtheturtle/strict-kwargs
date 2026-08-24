@@ -3,6 +3,15 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.24
+---------
+
+- Honor annotated ``__all__``, keep unknown star-import sources from blocking
+  ``ty``, preserve sibling-branch re-exports while superseding same-branch
+  aliases, replace superseded defs in one conditional arm, and keep the
+  descriptor protocol exemption on multi-level unbound ``__get__`` / ``__set__``
+  calls.
+
 2026.8.23
 ---------
 
