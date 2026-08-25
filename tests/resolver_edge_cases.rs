@@ -3732,6 +3732,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A `UserDict` initialized from a literal mapping preserves concrete callable
+/// values through subscripting (issue #778).
+#[test]
+fn userdict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict result violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
