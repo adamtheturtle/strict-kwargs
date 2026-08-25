@@ -1531,6 +1531,25 @@ async def main() -> None:
     );
 }
 
+/// Async comprehensions use the annotated callable item from their iterator
+/// factory (issue #842).
+#[test]
+fn async_comprehension_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def values() -> AsyncIterator[Callable[[int], None]]:
+    yield lambda value: None
+async def main() -> None:
+    [item(1) async for item in values()]
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "comprehension item"),
+        "expected async-comprehension item violation, got: {messages:?}"
+    );
+}
+
 /// ``async with`` preserves a context manager's ``__aenter__`` return type
 /// (issue #454).
 #[test]
