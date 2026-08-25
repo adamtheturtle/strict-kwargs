@@ -766,16 +766,15 @@ import typing
 from contextlib import nullcontext
 class Language:
     def word_filter(self, word: str) -> bool: ...
-def caller(lang: Language) -> None:
-    Callback = typing.Callable[[int], None]
-    Callback = lang.word_filter
-    with nullcontext(Callback) as Callback:
-        pass
-    Callback("word", "extra")
+Callback = typing.Callable[[int], None]
+Callback = Language().word_filter
+with nullcontext(Callback) as Callback:
+    pass
+Callback("word", "extra")
 "#,
     );
     assert!(
-        has_error_at(&messages, 11, "Too many positional"),
+        has_error_at(&messages, 10, "Too many positional"),
         "cleared alias tombstone must still defer to ty, got: {messages:?}"
     );
 }
