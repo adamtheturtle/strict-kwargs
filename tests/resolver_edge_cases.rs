@@ -1906,6 +1906,23 @@ weakref.ref(f)()(1)
     );
 }
 
+/// A directly imported alias of `weakref.ref` retains its concrete callable
+/// referent after dereferencing (issue #856).
+#[test]
+fn direct_import_weakref_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from weakref import ref as weak_ref
+def target(value: int) -> None: ...
+weak_ref(target)()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct weakref.ref violation, got: {messages:?}"
+    );
+}
+
 /// `operator.getitem` shares literal container selection semantics with a
 /// subscript expression (issue #394).
 #[test]

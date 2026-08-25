@@ -7451,15 +7451,7 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(construction) = dereference.func.as_ref() else {
             return None;
         };
-        let Expr::Attribute(reference) = construction.func.as_ref() else {
-            return None;
-        };
-        let Expr::Name(module) = reference.value.as_ref() else {
-            return None;
-        };
-        if reference.attr.as_str() != "ref"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("weakref")
-        {
+        if !self.names_stdlib_callable(&construction.func, "weakref.ref") {
             return None;
         }
         let [referent] = &*construction.arguments.args else {
