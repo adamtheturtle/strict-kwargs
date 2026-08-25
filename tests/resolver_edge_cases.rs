@@ -1728,6 +1728,23 @@ next(itertools.tee([f])[0])(1)
     }
 }
 
+/// `chain.from_iterable` retains the concrete callable shape of homogeneous
+/// nested literal items (issue #822).
+#[test]
+fn chain_from_iterable_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain.from_iterable([[target]]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chain.from_iterable violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]

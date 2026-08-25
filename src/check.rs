@@ -5781,6 +5781,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn nested_literal_iterable_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let iterables = match expr {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let mut result = None;
+        for iterable in iterables {
+            let signature = self.literal_iterable_callable_signature(iterable)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn is_multiprocessing_pool_map_method(fullname: &str) -> bool {
         let Some((class, method)) = fullname.rsplit_once('.') else {
             return false;
@@ -5954,6 +5975,9 @@ impl<'a> CallChecker<'a> {
                     result = Some(signature);
                 }
                 result
+            }
+            "itertools.chain.from_iterable" if selected_index.is_none() => {
+                self.nested_literal_iterable_callable_signature(call.arguments.args.first()?)
             }
             "itertools.accumulate" | "itertools.compress" | "itertools.islice"
                 if selected_index.is_none() =>
