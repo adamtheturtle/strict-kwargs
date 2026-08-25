@@ -4880,6 +4880,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_union_value<'b>(value: &'b Expr, key: &Expr) -> Result<Option<&'b Expr>, ()> {
+        match value {
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => {
+                Ok(dict.items.iter().rev().find_map(|item| {
+                    item.key
+                        .as_ref()
+                        .is_some_and(|candidate| Self::same_literal_key(candidate, key))
+                        .then_some(&item.value)
+                }))
+            }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::BitOr,
+                right,
+                ..
+            }) => {
+                let left = Self::literal_dict_union_value(left, key)?;
+                let right = Self::literal_dict_union_value(right, key)?;
+                Ok(right.or(left))
+            }
+            _ => Err(()),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
@@ -4908,36 +4933,11 @@ impl<'a> CallChecker<'a> {
                 self.resolve_callee(&tuple.elts[index])
             }
             Expr::BinOp(ast::ExprBinOp {
-                left,
                 op: ast::Operator::BitOr,
-                right,
                 ..
             }) => {
-                let (Expr::Dict(left), Expr::Dict(right)) = (left.as_ref(), right.as_ref()) else {
-                    return None;
-                };
-                if !left.items.iter().all(|item| item.key.is_some())
-                    || !right.items.iter().all(|item| item.key.is_some())
-                {
-                    return None;
-                }
-                let selected = right.items.iter().rev().find(|item| {
-                    item.key
-                        .as_ref()
-                        .is_some_and(|key| Self::same_literal_key(key, slice))
-                });
-                if let Some(selected) = selected {
-                    return self.resolve_callee(&selected.value);
-                }
-                left.items
-                    .iter()
-                    .rev()
-                    .find(|item| {
-                        item.key
-                            .as_ref()
-                            .is_some_and(|key| Self::same_literal_key(key, slice))
-                    })
-                    .and_then(|item| self.resolve_callee(&item.value))
+                let selected = Self::literal_dict_union_value(value, slice).ok()??;
+                self.resolve_callee(selected)
             }
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
                 .items

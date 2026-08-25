@@ -516,9 +516,10 @@ def other(first: int, second: int) -> None: ...
 ({"x": target} | {})["x"](1)
 ({} | {"x": target})["x"](1)
 ({"x": other} | {"x": target})["x"](1)
+({} | {"x": other} | {"x": target} | {})["x"](1)
 "#,
     );
-    for line in 4..=6 {
+    for line in 4..=7 {
         assert!(
             has_error_at(&messages, line, "target"),
             "expected dict-union violation on line {line}, got: {messages:?}"
