@@ -4273,6 +4273,22 @@ OrderedDict().setdefault(key="x", default=target)(1)
     );
 }
 
+/// Built-in `dict.setdefault` parameters are positional-only, so invalid
+/// keyword calls must not produce a callable-result diagnostic.
+#[test]
+fn literal_dict_setdefault_rejects_keyword_arguments() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an invalid dict call to resolve, got: {messages:?}"
+    );
+}
+
 /// Standard-library generic mappings retain the concrete callable value type
 /// through their result-returning methods (issue #440).
 #[test]

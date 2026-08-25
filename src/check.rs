@@ -7511,6 +7511,16 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "setdefault" || call.arguments.args.len() > 2 {
             return None;
         }
+        let ordered_dict = matches!(
+            method.value.as_ref(),
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| class == "collections.OrderedDict")
+        );
+        if !ordered_dict && !call.arguments.keywords.is_empty() {
+            return None;
+        }
         let key = call.arguments.args.first().or_else(|| {
             call.arguments
                 .find_keyword("key")
