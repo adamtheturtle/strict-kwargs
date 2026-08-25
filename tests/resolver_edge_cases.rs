@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Literal dictionary unions preserve the selected value with right-hand-side
+/// override precedence (issue #809).
+#[test]
+fn literal_dict_unions_resolve_selected_callables() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+({"x": target} | {})["x"](1)
+({} | {"x": target})["x"](1)
+({"x": other} | {"x": target})["x"](1)
+"#,
+    );
+    for line in 4..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected dict-union violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
