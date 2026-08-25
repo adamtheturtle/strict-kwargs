@@ -5034,7 +5034,7 @@ impl<'a> CallChecker<'a> {
             let factory = self.resolve_callee(&wrapper.func)?;
             if matches!(
                 Self::normalize_factory_fullname(&factory),
-                "collections.OrderedDict" | "collections.UserDict"
+                "collections.OrderedDict" | "collections.UserDict" | "weakref.WeakValueDictionary"
             ) && wrapper.arguments.keywords.is_empty()
             {
                 let [mapping] = &*wrapper.arguments.args else {
