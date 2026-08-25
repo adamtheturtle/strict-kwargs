@@ -6540,20 +6540,26 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn for_loop_item_signature(&self, iterable: &Expr) -> Option<Signature> {
-        let Expr::Name(source) = iterable else {
-            return None;
-        };
-        for scope in self.scopes.iter().rev() {
-            if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
-                return Some(signature.clone());
+        match iterable {
+            Expr::Name(source) => {
+                for scope in self.scopes.iter().rev() {
+                    if let Some(signature) = scope.callable_iterable_items.get(source.id.as_str()) {
+                        return Some(signature.clone());
+                    }
+                    if scope.names.contains_key(source.id.as_str())
+                        || scope.opaque_locals.contains(source.id.as_str())
+                    {
+                        return None;
+                    }
+                }
+                None
             }
-            if scope.names.contains_key(source.id.as_str())
-                || scope.opaque_locals.contains(source.id.as_str())
-            {
-                return None;
+            Expr::Call(factory_call) => {
+                let factory = self.resolve_callee(&factory_call.func)?;
+                self.callable_iterator_items.get(&factory).cloned()
             }
+            _ => None,
         }
-        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
