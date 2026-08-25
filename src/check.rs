@@ -6959,6 +6959,32 @@ impl<'a> CallChecker<'a> {
         self.callable_iterator_items.get(&factory_fullname).cloned()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn next_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iter_call), default] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterable] = &*iter_call.arguments.args else {
+            return None;
+        };
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
     // Covered end-to-end by the SimpleNamespace attribute regression. Other
     // constructor, keyword, and rebinding shapes intentionally decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -8398,6 +8424,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.next_empty_default_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
