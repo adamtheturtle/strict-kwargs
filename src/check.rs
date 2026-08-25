@@ -7771,6 +7771,37 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_set_or_dict_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Set(set) if call.arguments.args.is_empty() => {
+                let mut elements = set.elts.iter();
+                let resolved = self.resolve_callee(elements.next()?)?;
+                elements
+                    .all(|element| {
+                        self.resolve_callee(element).as_deref() == Some(resolved.as_str())
+                    })
+                    .then_some(resolved)
+            }
+            Expr::Dict(_) => {
+                let [key] = &*call.arguments.args else {
+                    return None;
+                };
+                self.resolve_literal_container_item(&method.value, key)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -8533,6 +8564,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_set_or_dict_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {
