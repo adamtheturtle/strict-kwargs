@@ -5150,10 +5150,19 @@ impl<'a> CallChecker<'a> {
         if let Expr::Call(copy_call) = value {
             if copy_call.arguments.is_empty() {
                 if let Expr::Attribute(method) = copy_call.func.as_ref() {
-                    if method.attr.as_str() == "copy"
-                        && matches!(method.value.as_ref(), Expr::List(_))
-                    {
-                        return self.resolve_literal_container_item(&method.value, slice);
+                    if method.attr.as_str() == "copy" {
+                        if matches!(method.value.as_ref(), Expr::List(_)) {
+                            return self.resolve_literal_container_item(&method.value, slice);
+                        }
+                        if let Expr::Call(constructor) = method.value.as_ref() {
+                            if self
+                                .class_from_constructor_func(&constructor.func)
+                                .as_deref()
+                                == Some("types.MappingProxyType")
+                            {
+                                return self.resolve_literal_container_item(&method.value, slice);
+                            }
+                        }
                     }
                 }
             }
@@ -5174,16 +5183,22 @@ impl<'a> CallChecker<'a> {
                 }
             }
             let factory = self.resolve_callee(&wrapper.func)?;
+            let factory = Self::normalize_factory_fullname(&factory);
             if matches!(
-                Self::normalize_factory_fullname(&factory),
+                factory,
                 "collections.ChainMap"
                     | "collections.OrderedDict"
                     | "collections.UserDict"
                     | "types.MappingProxyType"
-            ) && wrapper.arguments.keywords.is_empty()
-            {
-                let [mapping] = &*wrapper.arguments.args else {
-                    return None;
+            ) {
+                let mapping = match &*wrapper.arguments.args {
+                    [mapping] if wrapper.arguments.keywords.is_empty() => mapping,
+                    [] if factory == "types.MappingProxyType"
+                        && wrapper.arguments.keywords.len() == 1 =>
+                    {
+                        &wrapper.arguments.find_keyword("mapping")?.value
+                    }
+                    _ => return None,
                 };
                 return self.resolve_literal_container_item(mapping, slice);
             }
