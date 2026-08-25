@@ -505,6 +505,38 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Provably empty literal dictionary unpacking cannot override a concrete
+/// callable value (issue #810).
+#[test]
+fn empty_dict_unpacking_preserves_selected_callable() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"x": target, **{}}["x"](1)
+{**{}, "x": target}["x"](1)
+{"x": target, **{**{}}}["x"](1)
+"#,
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected empty-unpack violation on line {line}, got: {messages:?}"
+        );
+    }
+
+    let dynamic = check_source(
+        r#"
+def target(value: int) -> None: ...
+mapping = {"x": lambda *args: None}
+{"x": target, **mapping}["x"](1)
+"#,
+    );
+    assert!(
+        dynamic.is_empty(),
+        "dynamic unpack must decline: {dynamic:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]

@@ -4880,6 +4880,28 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_is_provably_empty(dict: &ast::ExprDict) -> bool {
+        dict.items.iter().all(|item| {
+            item.key.is_none()
+                && matches!(
+                    &item.value,
+                    Expr::Dict(nested) if Self::literal_dict_is_provably_empty(nested)
+                )
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_has_only_static_items(dict: &ast::ExprDict) -> bool {
+        dict.items.iter().all(|item| {
+            item.key.is_some()
+                || matches!(
+                    &item.value,
+                    Expr::Dict(unpacked) if Self::literal_dict_is_provably_empty(unpacked)
+                )
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
@@ -4907,7 +4929,7 @@ impl<'a> CallChecker<'a> {
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
             }
-            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
+            Expr::Dict(dict) if Self::literal_dict_has_only_static_items(dict) => dict
                 .items
                 .iter()
                 .rev()
