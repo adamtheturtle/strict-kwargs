@@ -7591,6 +7591,35 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weak_value_dict_literal_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop"
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakValueDictionary"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [mapping] = &*constructor.arguments.args else {
+            return None;
+        };
+        let key = match &*call.arguments.args {
+            [key] if call.arguments.keywords.is_empty() => key,
+            [] if call.arguments.keywords.len() == 1 => &call.arguments.find_keyword("key")?.value,
+            _ => return None,
+        };
+        self.resolve_literal_container_item(mapping, key)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn collections_mapping_pop_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -8347,6 +8376,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_dict_get_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.weak_value_dict_literal_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {

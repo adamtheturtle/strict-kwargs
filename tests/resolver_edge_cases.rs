@@ -4795,6 +4795,23 @@ weakref.WeakValueDictionary({"x": target}).get(key="x")(1)
     );
 }
 
+/// An immediate `WeakValueDictionary.pop` preserves the concrete callable at
+/// a known literal key (issue #935).
+#[test]
+fn weak_value_dictionary_pop_preserves_literal_callable() {
+    let messages = check_source(
+        r#"
+import weakref
+def target(value: int) -> None: ...
+weakref.WeakValueDictionary({"x": target}).pop(key="x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected WeakValueDictionary.pop violation, got: {messages:?}"
+    );
+}
+
 /// Annotated `Future[Callable[...]].result()` preserves the callable signature
 /// (issue #410).
 #[test]
