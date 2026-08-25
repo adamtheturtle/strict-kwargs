@@ -701,6 +701,58 @@ def caller(value: object) -> None:
         reassigned.is_empty(),
         "reassigned aliases must not leave stale narrowing: {reassigned:?}"
     );
+
+    for source in [
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: object) -> None:
+    Callback = int
+    def is_callback(item: object) -> typing.TypeIs[Callback]: return isinstance(item, int)
+    if is_callback(item=value): value(1)
+",
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+Callback, other = int, int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+",
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+for Callback in [int]: pass
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+",
+        r#"
+import typing
+Callback = typing.Callable[[int], int]
+globals()["Callback"] = int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+"#,
+        r"
+import typing
+def outer() -> None:
+    Callback = typing.Callable[[int], int]
+    def rebind() -> None:
+        nonlocal Callback
+        Callback = int
+    def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+    def caller(value: object) -> None:
+        if is_callback(value=value): value(1)
+",
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "shadowed alias must not leave stale narrowing: {messages:?}"
+        );
+    }
 }
 
 #[test]

@@ -1466,7 +1466,7 @@ struct Scope {
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
     /// Local type aliases whose value is a concrete ``Callable`` annotation.
-    callable_type_aliases: FxHashMap<String, Signature>,
+    callable_type_aliases: FxHashMap<String, Option<Signature>>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
@@ -1638,7 +1638,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
-        scope.callable_type_aliases.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1674,7 +1676,9 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
-            scope.callable_type_aliases.remove(local_name);
+            scope
+                .callable_type_aliases
+                .insert(local_name.to_string(), None);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1829,7 +1833,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
-        scope.callable_type_aliases.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1872,7 +1876,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
-        scope.callable_type_aliases.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2185,7 +2189,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
-        scope.callable_type_aliases.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -5175,11 +5181,13 @@ impl<'a> CallChecker<'a> {
     /// walrus, etc.).
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_local_name_if_callable(&mut self, name: &str) {
+        let was_callable_alias = self.has_visible_callable_type_alias(name);
         let was_known_callable = self.scopes.last().is_some_and(|scope| {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
-        });
+                || scope.callable_type_aliases.contains_key(name)
+        }) || was_callable_alias;
         if was_known_callable {
             self.mark_opaque_local(name);
             self.current_scope()
@@ -5299,7 +5307,8 @@ impl<'a> CallChecker<'a> {
         };
         let was_known = scope.functions.contains_key(name)
             || scope.names.contains_key(name)
-            || scope.modules.contains_key(name);
+            || scope.modules.contains_key(name)
+            || matches!(scope.callable_type_aliases.get(name), Some(Some(_)));
         if !was_known {
             return;
         }
@@ -5323,7 +5332,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
-        scope.callable_type_aliases.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -5376,12 +5385,16 @@ impl<'a> CallChecker<'a> {
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
             let owns = self.scopes[index].functions.contains_key(name)
-                || self.scopes[index].names.contains_key(name);
+                || self.scopes[index].names.contains_key(name)
+                || self.scopes[index].callable_type_aliases.contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
+            self.scopes[index]
+                .callable_type_aliases
+                .insert(name.to_string(), None);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
@@ -5466,7 +5479,7 @@ impl<'a> CallChecker<'a> {
         };
         for scope in self.scopes.iter().rev() {
             if let Some(signature) = scope.callable_type_aliases.get(name.id.as_str()) {
-                return Some(signature.clone());
+                return signature.clone();
             }
             if scope.names.contains_key(name.id.as_str())
                 || scope.opaque_locals.contains(name.id.as_str())
@@ -5475,6 +5488,18 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    fn has_visible_callable_type_alias(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name) {
+                return signature.is_some();
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return false;
+            }
+        }
+        false
     }
 
     fn typeguard_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
@@ -8418,7 +8443,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if let Some(signature) = &callable_type_alias {
                             self.current_scope()
                                 .callable_type_aliases
-                                .insert(name.id.to_string(), signature.clone());
+                                .insert(name.id.to_string(), Some(signature.clone()));
                         }
                         // Record after instance clearing so WeakSet/list element
                         // tracking is not wiped by ``clear_instance_binding``.
@@ -8494,11 +8519,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .filter_map(|item| item.optional_vars.as_deref())
                 {
                     if let Expr::Name(name) = target {
+                        let was_callable_alias =
+                            self.has_visible_callable_type_alias(name.id.as_str());
                         let was_known_callable = self.scopes.last().is_some_and(|scope| {
                             scope.functions.contains_key(name.id.as_str())
                                 || scope.names.contains_key(name.id.as_str())
                                 || scope.modules.contains_key(name.id.as_str())
-                        });
+                                || scope.callable_type_aliases.contains_key(name.id.as_str())
+                        }) || was_callable_alias;
                         self.mark_opaque_local(name.id.as_str());
                         if was_known_callable {
                             self.current_scope()
@@ -8536,7 +8564,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     if let Some(signature) = callable_type_alias {
                         self.current_scope()
                             .callable_type_aliases
-                            .insert(name.id.to_string(), signature);
+                            .insert(name.id.to_string(), Some(signature));
                     }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
