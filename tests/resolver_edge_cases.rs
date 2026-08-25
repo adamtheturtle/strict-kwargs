@@ -1802,6 +1802,18 @@ deque(iterable=[target]).copy()[0](1)
         has_error_at(&messages, 4, "deque result"),
         "expected copied-deque violation, got: {messages:?}"
     );
+
+    let qualified = check_source(
+        r"
+import collections
+def target(value: int) -> None: ...
+collections.deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&qualified, 4, "deque result"),
+        "qualified deque constructor must remain supported, got: {qualified:?}"
+    );
 }
 
 /// Iterating an immediate literal dictionary's values preserves a concrete
