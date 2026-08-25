@@ -6085,6 +6085,49 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dictionary_iterator_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if !matches!(
+            self.resolve_callee(&iter_call.func)?.as_str(),
+            "builtins.iter" | "builtins.iter.__new__"
+        ) {
+            return None;
+        }
+        let [Expr::Call(constructor)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        if self
+            .class_from_constructor_func(&constructor.func)?
+            .as_str()
+            != "weakref.WeakKeyDictionary"
+        {
+            return None;
+        }
+        let mapping = constructor
+            .arguments
+            .find_keyword("dict")
+            .map(|keyword| &keyword.value)
+            .or_else(|| constructor.arguments.args.first())?;
+        let Expr::Dict(mapping) = mapping else {
+            return None;
+        };
+        let mut result = None;
+        for item in &mapping.items {
+            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn queue_item_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -6588,6 +6631,9 @@ impl<'a> CallChecker<'a> {
             return Some(signature);
         }
         if let Some(signature) = self.dict_values_item_signature(iterator) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.weak_key_dictionary_iterator_signature(iterator) {
             return Some(signature);
         }
         if let Some(signature) = self.itertools_item_signature(iterator, selected_index) {
