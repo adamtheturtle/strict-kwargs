@@ -6243,7 +6243,9 @@ impl<'a> CallChecker<'a> {
                     .is_some_and(|class| {
                         matches!(
                             class.as_str(),
-                            "collections.OrderedDict" | "collections.UserDict"
+                            "collections.ChainMap"
+                                | "collections.OrderedDict"
+                                | "collections.UserDict"
                         )
                     })
                     && constructor.arguments.keywords.is_empty() =>

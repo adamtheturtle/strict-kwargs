@@ -2137,6 +2137,23 @@ next(iter(UserDict({"x": target}).values()))(1)
     );
 }
 
+/// Iterating a single-mapping immediate `ChainMap`'s values preserves a
+/// concrete callable value shape (issue #928).
+#[test]
+fn chain_map_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+next(iter(ChainMap({"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected ChainMap values violation, got: {messages:?}"
+    );
+}
+
 /// `dict.get` on an existing literal key preserves its callable value
 /// (issue #773).
 #[test]
