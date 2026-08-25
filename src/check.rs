@@ -8075,6 +8075,14 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
+        if let Expr::Attribute(method) = call.func.as_ref() {
+            if method.attr.as_str() == "__getitem__" && call.arguments.keywords.is_empty() {
+                let [slice] = &*call.arguments.args else {
+                    return None;
+                };
+                return self.resolve_literal_container_item(&method.value, slice);
+            }
+        }
         // Keyword arguments are allowed; only positional value/slice matter.
         if !self.names_stdlib_callable(call.func.as_ref(), "operator.getitem") {
             return None;
