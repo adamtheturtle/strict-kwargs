@@ -549,6 +549,27 @@ iconcat([target], [])[0](1)
     }
 }
 
+/// Literal slices retain the concrete callable at a statically selected result
+/// index, including negative and stepped slices (issue #805).
+#[test]
+fn literal_sequence_slices_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target][0:1][0](1)
+(target,)[0:1][0](1)
+[target, 0][::-1][-1](1)
+[target, 0, target][::2][1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected sliced-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]
@@ -1890,6 +1911,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// `dict.get` on an existing literal key preserves its callable value
+/// (issue #773).
+#[test]
+fn literal_dict_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.get("key")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-get violation, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary's `popitem` value preserves its concrete callable
 /// (issue #774).
 #[test]
@@ -2222,6 +2259,22 @@ call(1)
     assert!(
         has_error_at(&messages, 6, "list pop result"),
         "expected list-pop violation, got: {messages:?}"
+    );
+}
+
+/// A literal list copy preserves the concrete callable at a static index
+/// (issue #771).
+#[test]
+fn literal_list_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected list-copy violation, got: {messages:?}"
     );
 }
 
@@ -3852,6 +3905,40 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A single-mapping `ChainMap` preserves concrete callable values through
+/// subscripting (issue #777).
+#[test]
+fn chainmap_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An empty `ChainMap.new_child` falls through to concrete callable values in
+/// the parent mapping (issue #820).
+#[test]
+fn chainmap_empty_new_child_preserves_parent_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"x": target}).new_child()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected parent ChainMap result violation, got: {messages:?}"
+    );
+}
+
 /// An `OrderedDict` initialized from a literal mapping preserves concrete
 /// callable values through subscripting (issue #779).
 #[test]
@@ -5094,5 +5181,76 @@ dataclasses.dataclass()(Model)(1)
     assert!(
         has_error_at(&messages, 6, "Model") && has_error_at(&messages, 7, "Model"),
         "expected dataclass identity-return violations, got: {messages:?}"
+    );
+}
+
+/// A local function consisting of one unconditional return of a concrete
+/// callable preserves that callable's signature (issue #803).
+#[test]
+fn single_return_factory_preserves_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected concrete factory-result violation, got: {messages:?}"
+    );
+}
+
+/// Additional statements make a factory body too dynamic to infer safely.
+#[test]
+fn multi_statement_factory_does_not_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    marker = 1
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "dynamic factory should decline: {messages:?}"
+    );
+}
+
+/// Parameters shadow enclosing concrete callables inside the factory body.
+#[test]
+fn single_return_factory_does_not_resolve_shadowed_parameter() {
+    let messages = check_source(
+        r"
+def value(first: int, second: int) -> None: ...
+def factory(value=lambda *args: None):
+    return value
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "shadowed parameter must not resolve to the outer callable: {messages:?}"
+    );
+}
+
+/// Calling an async factory directly produces a coroutine, not its returned
+/// callable value.
+#[test]
+fn async_single_return_factory_does_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+async def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "async factory must decline: {messages:?}"
     );
 }
