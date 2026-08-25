@@ -505,6 +505,25 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// `collections.UserList` preserves concrete callable elements from its
+/// positional or `initlist=` literal input (issue #814).
+#[test]
+fn userlist_subscript_resolves_selected_callable() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target])[0](1)
+collections.UserList((target,))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList violations, got: {messages:?}"
+    );
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]
