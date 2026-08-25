@@ -505,6 +505,70 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Literal slices retain the concrete callable at a statically selected result
+/// index, including negative and stepped slices (issue #805).
+#[test]
+fn literal_sequence_slices_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target][0:1][0](1)
+(target,)[0:1][0](1)
+[target, 0][::-1][-1](1)
+[target, 0, target][::2][1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected sliced-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// A statically non-empty homogeneous slice captured by a starred assignment
+/// target remains a callable list (issue #801).
+#[test]
+fn starred_destructuring_tail_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected starred-tail violation, got: {messages:?}"
+    );
+
+    let rebound = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail = [lambda *args: None]
+tail[0](1)
+",
+    );
+    assert!(
+        rebound.is_empty(),
+        "reassigning a starred list must clear its old callable: {rebound:?}"
+    );
+
+    let destructured_rebind = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail, = [[lambda *args: None]]
+tail[0](1)
+",
+    );
+    assert!(
+        destructured_rebind.is_empty(),
+        "destructuring must clear a starred callable list: {destructured_rebind:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
@@ -1770,6 +1834,23 @@ deque([f]).pop()(1)
     );
 }
 
+/// Subscripting an immediately constructed deque preserves a literal
+/// initializer's selected callable element (issue #786).
+#[test]
+fn deque_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result"),
+        "expected deque-subscript violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate literal dictionary's values preserves a concrete
 /// callable value shape (issue #391).
 #[test]
@@ -1783,6 +1864,22 @@ next(iter({"call": f}.values()))(1)
     assert!(
         has_error_at(&messages, 3, "next() result"),
         "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
+/// A literal dictionary's `popitem` value preserves its concrete callable
+/// (issue #774).
+#[test]
+fn literal_dict_popitem_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-popitem violation, got: {messages:?}"
     );
 }
 
@@ -2118,6 +2215,22 @@ def target(value: int) -> None: ...
     assert!(
         has_error_at(&messages, 3, "target"),
         "expected list-copy violation, got: {messages:?}"
+    );
+}
+
+/// Explicit `list.__getitem__` preserves the callable at a literal index
+/// (issue #772).
+#[test]
+fn literal_list_explicit_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__getitem__(0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit-getitem violation, got: {messages:?}"
     );
 }
 
@@ -3313,6 +3426,55 @@ async def main() -> None:
     }
 }
 
+/// A stored `IsolatedAsyncioTestCase` retains the generic callable returned by
+/// `enterAsyncContext` (regression #760).
+#[test]
+fn isolated_asyncio_test_case_instance_preserves_entered_callable() {
+    let messages = check_source(
+        r"
+import unittest
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None: pass
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    case = object()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale case bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 11, "awaited result")
+            || has_error_at(&messages, 11, "generic result"),
+        "expected entered-callable violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn inherited_unittest_enter_helper_keeps_generic_return() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+def target(value: int) -> None: ...
+class Case(unittest.TestCase): pass
+Case().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "inherited enter helper must preserve its generic return: {messages:?}"
+    );
+}
+
 /// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
 /// are indexed for later generic-result checking.
 #[test]
@@ -3683,6 +3845,57 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A single-mapping `ChainMap` preserves concrete callable values through
+/// subscripting (issue #777).
+#[test]
+fn chainmap_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An `OrderedDict` initialized from a literal mapping preserves concrete
+/// callable values through subscripting (issue #779).
+#[test]
+fn ordereddict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict result violation, got: {messages:?}"
+    );
+}
+
+/// A `UserDict` initialized from a literal mapping preserves concrete callable
+/// values through subscripting (issue #778).
+#[test]
+fn userdict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict result violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
@@ -3702,6 +3915,26 @@ heapq.heapreplace([f, f], f)(1)
     assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 7, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
+}
+
+/// `heapq.nsmallest` and `nlargest` retain concrete callable elements through
+/// subscripting, including their keyword argument forms (issue #793).
+#[test]
+fn heapq_selection_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def target(value: int) -> None: ...
+heapq.nsmallest(n=1, iterable=[target])[0](1)
+heapq.nlargest(n=1, iterable=[target])[0](1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected heapq selection violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// Generic selectors in `random` and `secrets` retain their input element's
@@ -3725,6 +3958,27 @@ secrets.choice((f,))(1)
     }
 }
 
+/// The valid keyword form of `random.choice` and `secrets.choice` preserves
+/// callable elements just like the positional form (issue #785).
+#[test]
+fn random_choice_keyword_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+import secrets
+def target(value: int) -> None: ...
+random.choice(seq=[target])(1)
+secrets.choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected keyword choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `statistics.mode` / `multimode` preserve callable element types (issue #515).
 #[test]
 fn statistics_selector_results_preserve_callable_signatures() {
@@ -3742,6 +3996,26 @@ statistics.multimode(data=[target])[0](1)
     );
 }
 
+/// Singleton `statistics.median_low` and `median_high` results preserve the
+/// sole callable data element (issue #796).
+#[test]
+fn statistics_median_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import statistics
+def target(value: int) -> None: ...
+statistics.median_low(data=[target])(1)
+statistics.median_high(data=[target])(1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected statistics median violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `Counter.most_common` preserves callable key types (issue #514).
 #[test]
 fn counter_most_common_preserves_callable_key_signatures() {
@@ -3755,6 +4029,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected Counter.most_common violation, got: {messages:?}"
+    );
+}
+
+/// `Counter.elements()` preserves concrete callable keys through `next()`
+/// for an immediately constructed counter (issue #797).
+#[test]
+fn counter_elements_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(Counter([target]).elements())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter.elements violation, got: {messages:?}"
     );
 }
 
@@ -4219,6 +4510,49 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     assert!(
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+/// A stored `property` retains the callable returned by its getter
+/// (regression #761).
+#[test]
+fn stored_property_fget_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+prop.fget(self=Owner())(1)
+prop = object()
+prop.fget(self=Owner())(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale property bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "stored property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+#[test]
+fn stored_property_fget_does_not_cross_a_nested_rebinding() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+def caller() -> None:
+    prop = object()
+    prop.fget(self=Owner())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "nested rebinding must hide the stored getter: {messages:?}"
     );
 }
 
@@ -4770,5 +5104,76 @@ dataclasses.dataclass()(Model)(1)
     assert!(
         has_error_at(&messages, 6, "Model") && has_error_at(&messages, 7, "Model"),
         "expected dataclass identity-return violations, got: {messages:?}"
+    );
+}
+
+/// A local function consisting of one unconditional return of a concrete
+/// callable preserves that callable's signature (issue #803).
+#[test]
+fn single_return_factory_preserves_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected concrete factory-result violation, got: {messages:?}"
+    );
+}
+
+/// Additional statements make a factory body too dynamic to infer safely.
+#[test]
+fn multi_statement_factory_does_not_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    marker = 1
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "dynamic factory should decline: {messages:?}"
+    );
+}
+
+/// Parameters shadow enclosing concrete callables inside the factory body.
+#[test]
+fn single_return_factory_does_not_resolve_shadowed_parameter() {
+    let messages = check_source(
+        r"
+def value(first: int, second: int) -> None: ...
+def factory(value=lambda *args: None):
+    return value
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "shadowed parameter must not resolve to the outer callable: {messages:?}"
+    );
+}
+
+/// Calling an async factory directly produces a coroutine, not its returned
+/// callable value.
+#[test]
+fn async_single_return_factory_does_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+async def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "async factory must decline: {messages:?}"
     );
 }
