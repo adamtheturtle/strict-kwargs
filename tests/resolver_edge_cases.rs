@@ -526,6 +526,49 @@ def target(value: int) -> None: ...
     }
 }
 
+/// A statically non-empty homogeneous slice captured by a starred assignment
+/// target remains a callable list (issue #801).
+#[test]
+fn starred_destructuring_tail_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected starred-tail violation, got: {messages:?}"
+    );
+
+    let rebound = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail = [lambda *args: None]
+tail[0](1)
+",
+    );
+    assert!(
+        rebound.is_empty(),
+        "reassigning a starred list must clear its old callable: {rebound:?}"
+    );
+
+    let destructured_rebind = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail, = [[lambda *args: None]]
+tail[0](1)
+",
+    );
+    assert!(
+        destructured_rebind.is_empty(),
+        "destructuring must clear a starred callable list: {destructured_rebind:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
@@ -2159,6 +2202,22 @@ call(1)
     );
 }
 
+/// Explicit `list.__getitem__` preserves the callable at a literal index
+/// (issue #772).
+#[test]
+fn literal_list_explicit_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__getitem__(0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit-getitem violation, got: {messages:?}"
+    );
+}
+
 /// Immediate list pop results preserve homogeneous callable elements
 /// (issue #770).
 #[test]
@@ -3768,6 +3827,23 @@ UserDict({"call": third}).pop("call")(1)
             "expected {callee} violation, got: {messages:?}"
         );
     }
+}
+
+/// An `OrderedDict` initialized from a literal mapping preserves concrete
+/// callable values through subscripting (issue #779).
+#[test]
+fn ordereddict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict result violation, got: {messages:?}"
+    );
 }
 
 /// A `UserDict` initialized from a literal mapping preserves concrete callable
