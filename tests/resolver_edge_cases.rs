@@ -3807,6 +3807,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// `Counter.elements()` preserves concrete callable keys through `next()`
+/// for an immediately constructed counter (issue #797).
+#[test]
+fn counter_elements_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(Counter([target]).elements())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter.elements violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]
