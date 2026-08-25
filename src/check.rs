@@ -4690,8 +4690,22 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
         if let Expr::Subscript(subscript) = func {
-            let Expr::Call(constructor) = subscript.value.as_ref() else {
+            let Expr::Call(value_call) = subscript.value.as_ref() else {
                 return None;
+            };
+            let constructor = if let Expr::Attribute(method) = value_call.func.as_ref() {
+                if method.attr.as_str() != "copy"
+                    || !value_call.arguments.args.is_empty()
+                    || !value_call.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let Expr::Call(constructor) = method.value.as_ref() else {
+                    return None;
+                };
+                constructor
+            } else {
+                value_call
             };
             let constructor_name = self.resolve_callee(&constructor.func)?;
             if !matches!(
