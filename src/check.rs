@@ -1468,6 +1468,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Locals bound by an `asyncio.TaskGroup` context manager.
+    asyncio_task_groups: FxHashSet<String>,
     /// Stored unittest case instances whose context-entry helpers have a
     /// type-preserving generic return.
     unittest_enter_instances: FxHashMap<String, String>,
@@ -1646,6 +1648,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.asyncio_task_groups.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
@@ -1683,6 +1686,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.asyncio_task_groups.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
@@ -1904,6 +1908,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.asyncio_task_groups.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -1948,6 +1953,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.asyncio_task_groups.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -2262,6 +2268,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.asyncio_task_groups.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
@@ -5599,6 +5606,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.asyncio_task_groups.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -6358,8 +6366,22 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = expr else {
             return None;
         };
-        let factory = self.resolve_callee(&call.func)?;
-        if !Self::is_asyncio_callable(&factory, "create_task") {
+        let is_module_create_task = self
+            .resolve_callee(&call.func)
+            .is_some_and(|factory| Self::is_asyncio_callable(&factory, "create_task"));
+        let is_task_group_create_task = match call.func.as_ref() {
+            Expr::Attribute(method) if method.attr.as_str() == "create_task" => {
+                let Expr::Name(receiver) = method.value.as_ref() else {
+                    return None;
+                };
+                self.scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.asyncio_task_groups.contains(receiver.id.as_str()))
+            }
+            _ => false,
+        };
+        if !is_module_create_task && !is_task_group_create_task {
             return None;
         }
         let coroutine = call
@@ -8347,6 +8369,11 @@ impl<'a> CallChecker<'a> {
                 let Some(factory) = self.resolve_callee(&manager_call.func) else {
                     continue;
                 };
+                if Self::is_asyncio_callable(&factory, "TaskGroup") {
+                    self.current_scope()
+                        .asyncio_task_groups
+                        .insert(name.id.to_string());
+                }
                 if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
                     self.define_function(
                         name.id.as_str(),
