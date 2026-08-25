@@ -505,6 +505,91 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Concatenated literal sequences retain the concrete callable selected from
+/// either operand (issue #806).
+#[test]
+fn concatenated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] + [])[0](1)
+((target,) + ())[0](1)
+([0] + [target])[-1](1)
+((target,) + (0,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected concatenated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Literal slices retain the concrete callable at a statically selected result
+/// index, including negative and stepped slices (issue #805).
+#[test]
+fn literal_sequence_slices_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target][0:1][0](1)
+(target,)[0:1][0](1)
+[target, 0][::-1][-1](1)
+[target, 0, target][::2][1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected sliced-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// A statically non-empty homogeneous slice captured by a starred assignment
+/// target remains a callable list (issue #801).
+#[test]
+fn starred_destructuring_tail_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected starred-tail violation, got: {messages:?}"
+    );
+
+    let rebound = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail = [lambda *args: None]
+tail[0](1)
+",
+    );
+    assert!(
+        rebound.is_empty(),
+        "reassigning a starred list must clear its old callable: {rebound:?}"
+    );
+
+    let destructured_rebind = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail, = [[lambda *args: None]]
+tail[0](1)
+",
+    );
+    assert!(
+        destructured_rebind.is_empty(),
+        "destructuring must clear a starred callable list: {destructured_rebind:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
@@ -813,6 +898,40 @@ namespace.call(1)
     );
 }
 
+/// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
+/// constructor attribute (issue #834).
+#[test]
+fn vars_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+vars(types.SimpleNamespace(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected vars(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
+/// `getattr` with a literal name preserves a concrete callable attribute on
+/// an inline `SimpleNamespace` (issue #835).
+#[test]
+fn getattr_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+getattr(types.SimpleNamespace(callback=target), "callback")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected getattr(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
@@ -838,6 +957,44 @@ current.get()(1)
     );
 }
 
+/// An unannotated `ContextVar` infers a concrete callable from its default
+/// value (issue #851).
+#[test]
+fn contextvar_default_infers_callable_signature() {
+    let messages = check_source(
+        r#"
+from contextvars import ContextVar
+def target(value: int) -> None: ...
+current = ContextVar("current", default=target)
+current.get()(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "get() result"),
+        "expected inferred ContextVar.get violation, got: {messages:?}"
+    );
+}
+
+/// Rebinding an inferred `ContextVar` clears its default callable signature
+/// (Bugbot on #997).
+#[test]
+fn contextvar_default_signature_is_cleared_on_rebind() {
+    let messages = check_source(
+        r#"
+from contextvars import ContextVar
+def target(value: int) -> None: ...
+current = ContextVar("current", default=target)
+class Replacement: ...
+current = Replacement()
+current.get()(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "rebound ContextVar must not retain its default: {messages:?}"
+    );
+}
+
 /// A dataclass constructor keyword directly supplies the corresponding field
 /// value, preserving a concrete callable's signature (issue #373).
 #[test]
@@ -856,6 +1013,127 @@ Holder(call=f).call(1)
     assert!(
         has_error_at(&messages, 8, "f"),
         "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
+/// `dataclasses.astuple` preserves concrete callable constructor fields at a
+/// literal tuple index (issue #830).
+#[test]
+fn dataclasses_astuple_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.astuple(obj=Record(callback=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.astuple violation, got: {messages:?}"
+    );
+}
+
+/// `dataclasses.asdict` preserves a concrete callable constructor field
+/// selected by its literal field name (issue #831).
+#[test]
+fn dataclasses_asdict_preserves_callable_field_signature() {
+    let messages = check_source(
+        r#"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.asdict(obj=Record(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.asdict violation, got: {messages:?}"
+    );
+}
+
+/// `asdict` omits constructor-only `InitVar` entries.
+#[test]
+fn dataclasses_asdict_ignores_initvar_fields() {
+    let messages = check_source(
+        r#"
+import dataclasses
+from dataclasses import InitVar, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+dataclasses.asdict(obj=Record(transient=target))["transient"](1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not resolve as an asdict field: {messages:?}"
+    );
+}
+
+/// `astuple` uses stored dataclass fields rather than constructor-only
+/// `InitVar` entries when mapping tuple positions (issue #830).
+#[test]
+fn dataclasses_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar, dataclass, field
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+    stored: object = field(default=None, init=False)
+dataclasses.astuple(obj=Record(transient=target))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// `KW_ONLY` is a dataclass sentinel rather than a stored runtime field.
+#[test]
+fn dataclasses_astuple_ignores_kw_only_sentinel() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import KW_ONLY, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    _: KW_ONLY
+    stored: object
+dataclasses.astuple(Record(stored=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "target"),
+        "KW_ONLY must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// Functional dataclasses omit constructor-only `InitVar` entries at runtime.
+#[test]
+fn make_dataclass_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar
+def target(value: int) -> None: ...
+Record = dataclasses.make_dataclass(cls_name='Record', fields=[('transient', InitVar[object]), ('stored', object)])
+dataclasses.astuple(obj=Record(transient=target, stored=None))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy a make_dataclass astuple position: {messages:?}"
     );
 }
 
@@ -1175,6 +1453,27 @@ async def caller() -> None:
     );
 }
 
+/// Awaiting an item yielded by `asyncio.as_completed` preserves the concrete
+/// callable result of its source awaitables (issue #836).
+#[test]
+fn asyncio_as_completed_preserves_callable_awaitable_result() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    completed = asyncio.as_completed(fs=[factory()])
+    (await next(iter(completed)))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "awaited result"),
+        "expected asyncio.as_completed violation, got: {messages:?}"
+    );
+}
+
 /// `anext` preserves callable item signatures declared by async iterator
 /// factories (issue #384).
 #[test]
@@ -1247,6 +1546,45 @@ async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
     assert!(
         has_error_at(&messages, 5, "async-for item"),
         "expected async-for item violation, got: {messages:?}"
+    );
+}
+
+/// ``async for`` reads callable items from an annotated iterator factory
+/// invocation (issue #841).
+#[test]
+fn async_for_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def values() -> AsyncIterator[Callable[[int], None]]:
+    yield lambda value: None
+async def main() -> None:
+    async for item in values():
+        item(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "async-for item"),
+        "expected async-for factory item violation, got: {messages:?}"
+    );
+}
+
+/// Async comprehensions use the annotated callable item from their iterator
+/// factory (issue #842).
+#[test]
+fn async_comprehension_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def values() -> AsyncIterator[Callable[[int], None]]:
+    yield lambda value: None
+async def main() -> None:
+    [item(1) async for item in values()]
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "comprehension item"),
+        "expected async-comprehension item violation, got: {messages:?}"
     );
 }
 
@@ -1710,23 +2048,44 @@ next(itertools.zip_longest([f]))[0](1)
     }
 }
 
-/// Generic builtins preserve literal callable elements at their documented
-/// output positions (issue #390).
+/// Tuple-producing builtins preserve literal callable elements at their
+/// documented output positions (issue #390).
 #[test]
 fn builtin_iterator_results_preserve_callable_item_signatures() {
     let messages = check_source(
         r"
 def f(value: int) -> None: ...
 next(zip([f]))[0](1)
-next(map(lambda x: x, [f]))(1)
-next(filter(None, [f]))(1)
 next(enumerate([f]))[1](1)
 ",
     );
-    for line in 3..=6 {
+    for line in 3..=4 {
         assert!(
             has_error_at(&messages, line, "next() result"),
             "expected builtin-iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// `map` and `filter` preserve literal callable items (regression #759).
+#[test]
+fn map_and_filter_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(map(lambda item: item, [target]))(1)
+next(filter(None, [target]))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly two violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected map/filter violation on line {line}, got: {messages:?}"
         );
     }
 }
@@ -1746,6 +2105,23 @@ deque([f]).pop()(1)
     assert!(
         has_error_at(&messages, 4, "deque result") && has_error_at(&messages, 5, "deque result"),
         "expected deque-result violations, got: {messages:?}"
+    );
+}
+
+/// Subscripting an immediately constructed deque preserves a literal
+/// initializer's selected callable element (issue #786).
+#[test]
+fn deque_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result"),
+        "expected deque-subscript violation, got: {messages:?}"
     );
 }
 
@@ -1779,6 +2155,55 @@ MappingProxyType({"key": target})["key"](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected mapping-proxy result violation, got: {messages:?}"
+    );
+}
+
+/// `dict.get` on an existing literal key preserves its callable value
+/// (issue #773).
+#[test]
+fn literal_dict_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.get("key")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-get violation, got: {messages:?}"
+    );
+}
+
+/// `defaultdict.get` preserves an existing literal mapping value rather than
+/// invoking or widening through its default factory (issue #800).
+#[test]
+fn defaultdict_get_preserves_existing_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: None, {"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict.get violation, got: {messages:?}"
+    );
+}
+
+/// A literal dictionary's `popitem` value preserves its concrete callable
+/// (issue #774).
+#[test]
+fn literal_dict_popitem_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-popitem violation, got: {messages:?}"
     );
 }
 
@@ -1870,6 +2295,133 @@ async def caller() -> None:
     assert!(
         has_error_at(&messages, 6, "get() result"),
         "expected queue result violation, got: {messages:?}"
+    );
+}
+
+/// A concrete `put_nowait` mutation infers the callable item returned by an
+/// unannotated `asyncio.Queue` (issue #840).
+#[test]
+fn asyncio_queue_put_nowait_infers_callable_item_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "get() result"),
+        "expected concrete Queue item violation, got: {messages:?}"
+    );
+}
+
+/// Heterogeneous concrete queue mutations do not retain a stale signature.
+#[test]
+fn asyncio_queue_put_nowait_rejects_ambiguous_item_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    values.put_nowait(item=object())
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "heterogeneous queue must not retain an inferred signature: {messages:?}"
+    );
+}
+
+/// A non-callable first insertion prevents later homogeneous inference.
+#[test]
+fn asyncio_queue_put_nowait_non_callable_first_is_ambiguous() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=object())
+    values.put_nowait(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "non-callable first item must make queue inference ambiguous: {messages:?}"
+    );
+}
+
+/// A nested shadow cannot poison the outer queue's inferred item signature.
+#[test]
+fn asyncio_queue_put_nowait_respects_nested_shadowing() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    async def inner() -> None:
+        values = object()
+        values.put_nowait(item=object())
+    (await values.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "get() result"),
+        "nested shadow must not poison the outer queue: {messages:?}"
+    );
+}
+
+/// A concrete `queue.Queue.put` mutation infers the callable returned by
+/// `get` (issue #848).
+#[test]
+fn sync_queue_put_infers_callable_item_signature() {
+    let messages = check_source(
+        r"
+import queue
+def target(value: int) -> None: ...
+values = queue.Queue()
+values.put(item=target)
+values.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "queue result"),
+        "expected concrete sync Queue item violation, got: {messages:?}"
+    );
+}
+
+/// Calling coroutine-based `asyncio.Queue.put` without awaiting it does not
+/// establish a concrete queue mutation.
+#[test]
+fn asyncio_queue_unawaited_put_does_not_infer_item_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "unawaited asyncio.Queue.put must not infer a mutation: {messages:?}"
     );
 }
 
@@ -2099,6 +2651,62 @@ call(1)
         has_error_at(&messages, 6, "list pop result"),
         "expected list-pop violation, got: {messages:?}"
     );
+}
+
+/// A literal list copy preserves the concrete callable at a static index
+/// (issue #771).
+#[test]
+fn literal_list_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected list-copy violation, got: {messages:?}"
+    );
+}
+
+/// Explicit `list.__getitem__` preserves the callable at a literal index
+/// (issue #772).
+#[test]
+fn literal_list_explicit_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__getitem__(0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit-getitem violation, got: {messages:?}"
+    );
+}
+
+/// Immediate list pop results preserve homogeneous callable elements
+/// (issue #770).
+#[test]
+fn literal_list_pop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].pop()(1)
+sorted([target]).pop()(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected both pop violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected list-pop violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// An operand-selecting `reduce` lambda preserves a literal sequence's
@@ -3269,6 +3877,55 @@ async def main() -> None:
     }
 }
 
+/// A stored `IsolatedAsyncioTestCase` retains the generic callable returned by
+/// `enterAsyncContext` (regression #760).
+#[test]
+fn isolated_asyncio_test_case_instance_preserves_entered_callable() {
+    let messages = check_source(
+        r"
+import unittest
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None: pass
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    case = object()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale case bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 11, "awaited result")
+            || has_error_at(&messages, 11, "generic result"),
+        "expected entered-callable violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn inherited_unittest_enter_helper_keeps_generic_return() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+def target(value: int) -> None: ...
+class Case(unittest.TestCase): pass
+Case().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "inherited enter helper must preserve its generic return: {messages:?}"
+    );
+}
+
 /// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
 /// are indexed for later generic-result checking.
 #[test]
@@ -3639,6 +4296,74 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A single-mapping `ChainMap` preserves concrete callable values through
+/// subscripting (issue #777).
+#[test]
+fn chainmap_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An empty `ChainMap.new_child` falls through to concrete callable values in
+/// the parent mapping (issue #820).
+#[test]
+fn chainmap_empty_new_child_preserves_parent_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"x": target}).new_child()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected parent ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An `OrderedDict` initialized from a literal mapping preserves concrete
+/// callable values through subscripting (issue #779).
+#[test]
+fn ordereddict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict result violation, got: {messages:?}"
+    );
+}
+
+/// A `UserDict` initialized from a literal mapping preserves concrete callable
+/// values through subscripting (issue #778).
+#[test]
+fn userdict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict result violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
@@ -3658,6 +4383,43 @@ heapq.heapreplace([f, f], f)(1)
     assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 7, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
+}
+
+/// A directly imported alias of `heapq.heappop` retains a concrete callable
+/// element's signature (issue #853).
+#[test]
+fn direct_import_heappop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from heapq import heappop as pop_heap
+def target(value: int) -> None: ...
+pop_heap([target])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct heappop violation, got: {messages:?}"
+    );
+}
+
+/// `heapq.nsmallest` and `nlargest` retain concrete callable elements through
+/// subscripting, including their keyword argument forms (issue #793).
+#[test]
+fn heapq_selection_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def target(value: int) -> None: ...
+heapq.nsmallest(n=1, iterable=[target])[0](1)
+heapq.nlargest(n=1, iterable=[target])[0](1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected heapq selection violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// Generic selectors in `random` and `secrets` retain their input element's
@@ -3681,6 +4443,48 @@ secrets.choice((f,))(1)
     }
 }
 
+/// Directly imported aliases of `random.choice` and `secrets.choice` retain
+/// the selected callable's signature (issue #852).
+#[test]
+fn direct_import_choice_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+from random import choice as random_choice
+from secrets import choice as secret_choice
+def target(value: int) -> None: ...
+random_choice(seq=[target])(1)
+secret_choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected direct choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// The valid keyword form of `random.choice` and `secrets.choice` preserves
+/// callable elements just like the positional form (issue #785).
+#[test]
+fn random_choice_keyword_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+import secrets
+def target(value: int) -> None: ...
+random.choice(seq=[target])(1)
+secrets.choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected keyword choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `statistics.mode` / `multimode` preserve callable element types (issue #515).
 #[test]
 fn statistics_selector_results_preserve_callable_signatures() {
@@ -3698,6 +4502,26 @@ statistics.multimode(data=[target])[0](1)
     );
 }
 
+/// Singleton `statistics.median_low` and `median_high` results preserve the
+/// sole callable data element (issue #796).
+#[test]
+fn statistics_median_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import statistics
+def target(value: int) -> None: ...
+statistics.median_low(data=[target])(1)
+statistics.median_high(data=[target])(1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected statistics median violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `Counter.most_common` preserves callable key types (issue #514).
 #[test]
 fn counter_most_common_preserves_callable_key_signatures() {
@@ -3711,6 +4535,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected Counter.most_common violation, got: {messages:?}"
+    );
+}
+
+/// `Counter.elements()` preserves concrete callable keys through `next()`
+/// for an immediately constructed counter (issue #797).
+#[test]
+fn counter_elements_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(Counter([target]).elements())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter.elements violation, got: {messages:?}"
     );
 }
 
@@ -3919,6 +4760,139 @@ future.result()(1)
     assert!(
         has_error_at(&messages, 6, "result() result"),
         "expected Future.result violation, got: {messages:?}"
+    );
+}
+
+/// `asyncio.create_task` infers a callable coroutine result for the created
+/// task's `result()` method (issue #837).
+#[test]
+fn asyncio_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    task = asyncio.create_task(coro=factory())
+    await task
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected create_task result violation, got: {messages:?}"
+    );
+}
+
+/// Dotted stdlib access remains a module-level `create_task` call.
+#[test]
+fn asyncio_tasks_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio.tasks
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    task = asyncio.tasks.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "result() result"),
+        "expected dotted create_task result violation, got: {messages:?}"
+    );
+}
+
+/// `TaskGroup.create_task` preserves the coroutine's callable result after
+/// the context manager waits for task completion (issue #839).
+#[test]
+fn asyncio_task_group_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        task = group.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected TaskGroup.create_task result violation, got: {messages:?}"
+    );
+}
+
+/// Rebinding the context-manager local must discard its `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        group = object()
+        task = group.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound TaskGroup local must not retain task result metadata: {messages:?}"
+    );
+}
+
+/// A nearer local binding shadows an enclosing `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_respects_nested_shadowing() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        async def inner() -> None:
+            group = object()
+            task = group.create_task(coro=factory())
+            task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "nested shadow must hide the outer TaskGroup: {messages:?}"
+    );
+}
+
+/// Loop-target rebinding discards a context target's `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        for group in [object()]:
+            task = group.create_task(coro=factory())
+            task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear TaskGroup identity: {messages:?}"
     );
 }
 
@@ -4175,6 +5149,49 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     assert!(
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+/// A stored `property` retains the callable returned by its getter
+/// (regression #761).
+#[test]
+fn stored_property_fget_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+prop.fget(self=Owner())(1)
+prop = object()
+prop.fget(self=Owner())(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale property bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "stored property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+#[test]
+fn stored_property_fget_does_not_cross_a_nested_rebinding() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+def caller() -> None:
+    prop = object()
+    prop.fget(self=Owner())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "nested rebinding must hide the stored getter: {messages:?}"
     );
 }
 
@@ -4726,5 +5743,76 @@ dataclasses.dataclass()(Model)(1)
     assert!(
         has_error_at(&messages, 6, "Model") && has_error_at(&messages, 7, "Model"),
         "expected dataclass identity-return violations, got: {messages:?}"
+    );
+}
+
+/// A local function consisting of one unconditional return of a concrete
+/// callable preserves that callable's signature (issue #803).
+#[test]
+fn single_return_factory_preserves_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected concrete factory-result violation, got: {messages:?}"
+    );
+}
+
+/// Additional statements make a factory body too dynamic to infer safely.
+#[test]
+fn multi_statement_factory_does_not_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    marker = 1
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "dynamic factory should decline: {messages:?}"
+    );
+}
+
+/// Parameters shadow enclosing concrete callables inside the factory body.
+#[test]
+fn single_return_factory_does_not_resolve_shadowed_parameter() {
+    let messages = check_source(
+        r"
+def value(first: int, second: int) -> None: ...
+def factory(value=lambda *args: None):
+    return value
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "shadowed parameter must not resolve to the outer callable: {messages:?}"
+    );
+}
+
+/// Calling an async factory directly produces a coroutine, not its returned
+/// callable value.
+#[test]
+fn async_single_return_factory_does_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+async def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "async factory must decline: {messages:?}"
     );
 }
