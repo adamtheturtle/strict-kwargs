@@ -932,6 +932,28 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     );
 }
 
+/// `sum` concatenates literal lists in deterministic order and preserves their
+/// concrete callable elements (issue #955).
+#[test]
+fn sum_literal_lists_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+sum([[second]], start=[first])[0](1)
+sum(([second],), [first])[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected sum start element violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected summed list element violation, got: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
