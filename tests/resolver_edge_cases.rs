@@ -1752,6 +1752,22 @@ next(filter(None, [target]))(1)
     }
 }
 
+/// `next()` preserves the concrete callable element from a simple identity
+/// generator expression over a homogeneous literal iterable (issue #802).
+#[test]
+fn next_generator_expression_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next((item for item in [target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected generator-expression violation, got: {messages:?}"
+    );
+}
+
 /// `pop`/`popleft` on an immediately constructed deque preserve a literal
 /// initializer's concrete callable element shape (issue #392).
 #[test]

@@ -6323,6 +6323,29 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generator_expression_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Generator(generator) = expr else {
+            return None;
+        };
+        let [comprehension] = generator.generators.as_slice() else {
+            return None;
+        };
+        if comprehension.is_async || !comprehension.ifs.is_empty() {
+            return None;
+        }
+        let Expr::Name(target) = &comprehension.target else {
+            return None;
+        };
+        let Expr::Name(element) = generator.elt.as_ref() else {
+            return None;
+        };
+        if element.id != target.id {
+            return None;
+        }
+        self.literal_iterable_callable_signature(&comprehension.iter)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -6340,6 +6363,11 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if selected_index.is_none() {
+            if let Some(signature) = self.generator_expression_item_signature(iterator) {
+                return Some(signature);
+            }
+        }
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
             return Some(signature);
         }
