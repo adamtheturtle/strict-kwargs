@@ -6240,7 +6240,12 @@ impl<'a> CallChecker<'a> {
             Expr::Call(constructor)
                 if self
                     .class_from_constructor_func(&constructor.func)
-                    .is_some_and(|class| class == "collections.OrderedDict")
+                    .is_some_and(|class| {
+                        matches!(
+                            class.as_str(),
+                            "collections.OrderedDict" | "collections.UserDict"
+                        )
+                    })
                     && constructor.arguments.keywords.is_empty() =>
             {
                 let [Expr::Dict(dict)] = &*constructor.arguments.args else {

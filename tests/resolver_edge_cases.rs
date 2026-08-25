@@ -2120,6 +2120,23 @@ next(iter(OrderedDict({"x": target}).values()))(1)
     );
 }
 
+/// Iterating an immediate `UserDict`'s values preserves a concrete callable
+/// value shape (issue #926).
+#[test]
+fn user_dict_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+next(iter(UserDict({"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected UserDict values violation, got: {messages:?}"
+    );
+}
+
 /// `dict.get` on an existing literal key preserves its callable value
 /// (issue #773).
 #[test]
