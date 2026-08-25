@@ -7033,15 +7033,35 @@ impl<'a> CallChecker<'a> {
         if constructor != "types.SimpleNamespace" {
             return Vec::new();
         }
-        call.arguments
-            .keywords
-            .iter()
-            .filter_map(|keyword| {
-                let name = keyword.arg.as_ref()?;
-                let callable = self.resolve_callee(&keyword.value)?;
-                Some((name.to_string(), callable))
-            })
-            .collect()
+        let mut seen = FxHashSet::default();
+        let mut attributes = Vec::new();
+        for keyword in &call.arguments.keywords {
+            if let Some(name) = &keyword.arg {
+                if !seen.insert(name.to_string()) {
+                    return Vec::new();
+                }
+                if let Some(callable) = self.resolve_callee(&keyword.value) {
+                    attributes.push((name.to_string(), callable));
+                }
+                continue;
+            }
+            let Expr::Dict(mapping) = &keyword.value else {
+                return Vec::new();
+            };
+            for item in &mapping.items {
+                let Some(Expr::StringLiteral(name)) = &item.key else {
+                    return Vec::new();
+                };
+                let name = name.value.to_str();
+                if !seen.insert(name.to_string()) {
+                    return Vec::new();
+                }
+                if let Some(callable) = self.resolve_callee(&item.value) {
+                    attributes.push((name.to_string(), callable));
+                }
+            }
+        }
+        attributes
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -8385,6 +8405,13 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
+                    return Some(callable);
+                }
+                if let Some((_, callable)) = self
+                    .simple_namespace_callable_attributes(value)
+                    .into_iter()
+                    .find(|(attribute, _)| attribute == attr_name)
+                {
                     return Some(callable);
                 }
                 if let Some(class_fullname) = self.class_from_constructor(value) {

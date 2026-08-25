@@ -918,6 +918,27 @@ namespace.call(1)
     );
 }
 
+/// Literal dictionary unpacking into `SimpleNamespace` preserves a concrete
+/// callable attribute for inline and assigned instances (issue #971).
+#[test]
+fn simple_namespace_literal_unpack_preserves_callable_attribute() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+types.SimpleNamespace(**{"callback": target}).callback(1)
+namespace = types.SimpleNamespace(**{"callback": target})
+namespace.callback(1)
+"#,
+    );
+    for line in [4, 6] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected unpacked namespace violation on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
 /// constructor attribute (issue #834).
 #[test]
