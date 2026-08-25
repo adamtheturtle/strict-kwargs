@@ -1144,6 +1144,9 @@ struct CallChecker<'a> {
     /// Callable values yielded by `@contextmanager` functions, keyed by the
     /// manager factory's fullname.
     callable_contextmanager_items: FxHashMap<String, Signature>,
+    /// `@contextmanager` factory fullname -> concrete callable yielded by its
+    /// sole body statement.
+    concrete_contextmanager_items: FxHashMap<String, String>,
     /// Generic function fullname -> parameters whose type variable is also
     /// returned, allowing concrete callable arguments to flow to the result.
     generic_returns: FxHashMap<String, GenericReturn>,
@@ -1558,6 +1561,7 @@ impl<'a> CallChecker<'a> {
             callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
+            concrete_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
@@ -4546,6 +4550,9 @@ impl<'a> CallChecker<'a> {
     fn context_manager_enter_callable(&self, expr: &Expr) -> Option<String> {
         if let Expr::Call(constructor) = expr {
             let factory = self.resolve_callee(&constructor.func)?;
+            if let Some(callable) = self.concrete_contextmanager_items.get(&factory) {
+                return Some(callable.clone());
+            }
             if let Some(generic) =
                 Self::known_stdlib_generic_return(Self::normalize_factory_fullname(&factory))
             {
@@ -4667,6 +4674,20 @@ impl<'a> CallChecker<'a> {
         let [Stmt::Return(ast::StmtReturn {
             value: Some(value), ..
         })] = body
+        else {
+            return None;
+        };
+        Some(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn single_yield_expression(body: &[Stmt]) -> Option<&Expr> {
+        let [Stmt::Expr(ast::StmtExpr { value, .. })] = body else {
+            return None;
+        };
+        let Expr::Yield(ast::ExprYield {
+            value: Some(value), ..
+        }) = value.as_ref()
         else {
             return None;
         };
@@ -9225,6 +9246,19 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .and_then(Self::typeguard_callable_signature)
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
+                }
+                if !is_async
+                    && decorator_list.iter().any(|decorator| {
+                        decorator_tail(&decorator.expression) == Some("contextmanager")
+                    })
+                {
+                    if let Some(callable) = Self::single_yield_expression(body)
+                        .and_then(|yielded| self.resolve_callee(yielded))
+                        .filter(|callable| self.index.get(callable).is_some())
+                    {
+                        self.concrete_contextmanager_items
+                            .insert(fullname.clone(), callable);
+                    }
                 }
                 if let Some(signature) = returns
                     .as_deref()

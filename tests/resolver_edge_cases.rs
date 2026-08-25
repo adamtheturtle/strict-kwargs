@@ -4169,6 +4169,26 @@ LiteralEnter().__enter__()
     );
 }
 
+/// Explicit `__enter__` on a `@contextmanager` result preserves the concrete
+/// callable yielded by its single-statement generator body (issue #974).
+#[test]
+fn contextmanager_explicit_enter_preserves_yielded_callable() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "contextmanager __enter__ must preserve its yielded callable: {messages:?}"
+    );
+}
+
 /// Callable-valued properties are not checked as the property getter (issue
 /// #668).
 #[test]
