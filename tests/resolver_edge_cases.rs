@@ -4594,6 +4594,29 @@ async def main() -> None:
     );
 }
 
+/// Loop-target rebinding discards a context target's `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        for group in [object()]:
+            task = group.create_task(coro=factory())
+            task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear TaskGroup identity: {messages:?}"
+    );
+}
+
 /// Rebinding a Future local must drop the annotated `future_callables` entry
 /// (issue #737).
 #[test]

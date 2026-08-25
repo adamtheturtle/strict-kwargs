@@ -5532,6 +5532,7 @@ impl<'a> CallChecker<'a> {
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
                 || scope.starred_callable_list_elements.contains_key(name)
+                || scope.asyncio_task_groups.contains(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);
