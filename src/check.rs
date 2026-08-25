@@ -5294,6 +5294,7 @@ impl<'a> CallChecker<'a> {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
+                || scope.starred_callable_list_elements.contains_key(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);

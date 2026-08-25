@@ -533,6 +533,19 @@ tail[0](1)
         rebound.is_empty(),
         "reassigning a starred list must clear its old callable: {rebound:?}"
     );
+
+    let destructured_rebind = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail, = [[lambda *args: None]]
+tail[0](1)
+",
+    );
+    assert!(
+        destructured_rebind.is_empty(),
+        "destructuring must clear a starred callable list: {destructured_rebind:?}"
+    );
 }
 
 /// Generic builtins that select or sort elements preserve a homogeneous
