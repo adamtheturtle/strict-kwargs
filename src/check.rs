@@ -5701,7 +5701,9 @@ impl<'a> CallChecker<'a> {
             {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
-            "itertools.dropwhile" | "itertools.takewhile" if selected_index.is_none() => {
+            "itertools.dropwhile" | "itertools.takewhile" | "itertools.filterfalse"
+                if selected_index.is_none() =>
+            {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
             }
             "itertools.pairwise"
