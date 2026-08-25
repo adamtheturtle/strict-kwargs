@@ -7001,11 +7001,12 @@ impl<'a> CallChecker<'a> {
         else {
             return None;
         };
-        let right_sign = match op {
-            ast::Operator::Add => 1,
-            ast::Operator::Sub => -1,
-            _ => return None,
-        };
+        if !matches!(
+            op,
+            ast::Operator::Add | ast::Operator::Sub | ast::Operator::BitAnd
+        ) {
+            return None;
+        }
         let left_entries = self.counter_literal_entries(left)?;
         let right_entries = self.counter_literal_entries(right)?;
         let same_key = |left: &Expr, right: &Expr| {
@@ -7028,19 +7029,29 @@ impl<'a> CallChecker<'a> {
             Some(())
         };
         for (key, count) in &left_entries {
-            let total = *count
-                + right_sign
-                    * right_entries
-                        .iter()
-                        .find(|(right, _)| same_key(key, right))
-                        .map_or(0, |(_, count)| *count);
+            let right_count = right_entries
+                .iter()
+                .find(|(right, _)| same_key(key, right))
+                .map_or(0, |(_, count)| *count);
+            let total = match op {
+                ast::Operator::Add => *count + right_count,
+                ast::Operator::Sub => *count - right_count,
+                ast::Operator::BitAnd => (*count).min(right_count),
+                _ => unreachable!(),
+            };
             include(key, total)?;
         }
         for (key, count) in right_entries
             .iter()
             .filter(|(right, _)| !left_entries.iter().any(|(left, _)| same_key(left, right)))
         {
-            include(key, right_sign * *count)?;
+            let total = match op {
+                ast::Operator::Add => *count,
+                ast::Operator::Sub => -*count,
+                ast::Operator::BitAnd => 0,
+                _ => unreachable!(),
+            };
+            include(key, total)?;
         }
         result
     }
