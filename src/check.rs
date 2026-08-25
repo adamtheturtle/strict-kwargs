@@ -7569,29 +7569,48 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        if method.attr.as_str() != "get"
-            || !call.arguments.keywords.is_empty()
-            || !(1..=2).contains(&call.arguments.args.len())
-        {
+        if method.attr.as_str() != "get" {
             return None;
         }
-        let mapping = match method.value.as_ref() {
-            Expr::Dict(_) => method.value.as_ref(),
+        let (mapping, key) = match method.value.as_ref() {
+            Expr::Dict(_)
+                if call.arguments.keywords.is_empty()
+                    && (1..=2).contains(&call.arguments.args.len()) =>
+            {
+                (method.value.as_ref(), call.arguments.args.first()?)
+            }
             Expr::Call(constructor) => {
                 let class = self.resolve_callee(&constructor.func)?;
-                if Self::normalize_factory_fullname(&class) != "collections.defaultdict"
-                    || !constructor.arguments.keywords.is_empty()
-                {
-                    return None;
+                match Self::normalize_factory_fullname(&class) {
+                    "collections.defaultdict"
+                        if constructor.arguments.keywords.is_empty()
+                            && call.arguments.keywords.is_empty()
+                            && (1..=2).contains(&call.arguments.args.len()) =>
+                    {
+                        let [_factory, mapping] = &*constructor.arguments.args else {
+                            return None;
+                        };
+                        (mapping, call.arguments.args.first()?)
+                    }
+                    "weakref.WeakValueDictionary" if constructor.arguments.keywords.is_empty() => {
+                        let [mapping] = &*constructor.arguments.args else {
+                            return None;
+                        };
+                        let key = match &*call.arguments.args {
+                            [key] if call.arguments.keywords.is_empty() => key,
+                            [] if call.arguments.keywords.len() == 1 => {
+                                &call.arguments.find_keyword("key")?.value
+                            }
+                            _ => return None,
+                        };
+                        (mapping, key)
+                    }
+                    _ => return None,
                 }
-                let [_factory, mapping] = &*constructor.arguments.args else {
-                    return None;
-                };
-                mapping
             }
             _ => return None,
         };
-        self.resolve_literal_container_item(mapping, call.arguments.args.first()?)
+        self.resolve_literal_container_item(mapping, key)
     }
 
     #[cfg_attr(coverage, coverage(off))]
