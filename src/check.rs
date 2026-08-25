@@ -7582,16 +7582,26 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(constructor) = method.value.as_ref() else {
             return None;
         };
-        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+        if method.attr.as_str() != "pop" {
             return None;
         }
-        let [key] = &*call.arguments.args else {
-            return None;
+        let key = match &*call.arguments.args {
+            [key] if call.arguments.keywords.is_empty() => key,
+            [] => {
+                let [keyword] = &*call.arguments.keywords else {
+                    return None;
+                };
+                if keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("key") {
+                    return None;
+                }
+                &keyword.value
+            }
+            _ => return None,
         };
         let class = self.class_from_constructor_func(&constructor.func)?;
         if !matches!(
             class.as_str(),
-            "collections.ChainMap" | "collections.UserDict"
+            "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
         ) || !constructor.arguments.keywords.is_empty()
         {
             return None;

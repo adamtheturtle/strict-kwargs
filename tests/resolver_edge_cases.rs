@@ -4279,6 +4279,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `OrderedDict.pop` preserves a present literal mapping value supplied via
+/// its keyword key argument (issue #924).
+#[test]
+fn ordered_dict_pop_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"x": target}).pop(key="x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict.pop violation, got: {messages:?}"
+    );
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]

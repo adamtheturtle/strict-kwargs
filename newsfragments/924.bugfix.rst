@@ -1,0 +1,2 @@
+Preserve concrete callable values returned by ``OrderedDict.pop`` for a
+present literal key.
