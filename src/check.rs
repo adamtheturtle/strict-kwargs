@@ -6869,6 +6869,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_list_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(pop_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop"
+            || pop_call.arguments.args.len() > 1
+            || !pop_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match method.value.as_ref() {
+            literal @ Expr::List(_) => self.homogeneous_callable_sequence(literal),
+            Expr::Call(sorted) => self.preserving_builtin_result(sorted, &["builtins.sorted"]),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -6909,6 +6930,30 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         self.resolve_callee(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_popitem_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        self.resolve_callee(&dict.items.last()?.value)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7326,6 +7371,7 @@ impl<'a> CallChecker<'a> {
                             self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         })
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
@@ -7334,6 +7380,7 @@ impl<'a> CallChecker<'a> {
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
@@ -7489,6 +7536,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_list_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {
