@@ -8263,6 +8263,41 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_sequence_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || !matches!(
+                iter_method.value.as_ref(),
+                Expr::List(_) | Expr::Tuple(_) | Expr::Set(_)
+            )
+        {
+            return None;
+        }
+        if let Expr::Set(set) = iter_method.value.as_ref() {
+            let mut elements = set.elts.iter();
+            let first = self.resolve_callee(elements.next()?)?;
+            return elements
+                .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+                .then_some(first);
+        }
+        self.homogeneous_callable_sequence(&iter_method.value)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -8455,6 +8490,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {

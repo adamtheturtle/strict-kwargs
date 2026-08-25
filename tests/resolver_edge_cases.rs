@@ -505,6 +505,26 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Explicit sequence iterator protocol calls preserve homogeneous concrete
+/// callable elements (issue #948).
+#[test]
+fn explicit_sequence_iterator_protocol_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__iter__().__next__()(1)
+(target,).__iter__().__next__()(1)
+{target}.__iter__().__next__()(1)
+",
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected explicit iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Concatenated literal sequences retain the concrete callable selected from
 /// either operand (issue #806).
 #[test]
