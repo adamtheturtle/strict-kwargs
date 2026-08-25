@@ -4570,6 +4570,29 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// Loop-target rebinding discards a tracked wait done-set signature.
+#[test]
+fn futures_wait_done_set_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    for done in [set()]:
+        done.pop().result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear wait done-set metadata: {messages:?}"
+    );
+}
+
 /// Destructuring rebinding also discards executor identity.
 #[test]
 fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {

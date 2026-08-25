@@ -5539,6 +5539,7 @@ impl<'a> CallChecker<'a> {
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
                 || scope.starred_callable_list_elements.contains_key(name)
+                || scope.future_set_callables.contains_key(name)
                 || scope.executor_instances.contains(name)
         });
         if was_known_callable {
