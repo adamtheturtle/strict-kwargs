@@ -5358,6 +5358,23 @@ staticmethod(target).__get__(None, Owner)(1)
     );
 }
 
+/// Binding a direct `classmethod` descriptor removes the newly bound `cls`
+/// parameter from its wrapped callable signature (issue #958).
+#[test]
+fn classmethod_get_preserves_bound_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(cls: object, value: int) -> None: ...
+classmethod(target).__get__(None, Owner)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target bound by classmethod"),
+        "classmethod.__get__ must preserve its bound callable: {messages:?}"
+    );
+}
+
 /// Bound-method `__func__` keeps the unbound method signature (issue #651).
 #[test]
 fn bound_method_func_preserves_unbound_method_signature() {

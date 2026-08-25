@@ -2847,7 +2847,10 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
+        let local_function = if let Some(method) = self.classmethod_get_result_signature(&call.func)
+        {
+            Some(method)
+        } else if let Some(method) = self.method_type_result_signature(&call.func) {
             Some(method)
         } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
             Some(LocalFunction {
@@ -4375,6 +4378,38 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         self.resolve_callee(wrapped)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn classmethod_get_result_signature(&self, func: &Expr) -> Option<LocalFunction> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(get_method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(descriptor) = get_method.value.as_ref() else {
+            return None;
+        };
+        if get_method.attr.as_str() != "__get__"
+            || !get_call.arguments.keywords.is_empty()
+            || !matches!(&*get_call.arguments.args, [_] | [_, _])
+            || !self.names_stdlib_callable(&descriptor.func, "builtins.classmethod")
+            || !descriptor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [wrapped] = &*descriptor.arguments.args else {
+            return None;
+        };
+        let fullname = self.resolve_callee(wrapped)?;
+        let mut signature = self.index.get(&fullname)?.first()?.clone();
+        (!signature.parameters.is_empty()).then_some(())?;
+        signature.parameters.remove(0);
+        Some(LocalFunction {
+            fullname: format!("{fullname} bound by classmethod.__get__"),
+            signature,
+        })
     }
 
     fn current_lexical_scope(&self) -> &str {
