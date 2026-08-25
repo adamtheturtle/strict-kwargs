@@ -4800,6 +4800,16 @@ impl<'a> CallChecker<'a> {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
+        if let Expr::Call(proxy) = value {
+            let factory = self.resolve_callee(&proxy.func)?;
+            let factory = Self::normalize_factory_fullname(&factory);
+            if factory == "types.MappingProxyType" && proxy.arguments.keywords.is_empty() {
+                let [mapping] = &*proxy.arguments.args else {
+                    return None;
+                };
+                return self.resolve_literal_container_item(mapping, slice);
+            }
+        }
         match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;

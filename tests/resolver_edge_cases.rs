@@ -1765,6 +1765,23 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// A `MappingProxyType` around a literal dictionary preserves its concrete
+/// callable values through subscripting (issue #776).
+#[test]
+fn mapping_proxy_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected mapping-proxy result violation, got: {messages:?}"
+    );
+}
+
 /// A queue's declared callable item type becomes the signature returned by
 /// `get` and `get_nowait` (issue #393).
 #[test]
