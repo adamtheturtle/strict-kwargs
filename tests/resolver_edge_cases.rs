@@ -4548,6 +4548,49 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// Destructuring rebinding also discards executor identity.
+#[test]
+fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor, other = object(), object()
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "destructuring rebound executor must not retain metadata: {messages:?}"
+    );
+}
+
+/// `Executor.submit` treats `fn` as positional-only; a forwarded `fn=`
+/// keyword is not the submitted callback.
+#[test]
+fn thread_pool_submit_ignores_forwarded_fn_keyword_for_inference() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def submitted() -> object: ...
+def forwarded() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor.submit(submitted, fn=forwarded).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "forwarded fn keyword must not determine Future result: {messages:?}"
+    );
+}
+
 /// `Context.run` preserves a lambda callback result callable signature
 /// (issue #480).
 #[test]
