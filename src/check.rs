@@ -5057,6 +5057,25 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if self.scopes.len() == 1 {
+            if let (Expr::Call(namespace), Expr::StringLiteral(name)) = (value, slice) {
+                let namespace_is_module_scope = namespace.arguments.is_empty()
+                    && (self.names_stdlib_callable(&namespace.func, "builtins.locals")
+                        || self.names_stdlib_callable(&namespace.func, "builtins.globals"));
+                if namespace_is_module_scope {
+                    let name = name.value.to_str();
+                    let scope = self.scopes.first()?;
+                    if scope.opaque_locals.contains(name)
+                        || scope.deleted_names.contains(name)
+                        || scope.invalidated_callables.contains(name)
+                    {
+                        return None;
+                    }
+                    let resolved = self.resolve_local(name)?;
+                    return Some(self.callable_fullname(&resolved).unwrap_or(resolved));
+                }
+            }
+        }
         if let Expr::Call(asdict_call) = value {
             if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
                 let Expr::StringLiteral(field) = slice else {

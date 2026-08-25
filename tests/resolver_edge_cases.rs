@@ -932,6 +932,25 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     );
 }
 
+/// Module-scope `locals` and `globals` literal lookups preserve a concrete
+/// function binding (issue #956).
+#[test]
+fn module_namespace_literal_lookups_preserve_callable_functions() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+locals()["target"](1)
+globals()["target"](1)
+"#,
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected namespace lookup violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
