@@ -4864,6 +4864,22 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn nonnegative_literal_integer(expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::NumberLiteral(ast::ExprNumberLiteral {
+                value: Number::Int(value),
+                ..
+            }) => value.as_usize(),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::UAdd,
+                operand,
+                ..
+            }) => Self::nonnegative_literal_integer(operand),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn same_literal_key(left: &Expr, right: &Expr) -> bool {
         match (left, right) {
             (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
@@ -4904,6 +4920,27 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => {
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
+            }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::Mult,
+                right,
+                ..
+            }) => {
+                let (elements, repetitions) = match (left.as_ref(), right.as_ref()) {
+                    (Expr::List(list), repetitions) | (repetitions, Expr::List(list)) => (
+                        list.elts.as_slice(),
+                        Self::nonnegative_literal_integer(repetitions)?,
+                    ),
+                    (Expr::Tuple(tuple), repetitions) | (repetitions, Expr::Tuple(tuple)) => (
+                        tuple.elts.as_slice(),
+                        Self::nonnegative_literal_integer(repetitions)?,
+                    ),
+                    _ => return None,
+                };
+                let len = elements.len().checked_mul(repetitions)?;
+                let index = Self::literal_sequence_index(slice, len)?;
+                self.resolve_callee(&elements[index % elements.len()])
             }
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
                 .items

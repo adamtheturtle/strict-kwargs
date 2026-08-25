@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Repeated literal sequences retain the concrete callable selected from any
+/// repetition, including reversed multiplication operands (issue #807).
+#[test]
+fn repeated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] * 2)[1](1)
+((target,) * 2)[1](1)
+(2 * [target])[-1](1)
+(+2 * (target,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected repeated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
