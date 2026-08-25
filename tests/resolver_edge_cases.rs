@@ -4330,6 +4330,27 @@ secrets.choice((f,))(1)
     }
 }
 
+/// Directly imported aliases of `random.choice` and `secrets.choice` retain
+/// the selected callable's signature (issue #852).
+#[test]
+fn direct_import_choice_preserves_callable_signatures() {
+    let messages = check_source(
+        r"
+from random import choice as random_choice
+from secrets import choice as secret_choice
+def target(value: int) -> None: ...
+random_choice(seq=[target])(1)
+secret_choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected direct choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// The valid keyword form of `random.choice` and `secrets.choice` preserves
 /// callable elements just like the positional form (issue #785).
 #[test]
