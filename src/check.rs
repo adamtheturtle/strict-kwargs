@@ -5052,6 +5052,33 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn same_literal_key(left: &Expr, right: &Expr) -> bool {
+        fn number_matches_bool(number: &Number, boolean: bool) -> bool {
+            match number {
+                Number::Int(value) => value.as_u8() == Some(u8::from(boolean)),
+                Number::Float(value) => value.to_bits() == f64::from(u8::from(boolean)).to_bits(),
+                Number::Complex { real, imag } => {
+                    real.to_bits() == f64::from(u8::from(boolean)).to_bits()
+                        && imag.to_bits() == 0.0f64.to_bits()
+                }
+            }
+        }
+
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            clippy::cast_sign_loss,
+            clippy::float_cmp
+        )]
+        fn same_number(left: &Number, right: &Number) -> bool {
+            match (left, right) {
+                (Number::Int(left), Number::Float(right))
+                | (Number::Float(right), Number::Int(left)) => left
+                    .as_u64()
+                    .is_some_and(|left| left as f64 == *right && left == *right as u64),
+                _ => left == right,
+            }
+        }
+
         match (left, right) {
             (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
                 left.value.to_str() == right.value.to_str()
@@ -5059,8 +5086,16 @@ impl<'a> CallChecker<'a> {
             (
                 Expr::NumberLiteral(ast::ExprNumberLiteral { value: left, .. }),
                 Expr::NumberLiteral(ast::ExprNumberLiteral { value: right, .. }),
-            ) => left == right,
+            ) => same_number(left, right),
             (Expr::BooleanLiteral(left), Expr::BooleanLiteral(right)) => left.value == right.value,
+            (
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }),
+                Expr::BooleanLiteral(boolean),
+            )
+            | (
+                Expr::BooleanLiteral(boolean),
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }),
+            ) => number_matches_bool(value, boolean.value),
             (Expr::NoneLiteral(_), Expr::NoneLiteral(_)) => true,
             _ => false,
         }

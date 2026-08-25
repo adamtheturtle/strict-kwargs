@@ -4309,6 +4309,28 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// Python-equal numeric keys must select the stored value rather than a
+/// supplied `dict.pop` default.
+#[test]
+fn literal_dict_pop_treats_equal_numeric_keys_as_existing() {
+    let messages = check_source(
+        r"
+def existing(value: int) -> None: ...
+def fallback(value: int) -> None: ...
+{True: existing}.pop(1, fallback)(1)
+{1: existing}.pop(1.0, fallback)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "existing") && has_error_at(&messages, 5, "existing"),
+        "expected existing-value violations, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("fallback")),
+        "did not expect default-value violations, got: {messages:?}"
+    );
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]
