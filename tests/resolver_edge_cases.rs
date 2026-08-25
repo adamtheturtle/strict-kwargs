@@ -2119,6 +2119,22 @@ def target(value: int) -> None: ...
     );
 }
 
+/// `dict.get` returns a concrete callable default when a literal key is known
+/// to be absent (issue #918).
+#[test]
+fn literal_dict_get_missing_key_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.get("missing", target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict.get default violation, got: {messages:?}"
+    );
+}
+
 /// `defaultdict.get` preserves an existing literal mapping value rather than
 /// invoking or widening through its default factory (issue #800).
 #[test]

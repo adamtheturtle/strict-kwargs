@@ -1,0 +1,2 @@
+Preserve concrete callable defaults returned by ``dict.get`` when a literal
+key is known to be missing.

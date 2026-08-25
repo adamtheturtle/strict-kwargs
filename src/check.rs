@@ -7551,7 +7551,32 @@ impl<'a> CallChecker<'a> {
             }
             _ => return None,
         };
-        self.resolve_literal_container_item(mapping, call.arguments.args.first()?)
+        let key = call.arguments.args.first()?;
+        if let Some(existing) = self.resolve_literal_container_item(mapping, key) {
+            return Some(existing);
+        }
+        let [_, default] = &*call.arguments.args else {
+            return None;
+        };
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        let key_is_literal = matches!(
+            key,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NoneLiteral(_)
+        );
+        (key_is_literal
+            && dict.items.iter().all(|item| item.key.is_some())
+            && !dict.items.iter().any(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            }))
+        .then(|| self.resolve_callee(default))
+        .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
