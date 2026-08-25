@@ -1,0 +1,1 @@
+Preserve concrete callable elements yielded by iterating immediate literal-backed ``collections.deque`` instances.
