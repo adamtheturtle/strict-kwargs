@@ -698,6 +698,23 @@ partial(f, 0)(1)
     );
 }
 
+/// Nested `functools.partial` layers recursively preserve the wrapped
+/// callable's remaining signature (issue #962).
+#[test]
+fn nested_functools_partial_preserves_remaining_signature() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.partial(functools.partial(target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "partial"),
+        "expected nested partial violation, got: {messages:?}"
+    );
+}
+
 /// `next` returns the item type declared by local iterator and generator
 /// factories, including a concrete callable signature (issue #369).
 #[test]
