@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Concatenated literal sequences retain the concrete callable selected from
+/// either operand (issue #806).
+#[test]
+fn concatenated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] + [])[0](1)
+((target,) + ())[0](1)
+([0] + [target])[-1](1)
+((target,) + (0,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected concatenated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Literal slices retain the concrete callable at a statically selected result
 /// index, including negative and stepped slices (issue #805).
 #[test]
@@ -877,6 +898,40 @@ namespace.call(1)
     );
 }
 
+/// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
+/// constructor attribute (issue #834).
+#[test]
+fn vars_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+vars(types.SimpleNamespace(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected vars(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
+/// `getattr` with a literal name preserves a concrete callable attribute on
+/// an inline `SimpleNamespace` (issue #835).
+#[test]
+fn getattr_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+getattr(types.SimpleNamespace(callback=target), "callback")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected getattr(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
@@ -920,6 +975,87 @@ Holder(call=f).call(1)
     assert!(
         has_error_at(&messages, 8, "f"),
         "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
+/// `dataclasses.astuple` preserves concrete callable constructor fields at a
+/// literal tuple index (issue #830).
+#[test]
+fn dataclasses_astuple_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.astuple(obj=Record(callback=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.astuple violation, got: {messages:?}"
+    );
+}
+
+/// `astuple` uses stored dataclass fields rather than constructor-only
+/// `InitVar` entries when mapping tuple positions (issue #830).
+#[test]
+fn dataclasses_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar, dataclass, field
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+    stored: object = field(default=None, init=False)
+dataclasses.astuple(obj=Record(transient=target))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// `KW_ONLY` is a dataclass sentinel rather than a stored runtime field.
+#[test]
+fn dataclasses_astuple_ignores_kw_only_sentinel() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import KW_ONLY, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    _: KW_ONLY
+    stored: object
+dataclasses.astuple(Record(stored=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "target"),
+        "KW_ONLY must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// Functional dataclasses omit constructor-only `InitVar` entries at runtime.
+#[test]
+fn make_dataclass_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar
+def target(value: int) -> None: ...
+Record = dataclasses.make_dataclass(cls_name='Record', fields=[('transient', InitVar[object]), ('stored', object)])
+dataclasses.astuple(obj=Record(transient=target, stored=None))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy a make_dataclass astuple position: {messages:?}"
     );
 }
 
@@ -1239,6 +1375,27 @@ async def caller() -> None:
     );
 }
 
+/// Awaiting an item yielded by `asyncio.as_completed` preserves the concrete
+/// callable result of its source awaitables (issue #836).
+#[test]
+fn asyncio_as_completed_preserves_callable_awaitable_result() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    completed = asyncio.as_completed(fs=[factory()])
+    (await next(iter(completed)))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "awaited result"),
+        "expected asyncio.as_completed violation, got: {messages:?}"
+    );
+}
+
 /// `anext` preserves callable item signatures declared by async iterator
 /// factories (issue #384).
 #[test]
@@ -1311,6 +1468,26 @@ async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
     assert!(
         has_error_at(&messages, 5, "async-for item"),
         "expected async-for item violation, got: {messages:?}"
+    );
+}
+
+/// ``async for`` reads callable items from an annotated iterator factory
+/// invocation (issue #841).
+#[test]
+fn async_for_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def values() -> AsyncIterator[Callable[[int], None]]:
+    yield lambda value: None
+async def main() -> None:
+    async for item in values():
+        item(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "async-for item"),
+        "expected async-for factory item violation, got: {messages:?}"
     );
 }
 
@@ -1880,6 +2057,23 @@ def target(value: int) -> None: ...
     assert!(
         has_error_at(&messages, 3, "target"),
         "expected dict-get violation, got: {messages:?}"
+    );
+}
+
+/// `defaultdict.get` preserves an existing literal mapping value rather than
+/// invoking or widening through its default factory (issue #800).
+#[test]
+fn defaultdict_get_preserves_existing_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: None, {"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict.get violation, got: {messages:?}"
     );
 }
 
