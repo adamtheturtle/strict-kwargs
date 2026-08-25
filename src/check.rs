@@ -4880,6 +4880,53 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_container_truthiness(expr: &Expr) -> Option<bool> {
+        match expr {
+            Expr::List(list) => Some(!list.elts.is_empty()),
+            Expr::Tuple(tuple) => Some(!tuple.elts.is_empty()),
+            Expr::Dict(dict) => Some(!dict.items.is_empty()),
+            Expr::Set(set) => Some(!set.elts.is_empty()),
+            _ => definite_bool(expr),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_boolean_container_item(
+        &self,
+        expression: &ast::ExprBoolOp,
+        slice: &Expr,
+    ) -> Option<String> {
+        let mut result = None;
+        for (index, value) in expression.values.iter().enumerate() {
+            let truthiness = Self::literal_container_truthiness(value);
+            let last = index + 1 == expression.values.len();
+            let can_return = last
+                || match expression.op {
+                    ast::BoolOp::Or => truthiness != Some(false),
+                    ast::BoolOp::And => truthiness != Some(true),
+                };
+            if can_return {
+                let candidate = self.resolve_literal_container_item(value, slice)?;
+                if result
+                    .as_ref()
+                    .is_some_and(|existing| existing != &candidate)
+                {
+                    return None;
+                }
+                result = Some(candidate);
+            }
+            let can_continue = match expression.op {
+                ast::BoolOp::Or => truthiness != Some(true),
+                ast::BoolOp::And => truthiness != Some(false),
+            };
+            if !can_continue {
+                break;
+            }
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
@@ -4899,6 +4946,7 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
+            Expr::BoolOp(expression) => self.resolve_boolean_container_item(expression, slice),
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
