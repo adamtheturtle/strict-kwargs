@@ -4689,6 +4689,31 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
+        if let Expr::Subscript(subscript) = func {
+            let Expr::Call(constructor) = subscript.value.as_ref() else {
+                return None;
+            };
+            let constructor_name = self.resolve_callee(&constructor.func)?;
+            if !matches!(
+                constructor_name.as_str(),
+                "collections.deque" | "collections.deque.__init__" | "collections.deque.__new__"
+            ) {
+                return None;
+            }
+            let iterable = constructor.arguments.args.first().or_else(|| {
+                constructor.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                        .then_some(&keyword.value)
+                })
+            })?;
+            let elements = match iterable {
+                Expr::List(list) => list.elts.as_slice(),
+                Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                _ => return None,
+            };
+            let index = Self::literal_sequence_index(&subscript.slice, elements.len())?;
+            return self.unnamed_callable_signature(&elements[index]);
+        }
         let Expr::Call(method_call) = func else {
             return None;
         };

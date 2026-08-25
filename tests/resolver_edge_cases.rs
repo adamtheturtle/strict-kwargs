@@ -1770,6 +1770,23 @@ deque([f]).pop()(1)
     );
 }
 
+/// Subscripting an immediately constructed deque preserves a literal
+/// initializer's selected callable element (issue #786).
+#[test]
+fn deque_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result"),
+        "expected deque-subscript violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate literal dictionary's values preserves a concrete
 /// callable value shape (issue #391).
 #[test]
