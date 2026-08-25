@@ -795,6 +795,25 @@ def caller(value: Callable[[int], None] | None) -> None:
     );
 }
 
+/// Optional narrowing resolves a named callable alias before restoring the
+/// parameter's signature (regression #763).
+#[test]
+fn optional_callable_alias_is_narrowed_after_is_not_none() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    if value is not None:
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed callable"),
+        "expected alias-narrowed violation, got: {messages:?}"
+    );
+}
+
 #[test]
 fn assert_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(

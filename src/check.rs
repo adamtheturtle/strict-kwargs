@@ -1979,7 +1979,7 @@ impl<'a> CallChecker<'a> {
         self.mark_param_opaque(name);
         if let Some(annotation) = annotation {
             self.define_annotation(name, annotation);
-            if let Some(signature) = Self::optional_callable_signature(annotation) {
+            if let Some(signature) = self.optional_callable_signature(annotation) {
                 self.current_scope()
                     .optional_callables
                     .insert(name.to_string(), signature);
@@ -5055,7 +5055,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn optional_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn optional_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         match annotation {
             Expr::BinOp(ast::ExprBinOp {
                 left,
@@ -5070,7 +5070,7 @@ impl<'a> CallChecker<'a> {
                 } else {
                     return None;
                 };
-                Self::callable_annotation_signature(callable)
+                self.callable_type_alias_signature(callable)
             }
             Expr::Subscript(ast::ExprSubscript { value, slice, .. })
                 if Self::dotted_path(value)?
@@ -5078,7 +5078,7 @@ impl<'a> CallChecker<'a> {
                     .next()
                     .is_some_and(|name| name == "Optional") =>
             {
-                Self::callable_annotation_signature(slice)
+                self.callable_type_alias_signature(slice)
             }
             _ => None,
         }
