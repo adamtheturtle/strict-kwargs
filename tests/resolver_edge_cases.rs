@@ -4656,6 +4656,23 @@ next(Counter({target: 2}).elements())(1)
     );
 }
 
+/// Unary plus on an immediate `Counter` preserves positive-count callable
+/// keys (issue #943).
+#[test]
+fn counter_unary_plus_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(+Counter({target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter unary-plus violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]

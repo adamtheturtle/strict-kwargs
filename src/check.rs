@@ -6916,6 +6916,51 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_unary_plus_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::UnaryOp(ast::ExprUnaryOp {
+            op: ast::UnaryOp::UAdd,
+            operand,
+            ..
+        })] = &*iter_call.arguments.args
+        else {
+            return None;
+        };
+        let Expr::Call(constructor) = operand.as_ref() else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+            != "collections.Counter"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            if Self::literal_signed_integer(&item.value)? <= 0 {
+                continue;
+            }
+            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -6944,6 +6989,9 @@ impl<'a> CallChecker<'a> {
         }
         if selected_index.is_none() {
             if let Some(signature) = self.counter_elements_item_signature(iterator) {
+                return Some(signature);
+            }
+            if let Some(signature) = self.counter_unary_plus_item_signature(iterator) {
                 return Some(signature);
             }
         }
