@@ -5964,6 +5964,25 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_mapping_key_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Dict(dict) = expr else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn is_multiprocessing_pool_map_method(fullname: &str) -> bool {
         let Some((class, method)) = fullname.rsplit_once('.') else {
             return false;
@@ -6893,6 +6912,7 @@ impl<'a> CallChecker<'a> {
             })
         })?;
         self.literal_iterable_callable_signature(iterable)
+            .or_else(|| self.literal_mapping_key_callable_signature(iterable))
     }
 
     #[cfg_attr(coverage, coverage(off))]

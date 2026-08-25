@@ -4639,6 +4639,23 @@ next(Counter([target]).elements())(1)
     );
 }
 
+/// `Counter.elements()` preserves callable keys supplied through mapping
+/// initialization (issue #941).
+#[test]
+fn counter_elements_preserves_mapping_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(Counter({target: 2}).elements())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter mapping-elements violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]
