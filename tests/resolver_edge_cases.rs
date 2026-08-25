@@ -4290,6 +4290,28 @@ future.result()(1)
     );
 }
 
+/// `asyncio.create_task` infers a callable coroutine result for the created
+/// task's `result()` method (issue #837).
+#[test]
+fn asyncio_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    task = asyncio.create_task(coro=factory())
+    await task
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected create_task result violation, got: {messages:?}"
+    );
+}
+
 /// Rebinding a Future local must drop the annotated `future_callables` entry
 /// (issue #737).
 #[test]
