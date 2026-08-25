@@ -4161,6 +4161,31 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     );
 }
 
+/// A stored `property` retains the callable returned by its getter
+/// (regression #761).
+#[test]
+fn stored_property_fget_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+prop.fget(self=Owner())(1)
+prop = object()
+prop.fget(self=Owner())(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale property bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "stored property.fget result must preserve callee: {messages:?}"
+    );
+}
+
 /// Annotated `asyncio.Task[Callable[...]].result()` preserves the callable
 /// signature (issue #447).
 #[test]
