@@ -6858,6 +6858,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_list_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(pop_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop"
+            || pop_call.arguments.args.len() > 1
+            || !pop_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match method.value.as_ref() {
+            literal @ Expr::List(_) => self.homogeneous_callable_sequence(literal),
+            Expr::Call(sorted) => self.preserving_builtin_result(sorted, &["builtins.sorted"]),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -7478,6 +7499,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_list_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {

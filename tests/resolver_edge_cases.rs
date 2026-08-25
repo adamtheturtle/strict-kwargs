@@ -2105,6 +2105,30 @@ call(1)
     );
 }
 
+/// Immediate list pop results preserve homogeneous callable elements
+/// (issue #770).
+#[test]
+fn literal_list_pop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].pop()(1)
+sorted([target]).pop()(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected both pop violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected list-pop violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// An operand-selecting `reduce` lambda preserves a literal sequence's
 /// concrete callable element shape (issue #399).
 #[test]
