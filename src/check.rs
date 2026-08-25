@@ -5043,6 +5043,12 @@ impl<'a> CallChecker<'a> {
                 if !self.index.is_dataclass(&class) {
                     return None;
                 }
+                if !self
+                    .index
+                    .is_dataclass_runtime_field(&class, field.value.to_str())
+                {
+                    return None;
+                }
                 return self.resolve_callee(
                     &constructor
                         .arguments

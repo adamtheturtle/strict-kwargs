@@ -963,6 +963,26 @@ dataclasses.asdict(obj=Record(callback=target))["callback"](1)
     );
 }
 
+/// `asdict` omits constructor-only `InitVar` entries.
+#[test]
+fn dataclasses_asdict_ignores_initvar_fields() {
+    let messages = check_source(
+        r#"
+import dataclasses
+from dataclasses import InitVar, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+dataclasses.asdict(obj=Record(transient=target))["transient"](1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not resolve as an asdict field: {messages:?}"
+    );
+}
+
 /// `astuple` uses stored dataclass fields rather than constructor-only
 /// `InitVar` entries when mapping tuple positions (issue #830).
 #[test]
@@ -982,6 +1002,45 @@ dataclasses.astuple(obj=Record(transient=target))[0](1)
     assert!(
         messages.is_empty(),
         "InitVar must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// `KW_ONLY` is a dataclass sentinel rather than a stored runtime field.
+#[test]
+fn dataclasses_astuple_ignores_kw_only_sentinel() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import KW_ONLY, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    _: KW_ONLY
+    stored: object
+dataclasses.astuple(Record(stored=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "target"),
+        "KW_ONLY must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// Functional dataclasses omit constructor-only `InitVar` entries at runtime.
+#[test]
+fn make_dataclass_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar
+def target(value: int) -> None: ...
+Record = dataclasses.make_dataclass(cls_name='Record', fields=[('transient', InitVar[object]), ('stored', object)])
+dataclasses.astuple(obj=Record(transient=target, stored=None))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy a make_dataclass astuple position: {messages:?}"
     );
 }
 

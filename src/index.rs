@@ -24,7 +24,7 @@ mod data_model;
 #[cfg(test)]
 use data_model::extend_unique;
 use data_model::{
-    callee_tail, dataclass_decorator, is_namedtuple_class, synthesize_data_constructor,
+    callee_tail, dataclass_decorator, is_init_var, is_namedtuple_class, synthesize_data_constructor,
 };
 
 /// Safety bound on re-export alias chain length during lazy resolution. Real
@@ -1365,6 +1365,16 @@ impl DefinitionIndex {
             .runtime_fields
             .get(index)
             .cloned()
+    }
+
+    /// Whether a name corresponds to a stored dataclass runtime field.
+    pub fn is_dataclass_runtime_field(&self, fullname: &str, field: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::Dataclass)
+            .is_some_and(|model| model.runtime_fields.iter().any(|name| name == field))
     }
 
     /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
@@ -2976,7 +2986,11 @@ fn synthesize_make_dataclass(
         ClassDataModel {
             kind: ClassDataKind::Dataclass,
             init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
-            runtime_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            runtime_fields: fields
+                .iter()
+                .filter(|(_, annotation)| !is_init_var(annotation))
+                .map(|(name, _)| name.clone())
+                .collect(),
         },
     );
     let mut parameters = vec![Parameter {
