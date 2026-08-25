@@ -4953,6 +4953,32 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(call) = value {
+            if let Some(operation) = self.imported_callable_path(&call.func) {
+                if matches!(operation.as_str(), "operator.concat" | "operator.iconcat")
+                    && call.arguments.keywords.is_empty()
+                {
+                    let [left, right] = &*call.arguments.args else {
+                        return None;
+                    };
+                    let (left, right) = match (left, right) {
+                        (Expr::List(left), Expr::List(right)) => {
+                            (left.elts.as_slice(), right.elts.as_slice())
+                        }
+                        (Expr::Tuple(left), Expr::Tuple(right)) => {
+                            (left.elts.as_slice(), right.elts.as_slice())
+                        }
+                        _ => return None,
+                    };
+                    let index = Self::literal_sequence_index(slice, left.len() + right.len())?;
+                    return self.resolve_callee(if index < left.len() {
+                        &left[index]
+                    } else {
+                        &right[index - left.len()]
+                    });
+                }
+            }
+        }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
