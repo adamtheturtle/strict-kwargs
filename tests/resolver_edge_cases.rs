@@ -943,6 +943,28 @@ dataclasses.astuple(obj=Record(callback=target))[0](1)
     );
 }
 
+/// `astuple` uses stored dataclass fields rather than constructor-only
+/// `InitVar` entries when mapping tuple positions (issue #830).
+#[test]
+fn dataclasses_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar, dataclass, field
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+    stored: object = field(default=None, init=False)
+dataclasses.astuple(obj=Record(transient=target))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy an astuple position: {messages:?}"
+    );
+}
+
 /// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
 #[test]
 fn make_dataclass_preserves_callable_field_signatures() {

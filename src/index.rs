@@ -130,6 +130,7 @@ enum ClassDataKind {
 struct ClassDataModel {
     kind: ClassDataKind,
     init_fields: Vec<String>,
+    runtime_fields: Vec<String>,
 }
 
 impl Store {
@@ -1342,26 +1343,26 @@ impl DefinitionIndex {
     }
 
     /// Return the number of fields in a synthesized dataclass constructor.
-    pub fn dataclass_init_field_count(&self, fullname: &str) -> Option<usize> {
+    pub fn dataclass_runtime_field_count(&self, fullname: &str) -> Option<usize> {
         Some(
             self.read()
                 .store
                 .data_models
                 .get(fullname)
                 .filter(|model| model.kind == ClassDataKind::Dataclass)?
-                .init_fields
+                .runtime_fields
                 .len(),
         )
     }
 
     /// Return a dataclass constructor field by its runtime positional order.
-    pub fn dataclass_init_field(&self, fullname: &str, index: usize) -> Option<String> {
+    pub fn dataclass_runtime_field(&self, fullname: &str, index: usize) -> Option<String> {
         self.read()
             .store
             .data_models
             .get(fullname)
             .filter(|model| model.kind == ClassDataKind::Dataclass)?
-            .init_fields
+            .runtime_fields
             .get(index)
             .cloned()
     }
@@ -2903,6 +2904,7 @@ fn synthesize_functional_namedtuple(
         ClassDataModel {
             kind: ClassDataKind::NamedTuple,
             init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            runtime_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
         },
     );
     let mut parameters = vec![Parameter {
@@ -2974,6 +2976,7 @@ fn synthesize_make_dataclass(
         ClassDataModel {
             kind: ClassDataKind::Dataclass,
             init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            runtime_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
         },
     );
     let mut parameters = vec![Parameter {
