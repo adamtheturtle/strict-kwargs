@@ -957,6 +957,24 @@ current.get()(1)
     );
 }
 
+/// An unannotated `ContextVar` infers a concrete callable from its default
+/// value (issue #851).
+#[test]
+fn contextvar_default_infers_callable_signature() {
+    let messages = check_source(
+        r#"
+from contextvars import ContextVar
+def target(value: int) -> None: ...
+current = ContextVar("current", default=target)
+current.get()(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "get() result"),
+        "expected inferred ContextVar.get violation, got: {messages:?}"
+    );
+}
+
 /// A dataclass constructor keyword directly supplies the corresponding field
 /// value, preserving a concrete callable's signature (issue #373).
 #[test]
