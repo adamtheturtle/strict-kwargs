@@ -524,6 +524,25 @@ collections.UserList((target,))[0](1)
     );
 }
 
+/// `UserList.pop()` preserves the homogeneous callable element from an
+/// immediately constructed literal-backed list (issue #816).
+#[test]
+fn userlist_pop_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target]).pop()(1)
+collections.UserList(initlist=(target,)).pop()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList.pop violations, got: {messages:?}"
+    );
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]
