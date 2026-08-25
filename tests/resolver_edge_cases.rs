@@ -2119,6 +2119,22 @@ def target(value: int) -> None: ...
     );
 }
 
+/// `dict.fromkeys` preserves a concrete callable value through a literal-key
+/// subscript (issue #920).
+#[test]
+fn dict_fromkeys_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+dict.fromkeys(["x"], target)["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict.fromkeys value violation, got: {messages:?}"
+    );
+}
+
 /// `defaultdict.get` preserves an existing literal mapping value rather than
 /// invoking or widening through its default factory (issue #800).
 #[test]
