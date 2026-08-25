@@ -6730,32 +6730,6 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(&field.value)
     }
 
-    #[cfg_attr(coverage, coverage(off))]
-    fn literal_item_index(index: &Expr, len: usize) -> Option<usize> {
-        match index {
-            Expr::NumberLiteral(ast::ExprNumberLiteral {
-                value: Number::Int(value),
-                ..
-            }) => value.as_usize().filter(|&value| value < len),
-            Expr::UnaryOp(ast::ExprUnaryOp {
-                op: ast::UnaryOp::USub,
-                operand,
-                ..
-            }) => {
-                let Expr::NumberLiteral(ast::ExprNumberLiteral {
-                    value: Number::Int(value),
-                    ..
-                }) = operand.as_ref()
-                else {
-                    return None;
-                };
-                let distance = value.as_usize()?;
-                (distance > 0).then(|| len.checked_sub(distance)).flatten()
-            }
-            _ => None,
-        }
-    }
-
     // Covered end-to-end for positive and negative indices; malformed getter
     // applications and non-literal containers deliberately decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -6779,12 +6753,7 @@ impl<'a> CallChecker<'a> {
         }
         let index = factory.arguments.args.first()?;
         let container = application.arguments.args.first()?;
-        let element = match container {
-            Expr::List(list) => &list.elts[Self::literal_item_index(index, list.elts.len())?],
-            Expr::Tuple(tuple) => &tuple.elts[Self::literal_item_index(index, tuple.elts.len())?],
-            _ => return None,
-        };
-        self.resolve_callee(element)
+        self.resolve_literal_container_item(container, index)
     }
 
     // Covered by the typed-factory resolver and fix regressions; unresolved

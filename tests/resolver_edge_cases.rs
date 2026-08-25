@@ -1033,6 +1033,23 @@ itemgetter(-1)((f,))(1)
     );
 }
 
+/// `itemgetter` preserves a callable value selected from a literal dictionary
+/// by a literal key (issue #823).
+#[test]
+fn itemgetter_dict_result_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+import operator
+def target(value: int) -> None: ...
+operator.itemgetter("x")({"x": target})(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected itemgetter dictionary result violation, got: {messages:?}"
+    );
+}
+
 /// A local factory's return annotation identifies a callable instance class
 /// and therefore its concrete `__call__` signature (issue #378).
 #[test]
