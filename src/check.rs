@@ -1465,6 +1465,9 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Stored unittest case instances whose context-entry helpers have a
+    /// type-preserving generic return.
+    unittest_enter_instances: FxHashMap<String, String>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
@@ -1636,6 +1639,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1671,6 +1675,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.unittest_enter_instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1825,6 +1830,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1867,6 +1873,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2179,6 +2186,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -2394,21 +2402,9 @@ impl<'a> CallChecker<'a> {
         self.index.is_class(aliased).then(|| aliased.to_string())
     }
 
-    /// Resolve `unittest.TestCase().enterContext` and similar re-exported
-    /// constructors without teaching `class_from_constructor` about those
-    /// aliases (which would divert all `TestCase` instance methods from ty).
     #[cfg_attr(coverage, coverage(off))]
-    fn unittest_enter_factory(&self, func: &Expr) -> Option<String> {
-        let Expr::Attribute(attr) = func else {
-            return None;
-        };
-        if !matches!(
-            attr.attr.as_str(),
-            "enterContext" | "enterClassContext" | "enterAsyncContext"
-        ) {
-            return None;
-        }
-        let Expr::Call(constructor) = attr.value.as_ref() else {
+    fn unittest_case_constructor(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(constructor) = expr else {
             return None;
         };
         let Expr::Attribute(ast::ExprAttribute {
@@ -2424,7 +2420,49 @@ impl<'a> CallChecker<'a> {
         };
         let module_path = self.resolve_module(module.id.as_str())?;
         let candidate = format!("{module_path}.{}", class_attr.as_str());
-        let class = self.indexed_class(&candidate)?;
+        matches!(
+            candidate.as_str(),
+            "unittest.TestCase" | "unittest.IsolatedAsyncioTestCase"
+        )
+        .then(|| self.indexed_class(&candidate))
+        .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn stored_unittest_enter_class(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(class) = scope.unittest_enter_instances.get(name) {
+                return Some(class.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Resolve `unittest.TestCase().enterContext` and similar re-exported
+    /// constructors without teaching `class_from_constructor` about those
+    /// aliases (which would divert all `TestCase` instance methods from ty).
+    #[cfg_attr(coverage, coverage(off))]
+    fn unittest_enter_factory(&self, func: &Expr) -> Option<String> {
+        let Expr::Attribute(attr) = func else {
+            return None;
+        };
+        if !matches!(
+            attr.attr.as_str(),
+            "enterContext" | "enterClassContext" | "enterAsyncContext"
+        ) {
+            return None;
+        }
+        let class = self
+            .unittest_case_constructor(attr.value.as_ref())
+            .or_else(|| {
+                let Expr::Name(name) = attr.value.as_ref() else {
+                    return None;
+                };
+                self.stored_unittest_enter_class(name.id.as_str())
+            })?;
         Some(format!("{class}.{}", attr.attr.as_str()))
     }
 
@@ -4518,8 +4556,8 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let factory = self
-            .resolve_callee(&call.func)
-            .or_else(|| self.unittest_enter_factory(&call.func))?;
+            .unittest_enter_factory(&call.func)
+            .or_else(|| self.resolve_callee(&call.func))?;
         let generic = self
             .generic_returns
             .get(&factory)
@@ -5316,6 +5354,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -8362,6 +8401,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
+                let unittest_enter_class = self.unittest_case_constructor(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -8435,6 +8475,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
+                        }
+                        if let Some(class) = &unittest_enter_class {
+                            self.current_scope()
+                                .unittest_enter_instances
+                                .insert(name.id.to_string(), class.clone());
                         }
                         // Record after instance clearing so WeakSet/list element
                         // tracking is not wiped by ``clear_instance_binding``.
@@ -8535,6 +8580,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let unittest_enter_class = self.unittest_case_constructor(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -8547,6 +8593,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
+                    }
+                    if let Some(class) = unittest_enter_class {
+                        self.current_scope()
+                            .unittest_enter_instances
+                            .insert(name.id.to_string(), class);
                     }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
