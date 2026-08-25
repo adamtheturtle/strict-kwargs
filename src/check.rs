@@ -1656,6 +1656,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
@@ -1926,6 +1927,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
+        scope.contextvar_callables.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -1976,6 +1978,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
+        scope.contextvar_callables.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -2296,6 +2299,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
@@ -6378,6 +6382,19 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn contextvar_default_callable_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&call.func)?)
+            != "contextvars.ContextVar"
+        {
+            return None;
+        }
+        self.unnamed_callable_signature(&call.arguments.find_keyword("default")?.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn future_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -9174,6 +9191,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let popped_signature = self.annotated_list_pop_signature(value);
                 let contextvar_token_signature = self.contextvar_set_token_signature(value);
+                let contextvar_default_signature =
+                    self.contextvar_default_callable_signature(value);
                 let contextvar_old_value_signature =
                     self.contextvar_token_old_value_assignment_signature(value);
                 let mapping_get_signature = self.mapping_proxy_get_signature(value);
@@ -9290,6 +9309,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if let Some(signature) = &contextvar_token_signature {
                             self.current_scope()
                                 .contextvar_token_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
+                        if let Some(signature) = &contextvar_default_signature {
+                            self.current_scope()
+                                .contextvar_callables
                                 .insert(name.id.to_string(), signature.clone());
                         }
                         if let Some(signature) = &contextvar_old_value_signature {
