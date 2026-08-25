@@ -5072,6 +5072,10 @@ impl<'a> CallChecker<'a> {
                         return None;
                     }
                     let resolved = self.resolve_local(name)?;
+                    if self.binding_is_instance(name) {
+                        let dunder_call = format!("{resolved}.__call__");
+                        return self.index.get(&dunder_call).map(|_| dunder_call);
+                    }
                     return Some(self.callable_fullname(&resolved).unwrap_or(resolved));
                 }
             }

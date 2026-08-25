@@ -951,6 +951,29 @@ globals()["target"](1)
     }
 }
 
+/// Namespace lookups of callable instances use the instance's `__call__`
+/// signature rather than its class constructor signature.
+#[test]
+fn module_namespace_literal_lookups_preserve_callable_instances() {
+    let messages = check_source(
+        r#"
+class Handler:
+    def __init__(self, label: str) -> None: ...
+    def __call__(self, value: int) -> None: ...
+handler = Handler("ready")
+locals()["handler"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "__call__"),
+        "expected callable-instance lookup violation, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("__init__")),
+        "namespace lookup must not use the constructor: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
