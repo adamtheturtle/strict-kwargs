@@ -2066,6 +2066,48 @@ async def caller() -> None:
     );
 }
 
+/// A concrete `put_nowait` mutation infers the callable item returned by an
+/// unannotated `asyncio.Queue` (issue #840).
+#[test]
+fn asyncio_queue_put_nowait_infers_callable_item_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "get() result"),
+        "expected concrete Queue item violation, got: {messages:?}"
+    );
+}
+
+/// Heterogeneous concrete queue mutations do not retain a stale signature.
+#[test]
+fn asyncio_queue_put_nowait_rejects_ambiguous_item_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    values.put_nowait(item=object())
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("asyncio.Queue.get() result")),
+        "heterogeneous queue must not retain an inferred signature: {messages:?}"
+    );
+}
+
 /// A constructed `operator.methodcaller` accepts its target positionally,
 /// while encoded `__call__` arguments are checked against that target (#395).
 #[test]

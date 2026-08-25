@@ -1441,6 +1441,12 @@ struct Scope {
     annotations: FxHashMap<String, String>,
     /// Queue-like local binding -> concrete callable item signature.
     callable_queue_items: FxHashMap<String, Signature>,
+    /// Queue item signatures inferred from concrete mutation rather than an annotation.
+    inferred_callable_queue_items: FxHashSet<String>,
+    /// Mutated queues whose observed item signatures are not homogeneous.
+    ambiguous_callable_queue_items: FxHashSet<String>,
+    /// Locals initialized from `asyncio.Queue()` and eligible for mutation inference.
+    concrete_asyncio_queues: FxHashSet<String>,
     /// Annotated ``WeakValueDictionary[K, V]`` locals when ``V`` is callable.
     /// Kept separate from [`Self::callable_queue_items`] so ``.get()`` is not
     /// confused with queue ``get`` / ``get_nowait`` tracking.
@@ -1637,6 +1643,9 @@ impl<'a> CallChecker<'a> {
         scope.modules.remove(local_name);
         scope.instances.remove(local_name);
         scope.callable_queue_items.remove(local_name);
+        scope.inferred_callable_queue_items.remove(local_name);
+        scope.ambiguous_callable_queue_items.remove(local_name);
+        scope.concrete_asyncio_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
@@ -1675,6 +1684,9 @@ impl<'a> CallChecker<'a> {
             scope.modules.remove(local_name);
             scope.instances.remove(local_name);
             scope.callable_queue_items.remove(local_name);
+            scope.inferred_callable_queue_items.remove(local_name);
+            scope.ambiguous_callable_queue_items.remove(local_name);
+            scope.concrete_asyncio_queues.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
@@ -1897,6 +1909,9 @@ impl<'a> CallChecker<'a> {
         scope.modules.remove(name);
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
+        scope.inferred_callable_queue_items.remove(name);
+        scope.ambiguous_callable_queue_items.remove(name);
+        scope.concrete_asyncio_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -1942,6 +1957,9 @@ impl<'a> CallChecker<'a> {
         remove_function_binding(scope, name);
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
+        scope.inferred_callable_queue_items.remove(name);
+        scope.ambiguous_callable_queue_items.remove(name);
+        scope.concrete_asyncio_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -2257,6 +2275,9 @@ impl<'a> CallChecker<'a> {
         scope.instances.insert(local_name.to_string());
         scope.modules.remove(local_name);
         scope.callable_queue_items.remove(local_name);
+        scope.inferred_callable_queue_items.remove(local_name);
+        scope.ambiguous_callable_queue_items.remove(local_name);
+        scope.concrete_asyncio_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
@@ -5640,6 +5661,9 @@ impl<'a> CallChecker<'a> {
         scope.modules.remove(name);
         scope.instances.remove(name);
         scope.callable_queue_items.remove(name);
+        scope.inferred_callable_queue_items.remove(name);
+        scope.ambiguous_callable_queue_items.remove(name);
+        scope.concrete_asyncio_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -6172,6 +6196,67 @@ impl<'a> CallChecker<'a> {
             Some("Queue" | "LifoQueue" | "PriorityQueue")
         )
         .then(|| Self::callable_annotation_signature(slice))?
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn record_queue_put_nowait(&mut self, call: &ast::ExprCall) {
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return;
+        };
+        if method.attr.as_str() != "put_nowait" {
+            return;
+        }
+        let Expr::Name(receiver) = method.value.as_ref() else {
+            return;
+        };
+        if !self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.concrete_asyncio_queues.contains(receiver.id.as_str()))
+        {
+            return;
+        }
+        let item = call
+            .arguments
+            .find_keyword("item")
+            .map(|keyword| &keyword.value)
+            .or_else(|| call.arguments.args.first());
+        let signature = item.and_then(|item| self.unnamed_callable_signature(item));
+        let Some(scope) = self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.concrete_asyncio_queues.contains(receiver.id.as_str()))
+        else {
+            return;
+        };
+        let name = receiver.id.as_str();
+        if scope.ambiguous_callable_queue_items.contains(name) {
+            return;
+        }
+        if scope.callable_queue_items.contains_key(name)
+            && !scope.inferred_callable_queue_items.contains(name)
+        {
+            return;
+        }
+        match (scope.callable_queue_items.get(name), signature) {
+            (None, Some(signature)) => {
+                scope
+                    .callable_queue_items
+                    .insert(name.to_string(), signature);
+                scope.inferred_callable_queue_items.insert(name.to_string());
+            }
+            (Some(existing), Some(signature)) if existing == &signature => {}
+            (Some(_), _) => {
+                scope.callable_queue_items.remove(name);
+                scope.inferred_callable_queue_items.remove(name);
+                scope
+                    .ambiguous_callable_queue_items
+                    .insert(name.to_string());
+            }
+            (None, None) => {}
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -8960,6 +9045,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     None
                 };
                 let as_completed_item = self.as_completed_item_signature(value);
+                let is_asyncio_queue = matches!(value.as_ref(), Expr::Call(call)
+                    if self.resolve_callee(&call.func)
+                        .is_some_and(|factory| Self::is_asyncio_callable(&factory, "Queue")));
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -9072,6 +9160,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .as_completed_callables
                                 .insert(name.id.to_string(), signature.clone());
+                        }
+                        if is_asyncio_queue {
+                            self.current_scope()
+                                .concrete_asyncio_queues
+                                .insert(name.id.to_string());
                         }
                     }
                 }
@@ -9351,6 +9444,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             Expr::Call(call) => {
                 self.invalidate_setattr_call(call);
                 self.invalidate_exec_literal_assignment(call);
+                self.record_queue_put_nowait(call);
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);
                 }
