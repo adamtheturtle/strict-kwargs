@@ -952,6 +952,26 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     );
 }
 
+/// `inspect.getattr_static` preserves a concrete callable stored on an inline
+/// `SimpleNamespace` (issue #966).
+#[test]
+fn getattr_static_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r#"
+import inspect
+import types
+def target(value: int) -> None: ...
+inspect.getattr_static(
+    obj=types.SimpleNamespace(callback=target), attr="callback"
+)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "inspect.getattr_static must preserve the namespace callable: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]

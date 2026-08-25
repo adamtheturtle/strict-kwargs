@@ -7122,6 +7122,41 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn getattr_static_simple_namespace_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "inspect.getattr_static")
+            || !(2..=3).contains(&call.arguments.len())
+            || call.arguments.keywords.iter().any(|keyword| {
+                !matches!(
+                    keyword.arg.as_ref().map(ast::Identifier::as_str),
+                    Some("obj" | "attr" | "default")
+                )
+            })
+        {
+            return None;
+        }
+        let Expr::Call(namespace) = Self::generic_argument(call, Some(0), "obj")? else {
+            return None;
+        };
+        let Expr::StringLiteral(attribute) = Self::generic_argument(call, Some(1), "attr")? else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+            != "types.SimpleNamespace"
+        {
+            return None;
+        }
+        self.resolve_callee(
+            &namespace
+                .arguments
+                .find_keyword(attribute.value.to_str())?
+                .value,
+        )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn attrgetter_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(getter_call) = func else {
             return None;
@@ -8480,6 +8515,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.getattr_simple_namespace_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.getattr_static_simple_namespace_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
