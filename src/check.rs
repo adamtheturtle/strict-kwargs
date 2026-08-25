@@ -6592,6 +6592,53 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn concrete_function_body_return(&self, body: &[Stmt]) -> Option<String> {
+        let return_callable = |stmt: &Stmt| {
+            let Stmt::Return(ast::StmtReturn {
+                value: Some(value), ..
+            }) = stmt
+            else {
+                return None;
+            };
+            self.resolve_callee(value)
+                .filter(|callable| self.index.get(callable).is_some())
+        };
+        if let [stmt] = body {
+            if let Some(callable) = return_callable(stmt) {
+                return Some(callable);
+            }
+            let Stmt::If(if_stmt) = stmt else {
+                return None;
+            };
+            let [body_return] = if_stmt.body.as_slice() else {
+                return None;
+            };
+            let [else_return] = if_stmt.elif_else_clauses.as_slice() else {
+                return None;
+            };
+            if else_return.test.is_some() {
+                return None;
+            }
+            let [else_return] = else_return.body.as_slice() else {
+                return None;
+            };
+            let callable = return_callable(body_return)?;
+            return (return_callable(else_return)? == callable).then_some(callable);
+        }
+        let [Stmt::If(if_stmt), fallback] = body else {
+            return None;
+        };
+        if !if_stmt.elif_else_clauses.is_empty() {
+            return None;
+        }
+        let [branch_return] = if_stmt.body.as_slice() else {
+            return None;
+        };
+        let callable = return_callable(branch_return)?;
+        (return_callable(fallback)? == callable).then_some(callable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn is_asyncio_callable(fullname: &str, name: &str) -> bool {
         let Some(rest) = fullname.strip_prefix("asyncio.") else {
             return false;
@@ -8308,17 +8355,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
-                if let [Stmt::Return(ast::StmtReturn {
-                    value: Some(value), ..
-                })] = body.as_slice()
-                {
-                    if let Some(callable) = self
-                        .resolve_callee(value)
-                        .filter(|callable| self.index.get(callable).is_some())
-                    {
-                        self.concrete_callable_returns
-                            .insert(fullname.clone(), callable);
-                    }
+                if let Some(callable) = self.concrete_function_body_return(body) {
+                    self.concrete_callable_returns
+                        .insert(fullname.clone(), callable);
                 }
                 if decorator_list
                     .iter()
