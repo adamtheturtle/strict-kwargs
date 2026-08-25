@@ -963,6 +963,25 @@ dataclasses.asdict(obj=Record(callback=target))["callback"](1)
     );
 }
 
+/// A `NamedTuple._asdict` result preserves a concrete callable constructor
+/// field selected by its literal name (issue #832).
+#[test]
+fn namedtuple_asdict_preserves_callable_field_signature() {
+    let messages = check_source(
+        r#"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair(callback=target)._asdict()["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected NamedTuple._asdict violation, got: {messages:?}"
+    );
+}
+
 /// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
 #[test]
 fn make_dataclass_preserves_callable_field_signatures() {
