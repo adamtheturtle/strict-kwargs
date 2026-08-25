@@ -3622,6 +3622,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `itertools.starmap` preserves a concrete callable returned by its mapping
+/// lambda through `next()` (issue #783).
+#[test]
+fn itertools_starmap_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.starmap(lambda _: target, [(0,)]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected starmap result violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]

@@ -5716,6 +5716,15 @@ impl<'a> CallChecker<'a> {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
+            "itertools.starmap" if selected_index.is_none() => {
+                if !call.arguments.keywords.is_empty() {
+                    return None;
+                }
+                let [Expr::Lambda(mapper), _iterable] = &*call.arguments.args else {
+                    return None;
+                };
+                self.unnamed_callable_signature(&mapper.body)
+            }
             _ => None,
         }
     }
