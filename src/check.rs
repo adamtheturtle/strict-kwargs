@@ -5033,6 +5033,25 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(astuple_call) = value {
+            if self.names_stdlib_callable(&astuple_call.func, "dataclasses.astuple") {
+                let instance = astuple_call
+                    .arguments
+                    .find_keyword("obj")
+                    .map(|keyword| &keyword.value)
+                    .or_else(|| astuple_call.arguments.args.first())?;
+                let Expr::Call(constructor) = instance else {
+                    return None;
+                };
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                let index = Self::literal_sequence_index(
+                    slice,
+                    self.index.dataclass_runtime_field_count(&class)?,
+                )?;
+                let field = self.index.dataclass_runtime_field(&class, index)?;
+                return self.resolve_callee(&constructor.arguments.find_keyword(&field)?.value);
+            }
+        }
         if let Expr::Call(vars_call) = value {
             if self.names_stdlib_callable(&vars_call.func, "builtins.vars") {
                 let [Expr::Call(namespace)] = &*vars_call.arguments.args else {

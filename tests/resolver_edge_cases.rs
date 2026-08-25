@@ -978,6 +978,87 @@ Holder(call=f).call(1)
     );
 }
 
+/// `dataclasses.astuple` preserves concrete callable constructor fields at a
+/// literal tuple index (issue #830).
+#[test]
+fn dataclasses_astuple_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.astuple(obj=Record(callback=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.astuple violation, got: {messages:?}"
+    );
+}
+
+/// `astuple` uses stored dataclass fields rather than constructor-only
+/// `InitVar` entries when mapping tuple positions (issue #830).
+#[test]
+fn dataclasses_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar, dataclass, field
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+    stored: object = field(default=None, init=False)
+dataclasses.astuple(obj=Record(transient=target))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// `KW_ONLY` is a dataclass sentinel rather than a stored runtime field.
+#[test]
+fn dataclasses_astuple_ignores_kw_only_sentinel() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import KW_ONLY, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    _: KW_ONLY
+    stored: object
+dataclasses.astuple(Record(stored=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "target"),
+        "KW_ONLY must not occupy an astuple position: {messages:?}"
+    );
+}
+
+/// Functional dataclasses omit constructor-only `InitVar` entries at runtime.
+#[test]
+fn make_dataclass_astuple_ignores_initvar_positions() {
+    let messages = check_source(
+        r"
+import dataclasses
+from dataclasses import InitVar
+def target(value: int) -> None: ...
+Record = dataclasses.make_dataclass(cls_name='Record', fields=[('transient', InitVar[object]), ('stored', object)])
+dataclasses.astuple(obj=Record(transient=target, stored=None))[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not occupy a make_dataclass astuple position: {messages:?}"
+    );
+}
+
 /// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
 #[test]
 fn make_dataclass_preserves_callable_field_signatures() {
