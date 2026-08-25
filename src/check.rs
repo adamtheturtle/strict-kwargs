@@ -8247,6 +8247,50 @@ impl<'a> CallChecker<'a> {
             .then_some(first)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_items_iterator_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(next_call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(items_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(items_method) = items_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = items_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || items_method.attr.as_str() != "items"
+            || !items_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -8294,6 +8338,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
@@ -8304,6 +8349,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 }
             }
             Expr::Name(name) => {
