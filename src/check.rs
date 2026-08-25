@@ -6979,6 +6979,9 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
+            return Some(signature);
+        }
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
             return Some(signature);
         }
@@ -7014,6 +7017,30 @@ impl<'a> CallChecker<'a> {
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = iterator else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&iter_call.func, "builtins.iter")
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Lambda(factory), Expr::NoneLiteral(_)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        if factory
+            .parameters
+            .as_deref()
+            .is_some_and(|parameters| parameters.iter().next().is_some())
+        {
+            return None;
+        }
+        self.single_signature_for_expr(&factory.body)
+            .map(|function| function.signature)
     }
 
     // Covered end-to-end by the SimpleNamespace attribute regression. Other
