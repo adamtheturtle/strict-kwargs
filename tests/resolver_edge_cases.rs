@@ -2329,6 +2329,47 @@ async def main() -> None:
     );
 }
 
+/// A concrete `queue.Queue.put` mutation infers the callable returned by
+/// `get` (issue #848).
+#[test]
+fn sync_queue_put_infers_callable_item_signature() {
+    let messages = check_source(
+        r"
+import queue
+def target(value: int) -> None: ...
+values = queue.Queue()
+values.put(item=target)
+values.get()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "queue result"),
+        "expected concrete sync Queue item violation, got: {messages:?}"
+    );
+}
+
+/// Calling coroutine-based `asyncio.Queue.put` without awaiting it does not
+/// establish a concrete queue mutation.
+#[test]
+fn asyncio_queue_unawaited_put_does_not_infer_item_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "unawaited asyncio.Queue.put must not infer a mutation: {messages:?}"
+    );
+}
+
 /// A constructed `operator.methodcaller` accepts its target positionally,
 /// while encoded `__call__` arguments are checked against that target (#395).
 #[test]

@@ -1447,6 +1447,8 @@ struct Scope {
     ambiguous_callable_queue_items: FxHashSet<String>,
     /// Locals initialized from `asyncio.Queue()` and eligible for mutation inference.
     concrete_asyncio_queues: FxHashSet<String>,
+    /// Locals initialized from `queue.Queue()` and eligible for mutation inference.
+    concrete_sync_queues: FxHashSet<String>,
     /// Annotated ``WeakValueDictionary[K, V]`` locals when ``V`` is callable.
     /// Kept separate from [`Self::callable_queue_items`] so ``.get()`` is not
     /// confused with queue ``get`` / ``get_nowait`` tracking.
@@ -1648,6 +1650,7 @@ impl<'a> CallChecker<'a> {
         scope.inferred_callable_queue_items.remove(local_name);
         scope.ambiguous_callable_queue_items.remove(local_name);
         scope.concrete_asyncio_queues.remove(local_name);
+        scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
@@ -1690,6 +1693,7 @@ impl<'a> CallChecker<'a> {
             scope.inferred_callable_queue_items.remove(local_name);
             scope.ambiguous_callable_queue_items.remove(local_name);
             scope.concrete_asyncio_queues.remove(local_name);
+            scope.concrete_sync_queues.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
@@ -1916,6 +1920,7 @@ impl<'a> CallChecker<'a> {
         scope.inferred_callable_queue_items.remove(name);
         scope.ambiguous_callable_queue_items.remove(name);
         scope.concrete_asyncio_queues.remove(name);
+        scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -1965,6 +1970,7 @@ impl<'a> CallChecker<'a> {
         scope.inferred_callable_queue_items.remove(name);
         scope.ambiguous_callable_queue_items.remove(name);
         scope.concrete_asyncio_queues.remove(name);
+        scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -2284,6 +2290,7 @@ impl<'a> CallChecker<'a> {
         scope.inferred_callable_queue_items.remove(local_name);
         scope.ambiguous_callable_queue_items.remove(local_name);
         scope.concrete_asyncio_queues.remove(local_name);
+        scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
@@ -5722,6 +5729,7 @@ impl<'a> CallChecker<'a> {
         scope.inferred_callable_queue_items.remove(name);
         scope.ambiguous_callable_queue_items.remove(name);
         scope.concrete_asyncio_queues.remove(name);
+        scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
@@ -6258,11 +6266,13 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn record_queue_put_nowait(&mut self, call: &ast::ExprCall) {
+    fn record_queue_put(&mut self, call: &ast::ExprCall) {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return;
         };
-        if method.attr.as_str() != "put_nowait" {
+        let is_nowait_put = method.attr.as_str() == "put_nowait";
+        let is_blocking_put = method.attr.as_str() == "put";
+        if !is_nowait_put && !is_blocking_put {
             return;
         }
         let Expr::Name(receiver) = method.value.as_ref() else {
@@ -6275,7 +6285,9 @@ impl<'a> CallChecker<'a> {
             .enumerate()
             .rev()
             .find_map(|(index, scope)| {
-                if scope.concrete_asyncio_queues.contains(name) {
+                if (is_nowait_put && scope.concrete_asyncio_queues.contains(name))
+                    || (is_blocking_put && scope.concrete_sync_queues.contains(name))
+                {
                     Some(Some(index))
                 } else if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
                     Some(None)
@@ -9202,6 +9214,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_asyncio_queue = matches!(value.as_ref(), Expr::Call(call)
                     if self.resolve_callee(&call.func)
                         .is_some_and(|factory| Self::is_asyncio_callable(&factory, "Queue")));
+                let is_sync_queue = matches!(value.as_ref(), Expr::Call(call)
+                    if self.resolve_callee(&call.func)
+                        .is_some_and(|factory| Self::normalize_factory_fullname(&factory) == "queue.Queue"));
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -9323,6 +9338,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if is_asyncio_queue {
                             self.current_scope()
                                 .concrete_asyncio_queues
+                                .insert(name.id.to_string());
+                        }
+                        if is_sync_queue {
+                            self.current_scope()
+                                .concrete_sync_queues
                                 .insert(name.id.to_string());
                         }
                     }
@@ -9603,7 +9623,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             Expr::Call(call) => {
                 self.invalidate_setattr_call(call);
                 self.invalidate_exec_literal_assignment(call);
-                self.record_queue_put_nowait(call);
+                self.record_queue_put(call);
                 if positional_argument_count(&call.arguments) > 0 {
                     self.check_call(call);
                 }
