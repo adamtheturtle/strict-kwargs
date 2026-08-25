@@ -3622,6 +3622,22 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `next(reversed(...))` preserves callable elements from a homogeneous
+/// literal iterable (issue #782).
+#[test]
+fn next_reversed_literal_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(reversed([target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected next(reversed(...)) violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]

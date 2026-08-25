@@ -5750,6 +5750,15 @@ impl<'a> CallChecker<'a> {
             "builtins.enumerate" | "builtins.enumerate.__new__" if selected_index == Some(1) => {
                 self.literal_iterable_callable_signature(call.arguments.args.first()?)
             }
+            "builtins.reversed" | "builtins.reversed.__new__" if selected_index.is_none() => {
+                if !call.arguments.keywords.is_empty() {
+                    return None;
+                }
+                let [iterable] = &*call.arguments.args else {
+                    return None;
+                };
+                self.literal_iterable_callable_signature(iterable)
+            }
             "builtins.filter" | "builtins.filter.__new__" if selected_index.is_none() => {
                 if !matches!(call.arguments.args.first(), Some(Expr::NoneLiteral(_))) {
                     return None;
