@@ -6354,17 +6354,21 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn create_task_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+    fn asyncio_future_callable_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Call(call) = expr else {
             return None;
         };
         let factory = self.resolve_callee(&call.func)?;
-        if !Self::is_asyncio_callable(&factory, "create_task") {
+        let argument_name = if Self::is_asyncio_callable(&factory, "create_task") {
+            "coro"
+        } else if Self::is_asyncio_callable(&factory, "ensure_future") {
+            "coro_or_future"
+        } else {
             return None;
-        }
+        };
         let coroutine = call
             .arguments
-            .find_keyword("coro")
+            .find_keyword(argument_name)
             .map(|keyword| &keyword.value)
             .or_else(|| call.arguments.args.first())?;
         self.awaitable_callable_result_signature(coroutine)
@@ -8841,7 +8845,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 } else {
                     None
                 };
-                let created_task_signature = self.create_task_callable_signature(value);
+                let created_task_signature = self.asyncio_future_callable_signature(value);
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda

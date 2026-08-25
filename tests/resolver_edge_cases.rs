@@ -4312,6 +4312,28 @@ async def main() -> None:
     );
 }
 
+/// `asyncio.ensure_future` infers a callable coroutine result for the
+/// future's `result()` method (issue #838).
+#[test]
+fn asyncio_ensure_future_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    future = asyncio.ensure_future(coro_or_future=factory())
+    await future
+    future.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected ensure_future result violation, got: {messages:?}"
+    );
+}
+
 /// Rebinding a Future local must drop the annotated `future_callables` entry
 /// (issue #737).
 #[test]
