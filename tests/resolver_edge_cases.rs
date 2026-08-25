@@ -2138,6 +2138,22 @@ call(1)
     );
 }
 
+/// Explicit `list.__getitem__` preserves the callable at a literal index
+/// (issue #772).
+#[test]
+fn literal_list_explicit_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__getitem__(0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit-getitem violation, got: {messages:?}"
+    );
+}
+
 /// Immediate list pop results preserve homogeneous callable elements
 /// (issue #770).
 #[test]

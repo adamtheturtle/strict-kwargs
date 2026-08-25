@@ -7503,6 +7503,25 @@ impl<'a> CallChecker<'a> {
         self.resolve_literal_container_item(value, slice)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_list_getitem_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "__getitem__" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [index] = &*call.arguments.args else {
+            return None;
+        };
+        matches!(method.value.as_ref(), Expr::List(_))
+            .then(|| self.resolve_literal_container_item(&method.value, index))
+            .flatten()
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -7692,6 +7711,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.operator_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_list_getitem_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
