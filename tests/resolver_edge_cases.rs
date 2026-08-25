@@ -3735,6 +3735,23 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
+/// A directly imported alias of `inspect.unwrap` retains the concrete wrapped
+/// callable signature (issue #858).
+#[test]
+fn direct_import_inspect_unwrap_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from inspect import unwrap as inspect_unwrap
+def target(value: int) -> None: ...
+inspect_unwrap(func=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct inspect.unwrap violation, got: {messages:?}"
+    );
+}
+
 /// `reprlib.recursive_repr` preserves the decorated callable signature (issue
 /// #613).
 #[test]
