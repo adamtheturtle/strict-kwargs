@@ -524,6 +524,25 @@ collections.UserList((target,))[0](1)
     );
 }
 
+/// A zero-argument `UserList.copy()` preserves the immediately constructed
+/// list's concrete callable elements (issue #815).
+#[test]
+fn userlist_copy_subscript_resolves_selected_callable() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target]).copy()[0](1)
+collections.UserList((target,)).copy()[-1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList.copy violations, got: {messages:?}"
+    );
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]

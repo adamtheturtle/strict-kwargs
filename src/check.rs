@@ -4952,12 +4952,34 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn immediate_userlist_copy_receiver<'b>(&self, call: &'b ast::ExprCall) -> Option<&'b Expr> {
+        if !call.arguments.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "copy" {
+            return None;
+        }
+        let Expr::Call(receiver) = method.value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&receiver.func)?;
+        (Self::normalize_factory_fullname(&factory) == "collections.UserList")
+            .then_some(method.value.as_ref())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
         if let Expr::Call(wrapper) = value {
+            if let Some(receiver) = self.immediate_userlist_copy_receiver(wrapper) {
+                return self.resolve_literal_container_item(receiver, slice);
+            }
             let factory = self.resolve_callee(&wrapper.func)?;
             if Self::normalize_factory_fullname(&factory) == "collections.UserList"
                 && wrapper.arguments.len() == 1
