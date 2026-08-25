@@ -1131,6 +1131,9 @@ struct CallChecker<'a> {
     /// Local factory fullname -> callable instance class declared by its
     /// return annotation.
     callable_factory_returns: FxHashMap<String, String>,
+    /// Local factory fullname -> concrete callable returned by a body made up
+    /// of one unconditional ``return`` statement.
+    concrete_callable_returns: FxHashMap<String, String>,
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
@@ -1536,6 +1539,7 @@ impl<'a> CallChecker<'a> {
             function_stack: Vec::new(),
             functional_namedtuple_names: FxHashSet::default(),
             callable_factory_returns: FxHashMap::default(),
+            concrete_callable_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
             callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
@@ -6579,6 +6583,15 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn concrete_factory_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(factory_call) = func else {
+            return None;
+        };
+        let factory = self.resolve_callee(&factory_call.func)?;
+        self.concrete_callable_returns.get(&factory).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn is_asyncio_callable(fullname: &str, name: &str) -> bool {
         let Some(rest) = fullname.strip_prefix("asyncio.") else {
             return false;
@@ -7599,6 +7612,9 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.factory_result_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.concrete_factory_result_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.itemgetter_result_callable(func) {
                     return Some(callable);
                 }
@@ -8291,6 +8307,19 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.visit_expr(&decorator.expression);
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
+                self.concrete_callable_returns.remove(&fullname);
+                if let [Stmt::Return(ast::StmtReturn {
+                    value: Some(value), ..
+                })] = body.as_slice()
+                {
+                    if let Some(callable) = self
+                        .resolve_callee(value)
+                        .filter(|callable| self.index.get(callable).is_some())
+                    {
+                        self.concrete_callable_returns
+                            .insert(fullname.clone(), callable);
+                    }
+                }
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))

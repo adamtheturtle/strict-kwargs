@@ -4876,3 +4876,39 @@ dataclasses.dataclass()(Model)(1)
         "expected dataclass identity-return violations, got: {messages:?}"
     );
 }
+
+/// A local function consisting of one unconditional return of a concrete
+/// callable preserves that callable's signature (issue #803).
+#[test]
+fn single_return_factory_preserves_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected concrete factory-result violation, got: {messages:?}"
+    );
+}
+
+/// Additional statements make a factory body too dynamic to infer safely.
+#[test]
+fn multi_statement_factory_does_not_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    marker = 1
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "dynamic factory should decline: {messages:?}"
+    );
+}
