@@ -6209,29 +6209,34 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(receiver) = method.value.as_ref() else {
             return;
         };
-        if !self
+        let name = receiver.id.as_str();
+        let Some(scope_index) = self
             .scopes
             .iter()
+            .enumerate()
             .rev()
-            .any(|scope| scope.concrete_asyncio_queues.contains(receiver.id.as_str()))
-        {
+            .find_map(|(index, scope)| {
+                if scope.concrete_asyncio_queues.contains(name) {
+                    Some(Some(index))
+                } else if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                    Some(None)
+                } else {
+                    None
+                }
+            })
+        else {
             return;
-        }
+        };
+        let Some(scope_index) = scope_index else {
+            return;
+        };
         let item = call
             .arguments
             .find_keyword("item")
             .map(|keyword| &keyword.value)
             .or_else(|| call.arguments.args.first());
         let signature = item.and_then(|item| self.unnamed_callable_signature(item));
-        let Some(scope) = self
-            .scopes
-            .iter_mut()
-            .rev()
-            .find(|scope| scope.concrete_asyncio_queues.contains(receiver.id.as_str()))
-        else {
-            return;
-        };
-        let name = receiver.id.as_str();
+        let scope = &mut self.scopes[scope_index];
         if scope.ambiguous_callable_queue_items.contains(name) {
             return;
         }
@@ -6255,7 +6260,11 @@ impl<'a> CallChecker<'a> {
                     .ambiguous_callable_queue_items
                     .insert(name.to_string());
             }
-            (None, None) => {}
+            (None, None) => {
+                scope
+                    .ambiguous_callable_queue_items
+                    .insert(name.to_string());
+            }
         }
     }
 
