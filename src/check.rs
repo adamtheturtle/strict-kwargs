@@ -1470,6 +1470,8 @@ struct Scope {
     unittest_enter_instances: FxHashMap<String, String>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
+    /// Starred-destructuring list name -> one callable shared by every captured element.
+    starred_callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
     instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
     /// Names declared ``nonlocal`` in this scope; assignments rebind an outer
@@ -1632,6 +1634,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -1668,6 +1671,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_iterable_items.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
+            scope.starred_callable_list_elements.remove(local_name);
             scope.instance_type_args.remove(local_name);
             scope.contextvar_token_callables.remove(local_name);
             scope.topological_sorter_nodes.remove(local_name);
@@ -1708,6 +1712,19 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_callable_list_element(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.starred_callable_list_elements.get(name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     fn record_callable_list(&mut self, name: &str, callable: Option<String>) {
         let scope = self.current_scope();
         if let Some(callable) = callable {
@@ -1716,6 +1733,7 @@ impl<'a> CallChecker<'a> {
                 .insert(name.to_owned(), callable);
         } else {
             scope.callable_list_elements.remove(name);
+            scope.starred_callable_list_elements.remove(name);
         }
     }
 
@@ -1728,6 +1746,57 @@ impl<'a> CallChecker<'a> {
         elements
             .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
             .then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn starred_destructuring_callable_lists(
+        &self,
+        targets: &[Expr],
+        value: &Expr,
+    ) -> Vec<(String, String)> {
+        let source = match value {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        for target in targets {
+            let pattern = match target {
+                Expr::List(list) => list.elts.as_slice(),
+                Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                _ => continue,
+            };
+            let mut starred = pattern.iter().enumerate().filter_map(|(index, element)| {
+                let Expr::Starred(starred) = element else {
+                    return None;
+                };
+                let Expr::Name(name) = starred.value.as_ref() else {
+                    return None;
+                };
+                Some((index, name.id.as_str()))
+            });
+            let Some((index, name)) = starred.next() else {
+                continue;
+            };
+            if starred.next().is_some() || source.len() < pattern.len().saturating_sub(1) {
+                continue;
+            }
+            let suffix_len = pattern.len() - index - 1;
+            let captured = &source[index..source.len() - suffix_len];
+            let mut captured = captured.iter();
+            let Some(first) = captured
+                .next()
+                .and_then(|element| self.resolve_callee(element))
+            else {
+                continue;
+            };
+            if captured
+                .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            {
+                result.push((name.to_string(), first));
+            }
+        }
+        result
     }
 
     // Only reached via random/secrets helpers that are themselves
@@ -1823,6 +1892,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -1866,6 +1936,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -2179,6 +2250,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -4153,20 +4225,9 @@ impl<'a> CallChecker<'a> {
         None
     }
 
-    /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
-    /// that names a callable is resolved for the subsequent call (issue #652).
     #[cfg_attr(coverage, coverage(off))]
-    fn property_fget_result_callable(&self, func: &Expr) -> Option<String> {
-        let Expr::Call(fget_call) = func else {
-            return None;
-        };
-        let Expr::Attribute(fget_attr) = fget_call.func.as_ref() else {
-            return None;
-        };
-        if fget_attr.attr.as_str() != "fget" {
-            return None;
-        }
-        let Expr::Call(property_call) = fget_attr.value.as_ref() else {
+    fn property_getter_callable(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(property_call) = expr else {
             return None;
         };
         let factory = self.resolve_callee(&property_call.func)?;
@@ -4188,6 +4249,39 @@ impl<'a> CallChecker<'a> {
         match getter {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
             _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn stored_property_getter_callable(&self, name: &str) -> Option<String> {
+        let result_name = format!("{name}.fget.__return__");
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.names.get(&result_name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
+    /// that names a callable is resolved for the subsequent call (issue #652).
+    #[cfg_attr(coverage, coverage(off))]
+    fn property_fget_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(fget_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(fget_attr) = fget_call.func.as_ref() else {
+            return None;
+        };
+        if fget_attr.attr.as_str() != "fget" {
+            return None;
+        }
+        match fget_attr.value.as_ref() {
+            Expr::Name(property) => self.stored_property_getter_callable(property.id.as_str()),
+            property_call => self.property_getter_callable(property_call),
         }
     }
 
@@ -4934,8 +5028,10 @@ impl<'a> CallChecker<'a> {
         }
         if let Expr::Call(wrapper) = value {
             let factory = self.resolve_callee(&wrapper.func)?;
-            if Self::normalize_factory_fullname(&factory) == "collections.UserDict"
-                && wrapper.arguments.keywords.is_empty()
+            if matches!(
+                Self::normalize_factory_fullname(&factory),
+                "collections.OrderedDict" | "collections.UserDict"
+            ) && wrapper.arguments.keywords.is_empty()
             {
                 let [mapping] = &*wrapper.arguments.args else {
                     return None;
@@ -4974,6 +5070,7 @@ impl<'a> CallChecker<'a> {
                         .is_some_and(|key| Self::same_literal_key(key, slice))
                 })
                 .and_then(|item| self.resolve_callee(&item.value)),
+            Expr::Name(name) => self.resolve_starred_callable_list_element(name.id.as_str()),
             _ => None,
         }
     }
@@ -5327,6 +5424,7 @@ impl<'a> CallChecker<'a> {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
+                || scope.starred_callable_list_elements.contains_key(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);
@@ -5464,6 +5562,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -6429,6 +6528,41 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_elements_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(elements_call) = expr else {
+            return None;
+        };
+        if !elements_call.arguments.args.is_empty() || !elements_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Attribute(method) = elements_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "elements" {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let class = class
+            .strip_suffix(".__new__")
+            .or_else(|| class.strip_suffix(".__init__"))
+            .unwrap_or(&class);
+        if class != "collections.Counter" {
+            return None;
+        }
+        let iterable = constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.literal_iterable_callable_signature(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -6454,6 +6588,11 @@ impl<'a> CallChecker<'a> {
         }
         if let Some(signature) = self.itertools_item_signature(iterator, selected_index) {
             return Some(signature);
+        }
+        if selected_index.is_none() {
+            if let Some(signature) = self.counter_elements_item_signature(iterator) {
+                return Some(signature);
+            }
         }
         if let Expr::Call(map_call) = iterator {
             if self.pool_map_call(map_call) {
@@ -7200,6 +7339,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn heapq_selection_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if !matches!(attribute.attr.as_str(), "nsmallest" | "nlargest")
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("heapq")
+        {
+            return None;
+        }
+        let iterable = call.arguments.args.get(1).or_else(|| {
+            call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.homogeneous_callable_sequence(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn statistics_selector_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -7210,8 +7374,10 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(module) = attribute.value.as_ref() else {
             return None;
         };
-        if attribute.attr.as_str() != "mode"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
+        if !matches!(
+            attribute.attr.as_str(),
+            "mode" | "median_low" | "median_high"
+        ) || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
         {
             return None;
         }
@@ -7221,6 +7387,16 @@ impl<'a> CallChecker<'a> {
                     .then_some(&keyword.value)
             })
         })?;
+        if matches!(attribute.attr.as_str(), "median_low" | "median_high") {
+            let singleton = match data {
+                Expr::List(list) => list.elts.len() == 1,
+                Expr::Tuple(tuple) => tuple.elts.len() == 1,
+                _ => false,
+            };
+            if !singleton {
+                return None;
+            }
+        }
         self.homogeneous_callable_sequence(data)
     }
 
@@ -7485,6 +7661,25 @@ impl<'a> CallChecker<'a> {
         self.resolve_literal_container_item(value, slice)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_list_getitem_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "__getitem__" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let [index] = &*call.arguments.args else {
+            return None;
+        };
+        matches!(method.value.as_ref(), Expr::List(_))
+            .then(|| self.resolve_literal_container_item(&method.value, index))
+            .flatten()
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -7527,6 +7722,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
@@ -7536,6 +7732,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
@@ -7672,6 +7869,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.operator_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_list_getitem_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
@@ -8527,6 +8727,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
+                let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
@@ -8538,6 +8739,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let callable_list = self
                     .homogeneous_callable_list(value)
                     .or_else(|| self.weakset_initializer_callable(value));
+                let starred_callable_lists =
+                    self.starred_destructuring_callable_lists(targets, value);
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
@@ -8602,6 +8805,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         } else {
                             self.clear_instance_binding(name.id.as_str());
                         }
+                        if let Some(callable) = &property_getter {
+                            self.define(
+                                &format!("{}.fget.__return__", name.id.as_str()),
+                                callable.clone(),
+                            );
+                        }
                         if let Some(class) = &unittest_enter_class {
                             self.current_scope()
                                 .unittest_enter_instances
@@ -8647,6 +8856,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .insert(name.id.to_string(), callable.clone());
                         }
                     }
+                }
+                for (name, callable) in starred_callable_lists {
+                    self.current_scope()
+                        .starred_callable_list_elements
+                        .insert(name, callable);
                 }
             }
             Stmt::Delete(ast::StmtDelete { targets, .. }) => {
@@ -8706,6 +8920,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -8719,6 +8934,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
+                    }
+                    if let Some(callable) = property_getter {
+                        self.define(&format!("{}.fget.__return__", name.id.as_str()), callable);
                     }
                     if let Some(class) = unittest_enter_class {
                         self.current_scope()

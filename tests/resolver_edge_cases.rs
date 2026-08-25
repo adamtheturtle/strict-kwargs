@@ -526,6 +526,49 @@ def target(value: int) -> None: ...
     }
 }
 
+/// A statically non-empty homogeneous slice captured by a starred assignment
+/// target remains a callable list (issue #801).
+#[test]
+fn starred_destructuring_tail_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected starred-tail violation, got: {messages:?}"
+    );
+
+    let rebound = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail = [lambda *args: None]
+tail[0](1)
+",
+    );
+    assert!(
+        rebound.is_empty(),
+        "reassigning a starred list must clear its old callable: {rebound:?}"
+    );
+
+    let destructured_rebind = check_source(
+        r"
+def target(value: int) -> None: ...
+head, *tail = [target, target]
+tail, = [[lambda *args: None]]
+tail[0](1)
+",
+    );
+    assert!(
+        destructured_rebind.is_empty(),
+        "destructuring must clear a starred callable list: {destructured_rebind:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
@@ -2159,6 +2202,22 @@ call(1)
     );
 }
 
+/// Explicit `list.__getitem__` preserves the callable at a literal index
+/// (issue #772).
+#[test]
+fn literal_list_explicit_getitem_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__getitem__(0)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit-getitem violation, got: {messages:?}"
+    );
+}
+
 /// Immediate list pop results preserve homogeneous callable elements
 /// (issue #770).
 #[test]
@@ -3770,6 +3829,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// An `OrderedDict` initialized from a literal mapping preserves concrete
+/// callable values through subscripting (issue #779).
+#[test]
+fn ordereddict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict result violation, got: {messages:?}"
+    );
+}
+
 /// A `UserDict` initialized from a literal mapping preserves concrete callable
 /// values through subscripting (issue #778).
 #[test]
@@ -3806,6 +3882,26 @@ heapq.heapreplace([f, f], f)(1)
     assert!(has_error_at(&messages, 6, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 7, "f"), "messages: {messages:?}");
     assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
+}
+
+/// `heapq.nsmallest` and `nlargest` retain concrete callable elements through
+/// subscripting, including their keyword argument forms (issue #793).
+#[test]
+fn heapq_selection_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def target(value: int) -> None: ...
+heapq.nsmallest(n=1, iterable=[target])[0](1)
+heapq.nlargest(n=1, iterable=[target])[0](1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected heapq selection violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// Generic selectors in `random` and `secrets` retain their input element's
@@ -3867,6 +3963,26 @@ statistics.multimode(data=[target])[0](1)
     );
 }
 
+/// Singleton `statistics.median_low` and `median_high` results preserve the
+/// sole callable data element (issue #796).
+#[test]
+fn statistics_median_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import statistics
+def target(value: int) -> None: ...
+statistics.median_low(data=[target])(1)
+statistics.median_high(data=[target])(1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected statistics median violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `Counter.most_common` preserves callable key types (issue #514).
 #[test]
 fn counter_most_common_preserves_callable_key_signatures() {
@@ -3880,6 +3996,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected Counter.most_common violation, got: {messages:?}"
+    );
+}
+
+/// `Counter.elements()` preserves concrete callable keys through `next()`
+/// for an immediately constructed counter (issue #797).
+#[test]
+fn counter_elements_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(Counter([target]).elements())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter.elements violation, got: {messages:?}"
     );
 }
 
@@ -4344,6 +4477,49 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     assert!(
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+/// A stored `property` retains the callable returned by its getter
+/// (regression #761).
+#[test]
+fn stored_property_fget_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+prop.fget(self=Owner())(1)
+prop = object()
+prop.fget(self=Owner())(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale property bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "stored property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+#[test]
+fn stored_property_fget_does_not_cross_a_nested_rebinding() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+def caller() -> None:
+    prop = object()
+    prop.fget(self=Owner())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "nested rebinding must hide the stored getter: {messages:?}"
     );
 }
 
