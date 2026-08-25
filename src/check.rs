@@ -5144,6 +5144,31 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Expr::Call(wrapper) = value {
+            let is_dict_fromkeys = match wrapper.func.as_ref() {
+                Expr::Attribute(method) if method.attr.as_str() == "fromkeys" => {
+                    self.resolve_callee(&method.value).is_some_and(|resolved| {
+                        Self::normalize_factory_fullname(&resolved) == "builtins.dict"
+                    })
+                }
+                _ => false,
+            };
+            if is_dict_fromkeys && wrapper.arguments.keywords.is_empty() {
+                let [keys, default] = &*wrapper.arguments.args else {
+                    return None;
+                };
+                let elements = match keys {
+                    Expr::List(list) => &list.elts,
+                    Expr::Tuple(tuple) => &tuple.elts,
+                    _ => return None,
+                };
+                if elements
+                    .iter()
+                    .any(|key| Self::same_literal_key(key, slice))
+                {
+                    return self.resolve_callee(default);
+                }
+                return None;
+            }
             if let Expr::Attribute(method) = wrapper.func.as_ref() {
                 if method.attr.as_str() == "new_child"
                     && wrapper.arguments.args.is_empty()
