@@ -3252,6 +3252,38 @@ async def main() -> None:
     }
 }
 
+/// A stored `IsolatedAsyncioTestCase` retains the generic callable returned by
+/// `enterAsyncContext` (regression #760).
+#[test]
+fn isolated_asyncio_test_case_instance_preserves_entered_callable() {
+    let messages = check_source(
+        r"
+import unittest
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None: pass
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    case = object()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale case bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 11, "awaited result")
+            || has_error_at(&messages, 11, "generic result"),
+        "expected entered-callable violation, got: {messages:?}"
+    );
+}
+
 /// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
 /// are indexed for later generic-result checking.
 #[test]
