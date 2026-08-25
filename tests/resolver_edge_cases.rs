@@ -877,6 +877,23 @@ namespace.call(1)
     );
 }
 
+/// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
+/// constructor attribute (issue #834).
+#[test]
+fn vars_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+vars(types.SimpleNamespace(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected vars(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
