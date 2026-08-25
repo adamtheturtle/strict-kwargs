@@ -6371,13 +6371,26 @@ impl<'a> CallChecker<'a> {
             .is_some_and(|factory| Self::is_asyncio_callable(&factory, "create_task"));
         let is_task_group_create_task = match call.func.as_ref() {
             Expr::Attribute(method) if method.attr.as_str() == "create_task" => {
-                let Expr::Name(receiver) = method.value.as_ref() else {
-                    return None;
-                };
-                self.scopes
-                    .iter()
-                    .rev()
-                    .any(|scope| scope.asyncio_task_groups.contains(receiver.id.as_str()))
+                if let Expr::Name(receiver) = method.value.as_ref() {
+                    let name = receiver.id.as_str();
+                    self.scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| {
+                            if scope.asyncio_task_groups.contains(name) {
+                                Some(true)
+                            } else if scope.names.contains_key(name)
+                                || scope.opaque_locals.contains(name)
+                            {
+                                Some(false)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             }
             _ => false,
         };
