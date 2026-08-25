@@ -8426,10 +8426,11 @@ impl<'a> CallChecker<'a> {
                     if class_fullname == "builtins.super" {
                         return None;
                     }
-                    if let Some(callable) = self
-                        .property_body_callables
-                        .get(&format!("{class_fullname}.{attr_name}"))
-                    {
+                    let method_fullname = self
+                        .index
+                        .resolve_method(&class_fullname, attr_name)
+                        .unwrap_or_else(|| format!("{class_fullname}.{attr_name}"));
+                    if let Some(callable) = self.property_body_callables.get(&method_fullname) {
                         return Some(callable.clone());
                     }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
@@ -8603,6 +8604,7 @@ impl<'a> CallChecker<'a> {
         {
             if let Some(callable) = Self::single_return_expression(body)
                 .and_then(|returned| self.resolve_callee(returned))
+                .filter(|callable| self.index.get(callable).is_some())
             {
                 self.property_body_callables
                     .insert(method_fullname.clone(), callable);
