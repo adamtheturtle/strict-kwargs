@@ -4352,6 +4352,20 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(wrapped)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn create_autospec_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "unittest.mock.create_autospec") {
+            return None;
+        }
+        let spec = Self::generic_argument(call, Some(0), "spec")?;
+        (!spec.is_starred_expr())
+            .then(|| self.resolve_callee(spec))
+            .flatten()
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -8444,6 +8458,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.identity_return_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.create_autospec_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.property_fget_result_callable(func) {
