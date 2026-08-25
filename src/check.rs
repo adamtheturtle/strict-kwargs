@@ -5057,6 +5057,9 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Some(callable) = self.namedtuple_make_item_callable(value, slice) {
+            return Some(callable);
+        }
         if let Expr::Call(asdict_call) = value {
             if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
                 let Expr::StringLiteral(field) = slice else {
@@ -7128,6 +7131,41 @@ impl<'a> CallChecker<'a> {
             .position(|parameter| parameter.name.as_deref() == Some(attr))?
             .checked_sub(1)?;
         self.resolve_callee(elements.get(index)?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn namedtuple_make_item_callable(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        let Expr::Call(make_call) = value else {
+            return None;
+        };
+        let Expr::Attribute(method) = make_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "_make" || make_call.arguments.len() != 1 {
+            return None;
+        }
+        let class = match method.value.as_ref() {
+            Expr::Name(name) => self.resolve_local(name.id.as_str())?,
+            value => self.class_from_constructor_func(value)?,
+        };
+        if !self.index.is_namedtuple(&class) {
+            return None;
+        }
+        let iterable = Self::generic_argument(make_call, Some(0), "iterable")?;
+        let elements = match iterable {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let constructor = self
+            .index
+            .resolve_method(&class, "__new__")
+            .unwrap_or_else(|| format!("{class}.__new__"));
+        let signatures = self.index.get(&constructor)?;
+        let signature = signatures.first()?;
+        (signature.parameters.len().checked_sub(1)? == elements.len()).then_some(())?;
+        let index = Self::literal_sequence_index(slice, elements.len())?;
+        self.resolve_callee(&elements[index])
     }
 
     // The end-to-end regression covers both tracked and inline receivers;

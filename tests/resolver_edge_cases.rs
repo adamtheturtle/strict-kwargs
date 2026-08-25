@@ -5413,6 +5413,25 @@ Pair._make(iterable=[target]).callback(1)
     );
 }
 
+/// A literal tuple index on `NamedTuple._make` preserves the corresponding
+/// concrete callable iterable element (issue #970).
+#[test]
+fn namedtuple_make_index_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair._make(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "NamedTuple._make index must preserve its callable: {messages:?}"
+    );
+}
+
 /// A stored `property` retains the callable returned by its getter
 /// (regression #761).
 #[test]
