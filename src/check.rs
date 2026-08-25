@@ -4959,6 +4959,17 @@ impl<'a> CallChecker<'a> {
         }
         if let Expr::Call(wrapper) = value {
             let factory = self.resolve_callee(&wrapper.func)?;
+            if matches!(factory.as_str(), "copy.copy" | "copy.deepcopy")
+                && wrapper.arguments.len() == 1
+            {
+                let copied = wrapper.arguments.args.first().or_else(|| {
+                    wrapper.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("x"))
+                            .then_some(&keyword.value)
+                    })
+                })?;
+                return self.resolve_literal_container_item(copied, slice);
+            }
             if matches!(
                 Self::normalize_factory_fullname(&factory),
                 "collections.OrderedDict" | "collections.UserDict"
