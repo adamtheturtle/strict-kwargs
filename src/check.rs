@@ -4882,10 +4882,30 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn literal_container_truthiness(expr: &Expr) -> Option<bool> {
         match expr {
-            Expr::List(list) => Some(!list.elts.is_empty()),
-            Expr::Tuple(tuple) => Some(!tuple.elts.is_empty()),
-            Expr::Dict(dict) => Some(!dict.items.is_empty()),
-            Expr::Set(set) => Some(!set.elts.is_empty()),
+            Expr::List(list) => list
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| list.elts.is_empty().then_some(false)),
+            Expr::Tuple(tuple) => tuple
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| tuple.elts.is_empty().then_some(false)),
+            Expr::Dict(dict) => dict
+                .items
+                .iter()
+                .any(|item| item.key.is_some())
+                .then_some(true)
+                .or_else(|| dict.items.is_empty().then_some(false)),
+            Expr::Set(set) => set
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| set.elts.is_empty().then_some(false)),
             _ => definite_bool(expr),
         }
     }

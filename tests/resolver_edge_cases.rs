@@ -536,6 +536,19 @@ def second(value: int) -> None: ...
         ambiguous.is_empty(),
         "ambiguous boolean result must decline: {ambiguous:?}"
     );
+
+    let unpacking = check_source(
+        r#"
+def target(value: int) -> None: ...
+([*values] and [target])[0](1)
+((*values,) and (target,))[0](1)
+({**mapping} and {"x": target})["x"](1)
+"#,
+    );
+    assert!(
+        unpacking.is_empty(),
+        "possibly empty unpacked containers must decline: {unpacking:?}"
+    );
 }
 
 /// Generic builtins that select or sort elements preserve a homogeneous
