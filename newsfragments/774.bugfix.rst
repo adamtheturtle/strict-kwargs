@@ -1,0 +1,2 @@
+Preserve the concrete callable value returned by ``popitem`` on a literal
+dictionary.
