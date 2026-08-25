@@ -6835,13 +6835,28 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         if method.attr.as_str() != "get"
-            || !matches!(method.value.as_ref(), Expr::Dict(_))
             || !call.arguments.keywords.is_empty()
             || !(1..=2).contains(&call.arguments.args.len())
         {
             return None;
         }
-        self.resolve_literal_container_item(&method.value, call.arguments.args.first()?)
+        let mapping = match method.value.as_ref() {
+            Expr::Dict(_) => method.value.as_ref(),
+            Expr::Call(constructor) => {
+                let class = self.resolve_callee(&constructor.func)?;
+                if Self::normalize_factory_fullname(&class) != "collections.defaultdict"
+                    || !constructor.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let [_factory, mapping] = &*constructor.arguments.args else {
+                    return None;
+                };
+                mapping
+            }
+            _ => return None,
+        };
+        self.resolve_literal_container_item(mapping, call.arguments.args.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
