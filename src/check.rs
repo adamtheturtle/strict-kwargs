@@ -8207,6 +8207,46 @@ impl<'a> CallChecker<'a> {
         self.homogeneous_literal_container_callable(container)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_values_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(values_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(values_method) = values_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = values_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || values_method.attr.as_str() != "values"
+            || !values_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
     // Exercised extensively by resolver integration tests. Excluded because
     // llvm-cov reports per-test-binary line holes as new expression variants
     // move calls between match arms.
@@ -8405,6 +8445,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.explicit_builtin_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_dict_values_iterator_next_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
