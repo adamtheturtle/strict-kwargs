@@ -3791,6 +3791,27 @@ secrets.choice((f,))(1)
     }
 }
 
+/// The valid keyword form of `random.choice` and `secrets.choice` preserves
+/// callable elements just like the positional form (issue #785).
+#[test]
+fn random_choice_keyword_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+import secrets
+def target(value: int) -> None: ...
+random.choice(seq=[target])(1)
+secrets.choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected keyword choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `statistics.mode` / `multimode` preserve callable element types (issue #515).
 #[test]
 fn statistics_selector_results_preserve_callable_signatures() {
