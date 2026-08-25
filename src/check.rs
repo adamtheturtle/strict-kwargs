@@ -4800,6 +4800,23 @@ impl<'a> CallChecker<'a> {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
+        if let Expr::Call(wrapper) = value {
+            let factory = self.resolve_callee(&wrapper.func)?;
+            if Self::normalize_factory_fullname(&factory) == "collections.defaultdict"
+                && wrapper.arguments.keywords.is_empty()
+            {
+                let [Expr::Lambda(default_factory)] = &*wrapper.arguments.args else {
+                    return None;
+                };
+                let accepts_no_arguments = default_factory
+                    .parameters
+                    .as_deref()
+                    .is_none_or(|parameters| parameters.iter().next().is_none());
+                if accepts_no_arguments {
+                    return self.resolve_callee(&default_factory.body);
+                }
+            }
+        }
         match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;

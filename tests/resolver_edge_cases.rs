@@ -3622,6 +3622,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A missing `defaultdict` key invokes its zero-argument factory and preserves
+/// the concrete callable returned by that factory (issue #780).
+#[test]
+fn defaultdict_factory_result_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: target)["missing"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict result violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
