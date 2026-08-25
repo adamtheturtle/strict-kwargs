@@ -4899,6 +4899,10 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                let body = self.resolve_literal_container_item(body, slice)?;
+                (self.resolve_literal_container_item(orelse, slice)? == body).then_some(body)
+            }
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])

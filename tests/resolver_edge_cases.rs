@@ -505,6 +505,38 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Conditional containers preserve a selected callable when both branches
+/// resolve to the same concrete target (issue #811).
+#[test]
+fn conditional_literal_containers_resolve_identical_callable() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+([target] if condition else [target])[0](1)
+((target,) if condition else (target,))[0](1)
+({"x": target} if condition else {"x": target})["x"](1)
+"#,
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected conditional-container violation on line {line}, got: {messages:?}"
+        );
+    }
+
+    let ambiguous = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+([first] if condition else [second])[0](1)
+",
+    );
+    assert!(
+        ambiguous.is_empty(),
+        "differing container branches must decline: {ambiguous:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
