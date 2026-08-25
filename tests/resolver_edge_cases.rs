@@ -668,6 +668,41 @@ def caller(value: object) -> None:
     );
 }
 
+/// `TypeIs` resolves a callable type alias before narrowing (regression #762).
+#[test]
+fn typeis_narrowing_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def is_callback(value: object) -> typing.TypeIs[Callback]: return callable(value)
+def caller(value: object) -> None:
+    if is_callback(value=value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "narrowed"),
+        "expected alias-narrowed violation, got: {messages:?}"
+    );
+
+    let reassigned = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+Callback = int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value):
+        value(1)
+",
+    );
+    assert!(
+        reassigned.is_empty(),
+        "reassigned aliases must not leave stale narrowing: {reassigned:?}"
+    );
+}
+
 #[test]
 fn optional_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(

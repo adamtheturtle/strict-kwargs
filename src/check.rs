@@ -1465,6 +1465,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Local type aliases whose value is a concrete ``Callable`` annotation.
+    callable_type_aliases: FxHashMap<String, Signature>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
@@ -1636,6 +1638,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.callable_type_aliases.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -1671,6 +1674,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.callable_type_aliases.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
             scope.invalidated_callables.remove(local_name);
@@ -1825,6 +1829,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -1867,6 +1872,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -2179,6 +2185,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.callable_type_aliases.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
         }
@@ -5316,6 +5323,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
         }
@@ -5449,7 +5457,27 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn callable_type_alias_signature(&self, annotation: &Expr) -> Option<Signature> {
+        if let Some(signature) = Self::callable_annotation_signature(annotation) {
+            return Some(signature);
+        }
+        let Expr::Name(name) = annotation else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(name.id.as_str())
+                || scope.opaque_locals.contains(name.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn typeguard_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -5457,7 +5485,7 @@ impl<'a> CallChecker<'a> {
             Self::dotted_path(value)?.rsplit('.').next(),
             Some("TypeGuard" | "TypeIs")
         )
-        .then(|| Self::callable_annotation_signature(slice))
+        .then(|| self.callable_type_alias_signature(slice))
         .flatten()
     }
 
@@ -8198,7 +8226,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 if let Some(signature) = returns
                     .as_deref()
-                    .and_then(Self::typeguard_callable_signature)
+                    .and_then(|annotation| self.typeguard_callable_signature(annotation))
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
                 }
@@ -8312,6 +8340,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -8385,6 +8414,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
+                        }
+                        if let Some(signature) = &callable_type_alias {
+                            self.current_scope()
+                                .callable_type_aliases
+                                .insert(name.id.to_string(), signature.clone());
                         }
                         // Record after instance clearing so WeakSet/list element
                         // tracking is not wiped by ``clear_instance_binding``.
@@ -8485,6 +8519,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -8497,6 +8532,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
+                    }
+                    if let Some(signature) = callable_type_alias {
+                        self.current_scope()
+                            .callable_type_aliases
+                            .insert(name.id.to_string(), signature);
                     }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
