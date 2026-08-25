@@ -6370,6 +6370,41 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_elements_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(elements_call) = expr else {
+            return None;
+        };
+        if !elements_call.arguments.args.is_empty() || !elements_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let Expr::Attribute(method) = elements_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "elements" {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let class = class
+            .strip_suffix(".__new__")
+            .or_else(|| class.strip_suffix(".__init__"))
+            .unwrap_or(&class);
+        if class != "collections.Counter" {
+            return None;
+        }
+        let iterable = constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.literal_iterable_callable_signature(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -6395,6 +6430,11 @@ impl<'a> CallChecker<'a> {
         }
         if let Some(signature) = self.itertools_item_signature(iterator, selected_index) {
             return Some(signature);
+        }
+        if selected_index.is_none() {
+            if let Some(signature) = self.counter_elements_item_signature(iterator) {
+                return Some(signature);
+            }
         }
         if let Expr::Call(map_call) = iterator {
             if self.pool_map_call(map_call) {
