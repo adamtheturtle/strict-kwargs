@@ -4962,12 +4962,14 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn literal_slice_original_index(
-        slice: &ast::ExprSlice,
+        lower: Option<&Expr>,
+        upper: Option<&Expr>,
+        stride_expr: Option<&Expr>,
         len: usize,
         selected: &Expr,
     ) -> Option<usize> {
         let len = i64::try_from(len).ok()?;
-        let stride = match slice.step.as_deref() {
+        let stride = match stride_expr {
             Some(stride) => Self::literal_signed_integer(stride)?,
             None => 1,
         };
@@ -4987,12 +4989,12 @@ impl<'a> CallChecker<'a> {
             }
         };
         let positive = stride > 0;
-        let start = match slice.lower.as_deref() {
+        let start = match lower {
             Some(start) => normalize(Self::literal_signed_integer(start)?, positive),
             None if positive => 0,
             None => len - 1,
         };
-        let stop = match slice.upper.as_deref() {
+        let stop = match upper {
             Some(stop) => normalize(Self::literal_signed_integer(stop)?, positive),
             None if positive => len,
             None => -1,
@@ -5026,6 +5028,9 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Some(callable) = self.itemgetter_slice_element_callable(value, slice) {
+            return Some(callable);
+        }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
@@ -5061,7 +5066,13 @@ impl<'a> CallChecker<'a> {
                     Expr::Tuple(tuple) => tuple.elts.as_slice(),
                     _ => return None,
                 };
-                let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
+                let index = Self::literal_slice_original_index(
+                    inner_slice.lower.as_deref(),
+                    inner_slice.upper.as_deref(),
+                    inner_slice.step.as_deref(),
+                    elements.len(),
+                    slice,
+                )?;
                 self.resolve_callee(&elements[index])
             }
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
@@ -6754,6 +6765,50 @@ impl<'a> CallChecker<'a> {
         let index = factory.arguments.args.first()?;
         let container = application.arguments.args.first()?;
         self.resolve_literal_container_item(container, index)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn itemgetter_slice_element_callable(&self, value: &Expr, selected: &Expr) -> Option<String> {
+        let Expr::Call(application) = value else {
+            return None;
+        };
+        let Expr::Call(factory) = application.func.as_ref() else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&factory.func)?)
+            != "operator.itemgetter"
+            || factory.arguments.len() != 1
+            || application.arguments.len() != 1
+        {
+            return None;
+        }
+        let Expr::Call(slice_call) = factory.arguments.args.first()? else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&slice_call.func)?)
+            != "builtins.slice"
+            || !slice_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let (lower, upper, step) = match &*slice_call.arguments.args {
+            [upper] => (None, Some(upper), None),
+            [lower, upper] => (Some(lower), Some(upper), None),
+            [lower, upper, step] => (Some(lower), Some(upper), Some(step)),
+            _ => return None,
+        };
+        let lower = lower.filter(|bound| !matches!(bound, Expr::NoneLiteral(_)));
+        let upper = upper.filter(|bound| !matches!(bound, Expr::NoneLiteral(_)));
+        let step = step.filter(|bound| !matches!(bound, Expr::NoneLiteral(_)));
+        let container = application.arguments.args.first()?;
+        let elements = match container {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let index =
+            Self::literal_slice_original_index(lower, upper, step, elements.len(), selected)?;
+        self.resolve_callee(&elements[index])
     }
 
     // Covered by the typed-factory resolver and fix regressions; unresolved

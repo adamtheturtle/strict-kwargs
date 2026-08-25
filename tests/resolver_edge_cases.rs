@@ -1050,6 +1050,23 @@ operator.itemgetter("x")({"x": target})(1)
     );
 }
 
+/// Subscripting a literal slice returned by `itemgetter` preserves the
+/// selected callable element (issue #824).
+#[test]
+fn itemgetter_slice_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+def target(value: int) -> None: ...
+operator.itemgetter(slice(0, 1))([target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected itemgetter slice result violation, got: {messages:?}"
+    );
+}
+
 /// A local factory's return annotation identifies a callable instance class
 /// and therefore its concrete `__call__` signature (issue #378).
 #[test]
