@@ -3878,6 +3878,23 @@ ChainMap({"key": target})["key"](1)
     );
 }
 
+/// An empty `ChainMap.new_child` falls through to concrete callable values in
+/// the parent mapping (issue #820).
+#[test]
+fn chainmap_empty_new_child_preserves_parent_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"x": target}).new_child()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected parent ChainMap result violation, got: {messages:?}"
+    );
+}
+
 /// An `OrderedDict` initialized from a literal mapping preserves concrete
 /// callable values through subscripting (issue #779).
 #[test]
