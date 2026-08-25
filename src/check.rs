@@ -4170,15 +4170,7 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let Expr::Attribute(attribute) = call.func.as_ref() else {
-            return None;
-        };
-        let Expr::Name(module) = attribute.value.as_ref() else {
-            return None;
-        };
-        if attribute.attr.as_str() != "unwrap"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("inspect")
-        {
+        if !self.names_stdlib_callable(&call.func, "inspect.unwrap") {
             return None;
         }
         let wrapped = call.arguments.args.first().or_else(|| {
