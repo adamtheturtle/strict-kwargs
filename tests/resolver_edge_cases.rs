@@ -1390,6 +1390,26 @@ async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
     );
 }
 
+/// ``async for`` reads callable items from an annotated iterator factory
+/// invocation (issue #841).
+#[test]
+fn async_for_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable
+async def values() -> AsyncIterator[Callable[[int], None]]:
+    yield lambda value: None
+async def main() -> None:
+    async for item in values():
+        item(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "async-for item"),
+        "expected async-for factory item violation, got: {messages:?}"
+    );
+}
+
 /// ``async with`` preserves a context manager's ``__aenter__`` return type
 /// (issue #454).
 #[test]
