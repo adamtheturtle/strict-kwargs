@@ -3765,6 +3765,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// An `OrderedDict` initialized from a literal mapping preserves concrete
+/// callable values through subscripting (issue #779).
+#[test]
+fn ordereddict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict result violation, got: {messages:?}"
+    );
+}
+
 /// A `UserDict` initialized from a literal mapping preserves concrete callable
 /// values through subscripting (issue #778).
 #[test]
