@@ -1468,6 +1468,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Locals bound by a stdlib futures executor context manager.
+    executor_instances: FxHashSet<String>,
     /// `asyncio.as_completed` local -> callable result of each yielded awaitable.
     as_completed_callables: FxHashMap<String, Signature>,
     /// Stored unittest case instances whose context-entry helpers have a
@@ -1648,6 +1650,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.executor_instances.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
@@ -1686,6 +1689,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.executor_instances.remove(local_name);
             scope.as_completed_callables.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
@@ -1908,6 +1912,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
@@ -1953,6 +1958,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
@@ -2268,6 +2274,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.executor_instances.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
@@ -5670,6 +5677,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
@@ -6406,12 +6414,15 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = result_call.func.as_ref() else {
             return None;
         };
-        let Expr::Name(value) = method.value.as_ref() else {
-            return None;
-        };
         if method.attr.as_str() != "result" {
             return None;
         }
+        if let Expr::Call(submit_call) = method.value.as_ref() {
+            return self.executor_submit_callable_signature(submit_call);
+        }
+        let Expr::Name(value) = method.value.as_ref() else {
+            return None;
+        };
         for scope in self.scopes.iter().rev() {
             if let Some(signature) = scope.future_callables.get(value.id.as_str()) {
                 return Some(signature.clone());
@@ -6423,6 +6434,44 @@ impl<'a> CallChecker<'a> {
             }
         }
         None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn executor_submit_callable_signature(&self, submit_call: &ast::ExprCall) -> Option<Signature> {
+        let Expr::Attribute(method) = submit_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "submit" {
+            return None;
+        }
+        let Expr::Name(executor) = method.value.as_ref() else {
+            return None;
+        };
+        let name = executor.id.as_str();
+        let is_executor = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| {
+                if scope.executor_instances.contains(name) {
+                    Some(true)
+                } else if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
+        if !is_executor {
+            return None;
+        }
+        let callback = submit_call
+            .arguments
+            .find_keyword("fn")
+            .map(|keyword| &keyword.value)
+            .or_else(|| submit_call.arguments.args.first())?;
+        let callback = self.resolve_callee(callback)?;
+        self.callable_returns.get(&callback).cloned()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -8514,6 +8563,17 @@ impl<'a> CallChecker<'a> {
                 let Some(factory) = self.resolve_callee(&manager_call.func) else {
                     continue;
                 };
+                let normalized_factory = Self::normalize_factory_fullname(&factory);
+                if normalized_factory.starts_with("concurrent.futures.")
+                    && matches!(
+                        normalized_factory.rsplit('.').next(),
+                        Some("ThreadPoolExecutor" | "ProcessPoolExecutor")
+                    )
+                {
+                    self.current_scope()
+                        .executor_instances
+                        .insert(name.id.to_string());
+                }
                 if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
                     self.define_function(
                         name.id.as_str(),

@@ -4486,6 +4486,47 @@ future.result()(1)
     );
 }
 
+/// `Executor.submit` returns a future carrying the submitted callable's
+/// concrete callable return signature (issue #843).
+#[test]
+fn thread_pool_submit_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "result() result"),
+        "expected Executor.submit result violation, got: {messages:?}"
+    );
+}
+
+/// Rebinding the context-manager local discards executor identity.
+#[test]
+fn thread_pool_submit_identity_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor = object()
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound executor must not retain result metadata: {messages:?}"
+    );
+}
+
 /// `Context.run` preserves a lambda callback result callable signature
 /// (issue #480).
 #[test]
