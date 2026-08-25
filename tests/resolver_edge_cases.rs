@@ -2135,6 +2135,24 @@ def target(value: int) -> None: ...
     );
 }
 
+/// A non-literal dictionary key prevents proving that a literal lookup is
+/// absent (Bugbot on #1005).
+#[test]
+fn literal_dict_get_nonliteral_key_does_not_assume_default() {
+    let messages = check_source(
+        r#"
+def existing(value: int) -> None: ...
+def fallback(first: int, second: int) -> None: ...
+key = "missing"
+{key: existing}.get("missing", fallback)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "non-literal key may match at runtime: {messages:?}"
+    );
+}
+
 /// `defaultdict.get` preserves an existing literal mapping value rather than
 /// invoking or widening through its default factory (issue #800).
 #[test]
