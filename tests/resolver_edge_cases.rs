@@ -2205,6 +2205,38 @@ pool.apply_async(func=lambda: target).get(timeout=1)(1)
     );
 }
 
+/// A Pool context target retains the receiver specialization used by its
+/// callable-result helpers (issue #847).
+#[test]
+fn thread_pool_context_preserves_callable_result_signatures() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import ThreadPool
+def target(value: int) -> None: ...
+with ThreadPool(processes=1) as pool:
+    pool.apply(func=lambda: target)(1)
+    pool.apply_async(func=lambda: target).get()(1)
+    pool.map(func=lambda _: target, iterable=[0])[0](1)
+    next(pool.imap(func=lambda _: target, iterable=[0]))(1)
+    next(pool.imap_unordered(func=lambda _: target, iterable=[0]))(1)
+    pool.map_async(func=lambda _: target, iterable=[0]).get()[0](1)
+",
+    );
+    for (line, label) in [
+        (5, "apply() result"),
+        (6, "apply() result"),
+        (7, "target"),
+        (8, "next() result"),
+        (9, "next() result"),
+        (10, "target"),
+    ] {
+        assert!(
+            has_error_at(&messages, line, label),
+            "expected Pool context result violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Awaiting an asyncio Queue get retains a callable item annotation
 /// (issue #445).
 #[test]

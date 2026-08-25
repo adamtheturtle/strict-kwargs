@@ -8662,6 +8662,15 @@ impl<'a> CallChecker<'a> {
                 let Some(factory) = self.resolve_callee(&manager_call.func) else {
                     continue;
                 };
+                let normalized_factory = Self::normalize_factory_fullname(&factory);
+                if normalized_factory.contains("multiprocessing")
+                    && matches!(
+                        normalized_factory.rsplit('.').next(),
+                        Some("Pool" | "ThreadPool")
+                    )
+                {
+                    self.record_instance(name.id.as_str(), normalized_factory.to_string());
+                }
                 if let Some(signature) = self.callable_contextmanager_items.get(&factory).cloned() {
                     self.define_function(
                         name.id.as_str(),
