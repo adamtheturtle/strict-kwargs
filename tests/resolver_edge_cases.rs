@@ -4485,6 +4485,23 @@ statistics.multimode(data=[target])[0](1)
     );
 }
 
+/// A directly imported alias of `statistics.mode` retains the selected
+/// callable's signature (issue #854).
+#[test]
+fn direct_import_statistics_mode_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from statistics import mode as stat_mode
+def target(value: int) -> None: ...
+stat_mode(data=[target])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct statistics.mode violation, got: {messages:?}"
+    );
+}
+
 /// Singleton `statistics.median_low` and `median_high` results preserve the
 /// sole callable data element (issue #796).
 #[test]

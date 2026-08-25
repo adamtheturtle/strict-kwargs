@@ -7808,26 +7808,18 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let Expr::Attribute(attribute) = call.func.as_ref() else {
-            return None;
-        };
-        let Expr::Name(module) = attribute.value.as_ref() else {
-            return None;
-        };
-        if !matches!(
-            attribute.attr.as_str(),
-            "mode" | "median_low" | "median_high"
-        ) || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
-        {
-            return None;
-        }
+        let operation = ["mode", "median_low", "median_high"]
+            .into_iter()
+            .find(|operation| {
+                self.names_stdlib_callable(&call.func, &format!("statistics.{operation}"))
+            })?;
         let data = call.arguments.args.first().or_else(|| {
             call.arguments.keywords.iter().find_map(|keyword| {
                 (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("data"))
                     .then_some(&keyword.value)
             })
         })?;
-        if matches!(attribute.attr.as_str(), "median_low" | "median_high") {
+        if matches!(operation, "median_low" | "median_high") {
             let singleton = match data {
                 Expr::List(list) => list.elts.len() == 1,
                 Expr::Tuple(tuple) => tuple.elts.len() == 1,
