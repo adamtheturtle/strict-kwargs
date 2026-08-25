@@ -3706,6 +3706,27 @@ secrets.choice(seq=[target])(1)
     }
 }
 
+/// Immediate `Random` and `SystemRandom` instances preserve concrete callable
+/// elements selected by their bound `choice` methods (issue #795).
+#[test]
+fn random_instance_choice_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+import secrets
+def target(value: int) -> None: ...
+random.Random().choice(seq=[target])(1)
+secrets.SystemRandom().choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected instance choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `statistics.mode` / `multimode` preserve callable element types (issue #515).
 #[test]
 fn statistics_selector_results_preserve_callable_signatures() {

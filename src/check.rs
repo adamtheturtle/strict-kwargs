@@ -6943,15 +6943,28 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(attribute) = call.func.as_ref() else {
             return None;
         };
-        let Expr::Name(module) = attribute.value.as_ref() else {
+        if attribute.attr.as_str() != "choice" {
             return None;
-        };
-        if attribute.attr.as_str() != "choice"
-            || !matches!(
+        }
+        let supported_receiver = match attribute.value.as_ref() {
+            Expr::Name(module) => matches!(
                 self.resolve_module(module.id.as_str()).as_deref(),
                 Some("random" | "secrets")
-            )
-        {
+            ),
+            Expr::Call(constructor) if constructor.arguments.is_empty() => {
+                let fullname = self.resolve_callee(&constructor.func)?;
+                let base = fullname
+                    .strip_suffix(".__init__")
+                    .or_else(|| fullname.strip_suffix(".__new__"))
+                    .unwrap_or(fullname.as_str());
+                matches!(
+                    base,
+                    "random.Random" | "random.SystemRandom" | "secrets.SystemRandom"
+                )
+            }
+            _ => false,
+        };
+        if !supported_receiver {
             return None;
         }
         let sequence = match &*call.arguments.args {
