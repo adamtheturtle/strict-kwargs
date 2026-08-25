@@ -3807,6 +3807,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// Tuple position zero from an immediately constructed `Counter.popitem()`
+/// preserves its literal callable key (issue #798).
+#[test]
+fn counter_popitem_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter.popitem violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]
