@@ -4527,6 +4527,27 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// `concurrent.futures.as_completed` preserves a singleton submitted future's
+/// concrete callable result (issue #845).
+#[test]
+fn futures_as_completed_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    next(concurrent.futures.as_completed(fs=[future])).result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "result() result"),
+        "expected as_completed Future result violation, got: {messages:?}"
+    );
+}
+
 /// `Context.run` preserves a lambda callback result callable signature
 /// (issue #480).
 #[test]

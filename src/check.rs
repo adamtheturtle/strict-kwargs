@@ -6417,8 +6417,10 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "result" {
             return None;
         }
-        if let Expr::Call(submit_call) = method.value.as_ref() {
-            return self.executor_submit_callable_signature(submit_call);
+        if let Expr::Call(inner_call) = method.value.as_ref() {
+            return self
+                .executor_submit_callable_signature(inner_call)
+                .or_else(|| self.completed_future_callable_signature(inner_call));
         }
         let Expr::Name(value) = method.value.as_ref() else {
             return None;
@@ -6429,6 +6431,50 @@ impl<'a> CallChecker<'a> {
             }
             if scope.names.contains_key(value.id.as_str())
                 || scope.opaque_locals.contains(value.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn completed_future_callable_signature(&self, next_call: &ast::ExprCall) -> Option<Signature> {
+        if self.resolve_callee(&next_call.func)? != "builtins.next" {
+            return None;
+        }
+        let [Expr::Call(completed_call)] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&completed_call.func)? != "concurrent.futures.as_completed" {
+            return None;
+        }
+        let futures = completed_call
+            .arguments
+            .find_keyword("fs")
+            .map(|keyword| &keyword.value)
+            .or_else(|| completed_call.arguments.args.first())?;
+        let future = match futures {
+            Expr::List(list) => {
+                let [Expr::Name(future)] = &*list.elts else {
+                    return None;
+                };
+                future
+            }
+            Expr::Tuple(tuple) => {
+                let [Expr::Name(future)] = &*tuple.elts else {
+                    return None;
+                };
+                future
+            }
+            _ => return None,
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_callables.get(future.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(future.id.as_str())
+                || scope.opaque_locals.contains(future.id.as_str())
             {
                 return None;
             }
@@ -9069,6 +9115,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     None
                 };
                 let as_completed_item = self.as_completed_item_signature(value);
+                let submitted_future = if let Expr::Call(call) = value.as_ref() {
+                    self.executor_submit_callable_signature(call)
+                } else {
+                    None
+                };
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -9180,6 +9231,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         if let Some(signature) = &as_completed_item {
                             self.current_scope()
                                 .as_completed_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
+                        if let Some(signature) = &submitted_future {
+                            self.current_scope()
+                                .future_callables
                                 .insert(name.id.to_string(), signature.clone());
                         }
                     }
