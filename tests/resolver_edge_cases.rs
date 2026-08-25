@@ -2202,6 +2202,22 @@ call(1)
     );
 }
 
+/// A literal list copy preserves the concrete callable at a static index
+/// (issue #771).
+#[test]
+fn literal_list_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected list-copy violation, got: {messages:?}"
+    );
+}
+
 /// Explicit `list.__getitem__` preserves the callable at a literal index
 /// (issue #772).
 #[test]
