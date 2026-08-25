@@ -1,0 +1,1 @@
+Infer concrete callable results for tasks returned by ``asyncio.create_task``.

@@ -6426,6 +6426,23 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn create_task_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let factory = self.resolve_callee(&call.func)?;
+        if !Self::is_asyncio_callable(&factory, "create_task") {
+            return None;
+        }
+        let coroutine = call
+            .arguments
+            .find_keyword("coro")
+            .map(|keyword| &keyword.value)
+            .or_else(|| call.arguments.args.first())?;
+        self.awaitable_callable_result_signature(coroutine)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn context_run_result_signature(&self, func: &Expr) -> Option<Signature> {
         let Expr::Call(run_call) = func else {
             return None;
@@ -9008,6 +9025,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 } else {
                     None
                 };
+                let created_task_signature = self.create_task_callable_signature(value);
                 let as_completed_item = self.as_completed_item_signature(value);
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
@@ -9116,6 +9134,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .topological_sorter_nodes
                                 .insert(name.id.to_string(), callable.clone());
+                        }
+                        if let Some(signature) = &created_task_signature {
+                            self.current_scope()
+                                .future_callables
+                                .insert(name.id.to_string(), signature.clone());
                         }
                         if let Some(signature) = &as_completed_item {
                             self.current_scope()
