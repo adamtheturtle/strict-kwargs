@@ -9202,6 +9202,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
+                self.concrete_contextmanager_items.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -9253,6 +9254,25 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     })
                 {
                     if let Some(callable) = Self::single_yield_expression(body)
+                        .filter(|yielded| {
+                            let Expr::Name(yielded_name) = yielded else {
+                                return true;
+                            };
+                            !parameters
+                                .posonlyargs
+                                .iter()
+                                .chain(parameters.args.iter())
+                                .chain(parameters.kwonlyargs.iter())
+                                .any(|parameter| {
+                                    parameter.parameter.name.as_str() == yielded_name.id.as_str()
+                                })
+                                && parameters.vararg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                                && parameters.kwarg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                        })
                         .and_then(|yielded| self.resolve_callee(yielded))
                         .filter(|callable| self.index.get(callable).is_some())
                     {

@@ -4189,6 +4189,53 @@ manager().__enter__()(1)
     );
 }
 
+/// A yielded parameter is opaque while the context-manager body executes and
+/// must not resolve to a same-named outer callable.
+#[test]
+fn contextmanager_enter_ignores_outer_callable_shadowed_by_parameter() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager(target):
+    yield target
+manager(object()).__enter__()(1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "shadowed outer callable must not leak into the yield: {messages:?}"
+    );
+}
+
+/// Redefining a context-manager factory clears the concrete callable yielded
+/// by its previous definition.
+#[test]
+fn contextmanager_redefinition_clears_concrete_yield_metadata() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+def manager():
+    yield 1
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 10, "target"),
+        "stale yielded callable survived redefinition: {messages:?}"
+    );
+}
+
 /// Callable-valued properties are not checked as the property getter (issue
 /// #668).
 #[test]
