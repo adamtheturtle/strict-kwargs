@@ -2224,6 +2224,92 @@ async def caller() -> None:
     );
 }
 
+/// A concrete `put_nowait` mutation infers the callable item returned by an
+/// unannotated `asyncio.Queue` (issue #840).
+#[test]
+fn asyncio_queue_put_nowait_infers_callable_item_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "get() result"),
+        "expected concrete Queue item violation, got: {messages:?}"
+    );
+}
+
+/// Heterogeneous concrete queue mutations do not retain a stale signature.
+#[test]
+fn asyncio_queue_put_nowait_rejects_ambiguous_item_signatures() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    values.put_nowait(item=object())
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "heterogeneous queue must not retain an inferred signature: {messages:?}"
+    );
+}
+
+/// A non-callable first insertion prevents later homogeneous inference.
+#[test]
+fn asyncio_queue_put_nowait_non_callable_first_is_ambiguous() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=object())
+    values.put_nowait(item=target)
+    (await values.get())(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("get() result")),
+        "non-callable first item must make queue inference ambiguous: {messages:?}"
+    );
+}
+
+/// A nested shadow cannot poison the outer queue's inferred item signature.
+#[test]
+fn asyncio_queue_put_nowait_respects_nested_shadowing() {
+    let messages = check_source(
+        r"
+import asyncio
+def target(value: int) -> None: ...
+async def main() -> None:
+    values = asyncio.Queue()
+    values.put_nowait(item=target)
+    async def inner() -> None:
+        values = object()
+        values.put_nowait(item=object())
+    (await values.get())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "get() result"),
+        "nested shadow must not poison the outer queue: {messages:?}"
+    );
+}
+
 /// A constructed `operator.methodcaller` accepts its target positionally,
 /// while encoded `__call__` arguments are checked against that target (#395).
 #[test]
