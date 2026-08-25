@@ -5086,9 +5086,9 @@ impl<'a> CallChecker<'a> {
                 let class = self.class_from_constructor_func(&constructor.func)?;
                 let index = Self::literal_sequence_index(
                     slice,
-                    self.index.dataclass_init_field_count(&class)?,
+                    self.index.dataclass_runtime_field_count(&class)?,
                 )?;
-                let field = self.index.dataclass_init_field(&class, index)?;
+                let field = self.index.dataclass_runtime_field(&class, index)?;
                 return self.resolve_callee(&constructor.arguments.find_keyword(&field)?.value);
             }
         }
