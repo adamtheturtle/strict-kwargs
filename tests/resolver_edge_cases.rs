@@ -3284,6 +3284,23 @@ async def main() -> None:
     );
 }
 
+#[test]
+fn inherited_unittest_enter_helper_keeps_generic_return() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+def target(value: int) -> None: ...
+class Case(unittest.TestCase): pass
+Case().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "inherited enter helper must preserve its generic return: {messages:?}"
+    );
+}
+
 /// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
 /// are indexed for later generic-result checking.
 #[test]

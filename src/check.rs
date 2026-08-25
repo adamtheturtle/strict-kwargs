@@ -2419,7 +2419,13 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let module_path = self.resolve_module(module.id.as_str())?;
-        self.indexed_class(&format!("{module_path}.{}", class_attr.as_str()))
+        let candidate = format!("{module_path}.{}", class_attr.as_str());
+        matches!(
+            candidate.as_str(),
+            "unittest.TestCase" | "unittest.IsolatedAsyncioTestCase"
+        )
+        .then(|| self.indexed_class(&candidate))
+        .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
