@@ -2175,6 +2175,24 @@ MappingProxyType(mapping={"x": target}).get("x")(1)
     );
 }
 
+/// A dictionary unpack can override an earlier key, so inline proxy lookup is
+/// intentionally conservative when an unpack is present.
+#[test]
+fn inline_mapping_proxy_get_does_not_resolve_across_unpacking() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def first(value: int) -> None: ...
+def replacement(value: int) -> None: ...
+MappingProxyType(mapping={"x": first, **{"x": replacement}}).get("x")(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an ambiguous proxy lookup to resolve, got: {messages:?}"
+    );
+}
+
 /// `dict.get` on an existing literal key preserves its callable value
 /// (issue #773).
 #[test]

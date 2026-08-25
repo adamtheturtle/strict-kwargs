@@ -6563,6 +6563,9 @@ impl<'a> CallChecker<'a> {
             let Expr::Dict(dict) = mapping else {
                 return None;
             };
+            if !dict.items.iter().all(|item| item.key.is_some()) {
+                return None;
+            }
             let item = dict.items.iter().rev().find(|item| {
                 item.key
                     .as_ref()
