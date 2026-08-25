@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Literal slices retain the concrete callable at a statically selected result
+/// index, including negative and stepped slices (issue #805).
+#[test]
+fn literal_sequence_slices_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target][0:1][0](1)
+(target,)[0:1][0](1)
+[target, 0][::-1][-1](1)
+[target, 0, target][::2][1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected sliced-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]

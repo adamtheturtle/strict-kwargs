@@ -4940,6 +4940,75 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_signed_integer(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::NumberLiteral(ast::ExprNumberLiteral {
+                value: Number::Int(value),
+                ..
+            }) => value.as_i64(),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::UAdd,
+                operand,
+                ..
+            }) => Self::literal_signed_integer(operand),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: ast::UnaryOp::USub,
+                operand,
+                ..
+            }) => Self::literal_signed_integer(operand)?.checked_neg(),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_slice_original_index(
+        slice: &ast::ExprSlice,
+        len: usize,
+        selected: &Expr,
+    ) -> Option<usize> {
+        let len = i64::try_from(len).ok()?;
+        let stride = match slice.step.as_deref() {
+            Some(stride) => Self::literal_signed_integer(stride)?,
+            None => 1,
+        };
+        if stride == 0 {
+            return None;
+        }
+        let normalize = |value: i64, positive: bool| {
+            let adjusted = if value < 0 {
+                value.saturating_add(len)
+            } else {
+                value
+            };
+            if positive {
+                adjusted.clamp(0, len)
+            } else {
+                adjusted.clamp(-1, len.saturating_sub(1))
+            }
+        };
+        let positive = stride > 0;
+        let start = match slice.lower.as_deref() {
+            Some(start) => normalize(Self::literal_signed_integer(start)?, positive),
+            None if positive => 0,
+            None => len - 1,
+        };
+        let stop = match slice.upper.as_deref() {
+            Some(stop) => normalize(Self::literal_signed_integer(stop)?, positive),
+            None if positive => len,
+            None => -1,
+        };
+        let output_len = if positive {
+            (start < stop).then(|| (stop - start - 1) / stride + 1)
+        } else {
+            (start > stop).then(|| (start - stop - 1) / -stride + 1)
+        }
+        .unwrap_or(0);
+        let output_len = usize::try_from(output_len).ok()?;
+        let selected = i64::try_from(Self::literal_sequence_index(selected, output_len)?).ok()?;
+        usize::try_from(start.checked_add(selected.checked_mul(stride)?)?).ok()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn same_literal_key(left: &Expr, right: &Expr) -> bool {
         match (left, right) {
             (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
@@ -4982,6 +5051,18 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => {
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
+            }
+            Expr::Subscript(subscript) => {
+                let Expr::Slice(inner_slice) = subscript.slice.as_ref() else {
+                    return None;
+                };
+                let elements = match subscript.value.as_ref() {
+                    Expr::List(list) => list.elts.as_slice(),
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                    _ => return None,
+                };
+                let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
+                self.resolve_callee(&elements[index])
             }
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
                 .items
