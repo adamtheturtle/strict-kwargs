@@ -4651,6 +4651,117 @@ async def main() -> None:
     );
 }
 
+/// Dotted stdlib access remains a module-level `create_task` call.
+#[test]
+fn asyncio_tasks_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio.tasks
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    task = asyncio.tasks.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "result() result"),
+        "expected dotted create_task result violation, got: {messages:?}"
+    );
+}
+
+/// `TaskGroup.create_task` preserves the coroutine's callable result after
+/// the context manager waits for task completion (issue #839).
+#[test]
+fn asyncio_task_group_create_task_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        task = group.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected TaskGroup.create_task result violation, got: {messages:?}"
+    );
+}
+
+/// Rebinding the context-manager local must discard its `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        group = object()
+        task = group.create_task(coro=factory())
+    task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound TaskGroup local must not retain task result metadata: {messages:?}"
+    );
+}
+
+/// A nearer local binding shadows an enclosing `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_respects_nested_shadowing() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        async def inner() -> None:
+            group = object()
+            task = group.create_task(coro=factory())
+            task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "nested shadow must hide the outer TaskGroup: {messages:?}"
+    );
+}
+
+/// Loop-target rebinding discards a context target's `TaskGroup` identity.
+#[test]
+fn asyncio_task_group_identity_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]: ...
+async def main() -> None:
+    async with asyncio.TaskGroup() as group:
+        for group in [object()]:
+            task = group.create_task(coro=factory())
+            task.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear TaskGroup identity: {messages:?}"
+    );
+}
+
 /// Rebinding a Future local must drop the annotated `future_callables` entry
 /// (issue #737).
 #[test]
