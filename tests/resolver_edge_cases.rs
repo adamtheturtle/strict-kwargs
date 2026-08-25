@@ -717,6 +717,23 @@ next(generator())(1)
     );
 }
 
+/// `itertools.batched` preserves concrete callable elements selected from a
+/// statically known first batch (issue #973).
+#[test]
+fn itertools_batched_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.batched(iterable=[target], n=1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "itertools.batched must preserve its callable element: {messages:?}"
+    );
+}
+
 /// A true `TypeGuard` branch narrows its argument to the declared callable
 /// signature (issue #456).
 #[test]
