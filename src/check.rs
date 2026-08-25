@@ -7695,18 +7695,17 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let Expr::Attribute(attribute) = call.func.as_ref() else {
+        let operation = if self.names_stdlib_callable(&call.func, "heapq.heappop") {
+            "heappop"
+        } else if self.names_stdlib_callable(&call.func, "heapq.heapreplace") {
+            "heapreplace"
+        } else {
             return None;
         };
-        let Expr::Name(module) = attribute.value.as_ref() else {
-            return None;
-        };
-        if self.resolve_module(module.id.as_str()).as_deref() != Some("heapq")
-            || !call.arguments.keywords.is_empty()
-        {
+        if !call.arguments.keywords.is_empty() {
             return None;
         }
-        match (attribute.attr.as_str(), &*call.arguments.args) {
+        match (operation, &*call.arguments.args) {
             ("heappop", [heap]) => match heap {
                 Expr::Name(name) => self.resolve_callable_list_element(name.id.as_str()),
                 Expr::List(_) => self.homogeneous_callable_list(heap),
