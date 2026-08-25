@@ -2699,6 +2699,27 @@ make("a")(1)
     );
 }
 
+/// Assigning a concrete new instance clears an older receiver annotation so
+/// attribute resolution uses the live class (issue #756).
+#[test]
+fn instance_reassignment_clears_old_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Old:
+    def method(self, value: int) -> None: ...
+class New:
+    def method(self, value: int, /) -> None: ...
+receiver: Old = Old()
+receiver = New()
+receiver.method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "old annotation must not override the new instance class: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]

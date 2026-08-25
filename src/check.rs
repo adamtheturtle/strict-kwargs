@@ -2299,6 +2299,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.annotations.remove(local_name);
         scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
