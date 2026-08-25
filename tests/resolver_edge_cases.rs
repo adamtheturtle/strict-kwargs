@@ -2720,6 +2720,26 @@ receiver.method(1)
     );
 }
 
+/// A valued annotated assignment retains its newly declared receiver type even
+/// when the initializer is a concrete constructor.
+#[test]
+fn annotated_instance_assignment_retains_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Declared:
+    def method(self, value: int) -> None: ...
+class Runtime:
+    def method(self, value: int, /) -> None: ...
+receiver: Declared = Runtime()
+receiver.method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "method"),
+        "declared receiver annotation was lost: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
