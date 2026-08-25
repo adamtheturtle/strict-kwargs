@@ -2287,6 +2287,26 @@ async def main() -> None:
     );
 }
 
+/// `AsyncGenerator.asend` resolves a named callable alias used as the yield
+/// type (regression #766).
+#[test]
+fn async_generator_asend_result_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+agen: collections.abc.AsyncGenerator[Callback, None]
+async def main() -> None:
+    (await agen.asend(value=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "asend() result"),
+        "expected alias yield violation, got: {messages:?}"
+    );
+}
+
 /// An `AsyncGenerator.athrow` result retains the declared callable yield signature
 /// (issue #658).
 #[test]
