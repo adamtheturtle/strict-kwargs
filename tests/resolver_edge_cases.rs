@@ -4186,6 +4186,24 @@ prop.fget(self=Owner())(1)
     );
 }
 
+#[test]
+fn stored_property_fget_does_not_cross_a_nested_rebinding() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> int: return value
+prop = property(fget=lambda self: target)
+def caller() -> None:
+    prop = object()
+    prop.fget(self=Owner())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "nested rebinding must hide the stored getter: {messages:?}"
+    );
+}
+
 /// Annotated `asyncio.Task[Callable[...]].result()` preserves the callable
 /// signature (issue #447).
 #[test]

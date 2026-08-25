@@ -4142,6 +4142,20 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn stored_property_getter_callable(&self, name: &str) -> Option<String> {
+        let result_name = format!("{name}.fget.__return__");
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.names.get(&result_name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
     /// that names a callable is resolved for the subsequent call (issue #652).
     #[cfg_attr(coverage, coverage(off))]
@@ -4156,9 +4170,7 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         match fget_attr.value.as_ref() {
-            Expr::Name(property) => {
-                self.resolve_local(&format!("{}.fget.__return__", property.id.as_str()))
-            }
+            Expr::Name(property) => self.stored_property_getter_callable(property.id.as_str()),
             property_call => self.property_getter_callable(property_call),
         }
     }
