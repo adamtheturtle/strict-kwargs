@@ -3643,6 +3643,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// Without a key function, `itertools.groupby` uses each input element as
+/// tuple position zero and preserves its callable signature (issue #791).
+#[test]
+fn itertools_groupby_default_key_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.groupby(iterable=[target]))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected groupby key violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]

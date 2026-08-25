@@ -5716,6 +5716,16 @@ impl<'a> CallChecker<'a> {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
+            "itertools.groupby" if selected_index == Some(0) => {
+                if call.arguments.args.len() > 1
+                    || call.arguments.keywords.iter().any(|keyword| {
+                        keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("iterable")
+                    })
+                {
+                    return None;
+                }
+                self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+            }
             _ => None,
         }
     }
