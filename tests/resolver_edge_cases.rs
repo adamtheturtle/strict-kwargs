@@ -1883,6 +1883,23 @@ def target(value: int) -> None: ...
     );
 }
 
+/// `defaultdict.get` preserves an existing literal mapping value rather than
+/// invoking or widening through its default factory (issue #800).
+#[test]
+fn defaultdict_get_preserves_existing_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: None, {"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict.get violation, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary's `popitem` value preserves its concrete callable
 /// (issue #774).
 #[test]
