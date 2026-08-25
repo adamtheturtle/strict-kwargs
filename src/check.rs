@@ -4407,7 +4407,7 @@ impl<'a> CallChecker<'a> {
         (!signature.parameters.is_empty()).then_some(())?;
         signature.parameters.remove(0);
         Some(LocalFunction {
-            fullname: format!("{fullname} bound by classmethod.__get__"),
+            fullname: format!("{fullname} bound by classmethod descriptor"),
             signature,
         })
     }
