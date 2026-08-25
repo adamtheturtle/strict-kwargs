@@ -4622,6 +4622,23 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// `Counter.most_common` preserves callable keys supplied through mapping
+/// initialization (issue #942).
+#[test]
+fn counter_most_common_preserves_mapping_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}).most_common()[0][0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter mapping-most-common violation, got: {messages:?}"
+    );
+}
+
 /// `Counter.elements()` preserves concrete callable keys through `next()`
 /// for an immediately constructed counter (issue #797).
 #[test]
