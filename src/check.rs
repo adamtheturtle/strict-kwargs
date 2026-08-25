@@ -4800,6 +4800,17 @@ impl<'a> CallChecker<'a> {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
+        if let Expr::Call(copy_call) = value {
+            if copy_call.arguments.is_empty() {
+                if let Expr::Attribute(method) = copy_call.func.as_ref() {
+                    if method.attr.as_str() == "copy"
+                        && matches!(method.value.as_ref(), Expr::List(_))
+                    {
+                        return self.resolve_literal_container_item(&method.value, slice);
+                    }
+                }
+            }
+        }
         match value {
             Expr::List(list) => {
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
