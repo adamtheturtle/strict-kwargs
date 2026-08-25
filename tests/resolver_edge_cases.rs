@@ -3704,6 +3704,26 @@ heapq.heapreplace([f, f], f)(1)
     assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
 }
 
+/// `heapq.nsmallest` and `nlargest` retain concrete callable elements through
+/// subscripting, including their keyword argument forms (issue #793).
+#[test]
+fn heapq_selection_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import heapq
+def target(value: int) -> None: ...
+heapq.nsmallest(n=1, iterable=[target])[0](1)
+heapq.nlargest(n=1, iterable=[target])[0](1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected heapq selection violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Generic selectors in `random` and `secrets` retain their input element's
 /// concrete callable signature (issue #442).
 #[test]

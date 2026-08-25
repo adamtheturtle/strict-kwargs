@@ -7035,6 +7035,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn heapq_selection_element_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        let Expr::Call(call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Name(module) = attribute.value.as_ref() else {
+            return None;
+        };
+        if !matches!(attribute.attr.as_str(), "nsmallest" | "nlargest")
+            || self.resolve_module(module.id.as_str()).as_deref() != Some("heapq")
+        {
+            return None;
+        }
+        let iterable = call.arguments.args.get(1).or_else(|| {
+            call.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.homogeneous_callable_sequence(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn statistics_selector_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -7362,6 +7387,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
@@ -7371,6 +7397,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
+                        .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
