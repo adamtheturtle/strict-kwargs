@@ -3824,6 +3824,24 @@ Counter({target: 1}).popitem()[0](1)
     );
 }
 
+/// Counter keyword counts are inserted after a positional mapping, while
+/// `iterable=` itself is a count key because the input is positional-only.
+#[test]
+fn counter_popitem_with_keyword_counts_does_not_preserve_mapping_key() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}, other=1).popitem()[0](1)
+Counter(iterable={target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "keyword count keys must hide the mapping key: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]

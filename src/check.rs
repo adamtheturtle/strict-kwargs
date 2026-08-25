@@ -7192,12 +7192,10 @@ impl<'a> CallChecker<'a> {
         if class != "collections.Counter" {
             return None;
         }
-        let mapping = constructor.arguments.args.first().or_else(|| {
-            constructor.arguments.keywords.iter().find_map(|keyword| {
-                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
-                    .then_some(&keyword.value)
-            })
-        })?;
+        if !constructor.arguments.keywords.is_empty() {
+            return None;
+        }
+        let mapping = constructor.arguments.args.first()?;
         let Expr::Dict(dict) = mapping else {
             return None;
         };
