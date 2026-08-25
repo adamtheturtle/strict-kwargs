@@ -1376,6 +1376,31 @@ impl DefinitionIndex {
             .is_some_and(|model| model.kind == ClassDataKind::NamedTuple)
     }
 
+    /// Return the number of fields in a synthesized `NamedTuple` model.
+    pub fn namedtuple_field_count(&self, fullname: &str) -> Option<usize> {
+        Some(
+            self.read()
+                .store
+                .data_models
+                .get(fullname)
+                .filter(|model| model.kind == ClassDataKind::NamedTuple)?
+                .init_fields
+                .len(),
+        )
+    }
+
+    /// Return a `NamedTuple` field by its runtime tuple position.
+    pub fn namedtuple_field(&self, fullname: &str, index: usize) -> Option<String> {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::NamedTuple)?
+            .init_fields
+            .get(index)
+            .cloned()
+    }
+
     /// Whether `fullname` was rejected by star-import export filtering and
     /// must not defer to ty (which may still see the underlying definition).
     #[cfg_attr(coverage, coverage(off))]
