@@ -4849,15 +4849,24 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(method_call) = func else {
             return None;
         };
-        if !method_call.arguments.args.is_empty() || !method_call.arguments.keywords.is_empty() {
-            return None;
-        }
         let Expr::Attribute(method) = method_call.func.as_ref() else {
             return None;
         };
-        if !matches!(method.attr.as_str(), "pop" | "popleft") {
-            return None;
-        }
+        let getitem_index = match method.attr.as_str() {
+            "__getitem__" if method_call.arguments.keywords.is_empty() => {
+                let [index] = &*method_call.arguments.args else {
+                    return None;
+                };
+                Some(index)
+            }
+            "pop" | "popleft"
+                if method_call.arguments.args.is_empty()
+                    && method_call.arguments.keywords.is_empty() =>
+            {
+                None
+            }
+            _ => return None,
+        };
         let Expr::Call(constructor) = method.value.as_ref() else {
             return None;
         };
@@ -4879,6 +4888,10 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => tuple.elts.as_slice(),
             _ => return None,
         };
+        if let Some(index) = getitem_index {
+            let index = Self::literal_sequence_index(index, elements.len())?;
+            return self.unnamed_callable_signature(&elements[index]);
+        }
         let mut result = None;
         for element in elements {
             let fullname = self.resolve_callee(element)?;
