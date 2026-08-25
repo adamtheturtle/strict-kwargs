@@ -1468,6 +1468,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// `asyncio.as_completed` local -> callable result of each yielded awaitable.
+    as_completed_callables: FxHashMap<String, Signature>,
     /// Stored unittest case instances whose context-entry helpers have a
     /// type-preserving generic return.
     unittest_enter_instances: FxHashMap<String, String>,
@@ -1646,6 +1648,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
@@ -1683,6 +1686,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.as_completed_callables.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
             scope.opaque_locals.remove(local_name);
             scope.deleted_names.remove(local_name);
@@ -1904,6 +1908,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -1948,6 +1953,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -2262,6 +2268,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
         if plan_fixes {
             scope.imported_callables.remove(local_name);
@@ -5076,11 +5083,57 @@ impl<'a> CallChecker<'a> {
                 return self.resolve_callee(&constructor.arguments.find_keyword(&field)?.value);
             }
         }
+        if let Expr::Call(vars_call) = value {
+            if self.names_stdlib_callable(&vars_call.func, "builtins.vars") {
+                let [Expr::Call(namespace)] = &*vars_call.arguments.args else {
+                    return None;
+                };
+                if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+                    != "types.SimpleNamespace"
+                {
+                    return None;
+                }
+                let Expr::StringLiteral(attribute) = slice else {
+                    return None;
+                };
+                return self.resolve_callee(
+                    &namespace
+                        .arguments
+                        .find_keyword(attribute.value.to_str())?
+                        .value,
+                );
+            }
+        }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
+        if let Expr::Call(copy_call) = value {
+            if copy_call.arguments.is_empty() {
+                if let Expr::Attribute(method) = copy_call.func.as_ref() {
+                    if method.attr.as_str() == "copy"
+                        && matches!(method.value.as_ref(), Expr::List(_))
+                    {
+                        return self.resolve_literal_container_item(&method.value, slice);
+                    }
+                }
+            }
+        }
         if let Expr::Call(wrapper) = value {
+            if let Expr::Attribute(method) = wrapper.func.as_ref() {
+                if method.attr.as_str() == "new_child"
+                    && wrapper.arguments.args.is_empty()
+                    && wrapper.arguments.keywords.is_empty()
+                {
+                    if let Expr::Call(parent) = method.value.as_ref() {
+                        if self.class_from_constructor_func(&parent.func).as_deref()
+                            == Some("collections.ChainMap")
+                        {
+                            return self.resolve_literal_container_item(&method.value, slice);
+                        }
+                    }
+                }
+            }
             let factory = self.resolve_callee(&wrapper.func)?;
             if matches!(
                 Self::normalize_factory_fullname(&factory),
@@ -5101,6 +5154,30 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => {
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
+            }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::Add,
+                right,
+                ..
+            }) => {
+                let (left, right) = match (left.as_ref(), right.as_ref()) {
+                    (Expr::List(left), Expr::List(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    (Expr::Tuple(left), Expr::Tuple(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    _ => return None,
+                };
+                let len = left.len().checked_add(right.len())?;
+                let index = Self::literal_sequence_index(slice, len)?;
+                let element = if index < left.len() {
+                    &left[index]
+                } else {
+                    &right[index - left.len()]
+                };
+                self.resolve_callee(element)
             }
             Expr::Subscript(subscript) => {
                 let Expr::Slice(inner_slice) = subscript.slice.as_ref() else {
@@ -5624,6 +5701,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
         if plan_fixes {
             scope.imported_callables.remove(name);
@@ -6747,6 +6825,33 @@ impl<'a> CallChecker<'a> {
     // The end-to-end regression covers both tracked and inline receivers;
     // malformed factories and unknown receiver shapes deliberately decline.
     #[cfg_attr(coverage, coverage(off))]
+    fn getattr_simple_namespace_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(getattr_call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&getattr_call.func, "builtins.getattr")
+            || !getattr_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
+        else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+            != "types.SimpleNamespace"
+        {
+            return None;
+        }
+        self.resolve_callee(
+            &namespace
+                .arguments
+                .find_keyword(attribute.value.to_str())?
+                .value,
+        )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn attrgetter_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(getter_call) = func else {
             return None;
@@ -6909,6 +7014,70 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn as_completed_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let factory = self.resolve_callee(&call.func)?;
+        if !Self::is_asyncio_callable(&factory, "as_completed") {
+            return None;
+        }
+        let awaitables = call
+            .arguments
+            .find_keyword("fs")
+            .map(|keyword| &keyword.value)
+            .or_else(|| call.arguments.args.first())?;
+        let elements = match awaitables {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            Expr::Set(set) => set.elts.as_slice(),
+            _ => return None,
+        };
+        let mut result = None;
+        for element in elements {
+            let signature = self.awaitable_callable_result_signature(element)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn awaited_as_completed_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(next_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next" {
+            return None;
+        }
+        let [Expr::Call(iter_call)] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::Name(completed)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.as_completed_callables.get(completed.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(completed.id.as_str())
+                || scope.opaque_locals.contains(completed.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
     // Covered end-to-end by the awaited callable regression. Unsupported
     // await expressions and unresolved factories intentionally decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -6916,6 +7085,9 @@ impl<'a> CallChecker<'a> {
         let Expr::Await(ast::ExprAwait { value, .. }) = func else {
             return None;
         };
+        if let Some(signature) = self.awaited_as_completed_item_signature(value) {
+            return Some(signature);
+        }
         if let Some(signature) = self.generic_result_signature(value) {
             return Some(signature);
         }
@@ -7182,6 +7354,39 @@ impl<'a> CallChecker<'a> {
             }))
         .then(|| self.resolve_callee(default))
         .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_get_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || !call.arguments.keywords.is_empty()
+            || !(1..=2).contains(&call.arguments.args.len())
+        {
+            return None;
+        }
+        let mapping = match method.value.as_ref() {
+            Expr::Dict(_) => method.value.as_ref(),
+            Expr::Call(constructor) => {
+                let class = self.resolve_callee(&constructor.func)?;
+                if Self::normalize_factory_fullname(&class) != "collections.defaultdict"
+                    || !constructor.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let [_factory, mapping] = &*constructor.arguments.args else {
+                    return None;
+                };
+                mapping
+            }
+            _ => return None,
+        };
+        self.resolve_literal_container_item(mapping, call.arguments.args.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7952,7 +8157,13 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.attrgetter_result_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.getattr_simple_namespace_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_dict_get_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {
@@ -8828,6 +9039,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 } else {
                     None
                 };
+                let as_completed_item = self.as_completed_item_signature(value);
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -8935,6 +9147,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .topological_sorter_nodes
                                 .insert(name.id.to_string(), callable.clone());
+                        }
+                        if let Some(signature) = &as_completed_item {
+                            self.current_scope()
+                                .as_completed_callables
+                                .insert(name.id.to_string(), signature.clone());
                         }
                     }
                 }
