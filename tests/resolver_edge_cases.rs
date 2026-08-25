@@ -4280,6 +4280,23 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     );
 }
 
+/// Dispatching from a freshly constructed inline singledispatch wrapper
+/// returns its concrete default implementation (issue #964).
+#[test]
+fn inline_singledispatch_dispatch_preserves_default_implementation() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.singledispatch(func=target).dispatch(cls=object)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "inline singledispatch.dispatch must preserve its default: {messages:?}"
+    );
+}
+
 /// `functools.wraps` preserves the decorated wrapper signature (issue #493).
 #[test]
 fn functools_wraps_preserves_callable_signature() {
