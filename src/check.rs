@@ -7003,7 +7003,7 @@ impl<'a> CallChecker<'a> {
         };
         if !matches!(
             op,
-            ast::Operator::Add | ast::Operator::Sub | ast::Operator::BitAnd
+            ast::Operator::Add | ast::Operator::Sub | ast::Operator::BitAnd | ast::Operator::BitOr
         ) {
             return None;
         }
@@ -7037,6 +7037,7 @@ impl<'a> CallChecker<'a> {
                 ast::Operator::Add => *count + right_count,
                 ast::Operator::Sub => *count - right_count,
                 ast::Operator::BitAnd => (*count).min(right_count),
+                ast::Operator::BitOr => (*count).max(right_count),
                 _ => unreachable!(),
             };
             include(key, total)?;
@@ -7046,7 +7047,7 @@ impl<'a> CallChecker<'a> {
             .filter(|(right, _)| !left_entries.iter().any(|(left, _)| same_key(left, right)))
         {
             let total = match op {
-                ast::Operator::Add => *count,
+                ast::Operator::Add | ast::Operator::BitOr => *count,
                 ast::Operator::Sub => -*count,
                 ast::Operator::BitAnd => 0,
                 _ => unreachable!(),
