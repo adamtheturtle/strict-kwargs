@@ -2249,6 +2249,25 @@ generator.throw(typ=RuntimeError)(1)
     );
 }
 
+/// `Generator.throw` resolves a named callable alias used as the yield type
+/// (regression #765).
+#[test]
+fn generator_throw_result_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+generator: collections.abc.Generator[Callback, None, None]
+generator.throw(typ=RuntimeError)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "throw() result"),
+        "expected alias yield violation, got: {messages:?}"
+    );
+}
+
 /// An `AsyncGenerator.asend` result retains the declared callable yield signature
 /// (issue #657).
 #[test]
