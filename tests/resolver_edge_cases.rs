@@ -1765,6 +1765,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// `dict.get` on an existing literal key preserves its callable value
+/// (issue #773).
+#[test]
+fn literal_dict_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.get("key")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-get violation, got: {messages:?}"
+    );
+}
+
 /// A queue's declared callable item type becomes the signature returned by
 /// `get` and `get_nowait` (issue #393).
 #[test]
