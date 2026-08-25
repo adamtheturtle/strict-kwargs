@@ -4279,6 +4279,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// Selecting the value from an immediate `UserDict.popitem` result preserves
+/// its concrete callable signature (issue #927).
+#[test]
+fn user_dict_popitem_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"x": target}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict.popitem violation, got: {messages:?}"
+    );
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]
