@@ -4289,6 +4289,23 @@ heapq.heapreplace([f, f], f)(1)
     assert!(has_error_at(&messages, 8, "f"), "messages: {messages:?}");
 }
 
+/// A directly imported alias of `heapq.heappop` retains a concrete callable
+/// element's signature (issue #853).
+#[test]
+fn direct_import_heappop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from heapq import heappop as pop_heap
+def target(value: int) -> None: ...
+pop_heap([target])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct heappop violation, got: {messages:?}"
+    );
+}
+
 /// `heapq.nsmallest` and `nlargest` retain concrete callable elements through
 /// subscripting, including their keyword argument forms (issue #793).
 #[test]
