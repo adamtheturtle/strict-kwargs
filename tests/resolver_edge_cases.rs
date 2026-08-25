@@ -3660,6 +3660,23 @@ next(itertools.groupby(iterable=[target]))[0](1)
     );
 }
 
+/// The group iterator in tuple position one of a `groupby` result preserves
+/// the original input element's callable signature (issue #792).
+#[test]
+fn itertools_groupby_group_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(next(itertools.groupby(iterable=[target]))[1])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected groupby group-item violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]

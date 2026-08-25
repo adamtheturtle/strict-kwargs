@@ -5655,11 +5655,52 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn groupby_group_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Subscript(group) = expr else {
+            return None;
+        };
+        if Self::nonnegative_literal_index(&group.slice)? != 1 {
+            return None;
+        }
+        let Expr::Call(next_call) = group.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)? != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(groupby)] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.imported_callable_path(&groupby.func)?.as_str() != "itertools.groupby"
+            || groupby.arguments.args.len() > 1
+            || groupby.arguments.keywords.iter().any(|keyword| {
+                keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("iterable")
+            })
+        {
+            return None;
+        }
+        let iterable = groupby.arguments.args.first().or_else(|| {
+            groupby.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })?;
+        self.literal_iterable_callable_signature(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn itertools_item_signature(
         &self,
         expr: &Expr,
         selected_index: Option<usize>,
     ) -> Option<Signature> {
+        if selected_index.is_none() {
+            if let Some(signature) = self.groupby_group_item_signature(expr) {
+                return Some(signature);
+            }
+        }
         if let Expr::Subscript(subscript) = expr {
             return self.itertools_item_signature(&subscript.value, selected_index);
         }
