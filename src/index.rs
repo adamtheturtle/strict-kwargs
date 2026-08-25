@@ -1367,6 +1367,16 @@ impl DefinitionIndex {
             .cloned()
     }
 
+    /// Whether a name corresponds to a stored dataclass runtime field.
+    pub fn is_dataclass_runtime_field(&self, fullname: &str, field: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::Dataclass)
+            .is_some_and(|model| model.runtime_fields.iter().any(|name| name == field))
+    }
+
     /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
     /// model.
     pub fn is_namedtuple(&self, fullname: &str) -> bool {

@@ -998,6 +998,46 @@ dataclasses.astuple(obj=Record(callback=target))[0](1)
     );
 }
 
+/// `dataclasses.asdict` preserves a concrete callable constructor field
+/// selected by its literal field name (issue #831).
+#[test]
+fn dataclasses_asdict_preserves_callable_field_signature() {
+    let messages = check_source(
+        r#"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.asdict(obj=Record(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.asdict violation, got: {messages:?}"
+    );
+}
+
+/// `asdict` omits constructor-only `InitVar` entries.
+#[test]
+fn dataclasses_asdict_ignores_initvar_fields() {
+    let messages = check_source(
+        r#"
+import dataclasses
+from dataclasses import InitVar, dataclass
+def target(value: int) -> None: ...
+@dataclass
+class Record:
+    transient: InitVar[object]
+dataclasses.asdict(obj=Record(transient=target))["transient"](1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "InitVar must not resolve as an asdict field: {messages:?}"
+    );
+}
+
 /// `astuple` uses stored dataclass fields rather than constructor-only
 /// `InitVar` entries when mapping tuple positions (issue #830).
 #[test]
