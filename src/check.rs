@@ -2299,6 +2299,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.annotations.remove(local_name);
         scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -9656,7 +9657,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
-                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {
@@ -9664,6 +9664,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(callable) = property_getter {
                         self.define(&format!("{}.fget.__return__", name.id.as_str()), callable);
                     }
