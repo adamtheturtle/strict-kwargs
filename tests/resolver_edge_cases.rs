@@ -5394,6 +5394,25 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     );
 }
 
+/// `NamedTuple._make` maps a statically known iterable element to its named
+/// field and preserves a concrete callable value (issue #969).
+#[test]
+fn namedtuple_make_attribute_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair._make(iterable=[target]).callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "NamedTuple._make attribute must preserve its callable: {messages:?}"
+    );
+}
+
 /// A stored `property` retains the callable returned by its getter
 /// (regression #761).
 #[test]
