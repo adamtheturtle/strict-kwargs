@@ -1651,6 +1651,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
@@ -1917,6 +1918,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
+        scope.contextvar_callables.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -1965,6 +1967,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
+        scope.contextvar_callables.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
         scope.mapping_proxy_callables.remove(name);
@@ -2283,6 +2286,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
         scope.mapping_proxy_callables.remove(local_name);
