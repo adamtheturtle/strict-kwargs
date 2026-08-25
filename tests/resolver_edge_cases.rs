@@ -3829,6 +3829,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A single-mapping `ChainMap` preserves concrete callable values through
+/// subscripting (issue #777).
+#[test]
+fn chainmap_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
 /// An `OrderedDict` initialized from a literal mapping preserves concrete
 /// callable values through subscripting (issue #779).
 #[test]
