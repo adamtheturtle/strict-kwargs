@@ -1964,6 +1964,23 @@ next(itertools.tee([f])[0])(1)
     }
 }
 
+/// A directly imported alias of `itertools.chain` retains its concrete
+/// callable items (issue #855).
+#[test]
+fn direct_import_itertools_chain_preserves_callable_items() {
+    let messages = check_source(
+        r"
+from itertools import chain as chain_items
+def target(value: int) -> None: ...
+next(chain_items([target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected direct itertools.chain violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]

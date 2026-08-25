@@ -6068,13 +6068,6 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn imported_callable_path(&self, expr: &Expr) -> Option<String> {
-        let dotted = Self::dotted_path(expr)?;
-        let (head, rest) = dotted.split_once('.')?;
-        Some(format!("{}.{}", self.resolve_module(head)?, rest))
-    }
-
-    #[cfg_attr(coverage, coverage(off))]
     fn itertools_item_signature(
         &self,
         expr: &Expr,
@@ -6094,15 +6087,36 @@ impl<'a> CallChecker<'a> {
                 })
             })
         };
-        match self.imported_callable_path(&call.func)?.as_str() {
-            "itertools.repeat" if selected_index.is_none() => {
+        let operation = [
+            "repeat",
+            "cycle",
+            "tee",
+            "chain",
+            "accumulate",
+            "compress",
+            "islice",
+            "dropwhile",
+            "takewhile",
+            "pairwise",
+            "permutations",
+            "combinations",
+            "combinations_with_replacement",
+            "product",
+            "zip_longest",
+        ]
+        .into_iter()
+        .find(|operation| {
+            self.names_stdlib_callable(&call.func, &format!("itertools.{operation}"))
+        })?;
+        match operation {
+            "repeat" if selected_index.is_none() => {
                 let object = first_named(0, "object")?;
                 self.unnamed_callable_signature(object)
             }
-            "itertools.cycle" | "itertools.tee" if selected_index.is_none() => {
+            "cycle" | "tee" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(call.arguments.args.first()?)
             }
-            "itertools.chain" if selected_index.is_none() => {
+            "chain" if selected_index.is_none() => {
                 let mut result = None;
                 for iterable in &call.arguments.args {
                     let signature = self.literal_iterable_callable_signature(iterable)?;
@@ -6116,23 +6130,18 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "itertools.accumulate" | "itertools.compress" | "itertools.islice"
-                if selected_index.is_none() =>
-            {
+            "accumulate" | "compress" | "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
-            "itertools.dropwhile" | "itertools.takewhile" if selected_index.is_none() => {
+            "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
             }
-            "itertools.pairwise"
-            | "itertools.permutations"
-            | "itertools.combinations"
-            | "itertools.combinations_with_replacement"
+            "pairwise" | "permutations" | "combinations" | "combinations_with_replacement"
                 if selected_index.is_some() =>
             {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
-            "itertools.product" | "itertools.zip_longest" => {
+            "product" | "zip_longest" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
