@@ -162,10 +162,7 @@ fn run_repository_case(case: RepositoryCase) {
 /// Tolerated `CPython` floor misses; Sphinx uses a hard zero via [`run_repository_case`].
 const CPYTHON_MISSING_BUDGET: usize = 100;
 
-fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
-    if std::env::var_os("STRICT_KWARGS_COMPLETENESS_FORCE_LINUX_SNAPSHOT").is_some() {
-        return case.linux_snapshot_name;
-    }
+const fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
     if cfg!(target_os = "macos") {
         case.macos_snapshot_name
     } else {
@@ -173,10 +170,7 @@ fn platform_snapshot_name(case: RepositoryCase) -> &'static str {
     }
 }
 
-fn platform_snapshot_relative_path(case: RepositoryCase) -> &'static str {
-    if std::env::var_os("STRICT_KWARGS_COMPLETENESS_FORCE_LINUX_SNAPSHOT").is_some() {
-        return case.linux_snapshot_relative_path;
-    }
+const fn platform_snapshot_relative_path(case: RepositoryCase) -> &'static str {
     if cfg!(target_os = "macos") {
         case.macos_snapshot_relative_path
     } else {
