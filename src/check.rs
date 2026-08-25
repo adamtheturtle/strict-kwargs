@@ -7614,6 +7614,50 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dict_literal_get_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakKeyDictionary"
+        {
+            return None;
+        }
+        let mapping = match &*constructor.arguments.args {
+            [mapping] if constructor.arguments.keywords.is_empty() => mapping,
+            [] if constructor.arguments.keywords.len() == 1 => {
+                &constructor.arguments.find_keyword("dict")?.value
+            }
+            _ => return None,
+        };
+        let key = match &*call.arguments.args {
+            [key] if call.arguments.keywords.is_empty() => key,
+            [] if call.arguments.keywords.len() == 1 => &call.arguments.find_keyword("key")?.value,
+            _ => return None,
+        };
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        if !dict.items.iter().all(|item| item.key.is_some()) {
+            return None;
+        }
+        let item = dict.items.iter().rev().find(|item| {
+            item.key.as_ref().is_some_and(|existing| {
+                Self::same_literal_key(existing, key)
+                    || matches!((existing, key), (Expr::Name(left), Expr::Name(right)) if left.id == right.id)
+            })
+        })?;
+        self.resolve_callee(&item.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn collections_mapping_pop_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -8378,6 +8422,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_dict_get_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.weak_key_dict_literal_get_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {

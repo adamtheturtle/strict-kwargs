@@ -4748,6 +4748,25 @@ sorter.get_ready()[0](1)
     );
 }
 
+/// An immediate `WeakKeyDictionary.get` preserves the concrete callable at a
+/// known object key (issue #938).
+#[test]
+fn weak_key_dictionary_get_preserves_literal_callable() {
+    let messages = check_source(
+        r"
+import weakref
+class Key: pass
+key = Key()
+def target(value: int) -> None: ...
+weakref.WeakKeyDictionary(dict={key: target}).get(key=key)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected WeakKeyDictionary.get violation, got: {messages:?}"
+    );
+}
+
 /// Annotated ``WeakKeyDictionary.popitem`` preserves callable key types
 /// (issue #517).
 #[test]
