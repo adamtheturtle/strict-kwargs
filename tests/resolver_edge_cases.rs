@@ -2720,6 +2720,26 @@ factory()(1)
     );
 }
 
+/// Redefining an iterator factory with non-callable items clears the earlier
+/// callable-item annotation metadata (issue #753).
+#[test]
+fn iterator_factory_redefinition_clears_callable_item_return() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+def values() -> Iterator[int]:
+    yield 0
+next(values())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "redefined iterator must not retain callable-item metadata: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
