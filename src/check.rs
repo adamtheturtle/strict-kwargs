@@ -6718,6 +6718,33 @@ impl<'a> CallChecker<'a> {
     // The end-to-end regression covers both tracked and inline receivers;
     // malformed factories and unknown receiver shapes deliberately decline.
     #[cfg_attr(coverage, coverage(off))]
+    fn getattr_simple_namespace_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(getattr_call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&getattr_call.func, "builtins.getattr")
+            || !getattr_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
+        else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+            != "types.SimpleNamespace"
+        {
+            return None;
+        }
+        self.resolve_callee(
+            &namespace
+                .arguments
+                .find_keyword(attribute.value.to_str())?
+                .value,
+        )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn attrgetter_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(getter_call) = func else {
             return None;
@@ -7921,6 +7948,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.attrgetter_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.getattr_simple_namespace_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_setdefault_callable(func) {

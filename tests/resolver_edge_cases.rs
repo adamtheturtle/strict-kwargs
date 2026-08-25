@@ -894,6 +894,23 @@ vars(types.SimpleNamespace(callback=target))["callback"](1)
     );
 }
 
+/// `getattr` with a literal name preserves a concrete callable attribute on
+/// an inline `SimpleNamespace` (issue #835).
+#[test]
+fn getattr_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+getattr(types.SimpleNamespace(callback=target), "callback")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected getattr(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
