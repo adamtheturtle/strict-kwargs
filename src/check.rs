@@ -7561,7 +7561,8 @@ impl<'a> CallChecker<'a> {
                 let class = self.resolve_callee(&constructor.func)?;
                 match Self::normalize_factory_fullname(&class) {
                     "collections.defaultdict"
-                        if call.arguments.keywords.is_empty()
+                        if constructor.arguments.keywords.is_empty()
+                            && call.arguments.keywords.is_empty()
                             && (1..=2).contains(&call.arguments.args.len()) =>
                     {
                         let [_factory, mapping] = &*constructor.arguments.args else {

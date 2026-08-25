@@ -2208,6 +2208,24 @@ defaultdict(lambda: None, {"x": target}).get("x")(1)
     );
 }
 
+/// Constructor keywords can override a `defaultdict`'s positional mapping,
+/// so such lookups are intentionally left unresolved.
+#[test]
+fn defaultdict_get_does_not_resolve_across_constructor_keywords() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def first(value: int) -> None: ...
+def replacement(value: int) -> None: ...
+defaultdict(lambda: None, {"x": first}, x=replacement).get("x")(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an overridden defaultdict lookup to resolve, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary's `popitem` value preserves its concrete callable
 /// (issue #774).
 #[test]
