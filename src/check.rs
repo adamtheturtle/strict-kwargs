@@ -7104,7 +7104,10 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let class = match method.value.as_ref() {
-            Expr::Name(name) => self.resolve_local(name.id.as_str())?,
+            Expr::Name(name) if !self.is_opaque_local(name.id.as_str()) => {
+                self.resolve_local(name.id.as_str())?
+            }
+            Expr::Name(_) => return None,
             value => self.class_from_constructor_func(value)?,
         };
         if !self.index.is_namedtuple(&class) {
@@ -7125,8 +7128,8 @@ impl<'a> CallChecker<'a> {
         let index = signature
             .parameters
             .iter()
-            .position(|parameter| parameter.name.as_deref() == Some(attr))?
-            .checked_sub(1)?;
+            .skip(1)
+            .position(|parameter| parameter.name.as_deref() == Some(attr))?;
         self.resolve_callee(elements.get(index)?)
     }
 
