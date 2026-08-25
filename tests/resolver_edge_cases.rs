@@ -5397,6 +5397,34 @@ Owner().callback(1)
     );
 }
 
+/// A `cached_property` with one unconditional concrete callable return is
+/// attributed to that callable rather than to the descriptor getter (issue
+/// #960).
+#[test]
+fn cached_property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "cached_property body return must preserve its callable: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("callback\"")),
+        "cached_property result must not be attributed to its getter: {messages:?}"
+    );
+}
+
 /// A stored `property` retains the callable returned by its getter
 /// (regression #761).
 #[test]

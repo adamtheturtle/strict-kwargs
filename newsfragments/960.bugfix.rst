@@ -1,0 +1,1 @@
+Attribute callable-valued ``cached_property`` results to their returned callable and safely rewrite their positional calls.

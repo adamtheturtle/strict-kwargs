@@ -99,6 +99,28 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn fixes_callable_returned_by_cached_property() {
+    assert_fixed(
+        r"import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+        r"import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(value=1)
+",
+    );
+}
+
+#[test]
 fn rewrites_itemgetter_result_without_rewriting_operand() {
     assert_fixed(
         "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(1)\n",

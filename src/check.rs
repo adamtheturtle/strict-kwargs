@@ -8597,10 +8597,10 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
-        if decorator_list
-            .iter()
-            .any(|decorator| self.names_stdlib_callable(&decorator.expression, "builtins.property"))
-        {
+        if decorator_list.iter().any(|decorator| {
+            self.names_stdlib_callable(&decorator.expression, "builtins.property")
+                || self.names_stdlib_callable(&decorator.expression, "functools.cached_property")
+        }) {
             if let Some(callable) = Self::single_return_expression(body)
                 .and_then(|returned| self.resolve_callee(returned))
             {
