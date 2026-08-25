@@ -4296,6 +4296,28 @@ UserDict({"x": target}).popitem()[1](1)
     );
 }
 
+/// `UserDict.popitem` inherits `MutableMapping.popitem` and removes the first
+/// inserted item, unlike `OrderedDict.popitem`.
+#[test]
+fn user_dict_popitem_selects_first_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+UserDict({"first": first, "second": second}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "first"),
+        "expected first-value violation, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("second")),
+        "did not expect last-value violation, got: {messages:?}"
+    );
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]
