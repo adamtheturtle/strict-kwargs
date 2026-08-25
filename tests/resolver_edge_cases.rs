@@ -4852,6 +4852,23 @@ sorter.get_ready()[0](1)
     );
 }
 
+/// Iterating a copied immediate `WeakSet` preserves its concrete callable
+/// element (issue #940).
+#[test]
+fn weakset_copy_iteration_preserves_callable_element() {
+    let messages = check_source(
+        r"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakSet(data=[target]).copy()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakSet.copy iteration violation, got: {messages:?}"
+    );
+}
+
 /// Immediate and assigned `WeakSet` / annotated `WeakValueDictionary` pops
 /// preserve callable elements (issue #443).
 #[test]

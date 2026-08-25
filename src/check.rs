@@ -6289,6 +6289,40 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weakset_copy_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::Call(copy_call)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(copy_method) = copy_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = copy_method.value.as_ref() else {
+            return None;
+        };
+        if copy_method.attr.as_str() != "copy"
+            || !copy_call.arguments.is_empty()
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakSet"
+        {
+            return None;
+        }
+        let data = match &*constructor.arguments.args {
+            [data] if constructor.arguments.keywords.is_empty() => data,
+            [] if constructor.arguments.keywords.len() == 1 => {
+                &constructor.arguments.find_keyword("data")?.value
+            }
+            _ => return None,
+        };
+        self.literal_iterable_callable_signature(data)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn queue_item_callable_signature(annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
@@ -6929,6 +6963,9 @@ impl<'a> CallChecker<'a> {
             return Some(signature);
         }
         if let Some(signature) = self.dict_values_item_signature(iterator) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.weakset_copy_item_signature(iterator) {
             return Some(signature);
         }
         if let Some(signature) = self.itertools_item_signature(iterator, selected_index) {
