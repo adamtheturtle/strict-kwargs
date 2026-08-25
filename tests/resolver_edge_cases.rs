@@ -4256,6 +4256,23 @@ def fallback(value: int) -> None: ...
     );
 }
 
+/// `OrderedDict.setdefault` on an empty immediate mapping preserves its
+/// concrete callable default (issue #925).
+#[test]
+fn ordered_dict_setdefault_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict().setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict.setdefault violation, got: {messages:?}"
+    );
+}
+
 /// Standard-library generic mappings retain the concrete callable value type
 /// through their result-returning methods (issue #440).
 #[test]
