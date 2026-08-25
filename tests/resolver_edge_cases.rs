@@ -1786,6 +1786,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// A literal dictionary's `popitem` value preserves its concrete callable
+/// (issue #774).
+#[test]
+fn literal_dict_popitem_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-popitem violation, got: {messages:?}"
+    );
+}
+
 /// A queue's declared callable item type becomes the signature returned by
 /// `get` and `get_nowait` (issue #393).
 #[test]
