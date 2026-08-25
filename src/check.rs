@@ -5674,9 +5674,12 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         if self.imported_callable_path(&groupby.func)?.as_str() != "itertools.groupby"
-            || groupby.arguments.args.len() > 1
+            || groupby.arguments.args.len() > 2
             || groupby.arguments.keywords.iter().any(|keyword| {
-                keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("iterable")
+                !matches!(
+                    keyword.arg.as_ref().map(ast::Identifier::as_str),
+                    Some("iterable" | "key")
+                )
             })
         {
             return None;

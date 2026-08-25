@@ -3669,12 +3669,15 @@ fn itertools_groupby_group_preserves_callable_signature() {
 import itertools
 def target(value: int) -> None: ...
 next(next(itertools.groupby(iterable=[target]))[1])(1)
+next(next(itertools.groupby([target], key=lambda _: 0))[1])(1)
 ",
     );
-    assert!(
-        has_error_at(&messages, 4, "next() result"),
-        "expected groupby group-item violation, got: {messages:?}"
-    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected groupby group-item violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// `heapq` functions returning a homogeneous list element retain its concrete
