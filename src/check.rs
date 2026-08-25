@@ -7104,7 +7104,8 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
+        let [Expr::Call(namespace), Expr::StringLiteral(attribute), default @ ..] =
+            &*getattr_call.arguments.args
         else {
             return None;
         };
@@ -7113,12 +7114,22 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        self.resolve_callee(
-            &namespace
+        if let Some(keyword) = namespace.arguments.find_keyword(attribute.value.to_str()) {
+            return self.resolve_callee(&keyword.value);
+        }
+        if namespace.arguments.args.is_empty()
+            && namespace
                 .arguments
-                .find_keyword(attribute.value.to_str())?
-                .value,
-        )
+                .keywords
+                .iter()
+                .all(|keyword| keyword.arg.is_some())
+        {
+            let [default] = default else {
+                return None;
+            };
+            return self.resolve_callee(default);
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
