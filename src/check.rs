@@ -8298,6 +8298,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     body,
                     decorator_list,
                     returns,
+                    is_async,
                     ..
                 } = function_def;
                 // Decorator expressions are evaluated in the enclosing
@@ -8308,18 +8309,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
-                if let [Stmt::Return(ast::StmtReturn {
-                    value: Some(value), ..
-                })] = body.as_slice()
-                {
-                    if let Some(callable) = self
-                        .resolve_callee(value)
-                        .filter(|callable| self.index.get(callable).is_some())
-                    {
-                        self.concrete_callable_returns
-                            .insert(fullname.clone(), callable);
-                    }
-                }
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -8406,13 +8395,26 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     };
                     self.define_function(name, fullname.clone(), signature);
                 }
-                self.function_stack.push(fullname);
+                self.function_stack.push(fullname.clone());
                 self.push_scope();
                 // Register every parameter as opaque so that calls through
                 // a Callable-typed (or otherwise unresolvable) parameter
                 // don't fall back to a module-level function with the same
                 // name (issue #71).
                 self.bind_function_parameters(parameters);
+                if !is_async {
+                    if let [Stmt::Return(ast::StmtReturn {
+                        value: Some(value), ..
+                    })] = body.as_slice()
+                    {
+                        if let Some(callable) = self
+                            .resolve_callee(value)
+                            .filter(|callable| self.index.get(callable).is_some())
+                        {
+                            self.concrete_callable_returns.insert(fullname, callable);
+                        }
+                    }
+                }
                 self.enter_hover_scope(false);
                 self.bind_parameter_hover_frames(parameters, parameters.range().start().to_usize());
                 for inner in body {
