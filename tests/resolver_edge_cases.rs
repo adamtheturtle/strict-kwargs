@@ -1786,6 +1786,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// Selecting the value position from a literal dictionary's sole `items()`
+/// iterator result preserves its callable signature (issue #789).
+#[test]
+fn dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({"key": target}.items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.items value violation, got: {messages:?}"
+    );
+}
+
 /// A queue's declared callable item type becomes the signature returned by
 /// `get` and `get_nowait` (issue #393).
 #[test]
