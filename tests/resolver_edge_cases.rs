@@ -1710,23 +1710,44 @@ next(itertools.zip_longest([f]))[0](1)
     }
 }
 
-/// Generic builtins preserve literal callable elements at their documented
-/// output positions (issue #390).
+/// Tuple-producing builtins preserve literal callable elements at their
+/// documented output positions (issue #390).
 #[test]
 fn builtin_iterator_results_preserve_callable_item_signatures() {
     let messages = check_source(
         r"
 def f(value: int) -> None: ...
 next(zip([f]))[0](1)
-next(map(lambda x: x, [f]))(1)
-next(filter(None, [f]))(1)
 next(enumerate([f]))[1](1)
 ",
     );
-    for line in 3..=6 {
+    for line in 3..=4 {
         assert!(
             has_error_at(&messages, line, "next() result"),
             "expected builtin-iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// `map` and `filter` preserve literal callable items (regression #759).
+#[test]
+fn map_and_filter_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(map(lambda item: item, [target]))(1)
+next(filter(None, [target]))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly two violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected map/filter violation on line {line}, got: {messages:?}"
         );
     }
 }
@@ -2098,6 +2119,30 @@ def target(value: int) -> None: ...
         has_error_at(&messages, 3, "target"),
         "expected list-copy violation, got: {messages:?}"
     );
+}
+
+/// Immediate list pop results preserve homogeneous callable elements
+/// (issue #770).
+#[test]
+fn literal_list_pop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].pop()(1)
+sorted([target]).pop()(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected both pop violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected list-pop violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// An operand-selecting `reduce` lambda preserves a literal sequence's
