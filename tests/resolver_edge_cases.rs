@@ -3859,6 +3859,28 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
+/// Literal set and dictionary `pop` results preserve their concrete callable
+/// element signatures (issue #758).
+#[test]
+fn literal_set_and_dict_pop_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+{first}.pop()(1)
+{"call": second}.pop("call")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected set-pop violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected dict-pop violation, got: {messages:?}"
+    );
+}
+
 /// A directly imported alias of `inspect.unwrap` retains the concrete wrapped
 /// callable signature (issue #858).
 #[test]
