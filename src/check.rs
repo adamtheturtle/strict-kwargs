@@ -4905,6 +4905,30 @@ impl<'a> CallChecker<'a> {
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
             }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::Add,
+                right,
+                ..
+            }) => {
+                let (left, right) = match (left.as_ref(), right.as_ref()) {
+                    (Expr::List(left), Expr::List(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    (Expr::Tuple(left), Expr::Tuple(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    _ => return None,
+                };
+                let len = left.len().checked_add(right.len())?;
+                let index = Self::literal_sequence_index(slice, len)?;
+                let element = if index < left.len() {
+                    &left[index]
+                } else {
+                    &right[index - left.len()]
+                };
+                self.resolve_callee(element)
+            }
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
                 .items
                 .iter()

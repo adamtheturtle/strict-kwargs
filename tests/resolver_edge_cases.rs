@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Concatenated literal sequences retain the concrete callable selected from
+/// either operand (issue #806).
+#[test]
+fn concatenated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] + [])[0](1)
+((target,) + ())[0](1)
+([0] + [target])[-1](1)
+((target,) + (0,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected concatenated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
