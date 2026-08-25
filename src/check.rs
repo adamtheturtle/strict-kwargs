@@ -7713,17 +7713,8 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        let Expr::Attribute(attribute) = call.func.as_ref() else {
-            return None;
-        };
-        let Expr::Name(module) = attribute.value.as_ref() else {
-            return None;
-        };
-        if attribute.attr.as_str() != "choice"
-            || !matches!(
-                self.resolve_module(module.id.as_str()).as_deref(),
-                Some("random" | "secrets")
-            )
+        if !self.names_stdlib_callable(&call.func, "random.choice")
+            && !self.names_stdlib_callable(&call.func, "secrets.choice")
         {
             return None;
         }
