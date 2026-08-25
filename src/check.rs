@@ -6066,11 +6066,24 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let Expr::Dict(dict) = attribute.value.as_ref() else {
-            return None;
+        let mapping = match attribute.value.as_ref() {
+            Expr::Dict(dict) => dict,
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .as_deref()
+                    == Some("weakref.WeakValueDictionary")
+                    && constructor.arguments.keywords.is_empty() =>
+            {
+                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+                    return None;
+                };
+                dict
+            }
+            _ => return None,
         };
         let mut result = None;
-        for item in &dict.items {
+        for item in &mapping.items {
             item.key.as_ref()?;
             let signature = self.unnamed_callable_signature(&item.value)?;
             if result

@@ -3880,6 +3880,23 @@ weakref.WeakValueDictionary({"x": target})["x"](1)
     );
 }
 
+/// Iterating a literal `WeakValueDictionary` values view preserves its
+/// concrete callable values (issue #827).
+#[test]
+fn weak_value_dictionary_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakValueDictionary({"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakValueDictionary values violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
