@@ -1470,6 +1470,8 @@ struct Scope {
     unittest_enter_instances: FxHashMap<String, String>,
     /// Local list name -> one concrete callable shared by every element.
     callable_list_elements: FxHashMap<String, String>,
+    /// Starred-destructuring list name -> one callable shared by every captured element.
+    starred_callable_list_elements: FxHashMap<String, String>,
     /// Local instance name -> type-parameter name -> concrete callable signature.
     instance_type_args: FxHashMap<String, FxHashMap<String, Signature>>,
     /// Names declared ``nonlocal`` in this scope; assignments rebind an outer
@@ -1632,6 +1634,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -1668,6 +1671,7 @@ impl<'a> CallChecker<'a> {
             scope.callable_iterable_items.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
+            scope.starred_callable_list_elements.remove(local_name);
             scope.instance_type_args.remove(local_name);
             scope.contextvar_token_callables.remove(local_name);
             scope.topological_sorter_nodes.remove(local_name);
@@ -1708,6 +1712,19 @@ impl<'a> CallChecker<'a> {
         None
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_callable_list_element(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.starred_callable_list_elements.get(name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     fn record_callable_list(&mut self, name: &str, callable: Option<String>) {
         let scope = self.current_scope();
         if let Some(callable) = callable {
@@ -1716,6 +1733,7 @@ impl<'a> CallChecker<'a> {
                 .insert(name.to_owned(), callable);
         } else {
             scope.callable_list_elements.remove(name);
+            scope.starred_callable_list_elements.remove(name);
         }
     }
 
@@ -1728,6 +1746,57 @@ impl<'a> CallChecker<'a> {
         elements
             .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
             .then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn starred_destructuring_callable_lists(
+        &self,
+        targets: &[Expr],
+        value: &Expr,
+    ) -> Vec<(String, String)> {
+        let source = match value {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        for target in targets {
+            let pattern = match target {
+                Expr::List(list) => list.elts.as_slice(),
+                Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                _ => continue,
+            };
+            let mut starred = pattern.iter().enumerate().filter_map(|(index, element)| {
+                let Expr::Starred(starred) = element else {
+                    return None;
+                };
+                let Expr::Name(name) = starred.value.as_ref() else {
+                    return None;
+                };
+                Some((index, name.id.as_str()))
+            });
+            let Some((index, name)) = starred.next() else {
+                continue;
+            };
+            if starred.next().is_some() || source.len() < pattern.len().saturating_sub(1) {
+                continue;
+            }
+            let suffix_len = pattern.len() - index - 1;
+            let captured = &source[index..source.len() - suffix_len];
+            let mut captured = captured.iter();
+            let Some(first) = captured
+                .next()
+                .and_then(|element| self.resolve_callee(element))
+            else {
+                continue;
+            };
+            if captured
+                .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
+            {
+                result.push((name.to_string(), first));
+            }
+        }
+        result
     }
 
     // Only reached via random/secrets helpers that are themselves
@@ -1823,6 +1892,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -1866,6 +1936,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -2179,6 +2250,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
+        scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -4917,6 +4989,7 @@ impl<'a> CallChecker<'a> {
                         .is_some_and(|key| Self::same_literal_key(key, slice))
                 })
                 .and_then(|item| self.resolve_callee(&item.value)),
+            Expr::Name(name) => self.resolve_starred_callable_list_element(name.id.as_str()),
             _ => None,
         }
     }
@@ -5270,6 +5343,7 @@ impl<'a> CallChecker<'a> {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
+                || scope.starred_callable_list_elements.contains_key(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);
@@ -5407,6 +5481,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_iterable_items.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
+        scope.starred_callable_list_elements.remove(name);
         scope.instance_type_args.remove(name);
         scope.contextvar_token_callables.remove(name);
         scope.topological_sorter_nodes.remove(name);
@@ -8583,6 +8658,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let callable_list = self
                     .homogeneous_callable_list(value)
                     .or_else(|| self.weakset_initializer_callable(value));
+                let starred_callable_lists =
+                    self.starred_destructuring_callable_lists(targets, value);
                 let generator_yield = if let Expr::Call(factory) = value.as_ref() {
                     self.resolve_callee(&factory.func)
                         .and_then(|fullname| self.callable_iterator_items.get(&fullname).cloned())
@@ -8698,6 +8775,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .insert(name.id.to_string(), callable.clone());
                         }
                     }
+                }
+                for (name, callable) in starred_callable_lists {
+                    self.current_scope()
+                        .starred_callable_list_elements
+                        .insert(name, callable);
                 }
             }
             Stmt::Delete(ast::StmtDelete { targets, .. }) => {
