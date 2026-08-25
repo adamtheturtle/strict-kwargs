@@ -6947,7 +6947,6 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         if attribute.attr.as_str() != "choice"
-            || !call.arguments.keywords.is_empty()
             || !matches!(
                 self.resolve_module(module.id.as_str()).as_deref(),
                 Some("random" | "secrets")
@@ -6955,8 +6954,18 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [sequence] = &*call.arguments.args else {
-            return None;
+        let sequence = match &*call.arguments.args {
+            [sequence] if call.arguments.keywords.is_empty() => sequence,
+            [] => {
+                let [keyword] = &*call.arguments.keywords else {
+                    return None;
+                };
+                if keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("seq") {
+                    return None;
+                }
+                &keyword.value
+            }
+            _ => return None,
         };
         self.homogeneous_callable_sequence(sequence)
     }
