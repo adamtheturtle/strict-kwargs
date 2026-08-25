@@ -5026,6 +5026,27 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(vars_call) = value {
+            if self.names_stdlib_callable(&vars_call.func, "builtins.vars") {
+                let [Expr::Call(namespace)] = &*vars_call.arguments.args else {
+                    return None;
+                };
+                if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+                    != "types.SimpleNamespace"
+                {
+                    return None;
+                }
+                let Expr::StringLiteral(attribute) = slice else {
+                    return None;
+                };
+                return self.resolve_callee(
+                    &namespace
+                        .arguments
+                        .find_keyword(attribute.value.to_str())?
+                        .value,
+                );
+            }
+        }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
