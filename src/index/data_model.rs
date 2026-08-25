@@ -42,12 +42,16 @@ fn is_class_var(annotation: &Expr) -> bool {
     matches!(callee_tail(core), Some("ClassVar"))
 }
 
-fn is_init_var(annotation: &Expr) -> bool {
+pub(super) fn is_init_var(annotation: &Expr) -> bool {
     let core = match annotation {
         Expr::Subscript(ast::ExprSubscript { value, .. }) => value.as_ref(),
         other => other,
     };
     matches!(callee_tail(core), Some("InitVar"))
+}
+
+fn is_kw_only(annotation: &Expr) -> bool {
+    matches!(callee_tail(annotation), Some("KW_ONLY"))
 }
 
 /// Whether a ``@dataclass`` field assignment opts out of ``__init__`` via
@@ -221,7 +225,8 @@ fn own_runtime_fields(class_def: &ast::StmtClassDef) -> impl Iterator<Item = Str
         let Expr::Name(name) = target.as_ref() else {
             return None;
         };
-        (!is_class_var(annotation) && !is_init_var(annotation)).then(|| name.id.to_string())
+        (!is_class_var(annotation) && !is_init_var(annotation) && !is_kw_only(annotation))
+            .then(|| name.id.to_string())
     })
 }
 
