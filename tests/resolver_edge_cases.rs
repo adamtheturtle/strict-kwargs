@@ -3866,6 +3866,26 @@ statistics.multimode(data=[target])[0](1)
     );
 }
 
+/// Singleton `statistics.median_low` and `median_high` results preserve the
+/// sole callable data element (issue #796).
+#[test]
+fn statistics_median_results_preserve_callable_signatures() {
+    let messages = check_source(
+        r"
+import statistics
+def target(value: int) -> None: ...
+statistics.median_low(data=[target])(1)
+statistics.median_high(data=[target])(1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected statistics median violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `Counter.most_common` preserves callable key types (issue #514).
 #[test]
 fn counter_most_common_preserves_callable_key_signatures() {

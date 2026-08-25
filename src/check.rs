@@ -7176,8 +7176,10 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(module) = attribute.value.as_ref() else {
             return None;
         };
-        if attribute.attr.as_str() != "mode"
-            || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
+        if !matches!(
+            attribute.attr.as_str(),
+            "mode" | "median_low" | "median_high"
+        ) || self.resolve_module(module.id.as_str()).as_deref() != Some("statistics")
         {
             return None;
         }
@@ -7187,6 +7189,16 @@ impl<'a> CallChecker<'a> {
                     .then_some(&keyword.value)
             })
         })?;
+        if matches!(attribute.attr.as_str(), "median_low" | "median_high") {
+            let singleton = match data {
+                Expr::List(list) => list.elts.len() == 1,
+                Expr::Tuple(tuple) => tuple.elts.len() == 1,
+                _ => false,
+            };
+            if !singleton {
+                return None;
+            }
+        }
         self.homogeneous_callable_sequence(data)
     }
 
