@@ -3643,6 +3643,23 @@ next(iter({target: 1}))(1)
     }
 }
 
+/// Iterating a literal `WeakSet` preserves its concrete callable elements
+/// (issue #829).
+#[test]
+fn weak_set_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakSet(data=[target])))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakSet iterator violation, got: {messages:?}"
+    );
+}
+
 /// `heapq` functions returning a homogeneous list element retain its concrete
 /// callable signature (issue #441).
 #[test]
