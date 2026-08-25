@@ -755,6 +755,31 @@ def outer() -> None:
     }
 }
 
+/// Clearing a callable-type alias leaves an internal tombstone. Later
+/// rebinding forms must not mistake that tombstone for a live callable and
+/// suppress the ty fallback (Bugbot on #862).
+#[test]
+fn cleared_callable_alias_tombstone_is_not_live() {
+    let messages = check_source(
+        r#"
+import typing
+from contextlib import nullcontext
+class Language:
+    def word_filter(self, word: str) -> bool: ...
+def caller(lang: Language) -> None:
+    Callback = typing.Callable[[int], None]
+    Callback = lang.word_filter
+    with nullcontext(Callback) as Callback:
+        pass
+    Callback("word", "extra")
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 11, "Too many positional"),
+        "cleared alias tombstone must still defer to ty, got: {messages:?}"
+    );
+}
+
 #[test]
 fn optional_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(

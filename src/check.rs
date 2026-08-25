@@ -5186,7 +5186,7 @@ impl<'a> CallChecker<'a> {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
-                || scope.callable_type_aliases.contains_key(name)
+                || matches!(scope.callable_type_aliases.get(name), Some(Some(_)))
         }) || was_callable_alias;
         if was_known_callable {
             self.mark_opaque_local(name);
@@ -8525,7 +8525,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             scope.functions.contains_key(name.id.as_str())
                                 || scope.names.contains_key(name.id.as_str())
                                 || scope.modules.contains_key(name.id.as_str())
-                                || scope.callable_type_aliases.contains_key(name.id.as_str())
+                                || matches!(
+                                    scope.callable_type_aliases.get(name.id.as_str()),
+                                    Some(Some(_))
+                                )
                         }) || was_callable_alias;
                         self.mark_opaque_local(name.id.as_str());
                         if was_known_callable {
