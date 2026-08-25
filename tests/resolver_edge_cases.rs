@@ -3686,6 +3686,23 @@ atexit.register(target)(1)
     );
 }
 
+/// A directly imported alias of `atexit.register` returns the registered
+/// callable unchanged (issue #857).
+#[test]
+fn direct_import_atexit_register_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from atexit import register as register_exit
+def target(value: int) -> None: ...
+register_exit(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected direct atexit.register violation, got: {messages:?}"
+    );
+}
+
 /// `MethodType` binds the leading receiver of a concrete method signature
 /// (issue #460).
 #[test]
