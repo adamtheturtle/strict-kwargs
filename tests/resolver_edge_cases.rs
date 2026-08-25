@@ -4812,6 +4812,23 @@ weakref.WeakValueDictionary({"x": target}).pop(key="x")(1)
     );
 }
 
+/// Selecting the value from an immediate `WeakValueDictionary.popitem`
+/// result preserves its concrete callable (issue #937).
+#[test]
+fn weak_value_dictionary_popitem_preserves_literal_callable() {
+    let messages = check_source(
+        r#"
+import weakref
+def target(value: int) -> None: ...
+weakref.WeakValueDictionary({"x": target}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected WeakValueDictionary.popitem violation, got: {messages:?}"
+    );
+}
+
 /// Annotated `Future[Callable[...]].result()` preserves the callable signature
 /// (issue #410).
 #[test]
