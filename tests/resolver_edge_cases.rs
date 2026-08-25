@@ -1802,6 +1802,23 @@ next(iter({"key": target}.items()))[1](1)
     );
 }
 
+/// Selecting the value position from an immediate `OrderedDict` items
+/// iterator preserves its concrete callable signature (issue #923).
+#[test]
+fn ordered_dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+next(iter(OrderedDict({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected OrderedDict items value violation, got: {messages:?}"
+    );
+}
+
 /// A queue's declared callable item type becomes the signature returned by
 /// `get` and `get_nowait` (issue #393).
 #[test]
