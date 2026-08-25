@@ -6545,6 +6545,31 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "get" {
             return None;
         }
+        if let Expr::Call(constructor) = method.value.as_ref() {
+            if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "types.MappingProxyType"
+            {
+                return None;
+            }
+            let [key] = &*get_call.arguments.args else {
+                return None;
+            };
+            let mapping = constructor.arguments.args.first().or_else(|| {
+                constructor
+                    .arguments
+                    .find_keyword("mapping")
+                    .map(|keyword| &keyword.value)
+            })?;
+            let Expr::Dict(dict) = mapping else {
+                return None;
+            };
+            let item = dict.items.iter().rev().find(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            })?;
+            return self.unnamed_callable_signature(&item.value);
+        }
         let Expr::Name(mapping) = method.value.as_ref() else {
             return None;
         };

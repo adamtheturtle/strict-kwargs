@@ -2158,6 +2158,23 @@ MappingProxyType({"key": target})["key"](1)
     );
 }
 
+/// An inline `MappingProxyType.get` preserves the concrete callable at a
+/// present literal key (issue #930).
+#[test]
+fn inline_mapping_proxy_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "get() result"),
+        "expected inline MappingProxyType.get violation, got: {messages:?}"
+    );
+}
+
 /// `dict.get` on an existing literal key preserves its callable value
 /// (issue #773).
 #[test]
