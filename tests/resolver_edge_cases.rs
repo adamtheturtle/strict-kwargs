@@ -4548,6 +4548,28 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// `concurrent.futures.wait` preserves the singleton future result through
+/// the returned done set (issue #846).
+#[test]
+fn futures_wait_done_set_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected wait done-set Future result violation, got: {messages:?}"
+    );
+}
+
 /// Destructuring rebinding also discards executor identity.
 #[test]
 fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {
