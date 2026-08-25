@@ -5026,6 +5026,31 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(asdict_call) = value {
+            if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
+                let Expr::StringLiteral(field) = slice else {
+                    return None;
+                };
+                let instance = asdict_call
+                    .arguments
+                    .find_keyword("obj")
+                    .map(|keyword| &keyword.value)
+                    .or_else(|| asdict_call.arguments.args.first())?;
+                let Expr::Call(constructor) = instance else {
+                    return None;
+                };
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                if !self.index.is_dataclass(&class) {
+                    return None;
+                }
+                return self.resolve_callee(
+                    &constructor
+                        .arguments
+                        .find_keyword(field.value.to_str())?
+                        .value,
+                );
+            }
+        }
         if let Expr::Call(astuple_call) = value {
             if self.names_stdlib_callable(&astuple_call.func, "dataclasses.astuple") {
                 let instance = astuple_call

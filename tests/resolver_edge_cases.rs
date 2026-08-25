@@ -943,6 +943,26 @@ dataclasses.astuple(obj=Record(callback=target))[0](1)
     );
 }
 
+/// `dataclasses.asdict` preserves a concrete callable constructor field
+/// selected by its literal field name (issue #831).
+#[test]
+fn dataclasses_asdict_preserves_callable_field_signature() {
+    let messages = check_source(
+        r#"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.asdict(obj=Record(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.asdict violation, got: {messages:?}"
+    );
+}
+
 /// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
 #[test]
 fn make_dataclass_preserves_callable_field_signatures() {
