@@ -1151,6 +1151,9 @@ struct CallChecker<'a> {
     /// ``__aenter__`` when the method body is a single ``return`` of a
     /// resolved callable.
     context_manager_enter_callables: FxHashMap<String, String>,
+    /// Property method fullname -> concrete callable returned by its sole
+    /// unconditional body statement.
+    property_body_callables: FxHashMap<String, String>,
     /// Concrete signatures returned by ``__enter__`` / ``__aenter__`` when the
     /// method body is a single ``return`` of a literal lambda.
     context_manager_enter_signatures: FxHashMap<String, Signature>,
@@ -1560,6 +1563,7 @@ impl<'a> CallChecker<'a> {
             callable_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
+            property_body_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             class_type_params: FxHashMap::default(),
@@ -8422,6 +8426,12 @@ impl<'a> CallChecker<'a> {
                     if class_fullname == "builtins.super" {
                         return None;
                     }
+                    if let Some(callable) = self
+                        .property_body_callables
+                        .get(&format!("{class_fullname}.{attr_name}"))
+                    {
+                        return Some(callable.clone());
+                    }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
                 if let Some(class_fullname) = Self::class_from_literal_expr(value) {
@@ -8587,6 +8597,17 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if decorator_list
+            .iter()
+            .any(|decorator| self.names_stdlib_callable(&decorator.expression, "builtins.property"))
+        {
+            if let Some(callable) = Self::single_return_expression(body)
+                .and_then(|returned| self.resolve_callee(returned))
+            {
+                self.property_body_callables
+                    .insert(method_fullname.clone(), callable);
+            }
+        }
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
             self.index_context_manager_enter_method(&class_fullname, returns.as_deref(), body);
         }
