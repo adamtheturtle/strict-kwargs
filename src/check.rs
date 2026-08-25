@@ -6185,15 +6185,12 @@ impl<'a> CallChecker<'a> {
                     return None;
                 }
                 let iterable = first_named(0, "iterable")?;
-                let input_len = match iterable {
-                    Expr::List(list) => list.elts.len(),
-                    Expr::Tuple(tuple) => tuple.elts.len(),
+                let elements = match iterable {
+                    Expr::List(list) => list.elts.as_slice(),
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
                     _ => return None,
                 };
-                if index >= input_len {
-                    return None;
-                }
-                self.literal_iterable_callable_signature(iterable)
+                self.unnamed_callable_signature(elements.get(index)?)
             }
             "pairwise" | "permutations" | "combinations" | "combinations_with_replacement"
                 if selected_index.is_some() =>

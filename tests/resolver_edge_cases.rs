@@ -734,6 +734,29 @@ next(itertools.batched(iterable=[target], n=1))[0](1)
     );
 }
 
+/// `batched` resolves only the selected element; siblings and later batches
+/// may contain callables with different signatures.
+#[test]
+fn itertools_batched_selects_the_indexed_callable() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+def other(*, named: int) -> None: ...
+next(itertools.batched([target, other], 2))[0](1)
+next(itertools.batched([target, other], 1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "messages: {messages:?}"
+    );
+}
+
 /// A true `TypeGuard` branch narrows its argument to the declared callable
 /// signature (issue #456).
 #[test]
