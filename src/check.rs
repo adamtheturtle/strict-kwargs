@@ -5532,6 +5532,7 @@ impl<'a> CallChecker<'a> {
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
                 || scope.starred_callable_list_elements.contains_key(name)
+                || scope.executor_instances.contains(name)
         });
         if was_known_callable {
             self.mark_opaque_local(name);
@@ -6450,11 +6451,7 @@ impl<'a> CallChecker<'a> {
         if !self.binding_is_executor(executor.id.as_str()) {
             return None;
         }
-        let callback = submit_call
-            .arguments
-            .find_keyword("fn")
-            .map(|keyword| &keyword.value)
-            .or_else(|| submit_call.arguments.args.first())?;
+        let callback = submit_call.arguments.args.first()?;
         let callback = self.resolve_callee(callback)?;
         self.callable_returns.get(&callback).cloned()
     }
@@ -6490,11 +6487,7 @@ impl<'a> CallChecker<'a> {
         if !self.binding_is_executor(executor.id.as_str()) {
             return None;
         }
-        let callback = map_call
-            .arguments
-            .find_keyword("fn")
-            .map(|keyword| &keyword.value)
-            .or_else(|| map_call.arguments.args.first())?;
+        let callback = map_call.arguments.args.first()?;
         match callback {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
             other => {
