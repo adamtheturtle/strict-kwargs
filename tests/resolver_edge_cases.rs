@@ -5425,6 +5425,26 @@ Owner().callback(1)
     );
 }
 
+/// Inline `cached_property.__get__` evaluates a concrete lambda getter and
+/// preserves the callable it returns (issue #961).
+#[test]
+fn inline_cached_property_get_preserves_returned_callable() {
+    let messages = check_source(
+        r"
+import functools
+class Owner: pass
+def target(value: int) -> None: ...
+functools.cached_property(func=lambda self: target).__get__(
+    instance=Owner(), owner=Owner
+)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "cached_property.__get__ must preserve its returned callable: {messages:?}"
+    );
+}
+
 /// A stored `property` retains the callable returned by its getter
 /// (regression #761).
 #[test]
