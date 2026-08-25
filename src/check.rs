@@ -4153,20 +4153,9 @@ impl<'a> CallChecker<'a> {
         None
     }
 
-    /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
-    /// that names a callable is resolved for the subsequent call (issue #652).
     #[cfg_attr(coverage, coverage(off))]
-    fn property_fget_result_callable(&self, func: &Expr) -> Option<String> {
-        let Expr::Call(fget_call) = func else {
-            return None;
-        };
-        let Expr::Attribute(fget_attr) = fget_call.func.as_ref() else {
-            return None;
-        };
-        if fget_attr.attr.as_str() != "fget" {
-            return None;
-        }
-        let Expr::Call(property_call) = fget_attr.value.as_ref() else {
+    fn property_getter_callable(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(property_call) = expr else {
             return None;
         };
         let factory = self.resolve_callee(&property_call.func)?;
@@ -4188,6 +4177,39 @@ impl<'a> CallChecker<'a> {
         match getter {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
             _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn stored_property_getter_callable(&self, name: &str) -> Option<String> {
+        let result_name = format!("{name}.fget.__return__");
+        for scope in self.scopes.iter().rev() {
+            if let Some(callable) = scope.names.get(&result_name) {
+                return Some(callable.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// ``property(...).fget(...)`` invokes the getter; a simple lambda body
+    /// that names a callable is resolved for the subsequent call (issue #652).
+    #[cfg_attr(coverage, coverage(off))]
+    fn property_fget_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(fget_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(fget_attr) = fget_call.func.as_ref() else {
+            return None;
+        };
+        if fget_attr.attr.as_str() != "fget" {
+            return None;
+        }
+        match fget_attr.value.as_ref() {
+            Expr::Name(property) => self.stored_property_getter_callable(property.id.as_str()),
+            property_call => self.property_getter_callable(property_call),
         }
     }
 
@@ -8446,6 +8468,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let signal_handler_signature = self.signal_getsignal_result_signature(value);
                 let topological_sorter_node = self.topological_sorter_graph_callable(value);
                 let class_fullname = self.class_from_obvious_instance(value);
+                let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
@@ -8520,6 +8543,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             }
                         } else {
                             self.clear_instance_binding(name.id.as_str());
+                        }
+                        if let Some(callable) = &property_getter {
+                            self.define(
+                                &format!("{}.fget.__return__", name.id.as_str()),
+                                callable.clone(),
+                            );
                         }
                         if let Some(class) = &unittest_enter_class {
                             self.current_scope()
@@ -8625,6 +8654,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -8638,6 +8668,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
                         self.clear_instance_binding(name.id.as_str());
+                    }
+                    if let Some(callable) = property_getter {
+                        self.define(&format!("{}.fget.__return__", name.id.as_str()), callable);
                     }
                     if let Some(class) = unittest_enter_class {
                         self.current_scope()
