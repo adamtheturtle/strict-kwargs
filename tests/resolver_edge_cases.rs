@@ -923,6 +923,26 @@ Holder(call=f).call(1)
     );
 }
 
+/// `dataclasses.astuple` preserves concrete callable constructor fields at a
+/// literal tuple index (issue #830).
+#[test]
+fn dataclasses_astuple_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+import dataclasses
+@dataclasses.dataclass
+class Record:
+    callback: object
+def target(value: int) -> None: ...
+dataclasses.astuple(obj=Record(callback=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected dataclasses.astuple violation, got: {messages:?}"
+    );
+}
+
 /// ``make_dataclass`` synthesizes a class with typed callable fields (issue #453).
 #[test]
 fn make_dataclass_preserves_callable_field_signatures() {

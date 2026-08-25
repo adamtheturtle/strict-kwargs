@@ -1341,6 +1341,31 @@ impl DefinitionIndex {
             .is_some_and(|model| model.kind == ClassDataKind::Dataclass)
     }
 
+    /// Return the number of fields in a synthesized dataclass constructor.
+    pub fn dataclass_init_field_count(&self, fullname: &str) -> Option<usize> {
+        Some(
+            self.read()
+                .store
+                .data_models
+                .get(fullname)
+                .filter(|model| model.kind == ClassDataKind::Dataclass)?
+                .init_fields
+                .len(),
+        )
+    }
+
+    /// Return a dataclass constructor field by its runtime positional order.
+    pub fn dataclass_init_field(&self, fullname: &str, index: usize) -> Option<String> {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::Dataclass)?
+            .init_fields
+            .get(index)
+            .cloned()
+    }
+
     /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
     /// model.
     pub fn is_namedtuple(&self, fullname: &str) -> bool {
