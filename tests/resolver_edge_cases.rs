@@ -4280,6 +4280,27 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     );
 }
 
+/// Positional `update_wrapper` returns its concrete wrapper lambda with the
+/// lambda's signature intact (issue #963).
+#[test]
+fn positional_update_wrapper_preserves_lambda_signature() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.update_wrapper(lambda value: None, target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "update_wrapper result"),
+        "expected returned wrapper violation, got: {messages:?}"
+    );
+    assert!(
+        messages.len() >= 2,
+        "both update_wrapper and its returned lambda call must be checked: {messages:?}"
+    );
+}
+
 /// `functools.wraps` preserves the decorated wrapper signature (issue #493).
 #[test]
 fn functools_wraps_preserves_callable_signature() {

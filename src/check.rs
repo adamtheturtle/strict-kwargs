@@ -2847,7 +2847,14 @@ impl<'a> CallChecker<'a> {
         if self.check_methodcaller_invocation(call) {
             return;
         }
-        let local_function = if let Some(method) = self.method_type_result_signature(&call.func) {
+        let local_function = if let Some(signature) =
+            self.update_wrapper_result_signature(&call.func)
+        {
+            Some(LocalFunction {
+                fullname: "functools.update_wrapper result".to_string(),
+                signature,
+            })
+        } else if let Some(method) = self.method_type_result_signature(&call.func) {
             Some(method)
         } else if let Some(signature) = self.contextvar_result_signature(&call.func) {
             Some(LocalFunction {
@@ -4350,6 +4357,30 @@ impl<'a> CallChecker<'a> {
         }
         let wrapped = Self::wrapped_callable_argument(call)?;
         self.resolve_callee(wrapped)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn update_wrapper_result_signature(&self, func: &Expr) -> Option<Signature> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "functools.update_wrapper") {
+            return None;
+        }
+        let wrapper = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .find_keyword("wrapper")
+                .map(|keyword| &keyword.value)
+        })?;
+        let Expr::Lambda(lambda) = wrapper else {
+            return None;
+        };
+        Some(lambda.parameters.as_deref().map_or_else(
+            || Signature {
+                parameters: Vec::new(),
+            },
+            signature_from_parameters,
+        ))
     }
 
     fn current_lexical_scope(&self) -> &str {
