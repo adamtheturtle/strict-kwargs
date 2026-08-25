@@ -1277,6 +1277,27 @@ async def caller() -> None:
     );
 }
 
+/// Awaiting an item yielded by `asyncio.as_completed` preserves the concrete
+/// callable result of its source awaitables (issue #836).
+#[test]
+fn asyncio_as_completed_preserves_callable_awaitable_result() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    completed = asyncio.as_completed(fs=[factory()])
+    (await next(iter(completed)))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "awaited result"),
+        "expected asyncio.as_completed violation, got: {messages:?}"
+    );
+}
+
 /// `anext` preserves callable item signatures declared by async iterator
 /// factories (issue #384).
 #[test]
