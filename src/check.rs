@@ -8168,14 +8168,43 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        if let Expr::Set(set) = iter_method.value.as_ref() {
+        self.homogeneous_literal_container_callable(&iter_method.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn homogeneous_literal_container_callable(&self, value: &Expr) -> Option<String> {
+        if let Expr::Set(set) = value {
             let mut elements = set.elts.iter();
             let first = self.resolve_callee(elements.next()?)?;
             return elements
                 .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
                 .then_some(first);
         }
-        self.homogeneous_callable_sequence(&iter_method.value)
+        self.homogeneous_callable_sequence(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_builtin_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [container] = &*iter_call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_literal_container_callable(container)
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
@@ -8373,6 +8402,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_builtin_iterator_next_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {

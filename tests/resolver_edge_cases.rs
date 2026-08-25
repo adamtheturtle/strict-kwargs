@@ -525,6 +525,22 @@ def target(value: int) -> None: ...
     }
 }
 
+/// Calling `__next__` explicitly on a built-in iterator preserves its
+/// homogeneous concrete callable element (issue #949).
+#[test]
+fn explicit_builtin_iterator_next_preserves_callable_element() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+iter([target]).__next__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit built-in iterator violation, got: {messages:?}"
+    );
+}
+
 /// Concatenated literal sequences retain the concrete callable selected from
 /// either operand (issue #806).
 #[test]
