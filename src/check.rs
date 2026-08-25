@@ -4366,6 +4366,17 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn mock_wraps_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if self.class_from_constructor_func(&call.func)?.as_str() != "unittest.mock.Mock" {
+            return None;
+        }
+        self.resolve_callee(&call.arguments.find_keyword("wraps")?.value)
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -8461,6 +8472,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.create_autospec_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.mock_wraps_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.property_fget_result_callable(func) {
