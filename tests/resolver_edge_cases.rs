@@ -4297,6 +4297,24 @@ functools.singledispatch(func=target).dispatch(cls=object)(1)
     );
 }
 
+/// Registering on a freshly constructed inline singledispatch wrapper returns
+/// the concrete implementation supplied to the two-argument form (issue
+/// #965).
+#[test]
+fn inline_singledispatch_register_preserves_implementation() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.singledispatch(func=target).register(cls=int, func=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "inline singledispatch.register must preserve its implementation: {messages:?}"
+    );
+}
+
 /// `functools.wraps` preserves the decorated wrapper signature (issue #493).
 #[test]
 fn functools_wraps_preserves_callable_signature() {
