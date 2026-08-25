@@ -997,6 +997,34 @@ current.get()(1)
     );
 }
 
+/// Rebinding or deleting a specialized `ContextVar` clears its recorded
+/// callable-value signature (issue #755).
+#[test]
+fn contextvar_rebinding_and_deletion_clear_callable_metadata() {
+    for source in [
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+value = ContextVar("replacement")
+value.get()(1)
+"#,
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+del value
+value.get()(1)
+"#,
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "stale ContextVar metadata survived invalidation: {messages:?}"
+        );
+    }
+}
+
 /// An unannotated `ContextVar` infers a concrete callable from its default
 /// value (issue #851).
 #[test]
