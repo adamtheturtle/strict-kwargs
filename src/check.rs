@@ -4880,6 +4880,42 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_literal_sequence_item(
+        &self,
+        elements: &[Expr],
+        slice: &Expr,
+    ) -> Option<String> {
+        let element_len = |element: &Expr| match element {
+            Expr::Starred(starred) => match starred.value.as_ref() {
+                Expr::List(list) => Some(list.elts.len()),
+                Expr::Tuple(tuple) => Some(tuple.elts.len()),
+                _ => None,
+            },
+            _ => Some(1),
+        };
+        let len = elements.iter().try_fold(0usize, |len, element| {
+            len.checked_add(element_len(element)?)
+        })?;
+        let mut index = Self::literal_sequence_index(slice, len)?;
+        for element in elements {
+            let width = element_len(element)?;
+            if index >= width {
+                index -= width;
+                continue;
+            }
+            return match element {
+                Expr::Starred(starred) => match starred.value.as_ref() {
+                    Expr::List(list) => self.resolve_callee(&list.elts[index]),
+                    Expr::Tuple(tuple) => self.resolve_callee(&tuple.elts[index]),
+                    _ => None,
+                },
+                _ => self.resolve_callee(element),
+            };
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
@@ -4897,14 +4933,8 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
-            Expr::List(list) => {
-                let index = Self::literal_sequence_index(slice, list.elts.len())?;
-                self.resolve_callee(&list.elts[index])
-            }
-            Expr::Tuple(tuple) => {
-                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
-                self.resolve_callee(&tuple.elts[index])
-            }
+            Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
+            Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
                 .items
                 .iter()
