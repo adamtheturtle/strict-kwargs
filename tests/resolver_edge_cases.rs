@@ -524,6 +524,18 @@ def target(value: int) -> None: ...
             "expected starred-literal violation on line {line}, got: {messages:?}"
         );
     }
+
+    let nested = check_source(
+        r"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+[*[0, *[other, target]]][-1](1)
+",
+    );
+    assert!(
+        has_error_at(&nested, 4, "target"),
+        "nested stars must preserve expanded indexing: {nested:?}"
+    );
 }
 
 /// Generic builtins that select or sort elements preserve a homogeneous
