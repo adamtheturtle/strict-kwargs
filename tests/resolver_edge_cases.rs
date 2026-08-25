@@ -1901,6 +1901,39 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// `dict.get` on an existing literal key preserves its callable value
+/// (issue #773).
+#[test]
+fn literal_dict_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.get("key")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-get violation, got: {messages:?}"
+    );
+}
+
+/// `defaultdict.get` preserves an existing literal mapping value rather than
+/// invoking or widening through its default factory (issue #800).
+#[test]
+fn defaultdict_get_preserves_existing_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: None, {"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict.get violation, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary's `popitem` value preserves its concrete callable
 /// (issue #774).
 #[test]
@@ -2233,6 +2266,22 @@ call(1)
     assert!(
         has_error_at(&messages, 6, "list pop result"),
         "expected list-pop violation, got: {messages:?}"
+    );
+}
+
+/// A literal list copy preserves the concrete callable at a static index
+/// (issue #771).
+#[test]
+fn literal_list_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected list-copy violation, got: {messages:?}"
     );
 }
 
@@ -3877,6 +3926,23 @@ ChainMap({"key": target})["key"](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An empty `ChainMap.new_child` falls through to concrete callable values in
+/// the parent mapping (issue #820).
+#[test]
+fn chainmap_empty_new_child_preserves_parent_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"x": target}).new_child()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected parent ChainMap result violation, got: {messages:?}"
     );
 }
 

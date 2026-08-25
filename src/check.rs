@@ -5051,7 +5051,32 @@ impl<'a> CallChecker<'a> {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
+        if let Expr::Call(copy_call) = value {
+            if copy_call.arguments.is_empty() {
+                if let Expr::Attribute(method) = copy_call.func.as_ref() {
+                    if method.attr.as_str() == "copy"
+                        && matches!(method.value.as_ref(), Expr::List(_))
+                    {
+                        return self.resolve_literal_container_item(&method.value, slice);
+                    }
+                }
+            }
+        }
         if let Expr::Call(wrapper) = value {
+            if let Expr::Attribute(method) = wrapper.func.as_ref() {
+                if method.attr.as_str() == "new_child"
+                    && wrapper.arguments.args.is_empty()
+                    && wrapper.arguments.keywords.is_empty()
+                {
+                    if let Expr::Call(parent) = method.value.as_ref() {
+                        if self.class_from_constructor_func(&parent.func).as_deref()
+                            == Some("collections.ChainMap")
+                        {
+                            return self.resolve_literal_container_item(&method.value, slice);
+                        }
+                    }
+                }
+            }
             let factory = self.resolve_callee(&wrapper.func)?;
             if matches!(
                 Self::normalize_factory_fullname(&factory),
@@ -7183,6 +7208,39 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_get_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "get"
+            || !call.arguments.keywords.is_empty()
+            || !(1..=2).contains(&call.arguments.args.len())
+        {
+            return None;
+        }
+        let mapping = match method.value.as_ref() {
+            Expr::Dict(_) => method.value.as_ref(),
+            Expr::Call(constructor) => {
+                let class = self.resolve_callee(&constructor.func)?;
+                if Self::normalize_factory_fullname(&class) != "collections.defaultdict"
+                    || !constructor.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let [_factory, mapping] = &*constructor.arguments.args else {
+                    return None;
+                };
+                mapping
+            }
+            _ => return None,
+        };
+        self.resolve_literal_container_item(mapping, call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn collections_mapping_pop_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -7954,6 +8012,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_dict_get_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.collections_mapping_pop_callable(func) {
