@@ -6985,6 +6985,31 @@ impl<'a> CallChecker<'a> {
             .flatten()
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn min_max_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !matches!(
+            self.resolve_callee(&call.func)?.as_str(),
+            "builtins.min" | "builtins.max"
+        ) || !call.arguments.keywords.iter().all(|keyword| {
+            keyword
+                .arg
+                .as_ref()
+                .is_some_and(|name| matches!(name.as_str(), "default" | "key"))
+        }) {
+            return None;
+        }
+        let [iterable] = &*call.arguments.args else {
+            return None;
+        };
+        let default = &call.arguments.find_keyword("default")?.value;
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
     // Covered end-to-end by the SimpleNamespace attribute regression. Other
     // constructor, keyword, and rebinding shapes intentionally decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -8427,6 +8452,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.next_empty_default_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.min_max_empty_default_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
