@@ -7115,9 +7115,7 @@ impl<'a> CallChecker<'a> {
                     self.immediate_userlist_iterable(&method.value)
                         .and_then(|iterable| self.homogeneous_callable_sequence(iterable))
                 }),
-            value => self
-                .immediate_userlist_iterable(value)
-                .and_then(|iterable| self.homogeneous_callable_sequence(iterable)),
+            _ => None,
         }
     }
 
