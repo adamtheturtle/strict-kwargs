@@ -1531,6 +1531,25 @@ async def main() -> None:
     );
 }
 
+/// A synchronous `for` loop reads callable items from an annotated generator
+/// factory invocation (issue #849).
+#[test]
+fn for_generator_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+for item in values():
+    item(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "for-loop item"),
+        "expected generator factory loop violation, got: {messages:?}"
+    );
+}
+
 /// ``async with`` preserves a context manager's ``__aenter__`` return type
 /// (issue #454).
 #[test]

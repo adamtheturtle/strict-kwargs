@@ -1,0 +1,1 @@
+Preserve callable item signatures in ``for`` loops over annotated generator factories.
