@@ -1710,23 +1710,44 @@ next(itertools.zip_longest([f]))[0](1)
     }
 }
 
-/// Generic builtins preserve literal callable elements at their documented
-/// output positions (issue #390).
+/// Tuple-producing builtins preserve literal callable elements at their
+/// documented output positions (issue #390).
 #[test]
 fn builtin_iterator_results_preserve_callable_item_signatures() {
     let messages = check_source(
         r"
 def f(value: int) -> None: ...
 next(zip([f]))[0](1)
-next(map(lambda x: x, [f]))(1)
-next(filter(None, [f]))(1)
 next(enumerate([f]))[1](1)
 ",
     );
-    for line in 3..=6 {
+    for line in 3..=4 {
         assert!(
             has_error_at(&messages, line, "next() result"),
             "expected builtin-iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// `map` and `filter` preserve literal callable items (regression #759).
+#[test]
+fn map_and_filter_preserve_callable_item_signatures() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(map(lambda item: item, [target]))(1)
+next(filter(None, [target]))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly two violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected map/filter violation on line {line}, got: {messages:?}"
         );
     }
 }
@@ -1762,6 +1783,22 @@ next(iter({"call": f}.values()))(1)
     assert!(
         has_error_at(&messages, 3, "next() result"),
         "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
+/// A literal dictionary's `popitem` value preserves its concrete callable
+/// (issue #774).
+#[test]
+fn literal_dict_popitem_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-popitem violation, got: {messages:?}"
     );
 }
 
@@ -2082,6 +2119,30 @@ call(1)
         has_error_at(&messages, 6, "list pop result"),
         "expected list-pop violation, got: {messages:?}"
     );
+}
+
+/// Immediate list pop results preserve homogeneous callable elements
+/// (issue #770).
+#[test]
+fn literal_list_pop_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].pop()(1)
+sorted([target]).pop()(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected both pop violations: {messages:?}"
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected list-pop violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// An operand-selecting `reduce` lambda preserves a literal sequence's
@@ -3252,6 +3313,55 @@ async def main() -> None:
     }
 }
 
+/// A stored `IsolatedAsyncioTestCase` retains the generic callable returned by
+/// `enterAsyncContext` (regression #760).
+#[test]
+fn isolated_asyncio_test_case_instance_preserves_entered_callable() {
+    let messages = check_source(
+        r"
+import unittest
+
+class Manager:
+    async def __aenter__(self):
+        return lambda value: value
+    async def __aexit__(self, *args: object) -> None: pass
+
+async def main() -> None:
+    case = unittest.IsolatedAsyncioTestCase()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+    case = object()
+    (await case.enterAsyncContext(cm=Manager()))(1)
+",
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "stale case bindings must be cleared: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 11, "awaited result")
+            || has_error_at(&messages, 11, "generic result"),
+        "expected entered-callable violation, got: {messages:?}"
+    );
+}
+
+#[test]
+fn inherited_unittest_enter_helper_keeps_generic_return() {
+    let messages = check_source(
+        r"
+import contextlib
+import unittest
+def target(value: int) -> None: ...
+class Case(unittest.TestCase): pass
+Case().enterContext(cm=contextlib.nullcontext(enter_result=target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "inherited enter helper must preserve its generic return: {messages:?}"
+    );
+}
+
 /// `__enter__` / `__aenter__` bodies that return named callables or bare lambdas
 /// are indexed for later generic-result checking.
 #[test]
@@ -3636,6 +3746,23 @@ OrderedDict({"key": target})["key"](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected OrderedDict result violation, got: {messages:?}"
+    );
+}
+
+/// A `UserDict` initialized from a literal mapping preserves concrete callable
+/// values through subscripting (issue #778).
+#[test]
+fn userdict_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict result violation, got: {messages:?}"
     );
 }
 
