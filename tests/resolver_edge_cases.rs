@@ -505,6 +505,27 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Concatenated literal sequences retain the concrete callable selected from
+/// either operand (issue #806).
+#[test]
+fn concatenated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] + [])[0](1)
+((target,) + ())[0](1)
+([0] + [target])[-1](1)
+((target,) + (0,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected concatenated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Literal slices retain the concrete callable at a statically selected result
 /// index, including negative and stepped slices (issue #805).
 #[test]
@@ -874,6 +895,23 @@ namespace.call(1)
             .iter()
             .any(|message| message.starts_with("main:7:")),
         "rebinding must clear synthesized attributes: {messages:?}"
+    );
+}
+
+/// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
+/// constructor attribute (issue #834).
+#[test]
+fn vars_simple_namespace_preserves_callable_attribute_signature() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+vars(types.SimpleNamespace(callback=target))["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected vars(SimpleNamespace) violation, got: {messages:?}"
     );
 }
 
@@ -1317,6 +1355,27 @@ async def caller() -> None:
     assert!(
         has_error_at(&messages, 5, "awaited result"),
         "expected awaited-result violation, got: {messages:?}"
+    );
+}
+
+/// Awaiting an item yielded by `asyncio.as_completed` preserves the concrete
+/// callable result of its source awaitables (issue #836).
+#[test]
+fn asyncio_as_completed_preserves_callable_awaitable_result() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+async def factory() -> Callable[[int], None]:
+    return lambda value: None
+async def main() -> None:
+    completed = asyncio.as_completed(fs=[factory()])
+    (await next(iter(completed)))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "awaited result"),
+        "expected asyncio.as_completed violation, got: {messages:?}"
     );
 }
 
@@ -1948,6 +2007,39 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// `dict.get` on an existing literal key preserves its callable value
+/// (issue #773).
+#[test]
+fn literal_dict_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.get("key")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-get violation, got: {messages:?}"
+    );
+}
+
+/// `defaultdict.get` preserves an existing literal mapping value rather than
+/// invoking or widening through its default factory (issue #800).
+#[test]
+fn defaultdict_get_preserves_existing_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: None, {"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict.get violation, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary's `popitem` value preserves its concrete callable
 /// (issue #774).
 #[test]
@@ -2280,6 +2372,22 @@ call(1)
     assert!(
         has_error_at(&messages, 6, "list pop result"),
         "expected list-pop violation, got: {messages:?}"
+    );
+}
+
+/// A literal list copy preserves the concrete callable at a static index
+/// (issue #771).
+#[test]
+fn literal_list_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected list-copy violation, got: {messages:?}"
     );
 }
 
@@ -3924,6 +4032,23 @@ ChainMap({"key": target})["key"](1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected ChainMap result violation, got: {messages:?}"
+    );
+}
+
+/// An empty `ChainMap.new_child` falls through to concrete callable values in
+/// the parent mapping (issue #820).
+#[test]
+fn chainmap_empty_new_child_preserves_parent_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+ChainMap({"x": target}).new_child()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected parent ChainMap result violation, got: {messages:?}"
     );
 }
 
