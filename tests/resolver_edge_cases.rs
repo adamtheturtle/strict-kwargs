@@ -5052,3 +5052,74 @@ dataclasses.dataclass()(Model)(1)
         "expected dataclass identity-return violations, got: {messages:?}"
     );
 }
+
+/// A local function consisting of one unconditional return of a concrete
+/// callable preserves that callable's signature (issue #803).
+#[test]
+fn single_return_factory_preserves_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected concrete factory-result violation, got: {messages:?}"
+    );
+}
+
+/// Additional statements make a factory body too dynamic to infer safely.
+#[test]
+fn multi_statement_factory_does_not_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory() -> object:
+    marker = 1
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "dynamic factory should decline: {messages:?}"
+    );
+}
+
+/// Parameters shadow enclosing concrete callables inside the factory body.
+#[test]
+fn single_return_factory_does_not_resolve_shadowed_parameter() {
+    let messages = check_source(
+        r"
+def value(first: int, second: int) -> None: ...
+def factory(value=lambda *args: None):
+    return value
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "shadowed parameter must not resolve to the outer callable: {messages:?}"
+    );
+}
+
+/// Calling an async factory directly produces a coroutine, not its returned
+/// callable value.
+#[test]
+fn async_single_return_factory_does_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+async def factory() -> object:
+    return target
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "async factory must decline: {messages:?}"
+    );
+}
