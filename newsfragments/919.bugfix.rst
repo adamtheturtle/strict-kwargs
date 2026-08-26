@@ -1,0 +1,2 @@
+Preserve concrete callable defaults returned by ``dict.pop`` when a literal
+key is known to be missing.
