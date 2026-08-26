@@ -5422,6 +5422,25 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn resolve_userlist_item(&self, iterable: &Expr, slice: &Expr) -> Option<String> {
+        let Expr::Dict(dict) = iterable else {
+            return self.resolve_literal_container_item(iterable, slice);
+        };
+        let mut keys: Vec<&Expr> = Vec::new();
+        for item in &dict.items {
+            let key = item.key.as_ref()?;
+            if !keys
+                .iter()
+                .any(|existing| Self::same_literal_key(existing, key))
+            {
+                keys.push(key);
+            }
+        }
+        let index = Self::literal_sequence_index(slice, keys.len())?;
+        self.resolve_callee(keys[index])
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Expr::Call(sum_call) = value {
             if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
@@ -5565,7 +5584,7 @@ impl<'a> CallChecker<'a> {
                 return self.resolve_literal_container_item(receiver, slice);
             }
             if let Some(iterable) = self.immediate_userlist_iterable(value) {
-                return self.resolve_literal_container_item(iterable, slice);
+                return self.resolve_userlist_item(iterable, slice);
             }
             let is_dict_fromkeys = match wrapper.func.as_ref() {
                 Expr::Attribute(method) if method.attr.as_str() == "fromkeys" => {
