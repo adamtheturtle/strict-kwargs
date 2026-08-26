@@ -6160,6 +6160,7 @@ impl<'a> CallChecker<'a> {
             "islice",
             "dropwhile",
             "takewhile",
+            "batched",
             "pairwise",
             "permutations",
             "combinations",
@@ -6198,6 +6199,20 @@ impl<'a> CallChecker<'a> {
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
+            }
+            "batched" if selected_index.is_some() => {
+                let index = selected_index?;
+                let batch_size = Self::nonnegative_literal_index(first_named(1, "n")?)?;
+                if batch_size == 0 || index >= batch_size {
+                    return None;
+                }
+                let iterable = first_named(0, "iterable")?;
+                let elements = match iterable {
+                    Expr::List(list) => list.elts.as_slice(),
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                    _ => return None,
+                };
+                self.unnamed_callable_signature(elements.get(index)?)
             }
             "pairwise" | "permutations" | "combinations" | "combinations_with_replacement"
                 if selected_index.is_some() =>
