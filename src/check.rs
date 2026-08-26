@@ -1481,6 +1481,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Local type aliases whose value is a concrete ``Callable`` annotation.
+    callable_type_aliases: FxHashMap<String, Option<Signature>>,
     /// Locals bound by an `asyncio.TaskGroup` context manager.
     asyncio_task_groups: FxHashSet<String>,
     /// `asyncio.as_completed` local -> callable result of each yielded awaitable.
@@ -1669,6 +1671,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         scope.asyncio_task_groups.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -1713,6 +1718,9 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope
+                .callable_type_aliases
+                .insert(local_name.to_string(), None);
             scope.asyncio_task_groups.remove(local_name);
             scope.as_completed_callables.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
@@ -1942,6 +1950,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -1994,6 +2003,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -2099,7 +2109,7 @@ impl<'a> CallChecker<'a> {
         self.mark_param_opaque(name);
         if let Some(annotation) = annotation {
             self.define_annotation(name, annotation);
-            if let Some(signature) = Self::optional_callable_signature(annotation) {
+            if let Some(signature) = self.optional_callable_signature(annotation) {
                 self.current_scope()
                     .optional_callables
                     .insert(name.to_string(), signature);
@@ -2333,6 +2343,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         scope.asyncio_task_groups.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -5752,7 +5765,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn optional_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn optional_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         match annotation {
             Expr::BinOp(ast::ExprBinOp {
                 left,
@@ -5767,7 +5780,7 @@ impl<'a> CallChecker<'a> {
                 } else {
                     return None;
                 };
-                Self::callable_annotation_signature(callable)
+                self.callable_type_alias_signature(callable)
             }
             Expr::Subscript(ast::ExprSubscript { value, slice, .. })
                 if Self::dotted_path(value)?
@@ -5775,7 +5788,7 @@ impl<'a> CallChecker<'a> {
                     .next()
                     .is_some_and(|name| name == "Optional") =>
             {
-                Self::callable_annotation_signature(slice)
+                self.callable_type_alias_signature(slice)
             }
             _ => None,
         }
@@ -5878,13 +5891,15 @@ impl<'a> CallChecker<'a> {
     /// walrus, etc.).
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_local_name_if_callable(&mut self, name: &str) {
+        let was_callable_alias = self.has_visible_callable_type_alias(name);
         let was_known_callable = self.scopes.last().is_some_and(|scope| {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
+                || matches!(scope.callable_type_aliases.get(name), Some(Some(_)))
                 || scope.starred_callable_list_elements.contains_key(name)
                 || scope.asyncio_task_groups.contains(name)
-        });
+        }) || was_callable_alias;
         if was_known_callable {
             self.mark_opaque_local(name);
             self.current_scope()
@@ -6004,7 +6019,8 @@ impl<'a> CallChecker<'a> {
         };
         let was_known = scope.functions.contains_key(name)
             || scope.names.contains_key(name)
-            || scope.modules.contains_key(name);
+            || scope.modules.contains_key(name)
+            || matches!(scope.callable_type_aliases.get(name), Some(Some(_)));
         if !was_known {
             return;
         }
@@ -6034,6 +6050,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -6096,13 +6113,17 @@ impl<'a> CallChecker<'a> {
                 || self.scopes[index].opaque_locals.contains(name)
                 || self.scopes[index]
                     .callable_generator_yields
-                    .contains_key(name);
+                    .contains_key(name)
+                || self.scopes[index].callable_type_aliases.contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
             self.scopes[index].callable_generator_yields.remove(name);
+            self.scopes[index]
+                .callable_type_aliases
+                .insert(name.to_string(), None);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
@@ -6178,7 +6199,39 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn callable_type_alias_signature(&self, annotation: &Expr) -> Option<Signature> {
+        if let Some(signature) = Self::callable_annotation_signature(annotation) {
+            return Some(signature);
+        }
+        let Expr::Name(name) = annotation else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name.id.as_str()) {
+                return signature.clone();
+            }
+            if scope.names.contains_key(name.id.as_str())
+                || scope.opaque_locals.contains(name.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn has_visible_callable_type_alias(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name) {
+                return signature.is_some();
+            }
+            if scope.names.contains_key(name) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn typeguard_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -6186,7 +6239,7 @@ impl<'a> CallChecker<'a> {
             Self::dotted_path(value)?.rsplit('.').next(),
             Some("TypeGuard" | "TypeIs")
         )
-        .then(|| Self::callable_annotation_signature(slice))
+        .then(|| self.callable_type_alias_signature(slice))
         .flatten()
     }
 
@@ -6806,14 +6859,14 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn contextvar_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn contextvar_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
         if Self::dotted_path(value)?.rsplit('.').next() != Some("ContextVar") {
             return None;
         }
-        Self::callable_annotation_signature(slice)
+        self.callable_type_alias_signature(slice)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6949,7 +7002,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn mapping_proxy_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn mapping_proxy_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -6960,7 +7013,7 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let value_type = tuple.elts.get(1)?;
-        Self::callable_annotation_signature(value_type)
+        self.callable_type_alias_signature(value_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7951,7 +8004,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn generator_yield_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn generator_yield_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -7963,7 +8016,7 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => tuple.elts.first()?,
             other => other,
         };
-        Self::callable_annotation_signature(yield_type)
+        self.callable_type_alias_signature(yield_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -9884,7 +9937,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 if let Some(signature) = returns
                     .as_deref()
-                    .and_then(Self::typeguard_callable_signature)
+                    .and_then(|annotation| self.typeguard_callable_signature(annotation))
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
                 }
@@ -10055,6 +10108,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let class_fullname = self.class_from_obvious_instance(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -10143,6 +10197,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .unittest_enter_instances
                                 .insert(name.id.to_string(), class.clone());
+                        }
+                        if let Some(signature) = &callable_type_alias {
+                            self.current_scope()
+                                .callable_type_aliases
+                                .insert(name.id.to_string(), Some(signature.clone()));
                         }
                         // Record after instance clearing so WeakSet/list element
                         // tracking is not wiped by ``clear_instance_binding``.
@@ -10253,11 +10312,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .filter_map(|item| item.optional_vars.as_deref())
                 {
                     if let Expr::Name(name) = target {
+                        let was_callable_alias =
+                            self.has_visible_callable_type_alias(name.id.as_str());
                         let was_known_callable = self.scopes.last().is_some_and(|scope| {
                             scope.functions.contains_key(name.id.as_str())
                                 || scope.names.contains_key(name.id.as_str())
                                 || scope.modules.contains_key(name.id.as_str())
-                        });
+                                || matches!(
+                                    scope.callable_type_aliases.get(name.id.as_str()),
+                                    Some(Some(_))
+                                )
+                        }) || was_callable_alias;
                         self.mark_opaque_local(name.id.as_str());
                         if was_known_callable {
                             self.current_scope()
@@ -10283,6 +10348,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
@@ -10313,9 +10379,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .unittest_enter_instances
                             .insert(name.id.to_string(), class);
                     }
+                    if let Some(signature) = callable_type_alias {
+                        self.current_scope()
+                            .callable_type_aliases
+                            .insert(name.id.to_string(), Some(signature));
+                    }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
@@ -10344,7 +10415,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
@@ -10354,7 +10425,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
                         self.current_scope()
                             .callable_generator_yields
                             .insert(name.id.to_string(), signature);
@@ -10389,12 +10460,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
@@ -10413,7 +10484,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
                         self.current_scope()
                             .callable_generator_yields
                             .insert(name.id.to_string(), signature);
