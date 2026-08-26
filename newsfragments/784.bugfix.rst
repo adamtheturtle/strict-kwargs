@@ -1,0 +1,2 @@
+Preserve concrete callable elements through
+``next(itertools.filterfalse(...))``.

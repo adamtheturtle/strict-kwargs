@@ -1,0 +1,1 @@
+Preserve concrete callable attributes when subscripting ``vars(SimpleNamespace(...))`` results.
