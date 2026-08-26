@@ -2517,6 +2517,26 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
     }
 }
 
+/// Pool mapping helpers return homogeneous lists, so every literal index can
+/// preserve the callback result signature (issue #1082).
+#[test]
+fn pool_map_results_preserve_callable_at_nonzero_indices() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def target(value: int) -> None: ...
+Pool(1).map(func=lambda _: target, iterable=[None, None])[1](1)
+Pool(1).starmap_async(func=lambda: target, iterable=[(), ()]).get()[-2](1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected pool-map violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// `Pool.apply` and `ApplyResult.get` preserve callback result callables
 /// (issues #520, #521).
 #[test]
