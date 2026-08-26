@@ -2393,6 +2393,10 @@ impl<'a> CallChecker<'a> {
     ) -> bool {
         const DUNDER_RECEIVERS: [&str; 5] =
             [".__init__", ".__new__", ".__call__", ".__get__", ".__set__"];
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_unbound_class_method_call(body, callee_fullname, first_param)
+                && self.is_unbound_class_method_call(orelse, callee_fullname, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -2460,6 +2464,10 @@ impl<'a> CallChecker<'a> {
         callee_fullname: &str,
         first_param: Option<&str>,
     ) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_explicit_dunder_receiver_call(body, callee_fullname, first_param)
+                && self.is_explicit_dunder_receiver_call(orelse, callee_fullname, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -2491,7 +2499,12 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_bound_instance_method_call(&self, func: &Expr, first_param: Option<&str>) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_bound_instance_method_call(body, first_param)
+                && self.is_bound_instance_method_call(orelse, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -3224,7 +3237,7 @@ impl<'a> CallChecker<'a> {
         if let [signature] = signatures {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
-            let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
+            let is_attribute_call = Self::call_is_attribute(&call.func);
             match call_fix_insertions(
                 call,
                 self.tokens,
@@ -3268,6 +3281,15 @@ impl<'a> CallChecker<'a> {
         func: &Expr,
         callee_fullname: &str,
     ) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.call_may_dispatch_to_override_with_different_parameter_names(
+                body,
+                callee_fullname,
+            ) || self.call_may_dispatch_to_override_with_different_parameter_names(
+                orelse,
+                callee_fullname,
+            );
+        }
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
             return false;
         };
@@ -3280,11 +3302,24 @@ impl<'a> CallChecker<'a> {
         method == attr.as_str() && self.index.has_overriding_method(class_fullname, method)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
-        matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+        match func {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                self.call_uses_imported_callable_boundary(body)
+                    || self.call_uses_imported_callable_boundary(orelse)
+            }
+            Expr::Name(name) => self.binding_is_imported_callable(name.id.as_str()),
+            _ => false,
+        }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn call_uses_opaque_receiver_boundary(&self, func: &Expr) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.call_uses_opaque_receiver_boundary(body)
+                || self.call_uses_opaque_receiver_boundary(orelse);
+        }
         let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
             return false;
         };
@@ -3296,6 +3331,10 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn self_call_uses_inherited_method_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.self_call_uses_inherited_method_boundary(body, callee_fullname)
+                || self.self_call_uses_inherited_method_boundary(orelse, callee_fullname);
+        }
         let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
             return false;
         };
@@ -3310,7 +3349,12 @@ impl<'a> CallChecker<'a> {
             .is_some_and(|current| owner != current)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn constructor_call_uses_inherited_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.constructor_call_uses_inherited_boundary(body, callee_fullname)
+                || self.constructor_call_uses_inherited_boundary(orelse, callee_fullname);
+        }
         let Some(owner) = callee_fullname
             .strip_suffix(".__init__")
             .or_else(|| callee_fullname.strip_suffix(".__new__"))
@@ -3321,6 +3365,17 @@ impl<'a> CallChecker<'a> {
             return false;
         };
         owner != constructed_class && self.index.class_inherits_from(&constructed_class, owner)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn call_is_attribute(func: &Expr) -> bool {
+        match func {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                Self::call_is_attribute(body) && Self::call_is_attribute(orelse)
+            }
+            Expr::Attribute(_) => true,
+            _ => false,
+        }
     }
 
     fn pending_ty_for_call(&self, call: &ast::ExprCall) -> Option<PendingTy> {
