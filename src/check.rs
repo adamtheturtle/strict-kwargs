@@ -5379,7 +5379,10 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let mut wrapped = self.single_signature_for_expr(&partial.arguments.args[0])?;
+        let wrapped_expr = &partial.arguments.args[0];
+        let mut wrapped = self
+            .partial_result_function(wrapped_expr)
+            .or_else(|| self.single_signature_for_expr(wrapped_expr))?;
         let bound_positionals = partial.arguments.args.len() - 1;
         for _ in 0..bound_positionals {
             let index = wrapped.signature.parameters.iter().position(|parameter| {
