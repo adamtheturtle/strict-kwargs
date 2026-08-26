@@ -7687,18 +7687,51 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        let Expr::Dict(dict) = method.value.as_ref() else {
-            return None;
-        };
-        if method.attr.as_str() != "setdefault" || !call.arguments.keywords.is_empty() {
+        if method.attr.as_str() != "setdefault" || call.arguments.args.len() > 2 {
             return None;
         }
-        let [key, default] = &*call.arguments.args else {
+        let ordered_dict = matches!(
+            method.value.as_ref(),
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| class == "collections.OrderedDict")
+        );
+        if !ordered_dict && !call.arguments.keywords.is_empty() {
             return None;
-        };
+        }
+        let key = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .find_keyword("key")
+                .map(|keyword| &keyword.value)
+        })?;
+        let default = call.arguments.args.get(1).or_else(|| {
+            call.arguments
+                .find_keyword("default")
+                .map(|keyword| &keyword.value)
+        })?;
         if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
             return Some(existing);
         }
+        let known_missing = match method.value.as_ref() {
+            Expr::Dict(dict) => {
+                dict.items.iter().all(|item| item.key.is_some())
+                    && !dict.items.iter().any(|item| {
+                        item.key
+                            .as_ref()
+                            .is_some_and(|existing| Self::same_literal_key(existing, key))
+                    })
+            }
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| class == "collections.OrderedDict")
+                    && constructor.arguments.is_empty() =>
+            {
+                true
+            }
+            _ => false,
+        };
         let key_is_literal = matches!(
             key,
             Expr::StringLiteral(_)
@@ -7706,15 +7739,9 @@ impl<'a> CallChecker<'a> {
                 | Expr::BooleanLiteral(_)
                 | Expr::NoneLiteral(_)
         );
-        (key_is_literal
-            && dict.items.iter().all(|item| item.key.is_some())
-            && !dict.items.iter().any(|item| {
-                item.key
-                    .as_ref()
-                    .is_some_and(|existing| Self::same_literal_key(existing, key))
-            }))
-        .then(|| self.resolve_callee(default))
-        .flatten()
+        (key_is_literal && known_missing)
+            .then(|| self.resolve_callee(default))
+            .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
