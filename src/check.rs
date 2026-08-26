@@ -5399,7 +5399,7 @@ impl<'a> CallChecker<'a> {
             if copy_call.arguments.is_empty() {
                 if let Expr::Attribute(method) = copy_call.func.as_ref() {
                     if method.attr.as_str() == "copy"
-                        && matches!(method.value.as_ref(), Expr::List(_))
+                        && matches!(method.value.as_ref(), Expr::List(_) | Expr::Dict(_))
                     {
                         return self.resolve_literal_container_item(&method.value, slice);
                     }

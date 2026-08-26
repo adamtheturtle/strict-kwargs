@@ -3096,6 +3096,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// A literal dictionary copy preserves the concrete callable at a static key
+/// (issue #775).
+#[test]
+fn literal_dict_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.copy()["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-copy violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate `OrderedDict`'s values preserves a concrete callable
 /// value shape (issue #922).
 #[test]
