@@ -3459,6 +3459,100 @@ async def main() -> None:
     );
 }
 
+/// Generator-yield metadata follows lexical bindings and must not survive a
+/// function scope or bypass a nearer opaque parameter (issue #1084).
+#[test]
+fn generator_yield_signatures_do_not_leak_across_local_scopes() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def seed() -> None:
+    stream: Generator[Callable[[], None], None, None]
+def caller(stream: object) -> None:
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:6:")),
+        "generator yield signature leaked into a later parameter: {messages:?}"
+    );
+}
+
+/// A nonlocal assignment clears generator-yield metadata in the enclosing
+/// scope that owns the binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_clears_generator_yield_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def replace() -> None:
+        nonlocal stream
+        stream = object()
+    replace()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:9:")),
+        "nonlocal rebind kept a stale generator yield: {messages:?}"
+    );
+}
+
+/// A nearer opaque binding owns a nonlocal assignment, so invalidation must
+/// not continue into an outer callable generator binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_stops_at_nearer_opaque_binding() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def middle(stream: object) -> None:
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+        replace()
+    middle(object())
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "send() result"),
+        "nearer opaque binding invalidated the outer generator yield: {messages:?}"
+    );
+}
+
+/// Class namespaces are skipped by `nonlocal` lookup, so a class-body binding
+/// must not intercept invalidation of an enclosing function binding (#1131).
+#[test]
+fn nonlocal_rebinding_skips_class_scope() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    class Namespace:
+        stream: object
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "class scope intercepted nonlocal invalidation: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

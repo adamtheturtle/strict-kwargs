@@ -1137,8 +1137,6 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
-    /// Local generator name -> concrete callable yield signature.
-    callable_generator_yields: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
     /// Callable values yielded by `@contextmanager` functions, keyed by the
@@ -1412,6 +1410,8 @@ struct PendingTyOverloadFix {
 
 #[derive(Debug, Default, Clone)]
 struct Scope {
+    /// Class namespaces do not participate in Python's `nonlocal` lookup.
+    is_class_namespace: bool,
     /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
     /// Local name -> the currently visible local function signature.
@@ -1458,6 +1458,8 @@ struct Scope {
     weak_value_dict_callables: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Local generator name -> concrete callable yield signature.
+    callable_generator_yields: FxHashMap<String, Signature>,
     /// Annotated ``WeakKeyDictionary[K, V]`` locals when ``K`` is callable.
     /// Kept separate from [`Self::callable_iterable_items`] so ``.pop()``
     /// (value) is not confused with list-item / ``popitem`` key tracking.
@@ -1558,7 +1560,6 @@ impl<'a> CallChecker<'a> {
             callable_factory_returns: FxHashMap::default(),
             concrete_callable_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
-            callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             concrete_contextmanager_items: FxHashMap::default(),
@@ -1656,6 +1657,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -1700,6 +1702,7 @@ impl<'a> CallChecker<'a> {
             scope.concrete_asyncio_queues.remove(local_name);
             scope.concrete_sync_queues.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
+            scope.callable_generator_yields.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
             scope.starred_callable_list_elements.remove(local_name);
@@ -1927,6 +1930,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -1978,6 +1982,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -2299,6 +2304,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -5823,6 +5829,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -5887,13 +5894,21 @@ impl<'a> CallChecker<'a> {
         }
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            if self.scopes[index].is_class_namespace {
+                continue;
+            }
             let owns = self.scopes[index].functions.contains_key(name)
-                || self.scopes[index].names.contains_key(name);
+                || self.scopes[index].names.contains_key(name)
+                || self.scopes[index].opaque_locals.contains(name)
+                || self.scopes[index]
+                    .callable_generator_yields
+                    .contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
+            self.scopes[index].callable_generator_yields.remove(name);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
@@ -7748,10 +7763,21 @@ impl<'a> CallChecker<'a> {
             "throw" => "Generator.throw() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generator_yield_signature(&self, name: &str) -> Option<Signature> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_generator_yields.get(name) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7786,9 +7812,7 @@ impl<'a> CallChecker<'a> {
             "athrow" => "AsyncGenerator.athrow() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
     }
 
@@ -9761,6 +9785,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.current_scope().is_class_namespace = true;
                 self.enter_hover_scope(true);
                 self.class_body_depth += 1;
                 for inner in body {
@@ -9850,12 +9875,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        if let Some(signature) = &generator_yield {
-                            self.callable_generator_yields
-                                .insert(name.id.to_string(), signature.clone());
-                        } else {
-                            self.callable_generator_yields.remove(name.id.as_str());
-                        }
                         if is_functional_namedtuple || is_collections_namedtuple {
                             self.functional_namedtuple_names.insert(name.id.to_string());
                         }
@@ -9959,6 +9978,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .concrete_sync_queues
                                 .insert(name.id.to_string());
+                        }
+                        if let Some(signature) = &generator_yield {
+                            self.current_scope()
+                                .callable_generator_yields
+                                .insert(name.id.to_string(), signature.clone());
                         }
                     }
                 }
@@ -10090,7 +10114,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
@@ -10148,7 +10173,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
