@@ -970,6 +970,30 @@ next(iter(C()))(1)
     );
 }
 
+/// Iterator-like return annotations on methods are indexed under the bound
+/// method fullname, just like annotations on module functions (#1158).
+#[test]
+fn method_iterator_annotations_preserve_callable_items() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterable, Iterator, Generator
+class C:
+    def iterator(self) -> Iterator[Callable[[int], None]]: ...
+    def iterable(self) -> Iterable[Callable[[int], None]]: ...
+    def generator(self) -> Generator[Callable[[int], None], None, None]: ...
+next(C().iterator())(1)
+next(C().iterable())(1)
+next(C().generator())(1)
+",
+    );
+    for line in [7, 8, 9] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "method iterator annotation was ignored on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
 /// before looking up its callable item annotation (issue #1142).
 #[test]
