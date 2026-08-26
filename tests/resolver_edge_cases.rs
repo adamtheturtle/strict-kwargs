@@ -718,6 +718,25 @@ def target(value: int) -> None: ...
     }
 }
 
+/// Iterating an immediately constructed `UserList` preserves the homogeneous
+/// literal callable element selected by `next` (issue #817).
+#[test]
+fn userlist_iteration_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+next(iter(UserList(initlist=[target])))(1)
+next(iter(collections.UserList(initlist=(target,))))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        "expected UserList iteration violations, got: {messages:?}"
+    );
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]
