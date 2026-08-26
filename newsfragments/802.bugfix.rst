@@ -1,0 +1,2 @@
+Preserve concrete callable elements through ``next()`` for simple identity
+generator expressions over homogeneous literal iterables.
