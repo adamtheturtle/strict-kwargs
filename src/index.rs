@@ -442,21 +442,21 @@ fn synthesize_descriptor_attribute(
     target: &Expr,
     value: &Expr,
     bindings: &FxHashMap<String, String>,
-) {
+) -> bool {
     let (Expr::Name(target), Expr::Call(constructor)) = (target, value) else {
-        return;
+        return false;
     };
     let Some(descriptor_class) = reference_path(&constructor.func)
         .and_then(|path| resolve_reference(bindings, module_name, &path))
     else {
-        return;
+        return false;
     };
     let Some(signature) = store.descriptor_get_returns.get(&descriptor_class).cloned() else {
-        return;
+        return false;
     };
     let fullname = format!("{class_name}.{}", target.id);
-    store.excluded.remove(&fullname);
-    store.signatures.insert(fullname, vec![signature]);
+    store.insert_definition(fullname, signature, false);
+    true
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -3619,7 +3619,17 @@ fn index_class_body(
                 if !synthesize_partialmethod(store, class_name, target, value, bindings) {
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
-                    index_callable_field(store, class_name, target, annotation);
+                    let synthesized_descriptor = synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        bindings,
+                    );
+                    if !synthesized_descriptor {
+                        index_callable_field(store, class_name, target, annotation);
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -3869,7 +3879,17 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }) => {
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
-                index_callable_field(store, class_name, target, annotation);
+                let synthesized_descriptor = synthesize_descriptor_attribute(
+                    store,
+                    module_name,
+                    class_name,
+                    target,
+                    value,
+                    &bindings,
+                );
+                if !synthesized_descriptor {
+                    index_callable_field(store, class_name, target, annotation);
+                }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,

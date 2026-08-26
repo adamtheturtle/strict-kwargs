@@ -1754,6 +1754,73 @@ C().call(1)
     );
 }
 
+/// An annotation on a descriptor assignment does not prevent its `__get__`
+/// callable return from being indexed (issue #1146).
+#[test]
+fn annotated_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call: Descriptor = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected annotated descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// A descriptor's runtime `__get__` signature takes precedence over a broad
+/// callable annotation on the assigned class attribute (review on #1221).
+#[test]
+fn annotated_descriptor_does_not_create_dual_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+@dataclass
+class C:
+    call: Callable[..., None] = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "call"),
+        "broad annotation masked descriptor signature: {messages:?}"
+    );
+}
+
+/// Descriptor synthesis in an uncertain branch unions with a sibling
+/// callable-field signature instead of overwriting it (review on #1221).
+#[test]
+fn conditional_descriptor_assignment_preserves_sibling_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    if condition:
+        call: Callable[..., None] = lambda *args: None
+    else:
+        call: Descriptor = Descriptor()
+C().call(1, 2)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "descriptor branch overwrote sibling callable signature: {messages:?}"
+    );
+}
+
 /// Descriptor synthesis resolves constructor aliases when the binding-aware
 /// indexer is active (issue #1147).
 #[test]
