@@ -1509,6 +1509,28 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     );
 }
 
+/// `getattr` returns its concrete callable default when an inline namespace
+/// provably lacks the requested attribute (issue #954).
+#[test]
+fn getattr_missing_simple_namespace_attribute_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+getattr(types.SimpleNamespace(other=target), "missing", target)(1)
+getattr(types.SimpleNamespace(callback=target), "callback", print)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected getattr default violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected present attribute to win over default, got: {messages:?}"
+    );
+}
+
 /// `inspect.getattr_static` preserves a concrete callable stored on an inline
 /// `SimpleNamespace` (issue #966).
 #[test]
