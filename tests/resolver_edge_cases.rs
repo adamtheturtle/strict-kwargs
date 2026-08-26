@@ -1467,6 +1467,29 @@ C().call(1)
     );
 }
 
+/// Descriptor synthesis resolves constructor aliases when the binding-aware
+/// indexer is active (issue #1147).
+#[test]
+fn aliased_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+Alias = Descriptor
+@dataclass
+class C:
+    call = Alias()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "call"),
+        "expected aliased descriptor-return violation, got: {messages:?}"
+    );
+}
+
 /// `CPython` descriptor `__get__` methods reject keyword arguments, so both
 /// binding arguments must remain positional (issues #501–#506).
 #[test]
