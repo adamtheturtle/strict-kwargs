@@ -505,6 +505,26 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Explicit sequence iterator protocol calls preserve homogeneous concrete
+/// callable elements (issue #948).
+#[test]
+fn explicit_sequence_iterator_protocol_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[target].__iter__().__next__()(1)
+(target,).__iter__().__next__()(1)
+{target}.__iter__().__next__()(1)
+",
+    );
+    for line in 3..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected explicit iterator violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Concatenated literal sequences retain the concrete callable selected from
 /// either operand (issue #806).
 #[test]
@@ -678,6 +698,23 @@ partial(f, 0)(1)
     );
 }
 
+/// Nested `functools.partial` layers recursively preserve the wrapped
+/// callable's remaining signature (issue #962).
+#[test]
+fn nested_functools_partial_preserves_remaining_signature() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.partial(functools.partial(target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "partial"),
+        "expected nested partial violation, got: {messages:?}"
+    );
+}
+
 /// `next` returns the item type declared by local iterator and generator
 /// factories, including a concrete callable signature (issue #369).
 #[test]
@@ -694,6 +731,46 @@ next(generator())(1)
     assert!(
         has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
         "expected iterator and generator result violations, got: {messages:?}"
+    );
+}
+
+/// `itertools.batched` preserves concrete callable elements selected from a
+/// statically known first batch (issue #973).
+#[test]
+fn itertools_batched_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.batched(iterable=[target], n=1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "itertools.batched must preserve its callable element: {messages:?}"
+    );
+}
+
+/// `batched` resolves only the selected element; siblings and later batches
+/// may contain callables with different signatures.
+#[test]
+fn itertools_batched_selects_the_indexed_callable() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+def other(*, named: int) -> None: ...
+next(itertools.batched([target, other], 2))[0](1)
+next(itertools.batched([target, other], 1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "messages: {messages:?}"
     );
 }
 
@@ -954,6 +1031,26 @@ getattr(types.SimpleNamespace(callback=target), "callback", print)(1)
     );
 }
 
+/// `inspect.getattr_static` preserves a concrete callable stored on an inline
+/// `SimpleNamespace` (issue #966).
+#[test]
+fn getattr_static_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r#"
+import inspect
+import types
+def target(value: int) -> None: ...
+inspect.getattr_static(
+    obj=types.SimpleNamespace(callback=target), attr="callback"
+)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "inspect.getattr_static must preserve the namespace callable: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
@@ -977,6 +1074,34 @@ current.get()(1)
         has_error_at(&messages, 6, "get() result"),
         "expected ContextVar.get result violation, got: {messages:?}"
     );
+}
+
+/// Rebinding or deleting a specialized `ContextVar` clears its recorded
+/// callable-value signature (issue #755).
+#[test]
+fn contextvar_rebinding_and_deletion_clear_callable_metadata() {
+    for source in [
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+value = ContextVar("replacement")
+value.get()(1)
+"#,
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+del value
+value.get()(1)
+"#,
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "stale ContextVar metadata survived invalidation: {messages:?}"
+        );
+    }
 }
 
 /// An unannotated `ContextVar` infers a concrete callable from its default
@@ -1266,6 +1391,23 @@ itemgetter(-1)((f,))(1)
     assert!(
         has_error_at(&messages, 4, "f") && has_error_at(&messages, 5, "f"),
         "expected both itemgetter result violations, got: {messages:?}"
+    );
+}
+
+/// `itemgetter` preserves a callable value selected from a literal dictionary
+/// by a literal key (issue #823).
+#[test]
+fn itemgetter_dict_result_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+import operator
+def target(value: int) -> None: ...
+operator.itemgetter("x")({"x": target})(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected itemgetter dictionary result violation, got: {messages:?}"
     );
 }
 
@@ -2664,6 +2806,47 @@ make("a")(1)
     );
 }
 
+/// Assigning a concrete new instance clears an older receiver annotation so
+/// attribute resolution uses the live class (issue #756).
+#[test]
+fn instance_reassignment_clears_old_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Old:
+    def method(self, value: int) -> None: ...
+class New:
+    def method(self, value: int, /) -> None: ...
+receiver: Old = Old()
+receiver = New()
+receiver.method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "old annotation must not override the new instance class: {messages:?}"
+    );
+}
+
+/// A valued annotated assignment retains its newly declared receiver type even
+/// when the initializer is a concrete constructor.
+#[test]
+fn annotated_instance_assignment_retains_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Declared:
+    def method(self, value: int) -> None: ...
+class Runtime:
+    def method(self, value: int, /) -> None: ...
+receiver: Declared = Runtime()
+receiver.method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "method"),
+        "declared receiver annotation was lost: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
@@ -3824,6 +4007,28 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
+/// Literal set and dictionary `pop` results preserve their concrete callable
+/// element signatures (issue #758).
+#[test]
+fn literal_set_and_dict_pop_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+{first}.pop()(1)
+{"call": second}.pop("call")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected set-pop violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected dict-pop violation, got: {messages:?}"
+    );
+}
+
 /// A directly imported alias of `inspect.unwrap` retains the concrete wrapped
 /// callable signature (issue #858).
 #[test]
@@ -4154,6 +4359,73 @@ LiteralEnter().__enter__()
     );
 }
 
+/// Explicit `__enter__` on a `@contextmanager` result preserves the concrete
+/// callable yielded by its single-statement generator body (issue #974).
+#[test]
+fn contextmanager_explicit_enter_preserves_yielded_callable() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "contextmanager __enter__ must preserve its yielded callable: {messages:?}"
+    );
+}
+
+/// A yielded parameter is opaque while the context-manager body executes and
+/// must not resolve to a same-named outer callable.
+#[test]
+fn contextmanager_enter_ignores_outer_callable_shadowed_by_parameter() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager(target):
+    yield target
+manager(object()).__enter__()(1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "shadowed outer callable must not leak into the yield: {messages:?}"
+    );
+}
+
+/// Redefining a context-manager factory clears the concrete callable yielded
+/// by its previous definition.
+#[test]
+fn contextmanager_redefinition_clears_concrete_yield_metadata() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+def manager():
+    yield 1
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 10, "target"),
+        "stale yielded callable survived redefinition: {messages:?}"
+    );
+}
+
 /// Callable-valued properties are not checked as the property getter (issue
 /// #668).
 #[test]
@@ -4279,6 +4551,23 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     assert!(
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
+    );
+}
+
+/// `unittest.mock.create_autospec` preserves the concrete function signature
+/// it enforces on the returned callable mock (issue #967).
+#[test]
+fn create_autospec_preserves_target_signature() {
+    let messages = check_source(
+        r"
+from unittest import mock
+def target(value: int) -> None: ...
+mock.create_autospec(spec=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "create_autospec must preserve its target signature: {messages:?}"
     );
 }
 
@@ -4413,6 +4702,39 @@ def fallback(value: int) -> None: ...
     );
 }
 
+/// `OrderedDict.setdefault` on an empty immediate mapping preserves its
+/// concrete callable default (issue #925).
+#[test]
+fn ordered_dict_setdefault_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict().setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict.setdefault violation, got: {messages:?}"
+    );
+}
+
+/// Built-in `dict.setdefault` parameters are positional-only, so invalid
+/// keyword calls must not produce a callable-result diagnostic.
+#[test]
+fn literal_dict_setdefault_rejects_keyword_arguments() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an invalid dict call to resolve, got: {messages:?}"
+    );
+}
+
 /// Standard-library generic mappings retain the concrete callable value type
 /// through their result-returning methods (issue #440).
 #[test]
@@ -4434,6 +4756,45 @@ UserDict({"call": third}).pop("call")(1)
             "expected {callee} violation, got: {messages:?}"
         );
     }
+}
+
+/// Selecting the value from an immediate `UserDict.popitem` result preserves
+/// its concrete callable signature (issue #927).
+#[test]
+fn user_dict_popitem_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"x": target}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict.popitem violation, got: {messages:?}"
+    );
+}
+
+/// `UserDict.popitem` inherits `MutableMapping.popitem` and removes the first
+/// inserted item, unlike `OrderedDict.popitem`.
+#[test]
+fn user_dict_popitem_selects_first_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+UserDict({"first": first, "second": second}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "first"),
+        "expected first-value violation, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("second")),
+        "did not expect last-value violation, got: {messages:?}"
+    );
 }
 
 /// A single-mapping `ChainMap` preserves concrete callable values through
@@ -5377,6 +5738,61 @@ property(fget=lambda self: target).fget(self=Owner())(1)
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
     );
+}
+
+/// `NamedTuple._make` maps a statically known iterable element to its named
+/// field and preserves a concrete callable value (issue #969).
+#[test]
+fn namedtuple_make_attribute_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair._make(iterable=[target]).callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "NamedTuple._make attribute must preserve its callable: {messages:?}"
+    );
+}
+
+/// `_make` field lookup excludes the synthetic `cls` receiver, so a real field
+/// with that name maps to the first iterable element.
+#[test]
+fn namedtuple_make_attribute_handles_cls_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    cls: object
+def target(value: int) -> None: ...
+Item._make([target]).cls(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// An opaque local that shadows a `NamedTuple` class must not reuse the class's
+/// `_make` field metadata.
+#[test]
+fn namedtuple_make_ignores_opaque_shadowing_receiver() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+def consume(Item: object) -> None:
+    Item._make([target]).callback(1)
+",
+    );
+    assert!(messages.is_empty(), "messages: {messages:?}");
 }
 
 /// A stored `property` retains the callable returned by its getter
