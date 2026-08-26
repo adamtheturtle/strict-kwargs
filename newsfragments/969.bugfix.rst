@@ -1,0 +1,1 @@
+Preserve concrete callable fields read from statically known ``NamedTuple._make`` results.
