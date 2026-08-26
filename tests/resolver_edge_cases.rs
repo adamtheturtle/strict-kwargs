@@ -160,6 +160,48 @@ C().bound(1)
     );
 }
 
+/// Annotating a class attribute assigned from `partialmethod` does not prevent
+/// synthesis of its remaining bound-method signature (issue #1150).
+#[test]
+fn annotated_partialmethod_preserves_remaining_method_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, required: int, /, value: int) -> None: ...
+    method: object = partialmethod(base, 0)
+C().method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "method"),
+        "expected annotated partialmethod violation, got: {messages:?}"
+    );
+}
+
+/// A `partialmethod` assignment in an uncertain branch does not replace the
+/// unconditional signature visible after the branch (issue #1151).
+#[test]
+fn conditional_partialmethod_does_not_overwrite_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, value: int) -> None: ...
+    def method(self, *args) -> None: ...
+    if enabled:
+        method = partialmethod(base)
+C().method(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "conditional partialmethod overwrote the unconditional signature: {messages:?}"
+    );
+}
+
 /// `del f` removes a local callable binding so later calls are not resolved
 /// against the deleted definition.
 #[test]
@@ -467,6 +509,26 @@ def f(value: int) -> None: ...
     );
 }
 
+/// A qualified rebind inside its own class body resolves the target owner
+/// from the module scope and invalidates the original method (#1165).
+#[test]
+fn class_body_qualified_method_rebind_clears_signature() {
+    let messages = check_source(
+        r"
+class C:
+    def method(self, value): ...
+    C.method = lambda self, value, /: None
+C().method(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:5:")),
+        "stale method signature survived class-body rebind: {messages:?}"
+    );
+}
+
 /// A boolean expression whose operands are the same callable has an
 /// unambiguous signature (issue #363).
 #[test]
@@ -630,6 +692,59 @@ sorted({f}, key=id)[0](1)
     }
 }
 
+/// A `sorted()` subscript only produces an element for an in-range integer
+/// index; slices and invalid indices must not borrow the element signature
+/// (issue #1157).
+#[test]
+fn sorted_subscript_respects_index_shape_and_bounds() {
+    let messages = check_source(
+        r#"
+def narrow(value: int) -> None: ...
+sorted([narrow])[0](1)
+sorted([narrow])[-1](1)
+sorted([narrow])[0:1](1)
+sorted([narrow])["bad"](1)
+sorted([narrow])[2](1)
+"#,
+    );
+    for line in [3, 4] {
+        assert!(
+            has_error_at(&messages, line, "narrow"),
+            "valid sorted index was not preserved on line {line}: {messages:?}"
+        );
+    }
+    for line in [5, 6, 7] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "invalid sorted index borrowed the element on line {line}: {messages:?}"
+        );
+    }
+}
+
+/// The multi-argument forms of `min` and `max` select among their positional
+/// arguments; they do not select an element from the first argument (#1156).
+#[test]
+fn min_max_multi_argument_forms_do_not_use_first_iterable_element() {
+    let messages = check_source(
+        r"
+def narrow(value: int) -> None: ...
+def broad(*args) -> None: ...
+min([narrow], broad)(1)
+max((narrow,), broad)(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "multi-argument selector used first iterable element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
@@ -698,6 +813,23 @@ partial(f, 0)(1)
     );
 }
 
+/// Nested `functools.partial` layers recursively preserve the wrapped
+/// callable's remaining signature (issue #962).
+#[test]
+fn nested_functools_partial_preserves_remaining_signature() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.partial(functools.partial(target))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "partial"),
+        "expected nested partial violation, got: {messages:?}"
+    );
+}
+
 /// `next` returns the item type declared by local iterator and generator
 /// factories, including a concrete callable signature (issue #369).
 #[test]
@@ -714,6 +846,62 @@ next(generator())(1)
     assert!(
         has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
         "expected iterator and generator result violations, got: {messages:?}"
+    );
+}
+
+/// Callable-sentinel `iter` yields the concrete callable returned by its
+/// zero-argument factory when it differs from the sentinel (issue #972).
+#[test]
+fn callable_sentinel_iter_preserves_factory_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(iter(lambda: target, None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "callable-sentinel iter must preserve the factory result: {messages:?}"
+    );
+}
+
+/// `itertools.batched` preserves concrete callable elements selected from a
+/// statically known first batch (issue #973).
+#[test]
+fn itertools_batched_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.batched(iterable=[target], n=1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "itertools.batched must preserve its callable element: {messages:?}"
+    );
+}
+
+/// `batched` resolves only the selected element; siblings and later batches
+/// may contain callables with different signatures.
+#[test]
+fn itertools_batched_selects_the_indexed_callable() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+def other(*, named: int) -> None: ...
+next(itertools.batched([target, other], 2))[0](1)
+next(itertools.batched([target, other], 1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "messages: {messages:?}"
     );
 }
 
@@ -874,6 +1062,94 @@ next(iter(C()))(1)
     );
 }
 
+/// Iterator-like return annotations on methods are indexed under the bound
+/// method fullname, just like annotations on module functions (#1158).
+#[test]
+fn method_iterator_annotations_preserve_callable_items() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterable, Iterator, Generator
+class C:
+    def iterator(self) -> Iterator[Callable[[int], None]]: ...
+    def iterable(self) -> Iterable[Callable[[int], None]]: ...
+    def generator(self) -> Generator[Callable[[int], None], None, None]: ...
+next(C().iterator())(1)
+next(C().iterable())(1)
+next(C().generator())(1)
+",
+    );
+    for line in [7, 8, 9] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "method iterator annotation was ignored on line {line}: {messages:?}"
+        );
+    }
+}
+
+/// `iter()` accepts tracked instance bindings and annotated instance
+/// parameters, not only inline constructor expressions (issue #1143).
+#[test]
+fn bound_instance_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+c = C()
+next(iter(c))(1)
+def consume(value: C) -> None:
+    next(iter(value))(1)
+",
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected bound-instance __iter__ violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// An opaque inner binding shadows an outer tracked instance when resolving
+/// `iter()` receivers (review on #1218).
+#[test]
+fn shadowed_instance_does_not_supply_dunder_iter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+value = C()
+def consume(value: object) -> None:
+    next(iter(value))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "outer instance leaked through shadowing parameter: {messages:?}"
+    );
+}
+
+/// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
+/// before looking up its callable item annotation (issue #1142).
+#[test]
+fn inherited_dunder_iter_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class Base:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+class Child(Base): ...
+next(iter(Child()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "expected inherited __iter__ result violation, got: {messages:?}"
+    );
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]
@@ -916,6 +1192,47 @@ namespace.call(1)
             .any(|message| message.starts_with("main:7:")),
         "rebinding must clear synthesized attributes: {messages:?}"
     );
+}
+
+/// An annotation on a `SimpleNamespace` binding does not suppress its
+/// synthesized callable keyword attributes (issue #1155).
+#[test]
+fn annotated_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def target(value: int) -> None: ...
+namespace: SimpleNamespace = SimpleNamespace(call=target)
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected annotated namespace callable violation, got: {messages:?}"
+    );
+}
+
+/// Literal dictionary unpacking into `SimpleNamespace` preserves a concrete
+/// callable attribute for inline and assigned instances (issue #971).
+#[test]
+fn simple_namespace_literal_unpack_preserves_callable_attribute() {
+    let messages = check_source(
+        r#"
+import types
+from types import SimpleNamespace as NS
+def target(value: int) -> None: ...
+types.SimpleNamespace(**{"callback": target}).callback(1)
+namespace = types.SimpleNamespace(**{"callback": target})
+namespace.callback(1)
+NS(**{"callback": target}).callback(1)
+"#,
+    );
+    for line in [5, 7, 8] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected unpacked namespace violation on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// Subscripting `vars(SimpleNamespace(...))` preserves a concrete callable
@@ -997,6 +1314,34 @@ current.get()(1)
     );
 }
 
+/// Rebinding or deleting a specialized `ContextVar` clears its recorded
+/// callable-value signature (issue #755).
+#[test]
+fn contextvar_rebinding_and_deletion_clear_callable_metadata() {
+    for source in [
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+value = ContextVar("replacement")
+value.get()(1)
+"#,
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+del value
+value.get()(1)
+"#,
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "stale ContextVar metadata survived invalidation: {messages:?}"
+        );
+    }
+}
+
 /// An unannotated `ContextVar` infers a concrete callable from its default
 /// value (issue #851).
 #[test]
@@ -1053,6 +1398,29 @@ Holder(call=f).call(1)
     assert!(
         has_error_at(&messages, 8, "f"),
         "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
+/// Constructor keywords are treated as stored dataclass fields only when the
+/// indexed field model synthesized the constructor (issue #1154).
+#[test]
+fn handwritten_dataclass_init_keyword_is_not_a_stored_field() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+@dataclass
+class C:
+    def __init__(self, call) -> None: ...
+    def call(self, *args) -> None: ...
+def strict(value: int) -> None: ...
+C(call=strict).call(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "custom init keyword was treated as a stored field: {messages:?}"
     );
 }
 
@@ -1264,6 +1632,44 @@ attrgetter("call")(SimpleNamespace(call=f))(1)
     );
 }
 
+/// Constructor keywords are not generally instance attributes; for example,
+/// `dict(get=f)` still exposes `dict.get`, not `f` (issue #1153).
+#[test]
+fn attrgetter_does_not_trust_arbitrary_constructor_keywords() {
+    let messages = check_source(
+        r#"
+from operator import attrgetter
+def strict(value: int) -> None: ...
+attrgetter("get")(dict(get=strict))(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:4:")),
+        "constructor keyword was treated as an attribute: {messages:?}"
+    );
+}
+
+/// Functional namedtuple constructor keywords are modeled instance fields and
+/// retain their callable values through `attrgetter` (review on #1228).
+#[test]
+fn attrgetter_preserves_functional_namedtuple_keyword_field() {
+    let messages = check_source(
+        r#"
+from collections import namedtuple
+from operator import attrgetter
+Holder = namedtuple("Holder", ["call"])
+def strict(value: int) -> None: ...
+attrgetter("call")(Holder(call=strict))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "strict"),
+        "expected functional namedtuple attrgetter violation: {messages:?}"
+    );
+}
+
 /// `itemgetter` consumes its operand positionally but preserves a statically
 /// selected literal container element's callable signature (issue #376).
 #[test]
@@ -1285,6 +1691,32 @@ itemgetter(-1)((f,))(1)
         has_error_at(&messages, 4, "f") && has_error_at(&messages, 5, "f"),
         "expected both itemgetter result violations, got: {messages:?}"
     );
+}
+
+/// Starred literal elements make runtime offsets unknowable from AST element
+/// positions, so `itemgetter` result inference must decline (issue #1152).
+#[test]
+fn itemgetter_declines_starred_literal_sequences() {
+    let messages = check_source(
+        r"
+from operator import itemgetter
+def strict(value: int) -> None: ...
+def permissive(*args) -> None: ...
+values = [permissive, permissive]
+itemgetter(1)([*values, strict])(1)
+itemgetter(-2)((strict, *values))(1)
+itemgetter(0)([*values, strict][1:])(1)
+itemgetter(0)((*values, strict)[1:])(1)
+",
+    );
+    for line in [6, 7, 8, 9] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "starred sequence used static AST position on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// `itemgetter` preserves a callable value selected from a literal dictionary
@@ -1323,6 +1755,60 @@ factory()(1)
     );
 }
 
+/// Redefining or assigning over a typed factory clears its recorded callable
+/// result class (issue #1149).
+#[test]
+fn callable_factory_result_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def redefined() -> C: ...
+def redefined() -> object: ...
+redefined()(1)
+def assigned() -> C: ...
+assigned = lambda: object()
+assigned()(1)
+def annotated() -> C: ...
+annotated: object = lambda: object()
+annotated()(1)
+",
+    );
+    for line in [6, 9, 12] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "stale callable factory survived rebind on line {line}: {messages:?}"
+        );
+    }
+}
+
+/// Calling an async factory produces a coroutine rather than its annotated
+/// result class, so it must not be modeled as a synchronous callable (#1148).
+#[test]
+fn async_factory_result_is_not_treated_as_synchronous() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+async def factory() -> C: ...
+factory()(1)
+def replaced() -> C: ...
+async def replaced() -> C: ...
+replaced()(1)
+",
+    );
+    for line in [5, 8] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "async factory was treated as its result on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// A descriptor's annotated `__get__` callable return becomes the signature
 /// of class attributes assigned from that descriptor (issue #379).
 #[test]
@@ -1340,6 +1826,96 @@ C().call(1)
     assert!(
         has_error_at(&messages, 7, "call"),
         "expected descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// An annotation on a descriptor assignment does not prevent its `__get__`
+/// callable return from being indexed (issue #1146).
+#[test]
+fn annotated_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call: Descriptor = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected annotated descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// A descriptor's runtime `__get__` signature takes precedence over a broad
+/// callable annotation on the assigned class attribute (review on #1221).
+#[test]
+fn annotated_descriptor_does_not_create_dual_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+@dataclass
+class C:
+    call: Callable[..., None] = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "call"),
+        "broad annotation masked descriptor signature: {messages:?}"
+    );
+}
+
+/// Descriptor synthesis in an uncertain branch unions with a sibling
+/// callable-field signature instead of overwriting it (review on #1221).
+#[test]
+fn conditional_descriptor_assignment_preserves_sibling_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    if condition:
+        call: Callable[..., None] = lambda *args: None
+    else:
+        call: Descriptor = Descriptor()
+C().call(1, 2)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "descriptor branch overwrote sibling callable signature: {messages:?}"
+    );
+}
+
+/// Descriptor synthesis resolves constructor aliases when the binding-aware
+/// indexer is active (issue #1147).
+#[test]
+fn aliased_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+Alias = Descriptor
+@dataclass
+class C:
+    call = Alias()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "call"),
+        "expected aliased descriptor-return violation, got: {messages:?}"
     );
 }
 
@@ -1470,6 +2046,40 @@ C(call=f).call(1)
     );
 }
 
+/// A default value does not suppress indexing of a callable-annotated class
+/// field in either the fast or binding-aware indexer (issue #1145).
+#[test]
+fn callable_instance_field_with_default_is_resolved() {
+    for (source, line) in [
+        (
+            r"
+from collections.abc import Callable
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            5,
+        ),
+        (
+            r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            7,
+        ),
+    ] {
+        let messages = check_source(source);
+        assert!(
+            has_error_at(&messages, line, "call"),
+            "expected defaulted callable-field violation, got: {messages:?}"
+        );
+    }
+}
+
 /// A concrete callable return annotation on `__getitem__` supplies the
 /// selected value's signature (issue #381).
 #[test]
@@ -1492,6 +2102,29 @@ C()["call"](1)
     );
 }
 
+/// `__getitem__` callable return metadata applies to tracked instance names
+/// and annotated instance parameters as well as inline constructors (#1144).
+#[test]
+fn bound_getitem_callable_return_is_resolved() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+class C:
+    def __getitem__(self, key: str) -> Callable[[int], None]: ...
+c = C()
+c["call"](1)
+def consume(value: C) -> None:
+    value["call"](1)
+"#,
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "__return__"),
+            "expected bound getitem violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Awaiting a local async factory preserves its concrete callable return
 /// annotation (issue #383).
 #[test]
@@ -1507,6 +2140,25 @@ async def caller() -> None:
     assert!(
         has_error_at(&messages, 5, "awaited result"),
         "expected awaited-result violation, got: {messages:?}"
+    );
+}
+
+/// Awaiting an async method preserves its callable return annotation just as
+/// awaiting a module-level factory does (issue #1141).
+#[test]
+fn awaited_method_callable_result_preserves_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Factory:
+    async def build(self) -> Callable[[int], None]: ...
+async def caller(factory: Factory) -> None:
+    (await factory.build())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "awaited result"),
+        "expected awaited-method result violation, got: {messages:?}"
     );
 }
 
@@ -1549,6 +2201,24 @@ async def caller() -> None:
     );
 }
 
+/// `anext` also preserves the yielded callable declared by the usual
+/// two-argument `AsyncGenerator` annotation (issue #1140).
+#[test]
+fn annotated_async_generator_anext_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected async-generator anext violation, got: {messages:?}"
+    );
+}
+
 /// A `@contextmanager` factory's callable iterator item becomes the concrete
 /// signature of its `with ... as` binding (issue #385).
 #[test]
@@ -1566,6 +2236,27 @@ with manager() as call:
     assert!(
         has_error_at(&messages, 7, "context result"),
         "expected context-manager binding violation, got: {messages:?}"
+    );
+}
+
+/// Class-body context-manager targets remain visible to statements in the
+/// suite (issue #1139).
+#[test]
+fn class_contextmanager_binding_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def manager() -> Iterator[Callable[[int], None]]: ...
+class C:
+    with manager() as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "context result"),
+        "expected class context-manager binding violation, got: {messages:?}"
     );
 }
 
@@ -1798,6 +2489,88 @@ choose(f, g)(1)
         has_error_at(&messages, 8, "generic result")
             && has_error_at(&messages, 9, "generic result"),
         "expected generic-result violations, got: {messages:?}"
+    );
+}
+
+/// An omitted defaulted parameter sharing the return `TypeVar` does not erase
+/// the callable shape supplied by another argument (issue #1137).
+#[test]
+fn generic_return_skips_omitted_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+choose(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "expected defaulted generic-result violation, got: {messages:?}"
+    );
+}
+
+/// A starred argument can fill a defaulted `TypeVar` slot, so it is ambiguous
+/// rather than equivalent to omitting that parameter (review on #1212).
+#[test]
+fn generic_return_declines_starred_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+args = [target]
+choose(target, *args)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred defaulted argument must decline inference: {messages:?}"
+    );
+}
+
+/// PEP 695 function type parameters participate in the same generic-return
+/// propagation as an assigned `TypeVar` (issue #1136).
+#[test]
+fn pep695_generic_return_propagates_callable_argument() {
+    let messages = check_source(
+        r"
+def identity[T](value: T) -> T: ...
+def target(value: int) -> None: ...
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result"),
+        "expected PEP 695 generic-result violation, got: {messages:?}"
+    );
+}
+
+/// A starred positional before a `TypeVar` slot makes that positional binding
+/// ambiguous; an explicit keyword for the same slot remains deterministic
+/// (issue #1135).
+#[test]
+fn generic_return_declines_positions_after_starred_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def select(prefix: object, value: T) -> T: ...
+def target(value: int) -> None: ...
+args = [object()]
+select(*args, target)(1)
+select(*args, value=target)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred positional mapping must remain unresolved: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result"),
+        "explicit TypeVar keyword must still resolve: {messages:?}"
     );
 }
 
@@ -2109,6 +2882,24 @@ next(chain_items([target]))(1)
     );
 }
 
+/// Empty literal iterables contribute no values to `chain` and therefore do
+/// not erase the signature supplied by a later non-empty iterable (issue
+/// #1133).
+#[test]
+fn itertools_chain_skips_empty_literal_iterables() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain([], (), [target], set()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chained callable violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]
@@ -2132,6 +2923,46 @@ next(itertools.islice([f], 1))(1)
     }
 }
 
+/// The first item from `accumulate(..., initial=...)` is the initial value,
+/// not an item from the iterable (issue #1077).
+#[test]
+fn itertools_accumulate_initial_preserves_initial_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def item(value: int, /) -> None: ...
+def initial() -> None: ...
+next(itertools.accumulate([item], initial=initial))(1)
+next(itertools.accumulate([item], initial=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "initial signature must reject the iterable positional: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 6, "next() result"),
+        "initial=None must preserve the iterable signature: {messages:?}"
+    );
+}
+
+/// `itertools.compress` names its filtered input `data`, not `iterable`
+/// (issue #1076).
+#[test]
+fn itertools_compress_data_keyword_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.compress(data=[f], selectors=[True]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected compress data-keyword violation, got: {messages:?}"
+    );
+}
+
 /// Combinatoric itertools helpers preserve callable tuple-element types
 /// (issue #449).
 #[test]
@@ -2153,6 +2984,23 @@ next(itertools.zip_longest([f]))[0](1)
             "expected itertools tuple-helper violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// `product(..., repeat=n)` repeats its positional iterable sequence in the
+/// produced tuple (issue #1078).
+#[test]
+fn itertools_product_repeat_maps_repeated_tuple_indices() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.product([f], repeat=2))[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected repeated-product violation, got: {messages:?}"
+    );
 }
 
 /// Tuple-producing builtins preserve literal callable elements at their
@@ -2395,6 +3243,58 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
         assert!(
             has_error_at(&messages, line, "next() result"),
             "expected pool imap violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// A named Pool mapper's result type, rather than the mapper's own call
+/// signature, determines whether mapped items are callable (issue #1083).
+#[test]
+fn pool_map_named_mapper_uses_return_callable_signature() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def ordinary(item: int) -> int: ...
+def target() -> None: ...
+def callable_item(item: int):
+    return target
+Pool(1).map(ordinary, [1])[0](unexpected=1)
+Pool(1).map(callable_item, [1])[0](1)
+next(Pool(1).imap(callable_item, [1]))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"ordinary\"")),
+        "ordinary mapper must not become its result signature: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "expected callable-return violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 9, "next() result"),
+        "expected named imap callable-return violation, got: {messages:?}"
+    );
+}
+
+/// Pool mapping helpers return homogeneous lists, so every literal index can
+/// preserve the callback result signature (issue #1082).
+#[test]
+fn pool_map_results_preserve_callable_at_nonzero_indices() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def target(value: int) -> None: ...
+Pool(1).map(func=lambda _: target, iterable=[None, None])[1](1)
+Pool(1).starmap_async(func=lambda: target, iterable=[(), ()]).get()[-2](1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected pool-map violation on line {line}, got: {messages:?}"
         );
     }
 }
@@ -2792,6 +3692,47 @@ identity(target)(1)
     );
 }
 
+/// Assigning a concrete new instance clears an older receiver annotation so
+/// attribute resolution uses the live class (issue #756).
+#[test]
+fn instance_reassignment_clears_old_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Old:
+    def method(self, value: int) -> None: ...
+class New:
+    def method(self, value: int, /) -> None: ...
+receiver: Old = Old()
+receiver = New()
+receiver.method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "old annotation must not override the new instance class: {messages:?}"
+    );
+}
+
+/// A valued annotated assignment retains its newly declared receiver type even
+/// when the initializer is a concrete constructor.
+#[test]
+fn annotated_instance_assignment_retains_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Declared:
+    def method(self, value: int) -> None: ...
+class Runtime:
+    def method(self, value: int, /) -> None: ...
+receiver: Declared = Runtime()
+receiver.method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "method"),
+        "declared receiver annotation was lost: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
@@ -3032,6 +3973,100 @@ async def main() -> None:
     assert!(
         has_error_at(&messages, 6, "athrow() result"),
         "expected async generator athrow violation, got: {messages:?}"
+    );
+}
+
+/// Generator-yield metadata follows lexical bindings and must not survive a
+/// function scope or bypass a nearer opaque parameter (issue #1084).
+#[test]
+fn generator_yield_signatures_do_not_leak_across_local_scopes() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def seed() -> None:
+    stream: Generator[Callable[[], None], None, None]
+def caller(stream: object) -> None:
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:6:")),
+        "generator yield signature leaked into a later parameter: {messages:?}"
+    );
+}
+
+/// A nonlocal assignment clears generator-yield metadata in the enclosing
+/// scope that owns the binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_clears_generator_yield_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def replace() -> None:
+        nonlocal stream
+        stream = object()
+    replace()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:9:")),
+        "nonlocal rebind kept a stale generator yield: {messages:?}"
+    );
+}
+
+/// A nearer opaque binding owns a nonlocal assignment, so invalidation must
+/// not continue into an outer callable generator binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_stops_at_nearer_opaque_binding() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def middle(stream: object) -> None:
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+        replace()
+    middle(object())
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "send() result"),
+        "nearer opaque binding invalidated the outer generator yield: {messages:?}"
+    );
+}
+
+/// Class namespaces are skipped by `nonlocal` lookup, so a class-body binding
+/// must not intercept invalidation of an enclosing function binding (#1131).
+#[test]
+fn nonlocal_rebinding_skips_class_scope() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    class Namespace:
+        stream: object
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "class scope intercepted nonlocal invalidation: {messages:?}"
     );
 }
 
@@ -3952,6 +4987,28 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
+/// Literal set and dictionary `pop` results preserve their concrete callable
+/// element signatures (issue #758).
+#[test]
+fn literal_set_and_dict_pop_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+{first}.pop()(1)
+{"call": second}.pop("call")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected set-pop violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected dict-pop violation, got: {messages:?}"
+    );
+}
+
 /// A directly imported alias of `inspect.unwrap` retains the concrete wrapped
 /// callable signature (issue #858).
 #[test]
@@ -4073,6 +5130,37 @@ expectedFailure(target)(1)
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
     );
+}
+
+/// Decorated context-manager methods preserve their yielded callable in both
+/// bound-self and constructed-instance calls (issue #1138).
+#[test]
+fn contextmanager_methods_preserve_callable_yield_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+class Managers:
+    @contextmanager
+    def manager(self) -> Iterator[Callable[[int], None]]: ...
+    @asynccontextmanager
+    async def async_manager(self) -> AsyncIterator[Callable[[int], None]]: ...
+    def run(self) -> None:
+        with self.manager() as call:
+            call(1)
+    async def async_run(self) -> None:
+        async with self.async_manager() as call:
+            call(1)
+with Managers().manager() as call:
+    call(1)
+",
+    );
+    for line in [11, 14, 16] {
+        assert!(
+            has_error_at(&messages, line, "context result"),
+            "expected method context-result violation on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// Context-manager helpers and ``__enter__`` preserve managed callable types
@@ -4282,6 +5370,73 @@ LiteralEnter().__enter__()
     );
 }
 
+/// Explicit `__enter__` on a `@contextmanager` result preserves the concrete
+/// callable yielded by its single-statement generator body (issue #974).
+#[test]
+fn contextmanager_explicit_enter_preserves_yielded_callable() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "contextmanager __enter__ must preserve its yielded callable: {messages:?}"
+    );
+}
+
+/// A yielded parameter is opaque while the context-manager body executes and
+/// must not resolve to a same-named outer callable.
+#[test]
+fn contextmanager_enter_ignores_outer_callable_shadowed_by_parameter() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager(target):
+    yield target
+manager(object()).__enter__()(1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "shadowed outer callable must not leak into the yield: {messages:?}"
+    );
+}
+
+/// Redefining a context-manager factory clears the concrete callable yielded
+/// by its previous definition.
+#[test]
+fn contextmanager_redefinition_clears_concrete_yield_metadata() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+def manager():
+    yield 1
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 10, "target"),
+        "stale yielded callable survived redefinition: {messages:?}"
+    );
+}
+
 /// Callable-valued properties are not checked as the property getter (issue
 /// #668).
 #[test]
@@ -4407,6 +5562,23 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     assert!(
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
+    );
+}
+
+/// `unittest.mock.create_autospec` preserves the concrete function signature
+/// it enforces on the returned callable mock (issue #967).
+#[test]
+fn create_autospec_preserves_target_signature() {
+    let messages = check_source(
+        r"
+from unittest import mock
+def target(value: int) -> None: ...
+mock.create_autospec(spec=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "create_autospec must preserve its target signature: {messages:?}"
     );
 }
 
@@ -4541,6 +5713,39 @@ def fallback(value: int) -> None: ...
     );
 }
 
+/// `OrderedDict.setdefault` on an empty immediate mapping preserves its
+/// concrete callable default (issue #925).
+#[test]
+fn ordered_dict_setdefault_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict().setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict.setdefault violation, got: {messages:?}"
+    );
+}
+
+/// Built-in `dict.setdefault` parameters are positional-only, so invalid
+/// keyword calls must not produce a callable-result diagnostic.
+#[test]
+fn literal_dict_setdefault_rejects_keyword_arguments() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.setdefault(key="x", default=target)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an invalid dict call to resolve, got: {messages:?}"
+    );
+}
+
 /// Standard-library generic mappings retain the concrete callable value type
 /// through their result-returning methods (issue #440).
 #[test]
@@ -4562,6 +5767,45 @@ UserDict({"call": third}).pop("call")(1)
             "expected {callee} violation, got: {messages:?}"
         );
     }
+}
+
+/// Selecting the value from an immediate `UserDict.popitem` result preserves
+/// its concrete callable signature (issue #927).
+#[test]
+fn user_dict_popitem_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+UserDict({"x": target}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected UserDict.popitem violation, got: {messages:?}"
+    );
+}
+
+/// `UserDict.popitem` inherits `MutableMapping.popitem` and removes the first
+/// inserted item, unlike `OrderedDict.popitem`.
+#[test]
+fn user_dict_popitem_selects_first_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+UserDict({"first": first, "second": second}).popitem()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "first"),
+        "expected first-value violation, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("second")),
+        "did not expect last-value violation, got: {messages:?}"
+    );
 }
 
 /// A single-mapping `ChainMap` preserves concrete callable values through
@@ -5471,6 +6715,23 @@ staticmethod(target)(1)
     );
 }
 
+/// Binding a direct `staticmethod` descriptor returns its wrapped callable
+/// unchanged (issue #957).
+#[test]
+fn staticmethod_get_preserves_wrapped_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> None: ...
+staticmethod(target).__get__(None, Owner)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "staticmethod.__get__ must preserve its wrapped callable: {messages:?}"
+    );
+}
+
 /// Bound-method `__func__` keeps the unbound method signature (issue #651).
 #[test]
 fn bound_method_func_preserves_unbound_method_signature() {
@@ -5505,6 +6766,61 @@ property(fget=lambda self: target).fget(self=Owner())(1)
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
     );
+}
+
+/// `NamedTuple._make` maps a statically known iterable element to its named
+/// field and preserves a concrete callable value (issue #969).
+#[test]
+fn namedtuple_make_attribute_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair._make(iterable=[target]).callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "NamedTuple._make attribute must preserve its callable: {messages:?}"
+    );
+}
+
+/// `_make` field lookup excludes the synthetic `cls` receiver, so a real field
+/// with that name maps to the first iterable element.
+#[test]
+fn namedtuple_make_attribute_handles_cls_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    cls: object
+def target(value: int) -> None: ...
+Item._make([target]).cls(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// An opaque local that shadows a `NamedTuple` class must not reuse the class's
+/// `_make` field metadata.
+#[test]
+fn namedtuple_make_ignores_opaque_shadowing_receiver() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+def consume(Item: object) -> None:
+    Item._make([target]).callback(1)
+",
+    );
+    assert!(messages.is_empty(), "messages: {messages:?}");
 }
 
 /// A stored `property` retains the callable returned by its getter
