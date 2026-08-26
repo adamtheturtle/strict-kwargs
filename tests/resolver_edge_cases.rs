@@ -771,6 +771,25 @@ next(iter(collections.UserList(initlist=(target,))))(1)
     );
 }
 
+/// `UserList.pop()` preserves the homogeneous callable element from an
+/// immediately constructed literal-backed list (issue #816).
+#[test]
+fn userlist_pop_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target]).pop()(1)
+collections.UserList(initlist=(target,)).pop()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList.pop violations, got: {messages:?}"
+    );
+}
+
 /// A zero-argument `UserList.copy()` preserves the immediately constructed
 /// list's concrete callable elements (issue #815).
 #[test]

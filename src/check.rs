@@ -9078,7 +9078,12 @@ impl<'a> CallChecker<'a> {
         }
         match method.value.as_ref() {
             literal @ Expr::List(_) => self.homogeneous_callable_sequence(literal),
-            Expr::Call(sorted) => self.preserving_builtin_result(sorted, &["builtins.sorted"]),
+            Expr::Call(sorted) => self
+                .preserving_builtin_result(sorted, &["builtins.sorted"])
+                .or_else(|| {
+                    self.immediate_userlist_iterable(&method.value)
+                        .and_then(|iterable| self.homogeneous_callable_sequence(iterable))
+                }),
             _ => None,
         }
     }
