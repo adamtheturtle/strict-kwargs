@@ -7744,6 +7744,161 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_unary_plus_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::UnaryOp(ast::ExprUnaryOp {
+            op: ast::UnaryOp::UAdd,
+            operand,
+            ..
+        })] = &*iter_call.arguments.args
+        else {
+            return None;
+        };
+        let Expr::Call(constructor) = operand.as_ref() else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+            != "collections.Counter"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            if Self::literal_signed_integer(&item.value)? <= 0 {
+                continue;
+            }
+            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn same_counter_key(left: &Expr, right: &Expr) -> bool {
+        Self::same_literal_key(left, right)
+            || matches!(
+                (Self::dotted_path(left), Self::dotted_path(right)),
+                (Some(left), Some(right)) if left == right
+            )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_literal_entries<'b>(&self, expr: &'b Expr) -> Option<Vec<(&'b Expr, i64)>> {
+        let Expr::Call(constructor) = expr else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+            != "collections.Counter"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match &*constructor.arguments.args {
+            [] => Some(Vec::new()),
+            [Expr::Dict(dict)] => {
+                let mut entries: Vec<(&'b Expr, i64)> = Vec::new();
+                // Dict literals retain the last value for a repeated key.
+                for item in dict.items.iter().rev() {
+                    let key = item.key.as_ref()?;
+                    let count = Self::literal_signed_integer(&item.value)?;
+                    if entries
+                        .iter()
+                        .any(|(existing, _)| Self::same_counter_key(key, existing))
+                    {
+                        continue;
+                    }
+                    entries.push((key, count));
+                }
+                entries.reverse();
+                Some(entries)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_binary_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::BinOp(ast::ExprBinOp {
+            left, op, right, ..
+        })] = &*iter_call.arguments.args
+        else {
+            return None;
+        };
+        if !matches!(
+            op,
+            ast::Operator::Add | ast::Operator::Sub | ast::Operator::BitAnd | ast::Operator::BitOr
+        ) {
+            return None;
+        }
+        let left_entries = self.counter_literal_entries(left)?;
+        let right_entries = self.counter_literal_entries(right)?;
+        let mut result = None;
+        let mut include = |key: &Expr, total: i64| {
+            if total <= 0 {
+                return Some(());
+            }
+            let signature = self.unnamed_callable_signature(key)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+            Some(())
+        };
+        for (key, count) in &left_entries {
+            let right_count = right_entries
+                .iter()
+                .find(|(right, _)| Self::same_counter_key(key, right))
+                .map_or(0, |(_, count)| *count);
+            let total = match op {
+                ast::Operator::Add => *count + right_count,
+                ast::Operator::Sub => *count - right_count,
+                ast::Operator::BitAnd => (*count).min(right_count),
+                ast::Operator::BitOr => (*count).max(right_count),
+                _ => unreachable!(),
+            };
+            include(key, total)?;
+        }
+        for (key, count) in right_entries.iter().filter(|(right, _)| {
+            !left_entries
+                .iter()
+                .any(|(left, _)| Self::same_counter_key(left, right))
+        }) {
+            let total = match op {
+                ast::Operator::Add | ast::Operator::BitOr => *count,
+                ast::Operator::Sub => -*count,
+                ast::Operator::BitAnd => 0,
+                _ => unreachable!(),
+            };
+            include(key, total)?;
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -7778,6 +7933,12 @@ impl<'a> CallChecker<'a> {
         }
         if selected_index.is_none() {
             if let Some(signature) = self.counter_elements_item_signature(iterator) {
+                return Some(signature);
+            }
+            if let Some(signature) = self.counter_unary_plus_item_signature(iterator) {
+                return Some(signature);
+            }
+            if let Some(signature) = self.counter_binary_item_signature(iterator) {
                 return Some(signature);
             }
         }

@@ -6734,6 +6734,128 @@ next(Counter({target: 2}).elements())(1)
     );
 }
 
+/// Unary plus on an immediate `Counter` preserves positive-count callable
+/// keys (issue #943).
+#[test]
+fn counter_unary_plus_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(+Counter({target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter unary-plus violation, got: {messages:?}"
+    );
+}
+
+/// Adding immediate `Counter` values preserves positive-count callable keys
+/// (issue #944).
+#[test]
+fn counter_addition_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) + Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter addition violation, got: {messages:?}"
+    );
+}
+
+/// Subtracting immediate `Counter` values preserves positive-count callable
+/// keys (issue #945).
+#[test]
+fn counter_subtraction_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) - Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter subtraction violation, got: {messages:?}"
+    );
+}
+
+/// Intersecting immediate `Counter` values preserves positive-count callable
+/// keys (issue #946).
+#[test]
+fn counter_intersection_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) & Counter({target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter intersection violation, got: {messages:?}"
+    );
+}
+
+/// Unioning immediate `Counter` values preserves positive-count callable keys
+/// (issue #947).
+#[test]
+fn counter_union_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) | Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter union violation, got: {messages:?}"
+    );
+}
+
+/// Duplicate Counter mapping keys use the last literal value, matching Python
+/// dict construction semantics (Bugbot on #1028).
+#[test]
+fn counter_binary_operations_use_last_duplicate_key_count() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1, target: 0}) + Counter()))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("next() result")),
+        "last duplicate count must win: {messages:?}"
+    );
+}
+
+/// Identical dotted callable keys match across Counter operands (Bugbot on
+/// #1028).
+#[test]
+fn counter_intersection_matches_attribute_callable_keys() {
+    let messages = check_source(
+        r"
+from collections import Counter
+class Namespace:
+    def target(value: int) -> None: ...
+next(iter(Counter({Namespace.target: 1}) & Counter({Namespace.target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected attribute-key intersection violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]
