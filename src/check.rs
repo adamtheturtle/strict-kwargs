@@ -8078,6 +8078,16 @@ impl<'a> CallChecker<'a> {
                     .class_from_constructor_func(&constructor.func)
                     .is_some_and(|class| class == "collections.OrderedDict")
         );
+        let factory_only_defaultdict = matches!(
+            method.value.as_ref(),
+            Expr::Call(constructor)
+                if constructor.arguments.keywords.is_empty()
+                    && matches!(&*constructor.arguments.args, [Expr::Lambda(_)])
+                    && self
+                        .resolve_callee(&constructor.func)
+                        .is_some_and(|class| Self::normalize_factory_fullname(&class)
+                            == "collections.defaultdict")
+        );
         if !ordered_dict && !call.arguments.keywords.is_empty() {
             return None;
         }
@@ -8091,8 +8101,10 @@ impl<'a> CallChecker<'a> {
                 .find_keyword("default")
                 .map(|keyword| &keyword.value)
         })?;
-        if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
-            return Some(existing);
+        if !factory_only_defaultdict {
+            if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
+                return Some(existing);
+            }
         }
         let known_missing = match method.value.as_ref() {
             Expr::Dict(dict) => {
@@ -8111,7 +8123,7 @@ impl<'a> CallChecker<'a> {
             {
                 true
             }
-            _ => false,
+            _ => factory_only_defaultdict,
         };
         let key_is_literal = matches!(
             key,

@@ -5786,6 +5786,30 @@ defaultdict(lambda: target)["missing"](1)
     );
 }
 
+/// `defaultdict.setdefault` does not invoke the default factory. For a known
+/// missing key, its explicit default is the returned callable.
+#[test]
+fn defaultdict_setdefault_prefers_explicit_default() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def factory_result(value: int) -> None: ...
+def explicit_default(first: int, second: int) -> None: ...
+defaultdict(lambda: factory_result).setdefault("missing", explicit_default)(1, 2)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "explicit_default"),
+        "expected explicit-default violation, got: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("factory_result")),
+        "factory must not be used by setdefault: {messages:?}"
+    );
+}
+
 /// Selecting the value from an immediate `UserDict.popitem` result preserves
 /// its concrete callable signature (issue #927).
 #[test]
