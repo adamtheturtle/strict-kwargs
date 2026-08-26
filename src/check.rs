@@ -6816,14 +6816,11 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn dict_items_value_signature(
+    fn dict_view_item_signature(
         &self,
         expr: &Expr,
         selected_index: Option<usize>,
     ) -> Option<Signature> {
-        if selected_index != Some(1) {
-            return None;
-        }
         let Expr::Call(iter_call) = expr else {
             return None;
         };
@@ -6840,12 +6837,14 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(attribute) = view_call.func.as_ref() else {
             return None;
         };
-        if attribute.attr.as_str() != "items"
-            || !view_call.arguments.args.is_empty()
-            || !view_call.arguments.keywords.is_empty()
-        {
+        if !view_call.arguments.args.is_empty() || !view_call.arguments.keywords.is_empty() {
             return None;
         }
+        let select_key = match (attribute.attr.as_str(), selected_index) {
+            ("items", Some(1)) => false,
+            ("keys", None) => true,
+            _ => return None,
+        };
         let dict = match attribute.value.as_ref() {
             Expr::Dict(dict) => dict,
             Expr::Call(constructor)
@@ -6868,8 +6867,9 @@ impl<'a> CallChecker<'a> {
         };
         let mut result = None;
         for item in &dict.items {
-            item.key.as_ref()?;
-            let signature = self.unnamed_callable_signature(&item.value)?;
+            let key = item.key.as_ref()?;
+            let selected = if select_key { key } else { &item.value };
+            let signature = self.unnamed_callable_signature(selected)?;
             if result
                 .as_ref()
                 .is_some_and(|existing| existing != &signature)
@@ -7590,7 +7590,7 @@ impl<'a> CallChecker<'a> {
         if let Some(signature) = self.dict_values_item_signature(iterator) {
             return Some(signature);
         }
-        if let Some(signature) = self.dict_items_value_signature(iterator, selected_index) {
+        if let Some(signature) = self.dict_view_item_signature(iterator, selected_index) {
             return Some(signature);
         }
         if let Some(signature) = self.weakset_copy_item_signature(iterator) {

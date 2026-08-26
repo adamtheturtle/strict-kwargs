@@ -3403,6 +3403,22 @@ next(iter({"key": target}.items()))[1](1)
     );
 }
 
+/// Iterating a literal dictionary's `keys()` view preserves its concrete
+/// callable key signature (issue #790).
+#[test]
+fn dict_keys_iterator_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({target: "value"}.keys()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.keys violation, got: {messages:?}"
+    );
+}
+
 /// A `MappingProxyType` around a literal dictionary preserves its concrete
 /// callable values through subscripting (issue #776).
 #[test]
