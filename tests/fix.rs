@@ -287,6 +287,13 @@ fn conditional_opaque_receiver_boundary_declines_fix() {
 }
 
 #[test]
+fn conditional_mixed_bound_and_unbound_method_declines_fix() {
+    assert_unchanged(
+        "class C:\n    def m(self, a, b): ...\n\nc = C()\n(c.m if condition else C.m)(1, 2)\n",
+    );
+}
+
+#[test]
 fn does_not_fix_self_call_to_inherited_method() {
     // Inherited methods can come from descriptor/wrapper implementations whose
     // runtime keyword behavior is narrower than the visible signature.

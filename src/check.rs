@@ -3201,6 +3201,19 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
+        let first_param = signatures
+            .first()
+            .and_then(|signature| signature.parameters.first())
+            .and_then(|parameter| parameter.name.as_deref());
+        if self.conditional_callee_has_mixed_receiver_binding(
+            &call.func,
+            callee_fullname,
+            first_param,
+        ) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
         if self.call_uses_opaque_receiver_boundary(&call.func) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
@@ -3376,6 +3389,36 @@ impl<'a> CallChecker<'a> {
             Expr::Attribute(_) => true,
             _ => false,
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn conditional_callee_has_mixed_receiver_binding(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+        first_param: Option<&str>,
+    ) -> bool {
+        let Expr::If(ast::ExprIf { body, orelse, .. }) = func else {
+            return false;
+        };
+        let binding = |branch: &Expr| {
+            (
+                self.is_unbound_class_method_call(branch, callee_fullname, first_param),
+                self.is_bound_instance_method_call(branch, first_param),
+                self.is_explicit_dunder_receiver_call(branch, callee_fullname, first_param),
+            )
+        };
+        binding(body) != binding(orelse)
+            || self.conditional_callee_has_mixed_receiver_binding(
+                body,
+                callee_fullname,
+                first_param,
+            )
+            || self.conditional_callee_has_mixed_receiver_binding(
+                orelse,
+                callee_fullname,
+                first_param,
+            )
     }
 
     fn pending_ty_for_call(&self, call: &ast::ExprCall) -> Option<PendingTy> {
