@@ -1144,6 +1144,9 @@ struct CallChecker<'a> {
     /// Callable values yielded by `@contextmanager` functions, keyed by the
     /// manager factory's fullname.
     callable_contextmanager_items: FxHashMap<String, Signature>,
+    /// `@contextmanager` factory fullname -> concrete callable yielded by its
+    /// sole body statement.
+    concrete_contextmanager_items: FxHashMap<String, String>,
     /// Generic function fullname -> parameters whose type variable is also
     /// returned, allowing concrete callable arguments to flow to the result.
     generic_returns: FxHashMap<String, GenericReturn>,
@@ -1558,6 +1561,7 @@ impl<'a> CallChecker<'a> {
             callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
+            concrete_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
@@ -2299,6 +2303,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.annotations.remove(local_name);
         scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -4352,6 +4357,20 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(wrapped)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn create_autospec_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "unittest.mock.create_autospec") {
+            return None;
+        }
+        let spec = Self::generic_argument(call, Some(0), "spec")?;
+        (!spec.is_starred_expr())
+            .then(|| self.resolve_callee(spec))
+            .flatten()
+    }
+
     fn current_lexical_scope(&self) -> &str {
         self.function_stack
             .last()
@@ -4546,6 +4565,9 @@ impl<'a> CallChecker<'a> {
     fn context_manager_enter_callable(&self, expr: &Expr) -> Option<String> {
         if let Expr::Call(constructor) = expr {
             let factory = self.resolve_callee(&constructor.func)?;
+            if let Some(callable) = self.concrete_contextmanager_items.get(&factory) {
+                return Some(callable.clone());
+            }
             if let Some(generic) =
                 Self::known_stdlib_generic_return(Self::normalize_factory_fullname(&factory))
             {
@@ -4667,6 +4689,20 @@ impl<'a> CallChecker<'a> {
         let [Stmt::Return(ast::StmtReturn {
             value: Some(value), ..
         })] = body
+        else {
+            return None;
+        };
+        Some(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn single_yield_expression(body: &[Stmt]) -> Option<&Expr> {
+        let [Stmt::Expr(ast::StmtExpr { value, .. })] = body else {
+            return None;
+        };
+        let Expr::Yield(ast::ExprYield {
+            value: Some(value), ..
+        }) = value.as_ref()
         else {
             return None;
         };
@@ -5343,7 +5379,10 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let mut wrapped = self.single_signature_for_expr(&partial.arguments.args[0])?;
+        let wrapped_expr = &partial.arguments.args[0];
+        let mut wrapped = self
+            .partial_result_function(wrapped_expr)
+            .or_else(|| self.single_signature_for_expr(wrapped_expr))?;
         let bound_positionals = partial.arguments.args.len() - 1;
         for _ in 0..bound_positionals {
             let index = wrapped.signature.parameters.iter().position(|parameter| {
@@ -6138,6 +6177,7 @@ impl<'a> CallChecker<'a> {
             "islice",
             "dropwhile",
             "takewhile",
+            "batched",
             "pairwise",
             "permutations",
             "combinations",
@@ -6176,6 +6216,20 @@ impl<'a> CallChecker<'a> {
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
+            }
+            "batched" if selected_index.is_some() => {
+                let index = selected_index?;
+                let batch_size = Self::nonnegative_literal_index(first_named(1, "n")?)?;
+                if batch_size == 0 || index >= batch_size {
+                    return None;
+                }
+                let iterable = first_named(0, "iterable")?;
+                let elements = match iterable {
+                    Expr::List(list) => list.elts.as_slice(),
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                    _ => return None,
+                };
+                self.unnamed_callable_signature(elements.get(index)?)
             }
             "pairwise" | "permutations" | "combinations" | "combinations_with_replacement"
                 if selected_index.is_some() =>
@@ -6979,6 +7033,9 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
+            return Some(signature);
+        }
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
             return Some(signature);
         }
@@ -7014,6 +7071,30 @@ impl<'a> CallChecker<'a> {
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = iterator else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&iter_call.func, "builtins.iter")
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Lambda(factory), Expr::NoneLiteral(_)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        if factory
+            .parameters
+            .as_deref()
+            .is_some_and(|parameters| parameters.iter().next().is_some())
+        {
+            return None;
+        }
+        self.single_signature_for_expr(&factory.body)
+            .map(|function| function.signature)
     }
 
     // Covered end-to-end by the SimpleNamespace attribute regression. Other
@@ -7112,6 +7193,47 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(&field.value)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn namedtuple_make_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
+        let Expr::Call(make_call) = value else {
+            return None;
+        };
+        let Expr::Attribute(method) = make_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "_make" || make_call.arguments.len() != 1 {
+            return None;
+        }
+        let class = match method.value.as_ref() {
+            Expr::Name(name) if !self.is_opaque_local(name.id.as_str()) => {
+                self.resolve_local(name.id.as_str())?
+            }
+            Expr::Name(_) => return None,
+            value => self.class_from_constructor_func(value)?,
+        };
+        if !self.index.is_namedtuple(&class) {
+            return None;
+        }
+        let iterable = Self::generic_argument(make_call, Some(0), "iterable")?;
+        let elements = match iterable {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let constructor = self
+            .index
+            .resolve_method(&class, "__new__")
+            .unwrap_or_else(|| format!("{class}.__new__"));
+        let signatures = self.index.get(&constructor)?;
+        let signature = signatures.first()?;
+        let index = signature
+            .parameters
+            .iter()
+            .skip(1)
+            .position(|parameter| parameter.name.as_deref() == Some(attr))?;
+        self.resolve_callee(elements.get(index)?)
+    }
+
     // The end-to-end regression covers both tracked and inline receivers;
     // malformed factories and unknown receiver shapes deliberately decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -7126,6 +7248,41 @@ impl<'a> CallChecker<'a> {
         }
         let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
         else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+            != "types.SimpleNamespace"
+        {
+            return None;
+        }
+        self.resolve_callee(
+            &namespace
+                .arguments
+                .find_keyword(attribute.value.to_str())?
+                .value,
+        )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn getattr_static_simple_namespace_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "inspect.getattr_static")
+            || !(2..=3).contains(&call.arguments.len())
+            || call.arguments.keywords.iter().any(|keyword| {
+                !matches!(
+                    keyword.arg.as_ref().map(ast::Identifier::as_str),
+                    Some("obj" | "attr" | "default")
+                )
+            })
+        {
+            return None;
+        }
+        let Expr::Call(namespace) = Self::generic_argument(call, Some(0), "obj")? else {
+            return None;
+        };
+        let Expr::StringLiteral(attribute) = Self::generic_argument(call, Some(1), "attr")? else {
             return None;
         };
         if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
@@ -7577,18 +7734,51 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        let Expr::Dict(dict) = method.value.as_ref() else {
-            return None;
-        };
-        if method.attr.as_str() != "setdefault" || !call.arguments.keywords.is_empty() {
+        if method.attr.as_str() != "setdefault" || call.arguments.args.len() > 2 {
             return None;
         }
-        let [key, default] = &*call.arguments.args else {
+        let ordered_dict = matches!(
+            method.value.as_ref(),
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| class == "collections.OrderedDict")
+        );
+        if !ordered_dict && !call.arguments.keywords.is_empty() {
             return None;
-        };
+        }
+        let key = call.arguments.args.first().or_else(|| {
+            call.arguments
+                .find_keyword("key")
+                .map(|keyword| &keyword.value)
+        })?;
+        let default = call.arguments.args.get(1).or_else(|| {
+            call.arguments
+                .find_keyword("default")
+                .map(|keyword| &keyword.value)
+        })?;
         if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
             return Some(existing);
         }
+        let known_missing = match method.value.as_ref() {
+            Expr::Dict(dict) => {
+                dict.items.iter().all(|item| item.key.is_some())
+                    && !dict.items.iter().any(|item| {
+                        item.key
+                            .as_ref()
+                            .is_some_and(|existing| Self::same_literal_key(existing, key))
+                    })
+            }
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| class == "collections.OrderedDict")
+                    && constructor.arguments.is_empty() =>
+            {
+                true
+            }
+            _ => false,
+        };
         let key_is_literal = matches!(
             key,
             Expr::StringLiteral(_)
@@ -7596,15 +7786,9 @@ impl<'a> CallChecker<'a> {
                 | Expr::BooleanLiteral(_)
                 | Expr::NoneLiteral(_)
         );
-        (key_is_literal
-            && dict.items.iter().all(|item| item.key.is_some())
-            && !dict.items.iter().any(|item| {
-                item.key
-                    .as_ref()
-                    .is_some_and(|existing| Self::same_literal_key(existing, key))
-            }))
-        .then(|| self.resolve_callee(default))
-        .flatten()
+        (key_is_literal && known_missing)
+            .then(|| self.resolve_callee(default))
+            .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7756,6 +7940,37 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_set_or_dict_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Set(set) if call.arguments.args.is_empty() => {
+                let mut elements = set.elts.iter();
+                let resolved = self.resolve_callee(elements.next()?)?;
+                elements
+                    .all(|element| {
+                        self.resolve_callee(element).as_deref() == Some(resolved.as_str())
+                    })
+                    .then_some(resolved)
+            }
+            Expr::Dict(_) => {
+                let [key] = &*call.arguments.args else {
+                    return None;
+                };
+                self.resolve_literal_container_item(&method.value, key)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn ordered_dict_popitem_value_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -7770,13 +7985,14 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(constructor) = method.value.as_ref() else {
             return None;
         };
+        let class = self.class_from_constructor_func(&constructor.func)?;
         if method.attr.as_str() != "popitem"
             || !popitem.arguments.args.is_empty()
             || !popitem.arguments.keywords.is_empty()
-            || self
-                .class_from_constructor_func(&constructor.func)?
-                .as_str()
-                != "collections.OrderedDict"
+            || !matches!(
+                class.as_str(),
+                "collections.OrderedDict" | "collections.UserDict"
+            )
             || !constructor.arguments.keywords.is_empty()
         {
             return None;
@@ -7784,16 +8000,43 @@ impl<'a> CallChecker<'a> {
         let [entries] = &*constructor.arguments.args else {
             return None;
         };
-        let entry_elements = match entries {
-            Expr::List(entries) => &entries.elts,
-            Expr::Tuple(entries) => &entries.elts,
+        let first = class == "collections.UserDict";
+        let value = match entries {
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => {
+                &if first {
+                    dict.items.first()?
+                } else {
+                    dict.items.last()?
+                }
+                .value
+            }
+            Expr::List(entries) => {
+                let Expr::Tuple(pair) = (if first {
+                    entries.elts.first()?
+                } else {
+                    entries.elts.last()?
+                }) else {
+                    return None;
+                };
+                let [_, value] = &*pair.elts else {
+                    return None;
+                };
+                value
+            }
+            Expr::Tuple(entries) => {
+                let Expr::Tuple(pair) = (if first {
+                    entries.elts.first()?
+                } else {
+                    entries.elts.last()?
+                }) else {
+                    return None;
+                };
+                let [_, value] = &*pair.elts else {
+                    return None;
+                };
+                value
+            }
             _ => return None,
-        };
-        let Expr::Tuple(pair) = entry_elements.last()? else {
-            return None;
-        };
-        let [_, value] = &*pair.elts else {
-            return None;
         };
         self.resolve_callee(value)
     }
@@ -8404,6 +8647,9 @@ impl<'a> CallChecker<'a> {
                 {
                     return Some(callable);
                 }
+                if let Some(callable) = self.namedtuple_make_field_callable(value, attr_name) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
                     return Some(callable);
                 }
@@ -8473,6 +8719,9 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.identity_return_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.create_autospec_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.property_fget_result_callable(func) {
                     return Some(callable);
                 }
@@ -8509,6 +8758,9 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.getattr_simple_namespace_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.getattr_static_simple_namespace_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
                     return Some(callable);
                 }
@@ -8522,6 +8774,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_set_or_dict_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {
@@ -9208,6 +9463,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
+                self.concrete_contextmanager_items.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -9252,6 +9508,38 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .and_then(Self::typeguard_callable_signature)
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
+                }
+                if !is_async
+                    && decorator_list.iter().any(|decorator| {
+                        decorator_tail(&decorator.expression) == Some("contextmanager")
+                    })
+                {
+                    if let Some(callable) = Self::single_yield_expression(body)
+                        .filter(|yielded| {
+                            let Expr::Name(yielded_name) = yielded else {
+                                return true;
+                            };
+                            !parameters
+                                .posonlyargs
+                                .iter()
+                                .chain(parameters.args.iter())
+                                .chain(parameters.kwonlyargs.iter())
+                                .any(|parameter| {
+                                    parameter.parameter.name.as_str() == yielded_name.id.as_str()
+                                })
+                                && parameters.vararg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                                && parameters.kwarg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                        })
+                        .and_then(|yielded| self.resolve_callee(yielded))
+                        .filter(|callable| self.index.get(callable).is_some())
+                    {
+                        self.concrete_contextmanager_items
+                            .insert(fullname.clone(), callable);
+                    }
                 }
                 if let Some(signature) = returns
                     .as_deref()
@@ -9611,7 +9899,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
-                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {
@@ -9619,6 +9906,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(callable) = property_getter {
                         self.define(&format!("{}.fget.__return__", name.id.as_str()), callable);
                     }
