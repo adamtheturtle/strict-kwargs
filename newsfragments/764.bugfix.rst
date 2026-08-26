@@ -1,0 +1,1 @@
+Preserve named callable aliases when an assertion narrows an optional parameter.
