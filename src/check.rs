@@ -6211,8 +6211,11 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "accumulate" | "compress" | "islice" if selected_index.is_none() => {
+            "accumulate" | "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+            }
+            "compress" if selected_index.is_none() => {
+                self.literal_iterable_callable_signature(first_named(0, "data")?)
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)

@@ -2233,6 +2233,23 @@ next(itertools.islice([f], 1))(1)
     }
 }
 
+/// `itertools.compress` names its filtered input `data`, not `iterable`
+/// (issue #1076).
+#[test]
+fn itertools_compress_data_keyword_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.compress(data=[f], selectors=[True]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected compress data-keyword violation, got: {messages:?}"
+    );
+}
+
 /// Combinatoric itertools helpers preserve callable tuple-element types
 /// (issue #449).
 #[test]
