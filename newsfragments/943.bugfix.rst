@@ -1,0 +1,1 @@
+Preserve positive-count concrete callable keys when iterating unary plus on an immediate ``Counter``.
