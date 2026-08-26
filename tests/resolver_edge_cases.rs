@@ -3129,6 +3129,30 @@ def outer() -> None:
     );
 }
 
+/// A nearer opaque binding owns a nonlocal assignment, so invalidation must
+/// not continue into an outer callable generator binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_stops_at_nearer_opaque_binding() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def middle(stream: object) -> None:
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+        replace()
+    middle(object())
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "send() result"),
+        "nearer opaque binding invalidated the outer generator yield: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
