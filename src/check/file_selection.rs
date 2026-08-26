@@ -47,8 +47,7 @@ pub(super) fn collect_python_files(
                 .follow_links(true)
                 .into_iter()
                 .filter_entry(|entry| {
-                    entry.depth() == 0
-                        || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
+                    entry.depth() == 0 || !walk_entry_is_excluded(&selection, entry)
                 });
             for entry in walk {
                 let entry = entry.map_err(walk_error)?;
@@ -192,7 +191,15 @@ pub(super) fn collect_python_files_with_project_inventory(
             .as_ref()
             .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
 
-        if entry.file_type().is_symlink() && is_directory && !excluded_as_directory {
+        let excluded_symlink_target = entry.file_type().is_symlink()
+            && std::fs::canonicalize(path)
+                .ok()
+                .is_some_and(|target| selection.is_excluded(&target, is_directory, false));
+        if entry.file_type().is_symlink()
+            && is_directory
+            && !excluded_as_directory
+            && !excluded_symlink_target
+        {
             symlink_directories.push(path.to_path_buf());
         }
 
@@ -209,10 +216,7 @@ pub(super) fn collect_python_files_with_project_inventory(
         let walk = walkdir::WalkDir::new(directory)
             .follow_links(true)
             .into_iter()
-            .filter_entry(|entry| {
-                entry.depth() == 0
-                    || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
-            });
+            .filter_entry(|entry| entry.depth() == 0 || !walk_entry_is_excluded(&selection, entry));
         for entry in walk {
             let entry = entry.map_err(walk_error)?;
             if entry.file_type().is_file() && is_python_file(entry.path()) {
@@ -257,6 +261,24 @@ fn walk_error(error: walkdir::Error) -> CheckError {
         .io_error()
         .map_or(std::io::ErrorKind::Other, std::io::Error::kind);
     CheckError::Io(std::io::Error::new(kind, error))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn walk_entry_is_excluded(selection: &FileSelection, entry: &walkdir::DirEntry) -> bool {
+    let path = entry.path();
+    let is_directory = entry.file_type().is_dir() || path.is_dir();
+    if selection.is_excluded(path, is_directory, false) {
+        return true;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    std::fs::canonicalize(path)
+        .ok()
+        .is_some_and(|target| selection.is_excluded(&target, is_directory, false))
 }
 
 /// The selected paths that the caller named explicitly.
@@ -379,7 +401,10 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod file_selection_coverage {
-    use super::{collect_python_files, collect_python_files_for_fix};
+    use super::{
+        collect_python_files, collect_python_files_for_fix,
+        collect_python_files_with_project_inventory,
+    };
     use crate::config::Config;
 
     #[test]
@@ -439,5 +464,34 @@ mod file_selection_coverage {
         )
         .expect("collect for fix");
         assert_eq!(fixed, collected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_ignored_target_directory_is_pruned() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("project tempdir");
+        let external = tempfile::tempdir().expect("external tempdir");
+        let ignored = external.path().join("venv");
+        std::fs::create_dir_all(&ignored).expect("create ignored target");
+        std::fs::write(ignored.join("dependency.py"), "").expect("write ignored Python file");
+        symlink(&ignored, root.path().join("linked")).expect("symlink ignored directory");
+
+        let paths = [root.path().to_path_buf()];
+        let files = collect_python_files(root.path(), &paths, &Config::default())
+            .expect("collect ordinary files");
+        assert!(
+            files.is_empty(),
+            "ignored symlink target was followed: {files:?}"
+        );
+
+        let (files, _) =
+            collect_python_files_with_project_inventory(root.path(), &paths, &Config::default())
+                .expect("collect project inventory");
+        assert!(
+            files.is_empty(),
+            "inventory walk followed ignored target: {files:?}"
+        );
     }
 }
