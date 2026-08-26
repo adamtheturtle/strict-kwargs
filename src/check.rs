@@ -11188,7 +11188,13 @@ fn resolve_def_location_cached(
         character: loc.character,
     };
     if let Some(cached) = def_caches.locations.get(&key) {
-        return cached.clone();
+        // A cross-file lookup can fail because the target is not readable
+        // from disk, while a later same-file lookup still has the retained
+        // scan source. Do not let that weaker negative result mask the
+        // stronger same-file source (issue #1170).
+        if cached.is_some() || !same_path(&loc.path, current_path) {
+            return cached.clone();
+        }
     }
 
     let resolved = (|| {
@@ -12346,15 +12352,16 @@ mod tests {
         should_balance_grouped_ty, signature_is_fully_named, skipped_cache_miss_warnings,
         strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
         CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection, FixOptIns,
-        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
-        TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyDefCaches,
+        TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
-    use rustc_hash::FxHashSet;
+    use crate::ty_resolver::DefLocation;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -12374,6 +12381,43 @@ mod tests {
             pending_groups: vec![None; pending_calls],
             balancing_hover_requests: pending_calls,
         }
+    }
+
+    #[test]
+    fn same_file_definition_retries_cross_file_negative_cache_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("not-on-disk.py");
+        let location = DefLocation {
+            path: target.clone(),
+            line: 0,
+            character: 4,
+        };
+        let mut file_cache = FxHashMap::default();
+        let mut def_caches = TyDefCaches::default();
+        let indexed_files = FxHashMap::default();
+
+        assert_eq!(
+            super::resolve_def_location_cached(
+                Path::new("caller.py"),
+                "",
+                &location,
+                &indexed_files,
+                &mut file_cache,
+                &mut def_caches,
+            ),
+            None,
+        );
+
+        let resolved = super::resolve_def_location_cached(
+            &target,
+            "def target(value): ...\n",
+            &location,
+            &indexed_files,
+            &mut file_cache,
+            &mut def_caches,
+        )
+        .expect("retained same-file source must override a cached disk-read failure");
+        assert_eq!(resolved.0, "ty.target");
     }
 
     #[test]
