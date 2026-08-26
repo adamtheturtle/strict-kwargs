@@ -1,0 +1,2 @@
+Preserve concrete callable values selected from an immediately constructed
+``UserDict.popitem`` result.
