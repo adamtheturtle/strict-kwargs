@@ -3113,6 +3113,23 @@ MappingProxyType({"key": target})["key"](1)
     );
 }
 
+/// Copying an immediate `MappingProxyType` preserves its concrete callable
+/// values (issue #932).
+#[test]
+fn mapping_proxy_copy_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).copy()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected mapping-proxy copy violation, got: {messages:?}"
+    );
+}
+
 /// A literal dictionary copy preserves the concrete callable at a static key
 /// (issue #775).
 #[test]
