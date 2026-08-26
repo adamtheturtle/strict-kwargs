@@ -982,6 +982,25 @@ Pair(callback=target)._asdict()["callback"](1)
     );
 }
 
+/// Literal tuple indexing of a `NamedTuple._replace` result preserves an
+/// unchanged concrete callable field (issue #833).
+#[test]
+fn namedtuple_replace_index_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair(callback=target)._replace()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected NamedTuple._replace index violation, got: {messages:?}"
+    );
+}
+
 /// `astuple` uses stored dataclass fields rather than constructor-only
 /// `InitVar` entries when mapping tuple positions (issue #830).
 #[test]
