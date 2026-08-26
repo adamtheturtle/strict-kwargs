@@ -1137,8 +1137,6 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
-    /// Local generator name -> concrete callable yield signature.
-    callable_generator_yields: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
     /// Callable values yielded by `@contextmanager` functions, keyed by the
@@ -1412,6 +1410,8 @@ struct PendingTyOverloadFix {
 
 #[derive(Debug, Default, Clone)]
 struct Scope {
+    /// Class namespaces do not participate in Python's `nonlocal` lookup.
+    is_class_namespace: bool,
     /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
     /// Local name -> the currently visible local function signature.
@@ -1458,6 +1458,8 @@ struct Scope {
     weak_value_dict_callables: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Local generator name -> concrete callable yield signature.
+    callable_generator_yields: FxHashMap<String, Signature>,
     /// Annotated ``WeakKeyDictionary[K, V]`` locals when ``K`` is callable.
     /// Kept separate from [`Self::callable_iterable_items`] so ``.pop()``
     /// (value) is not confused with list-item / ``popitem`` key tracking.
@@ -1558,7 +1560,6 @@ impl<'a> CallChecker<'a> {
             callable_factory_returns: FxHashMap::default(),
             concrete_callable_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
-            callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             concrete_contextmanager_items: FxHashMap::default(),
@@ -1656,6 +1657,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -1700,6 +1702,7 @@ impl<'a> CallChecker<'a> {
             scope.concrete_asyncio_queues.remove(local_name);
             scope.concrete_sync_queues.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
+            scope.callable_generator_yields.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
             scope.starred_callable_list_elements.remove(local_name);
@@ -1927,6 +1930,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -1978,6 +1982,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -2299,6 +2304,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -4433,12 +4439,19 @@ impl<'a> CallChecker<'a> {
         &self,
         parameters: &ast::Parameters,
         returns: Option<&Expr>,
+        type_params: Option<&ast::TypeParams>,
     ) -> Option<GenericReturn> {
         let return_annotation = returns?;
         let Expr::Name(return_name) = return_annotation else {
             return None;
         };
-        if !self.type_vars.contains(return_name.id.as_str()) {
+        let is_pep695_type_var = type_params.is_some_and(|params| {
+            params.iter().any(|param| {
+                matches!(param, ast::TypeParam::TypeVar(type_var)
+                    if type_var.name.id.as_str() == return_name.id.as_str())
+            })
+        });
+        if !self.type_vars.contains(return_name.id.as_str()) && !is_pep695_type_var {
             return None;
         }
         let return_text = self.source[return_annotation.range()].trim();
@@ -5533,7 +5546,7 @@ impl<'a> CallChecker<'a> {
         let container = container.rsplit('.').next()?;
         let item = match container {
             "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
-            "Generator" => {
+            "Generator" | "AsyncGenerator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
                 };
@@ -5816,6 +5829,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -5880,13 +5894,21 @@ impl<'a> CallChecker<'a> {
         }
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            if self.scopes[index].is_class_namespace {
+                continue;
+            }
             let owns = self.scopes[index].functions.contains_key(name)
-                || self.scopes[index].names.contains_key(name);
+                || self.scopes[index].names.contains_key(name)
+                || self.scopes[index].opaque_locals.contains(name)
+                || self.scopes[index]
+                    .callable_generator_yields
+                    .contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
+            self.scopes[index].callable_generator_yields.remove(name);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
@@ -6120,7 +6142,9 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
-            _ => self.resolve_callee(func),
+            _ => self
+                .resolve_callee(func)
+                .and_then(|mapper| self.concrete_callable_returns.get(&mapper).cloned()),
         }
     }
 
@@ -6132,7 +6156,13 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
-            _ => self.unnamed_callable_signature(func),
+            _ => self.resolve_callee(func).and_then(|mapper| {
+                self.callable_returns.get(&mapper).cloned().or_else(|| {
+                    self.concrete_callable_returns
+                        .get(&mapper)
+                        .and_then(|returned| self.callable_fullname_signature(returned))
+                })
+            }),
         }
     }
 
@@ -7138,9 +7168,10 @@ impl<'a> CallChecker<'a> {
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
             let class_fullname = self.class_from_constructor(receiver)?;
+            let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
-                .get(&format!("{class_fullname}.__iter__"))
+                .get(&iterator_fullname)
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
@@ -7732,10 +7763,21 @@ impl<'a> CallChecker<'a> {
             "throw" => "Generator.throw() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generator_yield_signature(&self, name: &str) -> Option<Signature> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_generator_yields.get(name) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7770,9 +7812,7 @@ impl<'a> CallChecker<'a> {
             "athrow" => "AsyncGenerator.athrow() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
     }
 
@@ -8632,6 +8672,16 @@ impl<'a> CallChecker<'a> {
             Expr::Subscript(subscript) => {
                 if let Some(returned) = self
                     .class_from_constructor(&subscript.value)
+                    .or_else(|| {
+                        let Expr::Name(name) = subscript.value.as_ref() else {
+                            return None;
+                        };
+                        if self.binding_is_instance(name.id.as_str()) {
+                            self.resolve_local(name.id.as_str())
+                        } else {
+                            self.class_from_name_annotation(name.id.as_str())
+                        }
+                    })
                     .map(|class| format!("{class}.__getitem__.__return__"))
                     .filter(|returned| self.index.get(returned).is_some())
                 {
@@ -8939,6 +8989,13 @@ impl<'a> CallChecker<'a> {
                     .insert(method_fullname.clone(), signature.clone());
             }
             self.callable_iterator_items
+                .insert(method_fullname.clone(), signature);
+        }
+        if let Some(signature) = returns
+            .as_deref()
+            .and_then(Self::callable_annotation_signature)
+        {
+            self.callable_returns
                 .insert(method_fullname.clone(), signature);
         }
         if let Some(Expr::Name(return_name)) = returns.as_deref() {
@@ -9546,6 +9603,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     body,
                     decorator_list,
                     returns,
+                    type_params,
                     is_async,
                     ..
                 } = function_def;
@@ -9587,15 +9645,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.completed_overload_sets.insert(fullname.clone());
                     }
                 }
-                if let Some(class) = returns.as_deref().and_then(|annotation| {
-                    self.class_from_annotation(&self.source[annotation.range()])
-                }) {
-                    let dunder_call = format!("{class}.__call__");
-                    if self.index.resolve_method(&class, "__call__").is_some()
-                        || self.index.get(&dunder_call).is_some()
-                    {
-                        self.callable_factory_returns
-                            .insert(fullname.clone(), class);
+                if !is_async {
+                    if let Some(class) = returns.as_deref().and_then(|annotation| {
+                        self.class_from_annotation(&self.source[annotation.range()])
+                    }) {
+                        let dunder_call = format!("{class}.__call__");
+                        if self.index.resolve_method(&class, "__call__").is_some()
+                            || self.index.get(&dunder_call).is_some()
+                        {
+                            self.callable_factory_returns
+                                .insert(fullname.clone(), class);
+                        }
                     }
                 }
                 if let Some(signature) = returns
@@ -9658,9 +9718,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_returns.insert(fullname.clone(), signature);
                 }
-                if let Some(generic) =
-                    self.generic_return_from_parameters(parameters, returns.as_deref())
-                {
+                if let Some(generic) = self.generic_return_from_parameters(
+                    parameters,
+                    returns.as_deref(),
+                    type_params.as_deref(),
+                ) {
                     self.generic_returns.insert(fullname.clone(), generic);
                 }
                 if self.function_stack.is_empty() {
@@ -9723,6 +9785,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.current_scope().is_class_namespace = true;
                 self.enter_hover_scope(true);
                 self.class_body_depth += 1;
                 for inner in body {
@@ -9817,12 +9880,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        if let Some(signature) = &generator_yield {
-                            self.callable_generator_yields
-                                .insert(name.id.to_string(), signature.clone());
-                        } else {
-                            self.callable_generator_yields.remove(name.id.as_str());
-                        }
                         if is_functional_namedtuple || is_collections_namedtuple {
                             self.functional_namedtuple_names.insert(name.id.to_string());
                         }
@@ -9926,6 +9983,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .concrete_sync_queues
                                 .insert(name.id.to_string());
+                        }
+                        if let Some(signature) = &generator_yield {
+                            self.current_scope()
+                                .callable_generator_yields
+                                .insert(name.id.to_string(), signature.clone());
                         }
                     }
                 }
@@ -10062,7 +10124,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
@@ -10120,7 +10183,8 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .insert(name.id.to_string(), signature);
                     }
                     if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
