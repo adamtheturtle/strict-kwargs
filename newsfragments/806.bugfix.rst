@@ -1,0 +1,1 @@
+Preserve concrete callable elements selected from concatenated literal lists and tuples.

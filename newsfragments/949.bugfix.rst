@@ -1,0 +1,1 @@
+Preserve concrete callable elements through explicit ``__next__()`` calls on built-in iterators over literal containers.
