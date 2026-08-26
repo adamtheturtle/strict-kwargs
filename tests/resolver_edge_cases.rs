@@ -672,6 +672,28 @@ sorted({f}, key=id)[0](1)
     }
 }
 
+/// The multi-argument forms of `min` and `max` select among their positional
+/// arguments; they do not select an element from the first argument (#1156).
+#[test]
+fn min_max_multi_argument_forms_do_not_use_first_iterable_element() {
+    let messages = check_source(
+        r"
+def narrow(value: int) -> None: ...
+def broad(*args) -> None: ...
+min([narrow], broad)(1)
+max((narrow,), broad)(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "multi-argument selector used first iterable element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
