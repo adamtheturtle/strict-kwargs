@@ -6761,14 +6761,14 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn contextvar_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn contextvar_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
         if Self::dotted_path(value)?.rsplit('.').next() != Some("ContextVar") {
             return None;
         }
-        Self::callable_annotation_signature(slice)
+        self.callable_type_alias_signature(slice)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -10272,7 +10272,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
@@ -10351,7 +10351,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables

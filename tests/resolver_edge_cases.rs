@@ -6199,6 +6199,28 @@ if old is not contextvars.Token.MISSING:
     );
 }
 
+/// `Token.old_value` resolves a named callable alias used as its `ContextVar`
+/// value type (regression #768).
+#[test]
+fn contextvar_token_old_value_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import contextvars
+import typing
+Callback = typing.Callable[[int], int]
+var: contextvars.ContextVar[Callback]
+token = var.set(lambda value: value)
+old = token.old_value
+if old is not contextvars.Token.MISSING:
+    old(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "old_value"),
+        "expected alias-valued token violation, got: {messages:?}"
+    );
+}
+
 /// ``MappingProxyType.get`` preserves generic mapping value types (issue #660).
 #[test]
 fn mapping_proxy_get_preserves_callable_value_signatures() {
