@@ -2530,6 +2530,7 @@ def callable_item(item: int):
     return target
 Pool(1).map(ordinary, [1])[0](unexpected=1)
 Pool(1).map(callable_item, [1])[0](1)
+next(Pool(1).imap(callable_item, [1]))(1)
 ",
     );
     assert!(
@@ -2541,6 +2542,10 @@ Pool(1).map(callable_item, [1])[0](1)
     assert!(
         has_error_at(&messages, 8, "target"),
         "expected callable-return violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 9, "next() result"),
+        "expected named imap callable-return violation, got: {messages:?}"
     );
 }
 
