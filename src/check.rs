@@ -5317,10 +5317,16 @@ impl<'a> CallChecker<'a> {
         }
         match value {
             Expr::List(list) => {
+                if list.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
             }
             Expr::Tuple(tuple) => {
+                if tuple.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
             }
@@ -5339,6 +5345,9 @@ impl<'a> CallChecker<'a> {
                     }
                     _ => return None,
                 };
+                if left.iter().chain(right).any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let len = left.len().checked_add(right.len())?;
                 let index = Self::literal_sequence_index(slice, len)?;
                 let element = if index < left.len() {
@@ -5357,6 +5366,9 @@ impl<'a> CallChecker<'a> {
                     Expr::Tuple(tuple) => tuple.elts.as_slice(),
                     _ => return None,
                 };
+                if elements.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
                 self.resolve_callee(&elements[index])
             }
