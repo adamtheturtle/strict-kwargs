@@ -3105,6 +3105,30 @@ def caller(stream: object) -> None:
     );
 }
 
+/// A nonlocal assignment clears generator-yield metadata in the enclosing
+/// scope that owns the binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_clears_generator_yield_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def replace() -> None:
+        nonlocal stream
+        stream = object()
+    replace()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:9:")),
+        "nonlocal rebind kept a stale generator yield: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]

@@ -5854,12 +5854,16 @@ impl<'a> CallChecker<'a> {
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
             let owns = self.scopes[index].functions.contains_key(name)
-                || self.scopes[index].names.contains_key(name);
+                || self.scopes[index].names.contains_key(name)
+                || self.scopes[index]
+                    .callable_generator_yields
+                    .contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
+            self.scopes[index].callable_generator_yields.remove(name);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
