@@ -509,6 +509,26 @@ def f(value: int) -> None: ...
     );
 }
 
+/// A qualified rebind inside its own class body resolves the target owner
+/// from the module scope and invalidates the original method (#1165).
+#[test]
+fn class_body_qualified_method_rebind_clears_signature() {
+    let messages = check_source(
+        r"
+class C:
+    def method(self, value): ...
+    C.method = lambda self, value, /: None
+C().method(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:5:")),
+        "stale method signature survived class-body rebind: {messages:?}"
+    );
+}
+
 /// A boolean expression whose operands are the same callable has an
 /// unambiguous signature (issue #363).
 #[test]
