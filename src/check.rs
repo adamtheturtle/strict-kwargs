@@ -9558,6 +9558,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
                 self.concrete_contextmanager_items.remove(&fullname);
+                self.callable_factory_returns.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -9586,15 +9587,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.completed_overload_sets.insert(fullname.clone());
                     }
                 }
-                if let Some(class) = returns.as_deref().and_then(|annotation| {
-                    self.class_from_annotation(&self.source[annotation.range()])
-                }) {
-                    let dunder_call = format!("{class}.__call__");
-                    if self.index.resolve_method(&class, "__call__").is_some()
-                        || self.index.get(&dunder_call).is_some()
-                    {
-                        self.callable_factory_returns
-                            .insert(fullname.clone(), class);
+                if !is_async {
+                    if let Some(class) = returns.as_deref().and_then(|annotation| {
+                        self.class_from_annotation(&self.source[annotation.range()])
+                    }) {
+                        let dunder_call = format!("{class}.__call__");
+                        if self.index.resolve_method(&class, "__call__").is_some()
+                            || self.index.get(&dunder_call).is_some()
+                        {
+                            self.callable_factory_returns
+                                .insert(fullname.clone(), class);
+                        }
                     }
                 }
                 if let Some(signature) = returns
