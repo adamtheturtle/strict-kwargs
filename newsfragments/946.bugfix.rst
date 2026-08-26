@@ -1,0 +1,1 @@
+Preserve positive-count concrete callable keys when iterating intersections of immediate ``Counter`` values.
