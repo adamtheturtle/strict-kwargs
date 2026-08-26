@@ -4358,6 +4358,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn staticmethod_get_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(get_method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(descriptor) = get_method.value.as_ref() else {
+            return None;
+        };
+        if get_method.attr.as_str() != "__get__"
+            || !get_call.arguments.keywords.is_empty()
+            || !matches!(&*get_call.arguments.args, [_] | [_, _])
+            || !self.names_stdlib_callable(&descriptor.func, "builtins.staticmethod")
+            || !descriptor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [wrapped] = &*descriptor.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(wrapped)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn create_autospec_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -8747,6 +8772,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.identity_return_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.staticmethod_get_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.create_autospec_callable(func) {

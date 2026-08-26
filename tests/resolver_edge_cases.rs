@@ -5775,6 +5775,23 @@ staticmethod(target)(1)
     );
 }
 
+/// Binding a direct `staticmethod` descriptor returns its wrapped callable
+/// unchanged (issue #957).
+#[test]
+fn staticmethod_get_preserves_wrapped_callable_signature() {
+    let messages = check_source(
+        r"
+class Owner: pass
+def target(value: int) -> None: ...
+staticmethod(target).__get__(None, Owner)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "staticmethod.__get__ must preserve its wrapped callable: {messages:?}"
+    );
+}
+
 /// Bound-method `__func__` keeps the unbound method signature (issue #651).
 #[test]
 fn bound_method_func_preserves_unbound_method_signature() {
