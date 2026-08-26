@@ -1,0 +1,1 @@
+Resolve named callable aliases used as the yield type of annotated generators.

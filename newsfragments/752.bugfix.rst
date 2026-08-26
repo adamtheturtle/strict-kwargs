@@ -1,0 +1,1 @@
+Clear callable-class return metadata when a function is redefined.

@@ -1,0 +1,1 @@
+Preserve concrete callable keys from literal ``dict.keys()`` iterators.
