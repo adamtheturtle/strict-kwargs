@@ -4515,6 +4515,23 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     );
 }
 
+/// `unittest.mock.create_autospec` preserves the concrete function signature
+/// it enforces on the returned callable mock (issue #967).
+#[test]
+fn create_autospec_preserves_target_signature() {
+    let messages = check_source(
+        r"
+from unittest import mock
+def target(value: int) -> None: ...
+mock.create_autospec(spec=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "create_autospec must preserve its target signature: {messages:?}"
+    );
+}
+
 /// `functools.wraps` preserves the decorated wrapper signature (issue #493).
 #[test]
 fn functools_wraps_preserves_callable_signature() {
