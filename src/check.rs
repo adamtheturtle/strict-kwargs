@@ -6538,13 +6538,6 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn imported_callable_path(&self, expr: &Expr) -> Option<String> {
-        let dotted = Self::dotted_path(expr)?;
-        let (head, rest) = dotted.split_once('.')?;
-        Some(format!("{}.{}", self.resolve_module(head)?, rest))
-    }
-
-    #[cfg_attr(coverage, coverage(off))]
     fn groupby_group_item_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Subscript(group) = expr else {
             return None;
@@ -6563,7 +6556,7 @@ impl<'a> CallChecker<'a> {
         let [Expr::Call(groupby)] = &*next_call.arguments.args else {
             return None;
         };
-        if self.imported_callable_path(&groupby.func)?.as_str() != "itertools.groupby"
+        if !self.names_stdlib_callable(&groupby.func, "itertools.groupby")
             || groupby.arguments.args.len() > 2
             || groupby.arguments.keywords.iter().any(|keyword| {
                 !matches!(

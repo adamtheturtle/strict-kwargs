@@ -6309,6 +6309,23 @@ next(next(itertools.groupby([target], key=lambda _: 0))[1])(1)
     }
 }
 
+/// A directly imported `groupby` preserves the group iterator's callable
+/// signature too.
+#[test]
+fn imported_groupby_group_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from itertools import groupby as grouped
+def target(value: int) -> None: ...
+next(next(grouped([target]))[1])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected imported groupby group-item violation, got: {messages:?}"
+    );
+}
+
 /// `itertools.starmap` preserves a concrete callable returned by its mapping
 /// lambda through `next()` (issue #783).
 #[test]
