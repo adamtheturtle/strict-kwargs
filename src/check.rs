@@ -8653,8 +8653,12 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
                     return Some(callable);
                 }
-                if matches!(value.as_ref(), Expr::Call(call) if Self::dotted_path(&call.func)
-                    .is_some_and(|path| path.rsplit('.').next() == Some("SimpleNamespace")))
+                if matches!(value.as_ref(), Expr::Call(call)
+                    if Self::dotted_path(&call.func)
+                        .is_some_and(|path| path.rsplit('.').next() == Some("SimpleNamespace"))
+                    || matches!(call.func.as_ref(), Expr::Name(name)
+                        if self.resolve_local(name.id.as_str()).as_deref()
+                            == Some("types.SimpleNamespace")))
                 {
                     if let Some((_, callable)) = self
                         .simple_namespace_callable_attributes(value)

@@ -998,13 +998,15 @@ fn simple_namespace_literal_unpack_preserves_callable_attribute() {
     let messages = check_source(
         r#"
 import types
+from types import SimpleNamespace as NS
 def target(value: int) -> None: ...
 types.SimpleNamespace(**{"callback": target}).callback(1)
 namespace = types.SimpleNamespace(**{"callback": target})
 namespace.callback(1)
+NS(**{"callback": target}).callback(1)
 "#,
     );
-    for line in [4, 6] {
+    for line in [5, 7, 8] {
         assert!(
             has_error_at(&messages, line, "target"),
             "expected unpacked namespace violation on line {line}: {messages:?}"
