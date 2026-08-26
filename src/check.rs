@@ -8648,6 +8648,16 @@ impl<'a> CallChecker<'a> {
             Expr::Subscript(subscript) => {
                 if let Some(returned) = self
                     .class_from_constructor(&subscript.value)
+                    .or_else(|| {
+                        let Expr::Name(name) = subscript.value.as_ref() else {
+                            return None;
+                        };
+                        if self.binding_is_instance(name.id.as_str()) {
+                            self.resolve_local(name.id.as_str())
+                        } else {
+                            self.class_from_name_annotation(name.id.as_str())
+                        }
+                    })
                     .map(|class| format!("{class}.__getitem__.__return__"))
                     .filter(|returned| self.index.get(returned).is_some())
                 {

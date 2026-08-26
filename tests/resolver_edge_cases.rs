@@ -1635,6 +1635,29 @@ C()["call"](1)
     );
 }
 
+/// `__getitem__` callable return metadata applies to tracked instance names
+/// and annotated instance parameters as well as inline constructors (#1144).
+#[test]
+fn bound_getitem_callable_return_is_resolved() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+class C:
+    def __getitem__(self, key: str) -> Callable[[int], None]: ...
+c = C()
+c["call"](1)
+def consume(value: C) -> None:
+    value["call"](1)
+"#,
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "__return__"),
+            "expected bound getitem violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Awaiting a local async factory preserves its concrete callable return
 /// annotation (issue #383).
 #[test]
