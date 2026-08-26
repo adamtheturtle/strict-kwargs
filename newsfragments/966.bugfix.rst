@@ -1,0 +1,1 @@
+Preserve concrete ``SimpleNamespace`` callables returned by ``inspect.getattr_static``.

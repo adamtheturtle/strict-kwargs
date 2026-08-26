@@ -1,0 +1,1 @@
+Preserve concrete callable elements selected from statically known ``itertools.batched`` results.
