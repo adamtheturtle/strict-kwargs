@@ -5930,6 +5930,7 @@ impl<'a> CallChecker<'a> {
                 || scope.modules.contains_key(name)
                 || matches!(scope.callable_type_aliases.get(name), Some(Some(_)))
                 || scope.starred_callable_list_elements.contains_key(name)
+                || scope.future_callables.contains_key(name)
                 || scope.future_set_callables.contains_key(name)
                 || scope.executor_instances.contains(name)
                 || scope.asyncio_task_groups.contains(name)

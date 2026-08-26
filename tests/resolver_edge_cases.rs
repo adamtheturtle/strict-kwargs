@@ -6936,6 +6936,30 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// Loop targets discard callable-result metadata stored for submitted futures
+/// (Bugbot on #989).
+#[test]
+fn thread_pool_submitted_future_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    for future in [object()]:
+        pass
+    future.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound future must not retain submitted result metadata: {messages:?}"
+    );
+}
+
 /// `concurrent.futures.as_completed` preserves a singleton submitted future's
 /// concrete callable result (issue #845).
 #[test]
