@@ -3599,6 +3599,27 @@ make("a")(1)
     );
 }
 
+/// Redefining a factory with a non-callable return clears the callable-class
+/// metadata recorded for the earlier definition (issue #752).
+#[test]
+fn factory_redefinition_clears_callable_class_return() {
+    let messages = check_source(
+        r"
+class CallableClass:
+    def __call__(self, value: int) -> None: ...
+def factory() -> CallableClass:
+    return CallableClass()
+def factory() -> int:
+    return 0
+factory()(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "redefined factory must not retain callable-class metadata: {messages:?}"
+    );
+}
+
 /// Assigning a concrete new instance clears an older receiver annotation so
 /// attribute resolution uses the live class (issue #756).
 #[test]
