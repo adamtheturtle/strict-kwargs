@@ -1467,6 +1467,26 @@ C().call(1)
     );
 }
 
+/// An annotation on a descriptor assignment does not prevent its `__get__`
+/// callable return from being indexed (issue #1146).
+#[test]
+fn annotated_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call: Descriptor = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected annotated descriptor-return violation, got: {messages:?}"
+    );
+}
+
 /// `CPython` descriptor `__get__` methods reject keyword arguments, so both
 /// binding arguments must remain positional (issues #501–#506).
 #[test]
