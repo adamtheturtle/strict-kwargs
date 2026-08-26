@@ -1,0 +1,2 @@
+Preserve concrete callable values when subscripting an ``OrderedDict``
+constructed from a literal dictionary.
