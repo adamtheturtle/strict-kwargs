@@ -272,10 +272,32 @@ fn does_not_fix_self_method_call_when_subclass_override_renames_parameter() {
 }
 
 #[test]
+fn conditional_bound_method_callee_keeps_receiver_implicit() {
+    assert_fixed(
+        "class C:\n    def m(self, a, b): ...\n\nc = C()\n(c.m if condition else c.m)(1, 2)\n",
+        "class C:\n    def m(self, a, b): ...\n\nc = C()\n(c.m if condition else c.m)(a=1, b=2)\n",
+    );
+}
+
+#[test]
 fn named_bound_method_callee_keeps_receiver_implicit() {
     assert_fixed(
         "class C:\n    def m(self, a, b): ...\n\nc = C()\n(alias := c.m)(1, 2)\n",
         "class C:\n    def m(self, a, b): ...\n\nc = C()\n(alias := c.m)(a=1, b=2)\n",
+    );
+}
+
+#[test]
+fn conditional_opaque_receiver_boundary_declines_fix() {
+    assert_unchanged(
+        "class C:\n    def m(self, a, b): ...\n\ndef run(value, condition):\n    (value.m if condition else value.m)(1, 2)\n",
+    );
+}
+
+#[test]
+fn conditional_mixed_bound_and_unbound_method_declines_fix() {
+    assert_unchanged(
+        "class C:\n    def m(self, a, b): ...\n\nc = C()\n(c.m if condition else C.m)(1, 2)\n",
     );
 }
 
