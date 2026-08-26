@@ -5385,6 +5385,48 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(sum_call) = value {
+            if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
+                let (iterable, positional_start) = match &*sum_call.arguments.args {
+                    [iterable] => (iterable, None),
+                    [iterable, start] => (iterable, Some(start)),
+                    _ => return None,
+                };
+                if sum_call.arguments.keywords.iter().any(|keyword| {
+                    keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("start")
+                }) {
+                    return None;
+                }
+                let keyword_start = sum_call.arguments.find_keyword("start");
+                if positional_start.is_some() && keyword_start.is_some() {
+                    return None;
+                }
+                let start = positional_start.or_else(|| keyword_start.map(|value| &value.value))?;
+                let Expr::List(start) = start else {
+                    return None;
+                };
+                if start.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
+                let groups = match iterable {
+                    Expr::List(groups) => groups.elts.as_slice(),
+                    Expr::Tuple(groups) => groups.elts.as_slice(),
+                    _ => return None,
+                };
+                let mut elements: Vec<&Expr> = start.elts.iter().collect();
+                for group in groups {
+                    let Expr::List(group) = group else {
+                        return None;
+                    };
+                    if group.elts.iter().any(Expr::is_starred_expr) {
+                        return None;
+                    }
+                    elements.extend(&group.elts);
+                }
+                let index = Self::literal_sequence_index(slice, elements.len())?;
+                return self.resolve_callee(elements[index]);
+            }
+        }
         if let Expr::Call(asdict_call) = value {
             if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
                 let Expr::StringLiteral(field) = slice else {
