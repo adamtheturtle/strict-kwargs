@@ -2856,6 +2856,14 @@ impl<'a> CallChecker<'a> {
     // coverage gate because llvm-cov reports duplicate branch holes for this
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
+    fn unwrap_named_callee(mut func: &Expr) -> &Expr {
+        while let Expr::Named(ast::ExprNamed { value, .. }) = func {
+            func = value;
+        }
+        func
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
         self.record_singledispatch_registration(call);
         // A `# noqa` on the call's line suppresses the diagnostic and any
@@ -3058,8 +3066,9 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let callable_expr = Self::unwrap_named_callee(&call.func);
         let constructed_class = is_constructor
-            .then(|| self.class_from_constructor_func(&call.func))
+            .then(|| self.class_from_constructor_func(callable_expr))
             .flatten();
         let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
@@ -3085,11 +3094,12 @@ impl<'a> CallChecker<'a> {
             .and_then(|s| s.parameters.first())
             .and_then(|p| p.name.as_deref());
         let receiver_is_explicit =
-            self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
-        let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
+            self.is_unbound_class_method_call(callable_expr, &callee_fullname, first_param_name);
+        let receiver_is_implicit =
+            self.is_bound_instance_method_call(callable_expr, first_param_name);
         let receiver_is_explicit_for_fix = receiver_is_explicit
             || self.is_explicit_dunder_receiver_call(
-                &call.func,
+                callable_expr,
                 &callee_fullname,
                 first_param_name,
             );
@@ -3204,25 +3214,26 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
-        if self.call_uses_opaque_receiver_boundary(&call.func) {
+        let callable_expr = Self::unwrap_named_callee(&call.func);
+        if self.call_uses_opaque_receiver_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
         if self.call_may_dispatch_to_override_with_different_parameter_names(
-            &call.func,
+            callable_expr,
             callee_fullname,
         ) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.self_call_uses_inherited_method_boundary(&call.func, callee_fullname) {
+        if self.self_call_uses_inherited_method_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.constructor_call_uses_inherited_boundary(&call.func, callee_fullname) {
+        if self.constructor_call_uses_inherited_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3232,7 +3243,7 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.call_uses_imported_callable_boundary(&call.func) {
+        if self.call_uses_imported_callable_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3240,7 +3251,7 @@ impl<'a> CallChecker<'a> {
         if let [signature] = signatures {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
-            let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
+            let is_attribute_call = matches!(callable_expr, Expr::Attribute(_));
             match call_fix_insertions(
                 call,
                 self.tokens,
