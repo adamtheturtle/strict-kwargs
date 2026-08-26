@@ -1,0 +1,1 @@
+Clear generic parameter-to-result metadata when a function is redefined.
