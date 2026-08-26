@@ -653,6 +653,37 @@ sorted({f}, key=id)[0](1)
     }
 }
 
+/// A `sorted()` subscript only produces an element for an in-range integer
+/// index; slices and invalid indices must not borrow the element signature
+/// (issue #1157).
+#[test]
+fn sorted_subscript_respects_index_shape_and_bounds() {
+    let messages = check_source(
+        r#"
+def narrow(value: int) -> None: ...
+sorted([narrow])[0](1)
+sorted([narrow])[-1](1)
+sorted([narrow])[0:1](1)
+sorted([narrow])["bad"](1)
+sorted([narrow])[2](1)
+"#,
+    );
+    for line in [3, 4] {
+        assert!(
+            has_error_at(&messages, line, "narrow"),
+            "valid sorted index was not preserved on line {line}: {messages:?}"
+        );
+    }
+    for line in [5, 6, 7] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "invalid sorted index borrowed the element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]

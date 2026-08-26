@@ -4435,6 +4435,18 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn sorted_subscript_result(&self, call: &ast::ExprCall, slice: &Expr) -> Option<String> {
+        let len = match call.arguments.args.first()? {
+            Expr::List(list) => list.elts.len(),
+            Expr::Tuple(tuple) => tuple.elts.len(),
+            Expr::Set(set) => set.elts.len(),
+            _ => return None,
+        };
+        Self::literal_sequence_index(slice, len)?;
+        self.preserving_builtin_result(call, &["builtins.sorted"])
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn generic_return_from_parameters(
         &self,
         parameters: &ast::Parameters,
@@ -8747,7 +8759,7 @@ impl<'a> CallChecker<'a> {
                     return Some(returned);
                 }
                 if let Expr::Call(sorted) = subscript.value.as_ref() {
-                    self.preserving_builtin_result(sorted, &["builtins.sorted"])
+                    self.sorted_subscript_result(sorted, &subscript.slice)
                         .or_else(|| {
                             self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         })
