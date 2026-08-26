@@ -6988,7 +6988,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn counter_addition_item_signature(&self, expr: &Expr) -> Option<Signature> {
+    fn counter_binary_item_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Call(iter_call) = expr else {
             return None;
         };
@@ -6996,13 +6996,15 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let [Expr::BinOp(ast::ExprBinOp {
-            left,
-            op: ast::Operator::Add,
-            right,
-            ..
+            left, op, right, ..
         })] = &*iter_call.arguments.args
         else {
             return None;
+        };
+        let right_sign = match op {
+            ast::Operator::Add => 1,
+            ast::Operator::Sub => -1,
+            _ => return None,
         };
         let left_entries = self.counter_literal_entries(left)?;
         let right_entries = self.counter_literal_entries(right)?;
@@ -7027,17 +7029,18 @@ impl<'a> CallChecker<'a> {
         };
         for (key, count) in &left_entries {
             let total = *count
-                + right_entries
-                    .iter()
-                    .find(|(right, _)| same_key(key, right))
-                    .map_or(0, |(_, count)| *count);
+                + right_sign
+                    * right_entries
+                        .iter()
+                        .find(|(right, _)| same_key(key, right))
+                        .map_or(0, |(_, count)| *count);
             include(key, total)?;
         }
         for (key, count) in right_entries
             .iter()
             .filter(|(right, _)| !left_entries.iter().any(|(left, _)| same_key(left, right)))
         {
-            include(key, *count)?;
+            include(key, right_sign * *count)?;
         }
         result
     }
@@ -7076,7 +7079,7 @@ impl<'a> CallChecker<'a> {
             if let Some(signature) = self.counter_unary_plus_item_signature(iterator) {
                 return Some(signature);
             }
-            if let Some(signature) = self.counter_addition_item_signature(iterator) {
+            if let Some(signature) = self.counter_binary_item_signature(iterator) {
                 return Some(signature);
             }
         }
