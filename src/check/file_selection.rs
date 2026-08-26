@@ -191,10 +191,8 @@ pub(super) fn collect_python_files_with_project_inventory(
             .as_ref()
             .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
 
-        let excluded_symlink_target = entry.file_type().is_symlink()
-            && std::fs::canonicalize(path)
-                .ok()
-                .is_some_and(|target| selection.is_excluded(&target, is_directory, false));
+        let excluded_symlink_target =
+            entry.file_type().is_symlink() && symlink_target_directory_is_prunable(path);
         if entry.file_type().is_symlink()
             && is_directory
             && !excluded_as_directory
@@ -276,9 +274,18 @@ fn walk_entry_is_excluded(selection: &FileSelection, entry: &walkdir::DirEntry) 
     if !metadata.file_type().is_symlink() {
         return false;
     }
+    is_directory && symlink_target_directory_is_prunable(path)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn symlink_target_directory_is_prunable(path: &Path) -> bool {
     std::fs::canonicalize(path)
         .ok()
-        .is_some_and(|target| selection.is_excluded(&target, is_directory, false))
+        .and_then(|target| target.file_name().map(std::ffi::OsStr::to_owned))
+        .is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with('.') || name == "venv" || name == "__pycache__"
+        })
 }
 
 /// The selected paths that the caller named explicitly.
@@ -474,24 +481,22 @@ mod file_selection_coverage {
         let root = tempfile::tempdir().expect("project tempdir");
         let external = tempfile::tempdir().expect("external tempdir");
         let ignored = external.path().join("venv");
+        let included = external.path().join("source");
         std::fs::create_dir_all(&ignored).expect("create ignored target");
+        std::fs::create_dir_all(&included).expect("create included target");
         std::fs::write(ignored.join("dependency.py"), "").expect("write ignored Python file");
+        std::fs::write(included.join("main.py"), "").expect("write included Python file");
         symlink(&ignored, root.path().join("linked")).expect("symlink ignored directory");
+        symlink(&included, root.path().join("included")).expect("symlink included directory");
 
         let paths = [root.path().to_path_buf()];
         let files = collect_python_files(root.path(), &paths, &Config::default())
             .expect("collect ordinary files");
-        assert!(
-            files.is_empty(),
-            "ignored symlink target was followed: {files:?}"
-        );
+        assert_eq!(files, [root.path().join("included/main.py")]);
 
         let (files, _) =
             collect_python_files_with_project_inventory(root.path(), &paths, &Config::default())
                 .expect("collect project inventory");
-        assert!(
-            files.is_empty(),
-            "inventory walk followed ignored target: {files:?}"
-        );
+        assert_eq!(files, [root.path().join("included/main.py")]);
     }
 }
