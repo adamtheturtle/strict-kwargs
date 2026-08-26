@@ -1033,6 +1033,24 @@ namespace.call(1)
     );
 }
 
+/// An annotation on a `SimpleNamespace` binding does not suppress its
+/// synthesized callable keyword attributes (issue #1155).
+#[test]
+fn annotated_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def target(value: int) -> None: ...
+namespace: SimpleNamespace = SimpleNamespace(call=target)
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected annotated namespace callable violation, got: {messages:?}"
+    );
+}
+
 /// Literal dictionary unpacking into `SimpleNamespace` preserves a concrete
 /// callable attribute for inline and assigned instances (issue #971).
 #[test]

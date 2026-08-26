@@ -10110,6 +10110,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let class_fullname = self.class_from_obvious_instance(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -10117,6 +10118,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                        for (attribute, callable) in &namespace_attributes {
+                            self.define(
+                                &format!("{}.{}", name.id.as_str(), attribute),
+                                callable.clone(),
+                            );
+                        }
                     } else if is_callable_attribute_alias || is_lambda {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
