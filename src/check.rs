@@ -7422,7 +7422,21 @@ impl<'a> CallChecker<'a> {
         };
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
-            let receiver = factory_call.arguments.args.first()?;
+            if !factory_call.arguments.keywords.is_empty() {
+                return None;
+            }
+            let [receiver] = &*factory_call.arguments.args else {
+                return None;
+            };
+            if let Some(signature) = self.literal_iterable_callable_signature(receiver) {
+                return Some(signature);
+            }
+            if let Expr::Dict(dict) = receiver {
+                let [item] = dict.items.as_slice() else {
+                    return None;
+                };
+                return self.unnamed_callable_signature(item.key.as_ref()?);
+            }
             let class_fullname = self.class_from_constructor(receiver).or_else(|| {
                 let Expr::Name(name) = receiver else {
                     return None;

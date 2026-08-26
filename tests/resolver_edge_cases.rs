@@ -6030,6 +6030,27 @@ next(reversed([target]))(1)
     );
 }
 
+/// `next(iter(...))` preserves callable elements from one-element literal
+/// iterables, including dictionary keys (issue #781).
+#[test]
+fn next_iter_literal_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(iter([target]))(1)
+next(iter((target,)))(1)
+next(iter({target}))(1)
+next(iter({target: 1}))(1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected next(iter(...)) violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Selecting the value from an immediate `UserDict.popitem` result preserves
 /// its concrete callable signature (issue #927).
 #[test]
