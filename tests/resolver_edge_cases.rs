@@ -2233,6 +2233,24 @@ next(chain_items([target]))(1)
     );
 }
 
+/// Empty literal iterables contribute no values to `chain` and therefore do
+/// not erase the signature supplied by a later non-empty iterable (issue
+/// #1133).
+#[test]
+fn itertools_chain_skips_empty_literal_iterables() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain([], (), [target], set()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chained callable violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]
