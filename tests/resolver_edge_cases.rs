@@ -6030,6 +6030,22 @@ next(reversed([target]))(1)
     );
 }
 
+/// Sets are iterable but not reversible, so an invalid `reversed(set)` call
+/// must not synthesize a callable result (Bugbot on #875).
+#[test]
+fn next_reversed_set_does_not_resolve_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(reversed({target}))(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "invalid reversed(set) must remain unresolved: {messages:?}"
+    );
+}
+
 /// `next(iter(...))` preserves callable elements from one-element literal
 /// iterables, including dictionary keys (issue #781).
 #[test]

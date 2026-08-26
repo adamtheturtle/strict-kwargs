@@ -6631,6 +6631,9 @@ impl<'a> CallChecker<'a> {
                 let [iterable] = &*call.arguments.args else {
                     return None;
                 };
+                if !matches!(iterable, Expr::List(_) | Expr::Tuple(_)) {
+                    return None;
+                }
                 self.literal_iterable_callable_signature(iterable)
             }
             "builtins.filter" | "builtins.filter.__new__" if selected_index.is_none() => {
