@@ -6212,10 +6212,16 @@ impl<'a> CallChecker<'a> {
                 result
             }
             "accumulate" if selected_index.is_none() => {
-                if let Some(initial) = call.arguments.keywords.iter().find_map(|keyword| {
-                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
-                        .then_some(&keyword.value)
-                }) {
+                if let Some(initial) = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
+                            .then_some(&keyword.value)
+                    })
+                    .filter(|initial| !matches!(initial, Expr::NoneLiteral(_)))
+                {
                     self.unnamed_callable_signature(initial)
                 } else {
                     self.literal_iterable_callable_signature(first_named(0, "iterable")?)

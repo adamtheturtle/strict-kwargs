@@ -2240,14 +2240,19 @@ fn itertools_accumulate_initial_preserves_initial_callable_signature() {
     let messages = check_source(
         r"
 import itertools
-def item(value: str) -> None: ...
+def item(value: int, /) -> None: ...
 def initial() -> None: ...
 next(itertools.accumulate([item], initial=initial))(1)
+next(itertools.accumulate([item], initial=None))(1)
 ",
     );
     assert!(
         has_error_at(&messages, 5, "next() result"),
-        "expected accumulate-initial violation, got: {messages:?}"
+        "initial signature must reject the iterable positional: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 6, "next() result"),
+        "initial=None must preserve the iterable signature: {messages:?}"
     );
 }
 
