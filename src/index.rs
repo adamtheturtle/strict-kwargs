@@ -3606,7 +3606,7 @@ fn index_class_body(
                         value,
                         bindings,
                     );
-                    exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                    exclude_assigned_attribute(store, module_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
             }
@@ -3617,7 +3617,7 @@ fn index_class_body(
                 ..
             }) => {
                 if !synthesize_partialmethod(store, class_name, target, value, bindings) {
-                    exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                    exclude_assigned_attribute(store, module_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                     let synthesized_descriptor = synthesize_descriptor_attribute(
                         store,
@@ -3867,7 +3867,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         value,
                         &bindings,
                     );
-                    exclude_assigned_attribute(store, class_name, target, None);
+                    exclude_assigned_attribute(store, module_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
             }
@@ -3877,7 +3877,7 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                 value: Some(value),
                 ..
             }) => {
-                exclude_assigned_attribute(store, class_name, target, None);
+                exclude_assigned_attribute(store, module_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
                 let synthesized_descriptor = synthesize_descriptor_attribute(
                     store,
