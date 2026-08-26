@@ -1,0 +1,2 @@
+Preserve concrete callable elements returned by bound ``choice`` methods on
+immediate ``Random`` and ``SystemRandom`` instances.
