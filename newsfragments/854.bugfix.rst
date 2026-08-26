@@ -1,0 +1,2 @@
+Preserve callable signatures returned through directly imported aliases of
+``statistics.mode``.
