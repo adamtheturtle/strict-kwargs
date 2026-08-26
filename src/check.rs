@@ -6088,7 +6088,9 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
-            _ => self.resolve_callee(func),
+            _ => self
+                .resolve_callee(func)
+                .and_then(|mapper| self.concrete_callable_returns.get(&mapper).cloned()),
         }
     }
 
@@ -6100,7 +6102,9 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
-            _ => self.unnamed_callable_signature(func),
+            _ => self
+                .resolve_callee(func)
+                .and_then(|mapper| self.callable_returns.get(&mapper).cloned()),
         }
     }
 

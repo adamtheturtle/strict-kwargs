@@ -2500,6 +2500,33 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
     }
 }
 
+/// A named Pool mapper's result type, rather than the mapper's own call
+/// signature, determines whether mapped items are callable (issue #1083).
+#[test]
+fn pool_map_named_mapper_uses_return_callable_signature() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def ordinary(item: int) -> int: ...
+def target() -> None: ...
+def callable_item(item: int):
+    return target
+Pool(1).map(ordinary, [1])[0](unexpected=1)
+Pool(1).map(callable_item, [1])[0](1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"ordinary\"")),
+        "ordinary mapper must not become its result signature: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "expected callable-return violation, got: {messages:?}"
+    );
+}
+
 /// `Pool.apply` and `ApplyResult.get` preserve callback result callables
 /// (issues #520, #521).
 #[test]
