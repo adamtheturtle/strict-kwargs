@@ -6654,6 +6654,23 @@ secrets.choice((f,))(1)
     }
 }
 
+/// `random.choices` preserves homogeneous callable population elements
+/// through subscripting (issue #794).
+#[test]
+fn random_choices_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+def target(value: int) -> None: ...
+random.choices(population=[target], k=1)[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected random.choices violation, got: {messages:?}"
+    );
+}
+
 /// Directly imported aliases of `random.choice` and `secrets.choice` retain
 /// the selected callable's signature (issue #852).
 #[test]

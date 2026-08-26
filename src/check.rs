@@ -9202,12 +9202,12 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(module) = attribute.value.as_ref() else {
             return None;
         };
-        if attribute.attr.as_str() != "sample"
+        if !matches!(attribute.attr.as_str(), "sample" | "choices")
             || self.resolve_module(module.id.as_str()).as_deref() != Some("random")
         {
             return None;
         }
-        // ``sample(population, k)`` / ``sample(population, k=…)`` / ``sample(population=…, k=…)``.
+        // ``sample`` and ``choices`` both preserve their population's element type.
         let sequence = match &*call.arguments.args {
             [sequence] | [sequence, _] => sequence,
             [] => call.arguments.keywords.iter().find_map(|keyword| {
