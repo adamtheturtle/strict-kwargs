@@ -1634,6 +1634,25 @@ async def caller() -> None:
     );
 }
 
+/// Awaiting an async method preserves its callable return annotation just as
+/// awaiting a module-level factory does (issue #1141).
+#[test]
+fn awaited_method_callable_result_preserves_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Factory:
+    async def build(self) -> Callable[[int], None]: ...
+async def caller(factory: Factory) -> None:
+    (await factory.build())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "awaited result"),
+        "expected awaited-method result violation, got: {messages:?}"
+    );
+}
+
 /// Awaiting an item yielded by `asyncio.as_completed` preserves the concrete
 /// callable result of its source awaitables (issue #836).
 #[test]

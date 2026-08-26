@@ -8932,6 +8932,13 @@ impl<'a> CallChecker<'a> {
             self.callable_iterator_items
                 .insert(method_fullname.clone(), signature);
         }
+        if let Some(signature) = returns
+            .as_deref()
+            .and_then(Self::callable_annotation_signature)
+        {
+            self.callable_returns
+                .insert(method_fullname.clone(), signature);
+        }
         if let Some(Expr::Name(return_name)) = returns.as_deref() {
             if self
                 .class_type_params
