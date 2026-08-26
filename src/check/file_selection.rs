@@ -422,10 +422,9 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod file_selection_coverage {
-    use super::{
-        collect_python_files, collect_python_files_for_fix,
-        collect_python_files_with_project_inventory, FileSelection,
-    };
+    #[cfg(unix)]
+    use super::collect_python_files_with_project_inventory;
+    use super::{collect_python_files, collect_python_files_for_fix, FileSelection};
     use crate::config::Config;
     use std::path::Path;
 
