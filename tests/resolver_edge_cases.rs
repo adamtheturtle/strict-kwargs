@@ -586,6 +586,23 @@ collections.UserList((target,))[0](1)
     );
 }
 
+/// A mapping passed to `UserList` is iterated into its keys, not its values.
+#[test]
+fn userlist_mapping_subscript_resolves_callable_key() {
+    let messages = check_source(
+        r"
+from collections import UserList
+def key(value: int) -> None: ...
+def value(first: int, second: int) -> None: ...
+UserList({key: value})[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "key") && !has_error_at(&messages, 5, "value"),
+        "expected the UserList mapping key, got: {messages:?}"
+    );
+}
+
 /// `next` returns its concrete callable default when the iterator is
 /// statically empty (issue #952).
 #[test]
