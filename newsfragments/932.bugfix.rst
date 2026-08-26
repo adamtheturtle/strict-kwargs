@@ -1,0 +1,1 @@
+Preserve concrete callable values when subscripting an immediate ``MappingProxyType.copy()`` result.
