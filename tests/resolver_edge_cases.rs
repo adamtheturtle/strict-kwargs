@@ -160,6 +160,29 @@ C().bound(1)
     );
 }
 
+/// A `partialmethod` assignment in an uncertain branch does not replace the
+/// unconditional signature visible after the branch (issue #1151).
+#[test]
+fn conditional_partialmethod_does_not_overwrite_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, value: int) -> None: ...
+    def method(self, *args) -> None: ...
+    if enabled:
+        method = partialmethod(base)
+C().method(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "conditional partialmethod overwrote the unconditional signature: {messages:?}"
+    );
+}
+
 /// `del f` removes a local callable binding so later calls are not resolved
 /// against the deleted definition.
 #[test]
