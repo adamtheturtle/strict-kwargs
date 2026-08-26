@@ -1942,6 +1942,32 @@ identity(target)(1)
     );
 }
 
+/// A starred positional before a `TypeVar` slot makes that positional binding
+/// ambiguous; an explicit keyword for the same slot remains deterministic
+/// (issue #1135).
+#[test]
+fn generic_return_declines_positions_after_starred_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def select(prefix: object, value: T) -> T: ...
+def target(value: int) -> None: ...
+args = [object()]
+select(*args, target)(1)
+select(*args, value=target)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred positional mapping must remain unresolved: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result"),
+        "explicit TypeVar keyword must still resolve: {messages:?}"
+    );
+}
+
 /// Generic instance method returns substitute class type arguments (issue #522).
 #[test]
 fn generic_instance_method_return_substitutes_callable_type_arg() {
@@ -2250,6 +2276,24 @@ next(chain_items([target]))(1)
     );
 }
 
+/// Empty literal iterables contribute no values to `chain` and therefore do
+/// not erase the signature supplied by a later non-empty iterable (issue
+/// #1133).
+#[test]
+fn itertools_chain_skips_empty_literal_iterables() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain([], (), [target], set()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chained callable violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]
@@ -2271,6 +2315,29 @@ next(itertools.islice([f], 1))(1)
             "expected itertools filter-helper violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// The first item from `accumulate(..., initial=...)` is the initial value,
+/// not an item from the iterable (issue #1077).
+#[test]
+fn itertools_accumulate_initial_preserves_initial_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def item(value: int, /) -> None: ...
+def initial() -> None: ...
+next(itertools.accumulate([item], initial=initial))(1)
+next(itertools.accumulate([item], initial=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "initial signature must reject the iterable positional: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 6, "next() result"),
+        "initial=None must preserve the iterable signature: {messages:?}"
+    );
 }
 
 /// `itertools.compress` names its filtered input `data`, not `iterable`

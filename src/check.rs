@@ -4538,8 +4538,15 @@ impl<'a> CallChecker<'a> {
         name: &str,
     ) -> Option<&'b Expr> {
         index
+            .filter(|index| {
+                !call
+                    .arguments
+                    .args
+                    .iter()
+                    .take(index + 1)
+                    .any(Expr::is_starred_expr)
+            })
             .and_then(|index| call.arguments.args.get(index))
-            .filter(|argument| !argument.is_starred_expr())
             .or_else(|| {
                 call.arguments.keywords.iter().find_map(|keyword| {
                     (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
@@ -6232,6 +6239,9 @@ impl<'a> CallChecker<'a> {
             "chain" if selected_index.is_none() => {
                 let mut result = None;
                 for iterable in &call.arguments.args {
+                    if definite_empty_iterable(iterable) {
+                        continue;
+                    }
                     let signature = self.literal_iterable_callable_signature(iterable)?;
                     if result
                         .as_ref()
@@ -6243,7 +6253,23 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "accumulate" | "islice" if selected_index.is_none() => {
+            "accumulate" if selected_index.is_none() => {
+                if let Some(initial) = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
+                            .then_some(&keyword.value)
+                    })
+                    .filter(|initial| !matches!(initial, Expr::NoneLiteral(_)))
+                {
+                    self.unnamed_callable_signature(initial)
+                } else {
+                    self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+                }
+            }
+            "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
             "compress" if selected_index.is_none() => {
