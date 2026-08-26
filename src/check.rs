@@ -5411,10 +5411,19 @@ impl<'a> CallChecker<'a> {
         if let Expr::Call(copy_call) = value {
             if copy_call.arguments.is_empty() {
                 if let Expr::Attribute(method) = copy_call.func.as_ref() {
-                    if method.attr.as_str() == "copy"
-                        && matches!(method.value.as_ref(), Expr::List(_) | Expr::Dict(_))
-                    {
-                        return self.resolve_literal_container_item(&method.value, slice);
+                    if method.attr.as_str() == "copy" {
+                        if matches!(method.value.as_ref(), Expr::List(_) | Expr::Dict(_)) {
+                            return self.resolve_literal_container_item(&method.value, slice);
+                        }
+                        if let Expr::Call(constructor) = method.value.as_ref() {
+                            if self
+                                .class_from_constructor_func(&constructor.func)
+                                .as_deref()
+                                == Some("types.MappingProxyType")
+                            {
+                                return self.resolve_literal_container_item(&method.value, slice);
+                            }
+                        }
                     }
                 }
             }
@@ -5460,9 +5469,8 @@ impl<'a> CallChecker<'a> {
                 }
             }
             let factory = self.resolve_callee(&wrapper.func)?;
-            if Self::normalize_factory_fullname(&factory) == "collections.defaultdict"
-                && wrapper.arguments.keywords.is_empty()
-            {
+            let factory = Self::normalize_factory_fullname(&factory);
+            if factory == "collections.defaultdict" && wrapper.arguments.keywords.is_empty() {
                 let [Expr::Lambda(default_factory)] = &*wrapper.arguments.args else {
                     return None;
                 };
@@ -5475,12 +5483,20 @@ impl<'a> CallChecker<'a> {
                 }
             }
             if matches!(
-                Self::normalize_factory_fullname(&factory),
-                "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
-            ) && wrapper.arguments.keywords.is_empty()
-            {
-                let [mapping] = &*wrapper.arguments.args else {
-                    return None;
+                factory,
+                "collections.ChainMap"
+                    | "collections.OrderedDict"
+                    | "collections.UserDict"
+                    | "types.MappingProxyType"
+            ) {
+                let mapping = match &*wrapper.arguments.args {
+                    [mapping] if wrapper.arguments.keywords.is_empty() => mapping,
+                    [] if factory == "types.MappingProxyType"
+                        && wrapper.arguments.keywords.len() == 1 =>
+                    {
+                        &wrapper.arguments.find_keyword("mapping")?.value
+                    }
+                    _ => return None,
                 };
                 return self.resolve_literal_container_item(mapping, slice);
             }
@@ -7043,6 +7059,34 @@ impl<'a> CallChecker<'a> {
         };
         if method.attr.as_str() != "get" {
             return None;
+        }
+        if let Expr::Call(constructor) = method.value.as_ref() {
+            if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "types.MappingProxyType"
+            {
+                return None;
+            }
+            let [key] = &*get_call.arguments.args else {
+                return None;
+            };
+            let mapping = constructor.arguments.args.first().or_else(|| {
+                constructor
+                    .arguments
+                    .find_keyword("mapping")
+                    .map(|keyword| &keyword.value)
+            })?;
+            let Expr::Dict(dict) = mapping else {
+                return None;
+            };
+            if !dict.items.iter().all(|item| item.key.is_some()) {
+                return None;
+            }
+            let item = dict.items.iter().rev().find(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            })?;
+            return self.unnamed_callable_signature(&item.value);
         }
         let Expr::Name(mapping) = method.value.as_ref() else {
             return None;
