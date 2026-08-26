@@ -160,6 +160,25 @@ C().bound(1)
     );
 }
 
+/// Annotating a class attribute assigned from `partialmethod` does not prevent
+/// synthesis of its remaining bound-method signature (issue #1150).
+#[test]
+fn annotated_partialmethod_preserves_remaining_method_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, required: int, /, value: int) -> None: ...
+    method: object = partialmethod(base, 0)
+C().method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "method"),
+        "expected annotated partialmethod violation, got: {messages:?}"
+    );
+}
+
 /// A `partialmethod` assignment in an uncertain branch does not replace the
 /// unconditional signature visible after the branch (issue #1151).
 #[test]
@@ -653,6 +672,28 @@ sorted({f}, key=id)[0](1)
     }
 }
 
+/// The multi-argument forms of `min` and `max` select among their positional
+/// arguments; they do not select an element from the first argument (#1156).
+#[test]
+fn min_max_multi_argument_forms_do_not_use_first_iterable_element() {
+    let messages = check_source(
+        r"
+def narrow(value: int) -> None: ...
+def broad(*args) -> None: ...
+min([narrow], broad)(1)
+max((narrow,), broad)(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "multi-argument selector used first iterable element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
@@ -1033,6 +1074,24 @@ namespace.call(1)
     );
 }
 
+/// An annotation on a `SimpleNamespace` binding does not suppress its
+/// synthesized callable keyword attributes (issue #1155).
+#[test]
+fn annotated_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def target(value: int) -> None: ...
+namespace: SimpleNamespace = SimpleNamespace(call=target)
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected annotated namespace callable violation, got: {messages:?}"
+    );
+}
+
 /// Literal dictionary unpacking into `SimpleNamespace` preserves a concrete
 /// callable attribute for inline and assigned instances (issue #971).
 #[test]
@@ -1219,6 +1278,29 @@ Holder(call=f).call(1)
     assert!(
         has_error_at(&messages, 8, "f"),
         "expected dataclass field violation, got: {messages:?}"
+    );
+}
+
+/// Constructor keywords are treated as stored dataclass fields only when the
+/// indexed field model synthesized the constructor (issue #1154).
+#[test]
+fn handwritten_dataclass_init_keyword_is_not_a_stored_field() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+@dataclass
+class C:
+    def __init__(self, call) -> None: ...
+    def call(self, *args) -> None: ...
+def strict(value: int) -> None: ...
+C(call=strict).call(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "custom init keyword was treated as a stored field: {messages:?}"
     );
 }
 
@@ -1430,6 +1512,44 @@ attrgetter("call")(SimpleNamespace(call=f))(1)
     );
 }
 
+/// Constructor keywords are not generally instance attributes; for example,
+/// `dict(get=f)` still exposes `dict.get`, not `f` (issue #1153).
+#[test]
+fn attrgetter_does_not_trust_arbitrary_constructor_keywords() {
+    let messages = check_source(
+        r#"
+from operator import attrgetter
+def strict(value: int) -> None: ...
+attrgetter("get")(dict(get=strict))(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:4:")),
+        "constructor keyword was treated as an attribute: {messages:?}"
+    );
+}
+
+/// Functional namedtuple constructor keywords are modeled instance fields and
+/// retain their callable values through `attrgetter` (review on #1228).
+#[test]
+fn attrgetter_preserves_functional_namedtuple_keyword_field() {
+    let messages = check_source(
+        r#"
+from collections import namedtuple
+from operator import attrgetter
+Holder = namedtuple("Holder", ["call"])
+def strict(value: int) -> None: ...
+attrgetter("call")(Holder(call=strict))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "strict"),
+        "expected functional namedtuple attrgetter violation: {messages:?}"
+    );
+}
+
 /// `itemgetter` consumes its operand positionally but preserves a statically
 /// selected literal container element's callable signature (issue #376).
 #[test]
@@ -1451,6 +1571,32 @@ itemgetter(-1)((f,))(1)
         has_error_at(&messages, 4, "f") && has_error_at(&messages, 5, "f"),
         "expected both itemgetter result violations, got: {messages:?}"
     );
+}
+
+/// Starred literal elements make runtime offsets unknowable from AST element
+/// positions, so `itemgetter` result inference must decline (issue #1152).
+#[test]
+fn itemgetter_declines_starred_literal_sequences() {
+    let messages = check_source(
+        r"
+from operator import itemgetter
+def strict(value: int) -> None: ...
+def permissive(*args) -> None: ...
+values = [permissive, permissive]
+itemgetter(1)([*values, strict])(1)
+itemgetter(-2)((strict, *values))(1)
+itemgetter(0)([*values, strict][1:])(1)
+itemgetter(0)((*values, strict)[1:])(1)
+",
+    );
+    for line in [6, 7, 8, 9] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "starred sequence used static AST position on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// `itemgetter` preserves a callable value selected from a literal dictionary
@@ -1487,6 +1633,35 @@ factory()(1)
         has_error_at(&messages, 6, "__call__"),
         "expected typed factory-result violation, got: {messages:?}"
     );
+}
+
+/// Redefining or assigning over a typed factory clears its recorded callable
+/// result class (issue #1149).
+#[test]
+fn callable_factory_result_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def redefined() -> C: ...
+def redefined() -> object: ...
+redefined()(1)
+def assigned() -> C: ...
+assigned = lambda: object()
+assigned()(1)
+def annotated() -> C: ...
+annotated: object = lambda: object()
+annotated()(1)
+",
+    );
+    for line in [6, 9, 12] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "stale callable factory survived rebind on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// Calling an async factory produces a coroutine rather than its annotated
@@ -2194,6 +2369,45 @@ choose(f, g)(1)
         has_error_at(&messages, 8, "generic result")
             && has_error_at(&messages, 9, "generic result"),
         "expected generic-result violations, got: {messages:?}"
+    );
+}
+
+/// An omitted defaulted parameter sharing the return `TypeVar` does not erase
+/// the callable shape supplied by another argument (issue #1137).
+#[test]
+fn generic_return_skips_omitted_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+choose(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "expected defaulted generic-result violation, got: {messages:?}"
+    );
+}
+
+/// A starred argument can fill a defaulted `TypeVar` slot, so it is ambiguous
+/// rather than equivalent to omitting that parameter (review on #1212).
+#[test]
+fn generic_return_declines_starred_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+args = [target]
+choose(target, *args)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred defaulted argument must decline inference: {messages:?}"
     );
 }
 

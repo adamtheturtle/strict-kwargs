@@ -1507,7 +1507,7 @@ struct LocalFunction {
 
 #[derive(Debug, Clone)]
 struct GenericReturn {
-    parameters: Vec<(Option<usize>, String)>,
+    parameters: Vec<(Option<usize>, String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -4427,11 +4427,10 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
-        names
-            .contains(&fullname.as_str())
-            .then(|| call.arguments.args.first())
-            .flatten()
-            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+        if !names.contains(&fullname.as_str()) || call.arguments.args.len() != 1 {
+            return None;
+        }
+        self.homogeneous_literal_callable(call.arguments.args.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4462,13 +4461,23 @@ impl<'a> CallChecker<'a> {
             .enumerate()
             .filter_map(|(index, parameter)| {
                 let annotation = parameter.parameter.annotation.as_deref()?;
-                (self.source[annotation.range()].trim() == return_text)
-                    .then(|| (Some(index), parameter.parameter.name.to_string()))
+                (self.source[annotation.range()].trim() == return_text).then(|| {
+                    (
+                        Some(index),
+                        parameter.parameter.name.to_string(),
+                        parameter.default.is_some(),
+                    )
+                })
             });
         let keyword_only = parameters.kwonlyargs.iter().filter_map(|parameter| {
             let annotation = parameter.parameter.annotation.as_deref()?;
-            (self.source[annotation.range()].trim() == return_text)
-                .then(|| (None, parameter.parameter.name.to_string()))
+            (self.source[annotation.range()].trim() == return_text).then(|| {
+                (
+                    None,
+                    parameter.parameter.name.to_string(),
+                    parameter.default.is_some(),
+                )
+            })
         });
         let matching = positional.chain(keyword_only).collect::<Vec<_>>();
         (!matching.is_empty()).then_some(GenericReturn {
@@ -4488,18 +4497,18 @@ impl<'a> CallChecker<'a> {
     fn known_stdlib_generic_return(factory: &str) -> Option<GenericReturn> {
         match Self::normalize_factory_fullname(factory) {
             "copy.copy" | "copy.deepcopy" => Some(GenericReturn {
-                parameters: vec![(Some(0), "x".to_string())],
+                parameters: vec![(Some(0), "x".to_string(), false)],
             }),
             "contextlib.closing" | "contextlib.aclosing" => Some(GenericReturn {
-                parameters: vec![(Some(0), "thing".to_string())],
+                parameters: vec![(Some(0), "thing".to_string(), false)],
             }),
             "contextlib.redirect_stdout"
             | "contextlib.redirect_stderr"
             | "contextlib._RedirectStream" => Some(GenericReturn {
-                parameters: vec![(Some(0), "new_target".to_string())],
+                parameters: vec![(Some(0), "new_target".to_string(), false)],
             }),
             "contextlib.nullcontext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "enter_result".to_string())],
+                parameters: vec![(Some(0), "enter_result".to_string(), false)],
             }),
             "contextlib._BaseExitStack.enter_context"
             | "contextlib.ExitStack.enter_context"
@@ -4512,10 +4521,10 @@ impl<'a> CallChecker<'a> {
             | "unittest.TestCase.enterClassContext"
             | "unittest.async_case.IsolatedAsyncioTestCase.enterAsyncContext"
             | "unittest.IsolatedAsyncioTestCase.enterAsyncContext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "cm".to_string())],
+                parameters: vec![(Some(0), "cm".to_string(), false)],
             }),
             "contextlib.ContextDecorator.__call__" => Some(GenericReturn {
-                parameters: vec![(Some(0), "func".to_string())],
+                parameters: vec![(Some(0), "func".to_string(), false)],
             }),
             _ => None,
         }
@@ -4559,6 +4568,25 @@ impl<'a> CallChecker<'a> {
                         .then_some(&keyword.value)
                 })
             })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generic_argument_is_ambiguous(
+        call: &ast::ExprCall,
+        index: Option<usize>,
+        name: &str,
+    ) -> bool {
+        index.is_some_and(|index| {
+            call.arguments
+                .args
+                .iter()
+                .take(index + 1)
+                .any(Expr::is_starred_expr)
+        }) && !call
+            .arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4639,8 +4667,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<String> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
+                    continue;
+                }
+                return None;
+            };
             let callable = if name == "cm" {
                 self.context_manager_enter_callable(argument)?
             } else {
@@ -4664,8 +4697,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<Signature> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
+                    continue;
+                }
+                return None;
+            };
             let signature = if name == "cm" {
                 self.context_manager_enter_signature(argument)?
             } else {
@@ -4724,7 +4762,7 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&call.func)?;
         let generic = self.context_decorator_generic_return(&factory)?;
-        let (index, name) = generic.parameters.first()?;
+        let (index, name, _) = generic.parameters.first()?;
         let argument = Self::generic_argument(call, *index, name)?;
         self.resolve_callee(argument)
     }
@@ -5278,10 +5316,16 @@ impl<'a> CallChecker<'a> {
         }
         match value {
             Expr::List(list) => {
+                if list.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
             }
             Expr::Tuple(tuple) => {
+                if tuple.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
             }
@@ -5300,6 +5344,9 @@ impl<'a> CallChecker<'a> {
                     }
                     _ => return None,
                 };
+                if left.iter().chain(right).any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let len = left.len().checked_add(right.len())?;
                 let index = Self::literal_sequence_index(slice, len)?;
                 let element = if index < left.len() {
@@ -5318,6 +5365,9 @@ impl<'a> CallChecker<'a> {
                     Expr::Tuple(tuple) => tuple.elts.as_slice(),
                     _ => return None,
                 };
+                if elements.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
                 self.resolve_callee(&elements[index])
             }
@@ -7275,7 +7325,11 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let class_fullname = self.class_from_constructor_func(&constructor.func)?;
-        if !self.index.is_dataclass(&class_fullname) {
+        if !self
+            .index
+            .is_synthesized(&format!("{class_fullname}.__init__"))
+            || !self.index.is_dataclass_runtime_field(&class_fullname, attr)
+        {
             return None;
         }
         let field = constructor.arguments.find_keyword(attr)?;
@@ -7429,11 +7483,15 @@ impl<'a> CallChecker<'a> {
         if let Expr::Name(receiver) = receiver {
             return self.resolve_bound_callable_attribute(receiver.id.as_str(), attribute);
         }
-        let Expr::Call(constructor) = receiver else {
+        let Expr::Call(_) = receiver else {
             return None;
         };
-        let field = constructor.arguments.find_keyword(attribute)?;
-        self.resolve_callee(&field.value)
+        self.simple_namespace_callable_attributes(receiver)
+            .into_iter()
+            .find_map(|(name, callable)| (name == attribute).then_some(callable))
+            .or_else(|| self.dataclass_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_keyword_field_callable(receiver, attribute))
     }
 
     // Covered end-to-end for positive and negative indices; malformed getter
@@ -9804,6 +9862,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.invalidate_bound_callable_targets(target);
                         self.invalidate_globals_subscript_target(target);
                     } else if let Expr::Name(name) = target {
+                        self.callable_factory_returns.remove(&format!(
+                            "{}.{}",
+                            self.current_lexical_scope(),
+                            name.id
+                        ));
                         self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
@@ -10046,11 +10109,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 if let Expr::Name(name) = &**target {
+                    self.callable_factory_returns.remove(&format!(
+                        "{}.{}",
+                        self.current_lexical_scope(),
+                        name.id
+                    ));
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -10058,6 +10127,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                        for (attribute, callable) in &namespace_attributes {
+                            self.define(
+                                &format!("{}.{}", name.id.as_str(), attribute),
+                                callable.clone(),
+                            );
+                        }
                     } else if is_callable_attribute_alias || is_lambda {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
