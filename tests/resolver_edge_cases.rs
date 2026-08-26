@@ -2233,6 +2233,23 @@ next(itertools.islice([f], 1))(1)
     }
 }
 
+/// `itertools.compress` names its filtered input `data`, not `iterable`
+/// (issue #1076).
+#[test]
+fn itertools_compress_data_keyword_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.compress(data=[f], selectors=[True]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected compress data-keyword violation, got: {messages:?}"
+    );
+}
+
 /// Combinatoric itertools helpers preserve callable tuple-element types
 /// (issue #449).
 #[test]
@@ -2525,6 +2542,26 @@ Pool(1).map(callable_item, [1])[0](1)
         has_error_at(&messages, 8, "target"),
         "expected callable-return violation, got: {messages:?}"
     );
+}
+
+/// Pool mapping helpers return homogeneous lists, so every literal index can
+/// preserve the callback result signature (issue #1082).
+#[test]
+fn pool_map_results_preserve_callable_at_nonzero_indices() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def target(value: int) -> None: ...
+Pool(1).map(func=lambda _: target, iterable=[None, None])[1](1)
+Pool(1).starmap_async(func=lambda: target, iterable=[(), ()]).get()[-2](1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected pool-map violation on line {line}, got: {messages:?}"
+        );
+    }
 }
 
 /// `Pool.apply` and `ApplyResult.get` preserve callback result callables
