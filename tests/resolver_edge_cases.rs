@@ -567,6 +567,28 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// `next` returns its concrete callable default when the iterator is
+/// statically empty (issue #952).
+#[test]
+fn next_empty_iterator_preserves_callable_default() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def present(first: int, second: int) -> None: ...
+next(iter([]), target)(1)
+next(iter([present]), target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected next-default violation, got: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 5, "target"),
+        "did not expect the default for a nonempty iterator, got: {messages:?}"
+    );
+}
+
 /// Explicit sequence iterator protocol calls preserve homogeneous concrete
 /// callable elements (issue #948).
 #[test]
@@ -585,6 +607,54 @@ def target(value: int) -> None: ...
             "expected explicit iterator violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// Calling `__next__` explicitly on a built-in iterator preserves its
+/// homogeneous concrete callable element (issue #949).
+#[test]
+fn explicit_builtin_iterator_next_preserves_callable_element() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+iter([target]).__next__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit built-in iterator violation, got: {messages:?}"
+    );
+}
+
+/// Explicit dict-values iterator protocol calls preserve homogeneous concrete
+/// callable values (issue #950).
+#[test]
+fn explicit_dict_values_iterator_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"x": target}.values().__iter__().__next__()(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit dict-values iterator violation, got: {messages:?}"
+    );
+}
+
+/// Explicit dict-items iterator protocol calls preserve homogeneous concrete
+/// callable values selected from tuple position one (issue #951).
+#[test]
+fn explicit_dict_items_iterator_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"x": target}.items().__iter__().__next__()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit dict-items iterator violation, got: {messages:?}"
+    );
 }
 
 /// Concatenated literal sequences retain the concrete callable selected from
@@ -1436,6 +1506,28 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected getattr(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
+/// `getattr` returns its concrete callable default when an inline namespace
+/// provably lacks the requested attribute (issue #954).
+#[test]
+fn getattr_missing_simple_namespace_attribute_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+import types
+def target(value: int) -> None: ...
+getattr(types.SimpleNamespace(other=target), "missing", target)(1)
+getattr(types.SimpleNamespace(callback=target), "callback", print)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected getattr default violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected present attribute to win over default, got: {messages:?}"
     );
 }
 
@@ -3394,6 +3486,57 @@ next(iter(OrderedDict({"x": target}).values()))(1)
     assert!(
         has_error_at(&messages, 4, "next() result"),
         "expected OrderedDict values violation, got: {messages:?}"
+    );
+}
+
+/// Iterating an immediate `UserDict`'s values preserves a concrete callable
+/// value shape (issue #926).
+#[test]
+fn user_dict_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import UserDict
+def target(value: int) -> None: ...
+next(iter(UserDict({"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected UserDict values violation, got: {messages:?}"
+    );
+}
+
+/// Iterating a single-mapping immediate `ChainMap`'s values preserves a
+/// concrete callable value shape (issue #928).
+#[test]
+fn chain_map_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+next(iter(ChainMap({"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected ChainMap values violation, got: {messages:?}"
+    );
+}
+
+/// Iterating an immediate `MappingProxyType`'s values preserves a concrete
+/// callable value shape (issue #931).
+#[test]
+fn mapping_proxy_values_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+next(iter(MappingProxyType(mapping={"x": target}).values()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected MappingProxyType values violation, got: {messages:?}"
     );
 }
 
@@ -5908,6 +6051,23 @@ functools.update_wrapper(wrapper=target, wrapped=target)(1)
     );
 }
 
+/// Dispatching from a freshly constructed inline singledispatch wrapper
+/// returns its concrete default implementation (issue #964).
+#[test]
+fn inline_singledispatch_dispatch_preserves_default_implementation() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.singledispatch(func=target).dispatch(cls=object)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "inline singledispatch.dispatch must preserve its default: {messages:?}"
+    );
+}
+
 /// `unittest.mock.create_autospec` preserves the concrete function signature
 /// it enforces on the returned callable mock (issue #967).
 #[test]
@@ -7428,6 +7588,66 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     assert!(
         messages.iter().any(|message| message.contains("target")),
         "property.fget result must preserve callee: {messages:?}"
+    );
+}
+
+/// A property with one unconditional concrete callable return preserves that
+/// callable when read from a freshly constructed instance (issue #959).
+#[test]
+fn property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+class Owner:
+    @property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "property body return must preserve its callable: {messages:?}"
+    );
+}
+
+/// Inherited properties preserve the concrete callable returned by their
+/// defining method.
+#[test]
+fn inherited_property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+class Parent:
+    @property
+    def callback(self) -> object:
+        return target
+class Child(Parent): pass
+Child().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "inherited property must preserve its callable: {messages:?}"
+    );
+}
+
+/// A property return expression that merely resolves to a non-callable name
+/// must retain the normal property-call skip.
+#[test]
+fn non_callable_property_body_return_remains_skipped() {
+    let messages = check_source(
+        r"
+class Owner:
+    @property
+    def label(self) -> object:
+        return self._label
+Owner().label(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "non-callable property return must remain skipped: {messages:?}"
     );
 }
 
