@@ -1,0 +1,2 @@
+Preserve concrete callable values returned by ``get`` on an inline
+``MappingProxyType`` around a literal dictionary.
