@@ -1,0 +1,2 @@
+Preserve concrete callable defaults returned by ``OrderedDict.setdefault``
+when an immediate mapping is known to be empty.
