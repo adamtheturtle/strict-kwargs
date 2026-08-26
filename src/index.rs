@@ -1950,6 +1950,17 @@ fn collect_scoped(
     out: &mut Collected,
 ) {
     for stmt in stmts {
+        let assigned_value = match stmt {
+            Stmt::Assign(ast::StmtAssign { value, .. })
+            | Stmt::AnnAssign(ast::StmtAnnAssign {
+                value: Some(value), ..
+            }) => Some(value.as_ref()),
+            _ => None,
+        };
+        out.has_partialmethod_candidates |= matches!(
+            assigned_value,
+            Some(Expr::Call(call)) if callee_tail(&call.func) == Some("partialmethod")
+        );
         match stmt {
             Stmt::Import(ast::StmtImport { names, .. }) => {
                 for alias in names {
@@ -2045,12 +2056,6 @@ fn collect_scoped(
                         }
                     }
                 }
-            }
-            Stmt::Assign(ast::StmtAssign { value, .. }) => {
-                out.has_partialmethod_candidates |= matches!(
-                    value.as_ref(),
-                    Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
-                );
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -3611,9 +3616,11 @@ fn index_class_body(
                 value: Some(value),
                 ..
             }) => {
-                exclude_assigned_attribute(store, class_name, target, Some(bindings));
-                exclude_assigned_name(store, class_name, target, value);
-                index_callable_field(store, class_name, target, annotation);
+                if !synthesize_partialmethod(store, class_name, target, value, bindings) {
+                    exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                    exclude_assigned_name(store, class_name, target, value);
+                    index_callable_field(store, class_name, target, annotation);
+                }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,

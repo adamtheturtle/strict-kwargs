@@ -160,6 +160,25 @@ C().bound(1)
     );
 }
 
+/// Annotating a class attribute assigned from `partialmethod` does not prevent
+/// synthesis of its remaining bound-method signature (issue #1150).
+#[test]
+fn annotated_partialmethod_preserves_remaining_method_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, required: int, /, value: int) -> None: ...
+    method: object = partialmethod(base, 0)
+C().method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "method"),
+        "expected annotated partialmethod violation, got: {messages:?}"
+    );
+}
+
 /// A `partialmethod` assignment in an uncertain branch does not replace the
 /// unconditional signature visible after the branch (issue #1151).
 #[test]
@@ -684,6 +703,28 @@ sorted([narrow])[2](1)
     }
 }
 
+/// The multi-argument forms of `min` and `max` select among their positional
+/// arguments; they do not select an element from the first argument (#1156).
+#[test]
+fn min_max_multi_argument_forms_do_not_use_first_iterable_element() {
+    let messages = check_source(
+        r"
+def narrow(value: int) -> None: ...
+def broad(*args) -> None: ...
+min([narrow], broad)(1)
+max((narrow,), broad)(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "multi-argument selector used first iterable element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
@@ -1001,6 +1042,51 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter()` accepts tracked instance bindings and annotated instance
+/// parameters, not only inline constructor expressions (issue #1143).
+#[test]
+fn bound_instance_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+c = C()
+next(iter(c))(1)
+def consume(value: C) -> None:
+    next(iter(value))(1)
+",
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected bound-instance __iter__ violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// An opaque inner binding shadows an outer tracked instance when resolving
+/// `iter()` receivers (review on #1218).
+#[test]
+fn shadowed_instance_does_not_supply_dunder_iter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+value = C()
+def consume(value: object) -> None:
+    next(iter(value))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "outer instance leaked through shadowing parameter: {messages:?}"
+    );
+}
+
 /// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
 /// before looking up its callable item annotation (issue #1142).
 #[test]
@@ -1061,6 +1147,24 @@ namespace.call(1)
             .iter()
             .any(|message| message.starts_with("main:7:")),
         "rebinding must clear synthesized attributes: {messages:?}"
+    );
+}
+
+/// An annotation on a `SimpleNamespace` binding does not suppress its
+/// synthesized callable keyword attributes (issue #1155).
+#[test]
+fn annotated_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r"
+from types import SimpleNamespace
+def target(value: int) -> None: ...
+namespace: SimpleNamespace = SimpleNamespace(call=target)
+namespace.call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected annotated namespace callable violation, got: {messages:?}"
     );
 }
 
@@ -1605,6 +1709,35 @@ factory()(1)
         has_error_at(&messages, 6, "__call__"),
         "expected typed factory-result violation, got: {messages:?}"
     );
+}
+
+/// Redefining or assigning over a typed factory clears its recorded callable
+/// result class (issue #1149).
+#[test]
+fn callable_factory_result_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def redefined() -> C: ...
+def redefined() -> object: ...
+redefined()(1)
+def assigned() -> C: ...
+assigned = lambda: object()
+assigned()(1)
+def annotated() -> C: ...
+annotated: object = lambda: object()
+annotated()(1)
+",
+    );
+    for line in [6, 9, 12] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "stale callable factory survived rebind on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// Calling an async factory produces a coroutine rather than its annotated

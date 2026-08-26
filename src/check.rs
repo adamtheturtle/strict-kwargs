@@ -2159,6 +2159,22 @@ impl<'a> CallChecker<'a> {
             .and_then(|annotation| self.class_from_annotation(annotation))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_instance_binding(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(fullname) = scope.names.get(name) {
+                return scope.instances.contains(name).then(|| fullname.clone());
+            }
+            if let Some(annotation) = scope.annotations.get(name) {
+                return self.class_from_annotation(annotation);
+            }
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -4427,11 +4443,10 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
-        names
-            .contains(&fullname.as_str())
-            .then(|| call.arguments.args.first())
-            .flatten()
-            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+        if !names.contains(&fullname.as_str()) || call.arguments.args.len() != 1 {
+            return None;
+        }
+        self.homogeneous_literal_callable(call.arguments.args.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7230,7 +7245,12 @@ impl<'a> CallChecker<'a> {
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
-            let class_fullname = self.class_from_constructor(receiver)?;
+            let class_fullname = self.class_from_constructor(receiver).or_else(|| {
+                let Expr::Name(name) = receiver else {
+                    return None;
+                };
+                self.class_from_instance_binding(name.id.as_str())
+            })?;
             let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
@@ -9875,6 +9895,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.invalidate_bound_callable_targets(target);
                         self.invalidate_globals_subscript_target(target);
                     } else if let Expr::Name(name) = target {
+                        self.callable_factory_returns.remove(&format!(
+                            "{}.{}",
+                            self.current_lexical_scope(),
+                            name.id
+                        ));
                         self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
@@ -10117,11 +10142,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 if let Expr::Name(name) = &**target {
+                    self.callable_factory_returns.remove(&format!(
+                        "{}.{}",
+                        self.current_lexical_scope(),
+                        name.id
+                    ));
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -10129,6 +10160,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                        for (attribute, callable) in &namespace_attributes {
+                            self.define(
+                                &format!("{}.{}", name.id.as_str(), attribute),
+                                callable.clone(),
+                            );
+                        }
                     } else if is_callable_attribute_alias || is_lambda {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
