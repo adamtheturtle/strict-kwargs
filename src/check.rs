@@ -9470,12 +9470,12 @@ impl<'a> CallChecker<'a> {
         if class != "collections.Counter" {
             return None;
         }
-        let iterable = constructor.arguments.args.first().or_else(|| {
-            constructor.arguments.keywords.iter().find_map(|keyword| {
-                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
-                    .then_some(&keyword.value)
-            })
-        })?;
+        let [iterable] = &*constructor.arguments.args else {
+            return None;
+        };
+        if !constructor.arguments.keywords.is_empty() {
+            return None;
+        }
         self.homogeneous_callable_sequence(iterable)
             .or_else(|| self.homogeneous_callable_mapping_keys(iterable))
     }
