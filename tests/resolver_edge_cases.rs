@@ -1453,6 +1453,44 @@ attrgetter("call")(SimpleNamespace(call=f))(1)
     );
 }
 
+/// Constructor keywords are not generally instance attributes; for example,
+/// `dict(get=f)` still exposes `dict.get`, not `f` (issue #1153).
+#[test]
+fn attrgetter_does_not_trust_arbitrary_constructor_keywords() {
+    let messages = check_source(
+        r#"
+from operator import attrgetter
+def strict(value: int) -> None: ...
+attrgetter("get")(dict(get=strict))(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:4:")),
+        "constructor keyword was treated as an attribute: {messages:?}"
+    );
+}
+
+/// Functional namedtuple constructor keywords are modeled instance fields and
+/// retain their callable values through `attrgetter` (review on #1228).
+#[test]
+fn attrgetter_preserves_functional_namedtuple_keyword_field() {
+    let messages = check_source(
+        r#"
+from collections import namedtuple
+from operator import attrgetter
+Holder = namedtuple("Holder", ["call"])
+def strict(value: int) -> None: ...
+attrgetter("call")(Holder(call=strict))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "strict"),
+        "expected functional namedtuple attrgetter violation: {messages:?}"
+    );
+}
+
 /// `itemgetter` consumes its operand positionally but preserves a statically
 /// selected literal container element's callable signature (issue #376).
 #[test]

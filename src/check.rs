@@ -7472,11 +7472,15 @@ impl<'a> CallChecker<'a> {
         if let Expr::Name(receiver) = receiver {
             return self.resolve_bound_callable_attribute(receiver.id.as_str(), attribute);
         }
-        let Expr::Call(constructor) = receiver else {
+        let Expr::Call(_) = receiver else {
             return None;
         };
-        let field = constructor.arguments.find_keyword(attribute)?;
-        self.resolve_callee(&field.value)
+        self.simple_namespace_callable_attributes(receiver)
+            .into_iter()
+            .find_map(|(name, callable)| (name == attribute).then_some(callable))
+            .or_else(|| self.dataclass_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_keyword_field_callable(receiver, attribute))
     }
 
     // Covered end-to-end for positive and negative indices; malformed getter
