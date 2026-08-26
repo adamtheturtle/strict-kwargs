@@ -1,0 +1,2 @@
+Preserve concrete callable elements captured by statically determined starred
+destructuring targets.

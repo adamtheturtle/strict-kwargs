@@ -1,0 +1,1 @@
+Ensure rebinding or deleting a specialized ``ContextVar`` clears its callable-value metadata.
