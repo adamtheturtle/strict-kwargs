@@ -5410,10 +5410,13 @@ impl<'a> CallChecker<'a> {
         let mut keys: Vec<&Expr> = Vec::new();
         for item in &dict.items {
             let key = item.key.as_ref()?;
-            if !keys
-                .iter()
-                .any(|existing| Self::same_literal_key(existing, key))
-            {
+            let resolved_key = self.resolve_callee(key);
+            if !keys.iter().any(|existing| {
+                Self::same_literal_key(existing, key)
+                    || resolved_key.as_ref().is_some_and(|resolved| {
+                        self.resolve_callee(existing).as_ref() == Some(resolved)
+                    })
+            }) {
                 keys.push(key);
             }
         }

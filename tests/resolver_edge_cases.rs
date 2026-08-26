@@ -603,6 +603,23 @@ UserList({key: value})[0](1)
     );
 }
 
+/// Repeated callable keys in a mapping occupy one insertion-order slot.
+#[test]
+fn userlist_mapping_subscript_deduplicates_callable_keys() {
+    let messages = check_source(
+        r"
+from collections import UserList
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+UserList({first: 1, first: 2, second: 3})[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected the second unique callable key, got: {messages:?}"
+    );
+}
+
 /// `next` returns its concrete callable default when the iterator is
 /// statically empty (issue #952).
 #[test]
