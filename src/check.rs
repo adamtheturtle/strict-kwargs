@@ -6172,7 +6172,8 @@ impl<'a> CallChecker<'a> {
             .exclude_rebinding(&format!("{class_fullname}.{attr_name}"));
     }
 
-    /// ``globals()["f"] = …`` / ``globals()['f'] = …`` rebinds a module-level name.
+    /// A literal write through ``globals()`` or module-scope ``locals()``
+    /// rebinds a module-level name.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_globals_subscript_target(&mut self, target: &Expr) {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = target else {
@@ -6186,7 +6187,16 @@ impl<'a> CallChecker<'a> {
             Expr::Name(name) if name.id.as_str() == "globals"
                 && self.resolve_local(name.id.as_str()).is_none()
         ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.globals");
-        if !is_globals || !call.arguments.args.is_empty() || !call.arguments.keywords.is_empty() {
+        let is_module_locals = self.scopes.len() == 1
+            && (matches!(
+                call.func.as_ref(),
+                Expr::Name(name) if name.id.as_str() == "locals"
+                    && self.resolve_local(name.id.as_str()).is_none()
+            ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.locals"));
+        if !(is_globals || is_module_locals)
+            || !call.arguments.args.is_empty()
+            || !call.arguments.keywords.is_empty()
+        {
             return;
         }
         let Expr::StringLiteral(key) = slice.as_ref() else {
@@ -6195,7 +6205,7 @@ impl<'a> CallChecker<'a> {
         self.invalidate_module_name_if_callable(key.value.to_str());
     }
 
-    /// Invalidate a module-scope callable rebinding (for ``globals()`` writes).
+    /// Invalidate a module-scope callable rebinding through its namespace.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_module_name_if_callable(&mut self, name: &str) {
         let Some(scope) = self.scopes.first_mut() else {

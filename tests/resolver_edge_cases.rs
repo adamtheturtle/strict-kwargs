@@ -1665,6 +1665,23 @@ locals()["handler"](1)
     );
 }
 
+/// At module scope `locals()` aliases `globals()`, so a write invalidates the
+/// previously resolved callable before a subsequent namespace lookup.
+#[test]
+fn module_locals_write_invalidates_callable_lookup() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+locals()["target"] = lambda *args: None
+locals()["target"](1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "module locals write must invalidate the old callable: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
