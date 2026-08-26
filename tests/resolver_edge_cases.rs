@@ -6100,6 +6100,23 @@ defaultdict(lambda: target)["missing"](1)
     );
 }
 
+/// Mapping wrappers copy a defaultdict's entries, not its missing-key factory
+/// (Bugbot on #873).
+#[test]
+fn ordered_dict_does_not_preserve_defaultdict_factory() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict, OrderedDict
+def target(value: int) -> None: ...
+OrderedDict(defaultdict(lambda: target))["missing"](1)
+"#,
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "copied mapping must not invoke defaultdict factory: {messages:?}"
+    );
+}
+
 /// `defaultdict.setdefault` does not invoke the default factory. For a known
 /// missing key, its explicit default is the returned callable.
 #[test]

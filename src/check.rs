@@ -5498,6 +5498,19 @@ impl<'a> CallChecker<'a> {
                     }
                     _ => return None,
                 };
+                // Copying wrappers do not preserve ``defaultdict``'s missing-key
+                // factory behavior. They may copy existing entries, but a lookup
+                // cannot invoke the wrapped factory.
+                if matches!(factory, "collections.OrderedDict" | "collections.UserDict")
+                    && matches!(mapping, Expr::Call(call)
+                        if self.resolve_callee(&call.func).is_some_and(|callee| {
+                            Self::normalize_factory_fullname(&callee)
+                                == "collections.defaultdict"
+                        }) && matches!(&*call.arguments.args, [Expr::Lambda(_)])
+                            && call.arguments.keywords.is_empty())
+                {
+                    return None;
+                }
                 return self.resolve_literal_container_item(mapping, slice);
             }
         }
