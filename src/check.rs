@@ -7532,6 +7532,32 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn next_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iter_call), default] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterable] = &*iter_call.arguments.args else {
+            return None;
+        };
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
         let Expr::Call(iter_call) = iterator else {
             return None;
@@ -9346,6 +9372,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_getitem_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.next_empty_default_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {

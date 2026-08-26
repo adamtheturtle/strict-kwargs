@@ -567,6 +567,28 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// `next` returns its concrete callable default when the iterator is
+/// statically empty (issue #952).
+#[test]
+fn next_empty_iterator_preserves_callable_default() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def present(first: int, second: int) -> None: ...
+next(iter([]), target)(1)
+next(iter([present]), target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected next-default violation, got: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 5, "target"),
+        "did not expect the default for a nonempty iterator, got: {messages:?}"
+    );
+}
+
 /// Explicit sequence iterator protocol calls preserve homogeneous concrete
 /// callable elements (issue #948).
 #[test]
