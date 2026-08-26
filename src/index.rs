@@ -83,7 +83,6 @@ struct Store {
     descriptor_get_returns: FxHashMap<String, Signature>,
     /// Unqualified descriptor class names, used as a cheap assignment filter
     /// before resolving a constructor reference.
-    descriptor_get_names: FxHashSet<String>,
     /// Modules supplied as check targets rather than loaded from vendored
     /// typeshed or lazily resolved dependencies.
     first_party_modules: FxHashSet<String>,
@@ -320,6 +319,9 @@ fn synthesize_partialmethod(
     value: &Expr,
     bindings: &mut FxHashMap<String, String>,
 ) -> bool {
+    if store.conditional_depth > 0 {
+        return false;
+    }
     let Expr::Name(target) = target else {
         return false;
     };
@@ -455,14 +457,6 @@ fn synthesize_descriptor_attribute(
     let fullname = format!("{class_name}.{}", target.id);
     store.excluded.remove(&fullname);
     store.signatures.insert(fullname, vec![signature]);
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn assignment_may_construct_descriptor(store: &Store, value: &Expr) -> bool {
-    let Expr::Call(call) = value else {
-        return false;
-    };
-    callee_tail(&call.func).is_some_and(|name| store.descriptor_get_names.contains(name))
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -3563,9 +3557,6 @@ fn index_class_body(
                         store
                             .descriptor_get_returns
                             .insert(class_name.to_string(), signature);
-                        if let Some(name) = class_name.rsplit('.').next() {
-                            store.descriptor_get_names.insert(name.to_string());
-                        }
                     }
                 }
                 if name.as_str() == "__getitem__" {
@@ -3607,16 +3598,14 @@ fn index_class_body(
                     if synthesize_partialmethod(store, class_name, target, value, bindings) {
                         continue;
                     }
-                    if assignment_may_construct_descriptor(store, value) {
-                        synthesize_descriptor_attribute(
-                            store,
-                            module_name,
-                            class_name,
-                            target,
-                            value,
-                            bindings,
-                        );
-                    }
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        bindings,
+                    );
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
@@ -3630,11 +3619,7 @@ fn index_class_body(
                 if !synthesize_partialmethod(store, class_name, target, value, bindings) {
                     exclude_assigned_attribute(store, class_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
-                    if let (Expr::Name(name), Some(signature)) =
-                        (target.as_ref(), callable_annotation_signature(annotation))
-                    {
-                        store.insert(format!("{class_name}.{}", name.id), signature);
-                    }
+                    index_callable_field(store, class_name, target, annotation);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -3843,9 +3828,6 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         store
                             .descriptor_get_returns
                             .insert(class_name.to_string(), signature);
-                        if let Some(name) = class_name.rsplit('.').next() {
-                            store.descriptor_get_names.insert(name.to_string());
-                        }
                     }
                 }
                 if name.as_str() == "__getitem__" {
@@ -3867,27 +3849,27 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
-                    if assignment_may_construct_descriptor(store, value) {
-                        synthesize_descriptor_attribute(
-                            store,
-                            module_name,
-                            class_name,
-                            target,
-                            value,
-                            &bindings,
-                        );
-                    }
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        &bindings,
+                    );
                     exclude_assigned_attribute(store, class_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
+                index_callable_field(store, class_name, target, annotation);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
