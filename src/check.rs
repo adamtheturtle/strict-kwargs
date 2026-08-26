@@ -5133,8 +5133,22 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
         if let Expr::Subscript(subscript) = func {
-            let Expr::Call(constructor) = subscript.value.as_ref() else {
+            let Expr::Call(value_call) = subscript.value.as_ref() else {
                 return None;
+            };
+            let constructor = match value_call.func.as_ref() {
+                Expr::Attribute(method) if method.attr.as_str() == "copy" => {
+                    if !value_call.arguments.args.is_empty()
+                        || !value_call.arguments.keywords.is_empty()
+                    {
+                        return None;
+                    }
+                    let Expr::Call(constructor) = method.value.as_ref() else {
+                        return None;
+                    };
+                    constructor
+                }
+                _ => value_call,
             };
             let constructor_name = self.resolve_callee(&constructor.func)?;
             if !matches!(
@@ -7498,6 +7512,18 @@ impl<'a> CallChecker<'a> {
                     return None;
                 };
                 return self.unnamed_callable_signature(item.key.as_ref()?);
+            }
+            if let Expr::Call(constructor) = receiver {
+                if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                    == "weakref.WeakSet"
+                {
+                    let data = constructor
+                        .arguments
+                        .find_keyword("data")
+                        .map(|keyword| &keyword.value)
+                        .or_else(|| constructor.arguments.args.first())?;
+                    return self.literal_iterable_callable_signature(data);
+                }
             }
             let class_fullname = self.class_from_constructor(receiver).or_else(|| {
                 let Expr::Name(name) = receiver else {
