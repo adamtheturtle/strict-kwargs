@@ -672,6 +672,59 @@ sorted({f}, key=id)[0](1)
     }
 }
 
+/// A `sorted()` subscript only produces an element for an in-range integer
+/// index; slices and invalid indices must not borrow the element signature
+/// (issue #1157).
+#[test]
+fn sorted_subscript_respects_index_shape_and_bounds() {
+    let messages = check_source(
+        r#"
+def narrow(value: int) -> None: ...
+sorted([narrow])[0](1)
+sorted([narrow])[-1](1)
+sorted([narrow])[0:1](1)
+sorted([narrow])["bad"](1)
+sorted([narrow])[2](1)
+"#,
+    );
+    for line in [3, 4] {
+        assert!(
+            has_error_at(&messages, line, "narrow"),
+            "valid sorted index was not preserved on line {line}: {messages:?}"
+        );
+    }
+    for line in [5, 6, 7] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "invalid sorted index borrowed the element on line {line}: {messages:?}"
+        );
+    }
+}
+
+/// The multi-argument forms of `min` and `max` select among their positional
+/// arguments; they do not select an element from the first argument (#1156).
+#[test]
+fn min_max_multi_argument_forms_do_not_use_first_iterable_element() {
+    let messages = check_source(
+        r"
+def narrow(value: int) -> None: ...
+def broad(*args) -> None: ...
+min([narrow], broad)(1)
+max((narrow,), broad)(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "multi-argument selector used first iterable element on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an argument-free lambda evaluates to its body, so a callable
 /// returned directly from that body retains its signature (issue #365).
 #[test]
@@ -986,6 +1039,51 @@ next(iter(C()))(1)
     assert!(
         has_error_at(&messages, 5, "next() result"),
         "expected __iter__ result violation, got: {messages:?}"
+    );
+}
+
+/// `iter()` accepts tracked instance bindings and annotated instance
+/// parameters, not only inline constructor expressions (issue #1143).
+#[test]
+fn bound_instance_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+c = C()
+next(iter(c))(1)
+def consume(value: C) -> None:
+    next(iter(value))(1)
+",
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected bound-instance __iter__ violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// An opaque inner binding shadows an outer tracked instance when resolving
+/// `iter()` receivers (review on #1218).
+#[test]
+fn shadowed_instance_does_not_supply_dunder_iter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+value = C()
+def consume(value: object) -> None:
+    next(iter(value))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "outer instance leaked through shadowing parameter: {messages:?}"
     );
 }
 
@@ -1684,6 +1782,73 @@ C().call(1)
     assert!(
         has_error_at(&messages, 7, "call"),
         "expected descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// An annotation on a descriptor assignment does not prevent its `__get__`
+/// callable return from being indexed (issue #1146).
+#[test]
+fn annotated_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    call: Descriptor = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "call"),
+        "expected annotated descriptor-return violation, got: {messages:?}"
+    );
+}
+
+/// A descriptor's runtime `__get__` signature takes precedence over a broad
+/// callable annotation on the assigned class attribute (review on #1221).
+#[test]
+fn annotated_descriptor_does_not_create_dual_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+@dataclass
+class C:
+    call: Callable[..., None] = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "call"),
+        "broad annotation masked descriptor signature: {messages:?}"
+    );
+}
+
+/// Descriptor synthesis in an uncertain branch unions with a sibling
+/// callable-field signature instead of overwriting it (review on #1221).
+#[test]
+fn conditional_descriptor_assignment_preserves_sibling_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    if condition:
+        call: Callable[..., None] = lambda *args: None
+    else:
+        call: Descriptor = Descriptor()
+C().call(1, 2)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "descriptor branch overwrote sibling callable signature: {messages:?}"
     );
 }
 

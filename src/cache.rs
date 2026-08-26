@@ -1541,6 +1541,29 @@ mod tests {
         assert_ne!(before, after);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_follows_nested_tree_reached_through_directory_symlink() {
+        // Issue #1163: file selection follows the entire linked tree, so the
+        // cache fingerprint must include descendants rather than only files
+        // immediately below the symlink target.
+        use std::os::unix::fs::symlink;
+
+        let project = tempdir().expect("project tempdir");
+        let external = tempdir().expect("external tempdir");
+        let nested = external.path().join("pkg/deep");
+        std::fs::create_dir_all(&nested).expect("create nested tree");
+        let source = nested.join("mod.py");
+        std::fs::write(&source, "def target(value): ...\ntarget(1)\n").expect("write");
+        symlink(external.path(), project.path().join("src")).expect("symlink tree");
+
+        let before = compute_global_fingerprint(project.path(), "{}", None, &[]);
+        std::fs::write(&source, "def target(value, /): ...\ntarget(1)\n").expect("rewrite");
+        let after = compute_global_fingerprint(project.path(), "{}", None, &[]);
+
+        assert_ne!(before, after);
+    }
+
     #[test]
     fn explicit_environment_fingerprint_ignores_project_venv() {
         let project = tempdir().expect("project tempdir");

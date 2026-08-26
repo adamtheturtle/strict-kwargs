@@ -2159,6 +2159,22 @@ impl<'a> CallChecker<'a> {
             .and_then(|annotation| self.class_from_annotation(annotation))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_instance_binding(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(fullname) = scope.names.get(name) {
+                return scope.instances.contains(name).then(|| fullname.clone());
+            }
+            if let Some(annotation) = scope.annotations.get(name) {
+                return self.class_from_annotation(annotation);
+            }
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -2853,6 +2869,14 @@ impl<'a> CallChecker<'a> {
     // coverage gate because llvm-cov reports duplicate branch holes for this
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
+    fn unwrap_named_callee(mut func: &Expr) -> &Expr {
+        while let Expr::Named(ast::ExprNamed { value, .. }) = func {
+            func = value;
+        }
+        func
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
         self.record_singledispatch_registration(call);
         // A `# noqa` on the call's line suppresses the diagnostic and any
@@ -3055,8 +3079,9 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let callable_expr = Self::unwrap_named_callee(&call.func);
         let constructed_class = is_constructor
-            .then(|| self.class_from_constructor_func(&call.func))
+            .then(|| self.class_from_constructor_func(callable_expr))
             .flatten();
         let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
@@ -3082,11 +3107,12 @@ impl<'a> CallChecker<'a> {
             .and_then(|s| s.parameters.first())
             .and_then(|p| p.name.as_deref());
         let receiver_is_explicit =
-            self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
-        let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
+            self.is_unbound_class_method_call(callable_expr, &callee_fullname, first_param_name);
+        let receiver_is_implicit =
+            self.is_bound_instance_method_call(callable_expr, first_param_name);
         let receiver_is_explicit_for_fix = receiver_is_explicit
             || self.is_explicit_dunder_receiver_call(
-                &call.func,
+                callable_expr,
                 &callee_fullname,
                 first_param_name,
             );
@@ -3201,12 +3227,13 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
+        let callable_expr = Self::unwrap_named_callee(&call.func);
         let first_param = signatures
             .first()
             .and_then(|signature| signature.parameters.first())
             .and_then(|parameter| parameter.name.as_deref());
         if self.conditional_callee_has_mixed_receiver_binding(
-            &call.func,
+            callable_expr,
             callee_fullname,
             first_param,
         ) {
@@ -3214,25 +3241,25 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.call_uses_opaque_receiver_boundary(&call.func) {
+        if self.call_uses_opaque_receiver_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
         if self.call_may_dispatch_to_override_with_different_parameter_names(
-            &call.func,
+            callable_expr,
             callee_fullname,
         ) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.self_call_uses_inherited_method_boundary(&call.func, callee_fullname) {
+        if self.self_call_uses_inherited_method_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.constructor_call_uses_inherited_boundary(&call.func, callee_fullname) {
+        if self.constructor_call_uses_inherited_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3242,7 +3269,7 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.call_uses_imported_callable_boundary(&call.func) {
+        if self.call_uses_imported_callable_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3250,7 +3277,7 @@ impl<'a> CallChecker<'a> {
         if let [signature] = signatures {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
-            let is_attribute_call = Self::call_is_attribute(&call.func);
+            let is_attribute_call = Self::call_is_attribute(callable_expr);
             match call_fix_insertions(
                 call,
                 self.tokens,
@@ -4525,11 +4552,22 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
-        names
-            .contains(&fullname.as_str())
-            .then(|| call.arguments.args.first())
-            .flatten()
-            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+        if !names.contains(&fullname.as_str()) || call.arguments.args.len() != 1 {
+            return None;
+        }
+        self.homogeneous_literal_callable(call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn sorted_subscript_result(&self, call: &ast::ExprCall, slice: &Expr) -> Option<String> {
+        let len = match call.arguments.args.first()? {
+            Expr::List(list) => list.elts.len(),
+            Expr::Tuple(tuple) => tuple.elts.len(),
+            Expr::Set(set) => set.elts.len(),
+            _ => return None,
+        };
+        Self::literal_sequence_index(slice, len)?;
+        self.preserving_builtin_result(call, &["builtins.sorted"])
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7316,7 +7354,12 @@ impl<'a> CallChecker<'a> {
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
-            let class_fullname = self.class_from_constructor(receiver)?;
+            let class_fullname = self.class_from_constructor(receiver).or_else(|| {
+                let Expr::Name(name) = receiver else {
+                    return None;
+                };
+                self.class_from_instance_binding(name.id.as_str())
+            })?;
             let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
@@ -8845,7 +8888,7 @@ impl<'a> CallChecker<'a> {
                     return Some(returned);
                 }
                 if let Expr::Call(sorted) = subscript.value.as_ref() {
-                    self.preserving_builtin_result(sorted, &["builtins.sorted"])
+                    self.sorted_subscript_result(sorted, &subscript.slice)
                         .or_else(|| {
                             self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         })
