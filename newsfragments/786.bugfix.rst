@@ -1,0 +1,2 @@
+Preserve concrete callable elements when subscripting a ``deque`` constructed
+from a literal list or tuple.
