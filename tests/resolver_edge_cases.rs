@@ -3113,6 +3113,22 @@ MappingProxyType({"key": target})["key"](1)
     );
 }
 
+/// A literal dictionary copy preserves the concrete callable at a static key
+/// (issue #775).
+#[test]
+fn literal_dict_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.copy()["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-copy violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate `OrderedDict`'s values preserves a concrete callable
 /// value shape (issue #922).
 #[test]
@@ -3634,6 +3650,78 @@ factory()(1)
     assert!(
         messages.is_empty(),
         "redefined factory must not retain callable-class metadata: {messages:?}"
+    );
+}
+
+/// Redefining an iterator factory with non-callable items clears the earlier
+/// callable-item annotation metadata (issue #753).
+#[test]
+fn iterator_factory_redefinition_clears_callable_item_return() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+def values() -> Iterator[int]:
+    yield 0
+next(values())(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "redefined iterator must not retain callable-item metadata: {messages:?}"
+    );
+}
+
+/// Redefining a contextmanager with a non-callable yield clears the earlier
+/// callable context-item annotation metadata (issue #754).
+#[test]
+fn contextmanager_redefinition_clears_callable_item_return() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def managed() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+@contextmanager
+def managed() -> Iterator[int]:
+    yield 0
+with managed() as value:
+    value(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "redefined contextmanager must not retain callable-item metadata: {messages:?}"
+    );
+}
+
+/// Redefining a generic identity function as non-generic clears the obsolete
+/// parameter-to-result specialization (issue #757).
+#[test]
+fn function_redefinition_clears_generic_return_metadata() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def identity(value: T) -> T:
+    return value
+def identity(value: int) -> int:
+    return value
+def target(value: int) -> None: ...
+identity(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "identity"),
+        "live identity call should still be checked: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("generic result")),
+        "redefined function retained generic-result metadata: {messages:?}"
     );
 }
 

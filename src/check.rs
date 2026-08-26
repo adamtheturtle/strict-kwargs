@@ -5399,7 +5399,7 @@ impl<'a> CallChecker<'a> {
             if copy_call.arguments.is_empty() {
                 if let Expr::Attribute(method) = copy_call.func.as_ref() {
                     if method.attr.as_str() == "copy"
-                        && matches!(method.value.as_ref(), Expr::List(_))
+                        && matches!(method.value.as_ref(), Expr::List(_) | Expr::Dict(_))
                     {
                         return self.resolve_literal_container_item(&method.value, slice);
                     }
@@ -9826,8 +9826,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
                 self.callable_factory_returns.remove(&fullname);
+                self.callable_iterator_items.remove(&fullname);
+                self.callable_contextmanager_items.remove(&fullname);
+                self.generic_returns.remove(&fullname);
                 self.concrete_contextmanager_items.remove(&fullname);
-                self.callable_factory_returns.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
