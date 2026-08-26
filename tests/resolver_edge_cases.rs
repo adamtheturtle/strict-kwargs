@@ -6129,6 +6129,25 @@ next(itertools.starmap(lambda _: target, [(0,)]))(1)
     );
 }
 
+/// A starmap lambda parameter shadows an outer callable with the same name
+/// (Bugbot on #876).
+#[test]
+fn itertools_starmap_lambda_parameter_does_not_resolve_outer_callable() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.starmap(lambda target: target, [(object(),)]))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("next() result")),
+        "lambda parameter must shadow outer callable: {messages:?}"
+    );
+}
+
 /// `next(iter(...))` preserves callable elements from one-element literal
 /// iterables, including dictionary keys (issue #781).
 #[test]
