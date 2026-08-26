@@ -3250,6 +3250,35 @@ deque(iterable=[target])[0](1)
     );
 }
 
+/// Copying an immediately constructed deque preserves its literal callable
+/// elements through subscripting (issue #787).
+#[test]
+fn deque_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+deque(iterable=[target]).copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result"),
+        "expected copied-deque violation, got: {messages:?}"
+    );
+
+    let qualified = check_source(
+        r"
+import collections
+def target(value: int) -> None: ...
+collections.deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&qualified, 4, "deque result"),
+        "qualified deque constructor must remain supported, got: {qualified:?}"
+    );
+}
+
 /// Iterating an immediate literal dictionary's values preserves a concrete
 /// callable value shape (issue #391).
 #[test]
@@ -3263,6 +3292,75 @@ next(iter({"call": f}.values()))(1)
     assert!(
         has_error_at(&messages, 3, "next() result"),
         "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
+/// A `MappingProxyType` around a literal dictionary preserves its concrete
+/// callable values through subscripting (issue #776).
+#[test]
+fn mapping_proxy_literal_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType({"key": target})["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected mapping-proxy result violation, got: {messages:?}"
+    );
+}
+
+/// An inline `MappingProxyType.get` preserves the concrete callable at a
+/// present literal key (issue #930).
+#[test]
+fn inline_mapping_proxy_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "get() result"),
+        "expected inline MappingProxyType.get violation, got: {messages:?}"
+    );
+}
+
+/// A dictionary unpack can override an earlier key, so inline proxy lookup is
+/// intentionally conservative when an unpack is present.
+#[test]
+fn inline_mapping_proxy_get_does_not_resolve_across_unpacking() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def first(value: int) -> None: ...
+def replacement(value: int) -> None: ...
+MappingProxyType(mapping={"x": first, **{"x": replacement}}).get("x")(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an ambiguous proxy lookup to resolve, got: {messages:?}"
+    );
+}
+
+/// Copying an immediate `MappingProxyType` preserves its concrete callable
+/// values (issue #932).
+#[test]
+fn mapping_proxy_copy_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).copy()["x"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected mapping-proxy copy violation, got: {messages:?}"
     );
 }
 
@@ -6028,6 +6126,44 @@ next(itertools.starmap(lambda _: target, [(0,)]))(1)
     assert!(
         has_error_at(&messages, 4, "next() result"),
         "expected starmap result violation, got: {messages:?}"
+    );
+}
+
+/// `next(iter(...))` preserves callable elements from one-element literal
+/// iterables, including dictionary keys (issue #781).
+#[test]
+fn next_iter_literal_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(iter([target]))(1)
+next(iter((target,)))(1)
+next(iter({target}))(1)
+next(iter({target: 1}))(1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected next(iter(...)) violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Iterating a literal `WeakSet` preserves its concrete callable elements
+/// (issue #829).
+#[test]
+fn weak_set_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakSet(data=[target])))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakSet iterator violation, got: {messages:?}"
     );
 }
 
