@@ -11593,6 +11593,13 @@ fn resolve_file_with_ty(
     // contention instead of load-dependent.
     let baseline = diagnostics.len();
     let mut fixes = fixes;
+    let fix_baseline = fixes.as_ref().map(|fixes| {
+        (
+            fixes.insertions.len(),
+            *fixes.fixed_calls,
+            fixes.declined_fix_reasons.len(),
+        )
+    });
     for _ in 0..TY_FILE_ATTEMPTS {
         resolve_pending_with_ty(
             ty,
@@ -11606,12 +11613,19 @@ fn resolve_file_with_ty(
             ty_file_cache,
             ty_def_caches,
             diagnostics,
-            fixes.take(),
+            &mut fixes,
         );
         if !ty.is_disabled() {
             return Ok(());
         }
         diagnostics.truncate(baseline);
+        if let (Some(fixes), Some((insertions, fixed_calls, declined))) =
+            (fixes.as_mut(), fix_baseline)
+        {
+            fixes.insertions.truncate(insertions);
+            *fixes.fixed_calls = fixed_calls;
+            fixes.declined_fix_reasons.truncate(declined);
+        }
         ty.reenable();
     }
     Err(CheckError::TyServerFailed)
@@ -12005,7 +12019,7 @@ fn resolve_pending_with_ty(
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
-    mut fixes: Option<TyFixes<'_>>,
+    fixes: &mut Option<TyFixes<'_>>,
 ) {
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
@@ -12143,7 +12157,7 @@ fn resolve_pending_with_ty(
                         p.positional_count,
                     ) {
                         record_ty_fix(
-                            &mut fixes,
+                            fixes,
                             Some(index),
                             fix_ast,
                             p,
@@ -12155,10 +12169,7 @@ fn resolve_pending_with_ty(
                             receiver_already_omitted,
                         );
                     } else {
-                        record_declined_fix(
-                            &mut fixes,
-                            DeclinedFixReason::UnsupportedSignatureShape,
-                        );
+                        record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
                     }
                 }
                 continue;
@@ -12210,7 +12221,7 @@ fn resolve_pending_with_ty(
             ) {
                 if let [signature] = overloads.as_slice() {
                     record_ty_fix(
-                        &mut fixes,
+                        fixes,
                         Some(index),
                         fix_ast,
                         p,
@@ -12222,7 +12233,7 @@ fn resolve_pending_with_ty(
                         true,
                     );
                 } else if fixes.is_some() {
-                    record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
+                    record_declined_fix(fixes, DeclinedFixReason::AmbiguousTyHover);
                 }
             }
         }
@@ -12296,7 +12307,7 @@ fn resolve_pending_with_ty(
                         if let [signature] = sigs.as_slice() {
                             attempted_fix = true;
                             record_ty_fix(
-                                &mut fixes,
+                                fixes,
                                 Some(index),
                                 fix_ast,
                                 &pending[i],
@@ -12310,7 +12321,7 @@ fn resolve_pending_with_ty(
                         }
                     }
                     if !attempted_fix {
-                        record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+                        record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
                     }
                 }
             }
@@ -12335,7 +12346,7 @@ fn resolve_pending_with_ty(
             &source_line_starts,
             diagnostics,
         ) {
-            record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+            record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
         }
     }
 }
