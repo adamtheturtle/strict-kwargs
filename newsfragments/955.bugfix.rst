@@ -1,0 +1,1 @@
+Preserve concrete callable elements when ``sum`` concatenates statically known list literals.
