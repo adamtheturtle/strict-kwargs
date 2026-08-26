@@ -5384,6 +5384,64 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn expanded_literal_element_len(element: &Expr) -> Option<usize> {
+        let nested_len = |elements: &[Expr]| {
+            elements.iter().try_fold(0usize, |len, element| {
+                len.checked_add(Self::expanded_literal_element_len(element)?)
+            })
+        };
+        match element {
+            Expr::Starred(starred) => match starred.value.as_ref() {
+                Expr::List(list) => nested_len(&list.elts),
+                Expr::Tuple(tuple) => nested_len(&tuple.elts),
+                _ => None,
+            },
+            _ => Some(1),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_expanded_literal_sequence_index(
+        &self,
+        elements: &[Expr],
+        mut index: usize,
+    ) -> Option<String> {
+        for element in elements {
+            let width = Self::expanded_literal_element_len(element)?;
+            if index >= width {
+                index -= width;
+                continue;
+            }
+            return match element {
+                Expr::Starred(starred) => match starred.value.as_ref() {
+                    Expr::List(list) => {
+                        self.resolve_expanded_literal_sequence_index(&list.elts, index)
+                    }
+                    Expr::Tuple(tuple) => {
+                        self.resolve_expanded_literal_sequence_index(&tuple.elts, index)
+                    }
+                    _ => None,
+                },
+                _ => self.resolve_callee(element),
+            };
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_literal_sequence_item(
+        &self,
+        elements: &[Expr],
+        slice: &Expr,
+    ) -> Option<String> {
+        let len = elements.iter().try_fold(0usize, |len, element| {
+            len.checked_add(Self::expanded_literal_element_len(element)?)
+        })?;
+        let index = Self::literal_sequence_index(slice, len)?;
+        self.resolve_expanded_literal_sequence_index(elements, index)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Expr::Call(sum_call) = value {
             if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
@@ -5584,20 +5642,8 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
-            Expr::List(list) => {
-                if list.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, list.elts.len())?;
-                self.resolve_callee(&list.elts[index])
-            }
-            Expr::Tuple(tuple) => {
-                if tuple.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
-                self.resolve_callee(&tuple.elts[index])
-            }
+            Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
+            Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::BinOp(ast::ExprBinOp {
                 left,
                 op: ast::Operator::Add,

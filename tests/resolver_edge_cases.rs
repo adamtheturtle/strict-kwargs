@@ -742,6 +742,39 @@ tail[0](1)
     );
 }
 
+/// Starred literal list and tuple elements participate in static sequence
+/// indexing with their expanded lengths (issue #808).
+#[test]
+fn starred_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[*[target]][0](1)
+(*[target],)[0](1)
+[0, *[target], 0][1](1)
+(0, *(0, target))[-1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected starred-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+
+    let nested = check_source(
+        r"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+[*[0, *[other, target]]][-1](1)
+",
+    );
+    assert!(
+        has_error_at(&nested, 4, "target"),
+        "nested stars must preserve expanded indexing: {nested:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
