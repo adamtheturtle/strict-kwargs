@@ -742,6 +742,39 @@ tail[0](1)
     );
 }
 
+/// Starred literal list and tuple elements participate in static sequence
+/// indexing with their expanded lengths (issue #808).
+#[test]
+fn starred_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+[*[target]][0](1)
+(*[target],)[0](1)
+[0, *[target], 0][1](1)
+(0, *(0, target))[-1](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected starred-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+
+    let nested = check_source(
+        r"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+[*[0, *[other, target]]][-1](1)
+",
+    );
+    assert!(
+        has_error_at(&nested, 4, "target"),
+        "nested stars must preserve expanded indexing: {nested:?}"
+    );
+}
+
 /// Generic builtins that select or sort elements preserve a homogeneous
 /// literal collection's concrete callable signature (issue #370).
 #[test]
@@ -1506,6 +1539,45 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected getattr(SimpleNamespace) violation, got: {messages:?}"
+    );
+}
+
+/// `sum` concatenates literal lists in deterministic order and preserves their
+/// concrete callable elements (issue #955).
+#[test]
+fn sum_literal_lists_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+sum([[second]], start=[first])[0](1)
+sum(([second],), [first])[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected sum start element violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected summed list element violation, got: {messages:?}"
+    );
+}
+
+/// Starred list elements make flattened offsets dynamic, so sum indexing is
+/// intentionally conservative (Bugbot on #1040).
+#[test]
+fn sum_literal_lists_do_not_resolve_across_starred_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+extras = [object(), object()]
+sum([[*extras, target]], start=[])[1](1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "dynamic starred offsets must not resolve a later callable: {messages:?}"
     );
 }
 
@@ -3307,6 +3379,22 @@ next(filter(None, [target]))(1)
     }
 }
 
+/// `next()` preserves the concrete callable element from a simple identity
+/// generator expression over a homogeneous literal iterable (issue #802).
+#[test]
+fn next_generator_expression_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next((item for item in [target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected generator-expression violation, got: {messages:?}"
+    );
+}
+
 /// `pop`/`popleft` on an immediately constructed deque preserve a literal
 /// initializer's concrete callable element shape (issue #392).
 #[test]
@@ -3384,6 +3472,38 @@ next(iter({"call": f}.values()))(1)
     assert!(
         has_error_at(&messages, 3, "next() result"),
         "expected dictionary-values violation, got: {messages:?}"
+    );
+}
+
+/// Selecting the value position from a literal dictionary's sole `items()`
+/// iterator result preserves its callable signature (issue #789).
+#[test]
+fn dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({"key": target}.items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.items value violation, got: {messages:?}"
+    );
+}
+
+/// Iterating a literal dictionary's `keys()` view preserves its concrete
+/// callable key signature (issue #790).
+#[test]
+fn dict_keys_iterator_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({target: "value"}.keys()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.keys violation, got: {messages:?}"
     );
 }
 
@@ -3489,6 +3609,23 @@ next(iter(OrderedDict({"x": target}).values()))(1)
     );
 }
 
+/// Selecting the value position from an immediate `OrderedDict` items
+/// iterator preserves its concrete callable signature (issue #923).
+#[test]
+fn ordered_dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+next(iter(OrderedDict({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected OrderedDict items value violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate `UserDict`'s values preserves a concrete callable
 /// value shape (issue #926).
 #[test]
@@ -3537,6 +3674,23 @@ next(iter(MappingProxyType(mapping={"x": target}).values()))(1)
     assert!(
         has_error_at(&messages, 4, "next() result"),
         "expected MappingProxyType values violation, got: {messages:?}"
+    );
+}
+
+/// Selecting the value position from a single-mapping immediate `ChainMap`
+/// items iterator preserves its concrete callable signature (issue #929).
+#[test]
+fn chain_map_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+next(iter(ChainMap({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected ChainMap items value violation, got: {messages:?}"
     );
 }
 
@@ -6326,6 +6480,23 @@ next(next(grouped([target]))[1])(1)
     );
 }
 
+/// `itertools.filterfalse` preserves concrete callable elements from its
+/// input iterable through `next()` (issue #784).
+#[test]
+fn itertools_filterfalse_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.filterfalse(lambda _: False, [target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected filterfalse result violation, got: {messages:?}"
+    );
+}
+
 /// `itertools.starmap` preserves a concrete callable returned by its mapping
 /// lambda through `next()` (issue #783).
 #[test]
@@ -6586,6 +6757,23 @@ secrets.choice((f,))(1)
     }
 }
 
+/// `random.choices` preserves homogeneous callable population elements
+/// through subscripting (issue #794).
+#[test]
+fn random_choices_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+def target(value: int) -> None: ...
+random.choices(population=[target], k=1)[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected random.choices violation, got: {messages:?}"
+    );
+}
+
 /// Directly imported aliases of `random.choice` and `secrets.choice` retain
 /// the selected callable's signature (issue #852).
 #[test]
@@ -6624,6 +6812,27 @@ secrets.choice(seq=[target])(1)
         assert!(
             has_error_at(&messages, line, "target"),
             "expected keyword choice violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Immediate `Random` and `SystemRandom` instances preserve concrete callable
+/// elements selected by their bound `choice` methods (issue #795).
+#[test]
+fn random_instance_choice_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import random
+import secrets
+def target(value: int) -> None: ...
+random.Random().choice(seq=[target])(1)
+secrets.SystemRandom().choice(seq=[target])(1)
+",
+    );
+    for line in 5..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected instance choice violation on line {line}, got: {messages:?}"
         );
     }
 }
@@ -6698,6 +6907,41 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// Tuple position zero from an immediately constructed `Counter.popitem()`
+/// preserves its literal callable key (issue #798).
+#[test]
+fn counter_popitem_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter.popitem violation, got: {messages:?}"
+    );
+}
+
+/// Counter keyword counts are inserted after a positional mapping, while
+/// `iterable=` itself is a count key because the input is positional-only.
+#[test]
+fn counter_popitem_with_keyword_counts_does_not_preserve_mapping_key() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}, other=1).popitem()[0](1)
+Counter(iterable={target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "keyword count keys must hide the mapping key: {messages:?}"
+    );
+}
+
 /// `Counter.elements()` preserves concrete callable keys through `next()`
 /// for an immediately constructed counter (issue #797).
 #[test]
@@ -6729,6 +6973,128 @@ next(Counter({target: 2}).elements())(1)
     assert!(
         has_error_at(&messages, 4, "next() result"),
         "expected Counter mapping-elements violation, got: {messages:?}"
+    );
+}
+
+/// Unary plus on an immediate `Counter` preserves positive-count callable
+/// keys (issue #943).
+#[test]
+fn counter_unary_plus_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(+Counter({target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter unary-plus violation, got: {messages:?}"
+    );
+}
+
+/// Adding immediate `Counter` values preserves positive-count callable keys
+/// (issue #944).
+#[test]
+fn counter_addition_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) + Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter addition violation, got: {messages:?}"
+    );
+}
+
+/// Subtracting immediate `Counter` values preserves positive-count callable
+/// keys (issue #945).
+#[test]
+fn counter_subtraction_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) - Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter subtraction violation, got: {messages:?}"
+    );
+}
+
+/// Intersecting immediate `Counter` values preserves positive-count callable
+/// keys (issue #946).
+#[test]
+fn counter_intersection_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) & Counter({target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter intersection violation, got: {messages:?}"
+    );
+}
+
+/// Unioning immediate `Counter` values preserves positive-count callable keys
+/// (issue #947).
+#[test]
+fn counter_union_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1}) | Counter()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected Counter union violation, got: {messages:?}"
+    );
+}
+
+/// Duplicate Counter mapping keys use the last literal value, matching Python
+/// dict construction semantics (Bugbot on #1028).
+#[test]
+fn counter_binary_operations_use_last_duplicate_key_count() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1, target: 0}) + Counter()))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("next() result")),
+        "last duplicate count must win: {messages:?}"
+    );
+}
+
+/// Identical dotted callable keys match across Counter operands (Bugbot on
+/// #1028).
+#[test]
+fn counter_intersection_matches_attribute_callable_keys() {
+    let messages = check_source(
+        r"
+from collections import Counter
+class Namespace:
+    def target(value: int) -> None: ...
+next(iter(Counter({Namespace.target: 1}) & Counter({Namespace.target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected attribute-key intersection violation, got: {messages:?}"
     );
 }
 
@@ -8423,6 +8789,46 @@ factory()(1)
     assert!(
         messages.is_empty(),
         "dynamic factory should decline: {messages:?}"
+    );
+}
+
+/// Identical concrete callables across every explicit return path preserve the
+/// callable signature (issue #804).
+#[test]
+fn identical_conditional_returns_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory(flag: bool) -> object:
+    if flag:
+        return target
+    return target
+factory(flag=True)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected identical-return violation, got: {messages:?}"
+    );
+}
+
+/// Differing conditional return targets remain ambiguous.
+#[test]
+fn differing_conditional_returns_do_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+def factory(flag: bool) -> object:
+    if flag:
+        return first
+    return second
+factory(flag=True)(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "ambiguous returns should decline: {messages:?}"
     );
 }
 

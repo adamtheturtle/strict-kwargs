@@ -1,0 +1,2 @@
+Preserve concrete callable values selected from literal ``dict.items()``
+iterators.

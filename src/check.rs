@@ -5384,7 +5384,107 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn expanded_literal_element_len(element: &Expr) -> Option<usize> {
+        let nested_len = |elements: &[Expr]| {
+            elements.iter().try_fold(0usize, |len, element| {
+                len.checked_add(Self::expanded_literal_element_len(element)?)
+            })
+        };
+        match element {
+            Expr::Starred(starred) => match starred.value.as_ref() {
+                Expr::List(list) => nested_len(&list.elts),
+                Expr::Tuple(tuple) => nested_len(&tuple.elts),
+                _ => None,
+            },
+            _ => Some(1),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_expanded_literal_sequence_index(
+        &self,
+        elements: &[Expr],
+        mut index: usize,
+    ) -> Option<String> {
+        for element in elements {
+            let width = Self::expanded_literal_element_len(element)?;
+            if index >= width {
+                index -= width;
+                continue;
+            }
+            return match element {
+                Expr::Starred(starred) => match starred.value.as_ref() {
+                    Expr::List(list) => {
+                        self.resolve_expanded_literal_sequence_index(&list.elts, index)
+                    }
+                    Expr::Tuple(tuple) => {
+                        self.resolve_expanded_literal_sequence_index(&tuple.elts, index)
+                    }
+                    _ => None,
+                },
+                _ => self.resolve_callee(element),
+            };
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_literal_sequence_item(
+        &self,
+        elements: &[Expr],
+        slice: &Expr,
+    ) -> Option<String> {
+        let len = elements.iter().try_fold(0usize, |len, element| {
+            len.checked_add(Self::expanded_literal_element_len(element)?)
+        })?;
+        let index = Self::literal_sequence_index(slice, len)?;
+        self.resolve_expanded_literal_sequence_index(elements, index)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(sum_call) = value {
+            if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
+                let (iterable, positional_start) = match &*sum_call.arguments.args {
+                    [iterable] => (iterable, None),
+                    [iterable, start] => (iterable, Some(start)),
+                    _ => return None,
+                };
+                if sum_call.arguments.keywords.iter().any(|keyword| {
+                    keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("start")
+                }) {
+                    return None;
+                }
+                let keyword_start = sum_call.arguments.find_keyword("start");
+                if positional_start.is_some() && keyword_start.is_some() {
+                    return None;
+                }
+                let start = positional_start.or_else(|| keyword_start.map(|value| &value.value))?;
+                let Expr::List(start) = start else {
+                    return None;
+                };
+                if start.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
+                let groups = match iterable {
+                    Expr::List(groups) => groups.elts.as_slice(),
+                    Expr::Tuple(groups) => groups.elts.as_slice(),
+                    _ => return None,
+                };
+                let mut elements: Vec<&Expr> = start.elts.iter().collect();
+                for group in groups {
+                    let Expr::List(group) = group else {
+                        return None;
+                    };
+                    if group.elts.iter().any(Expr::is_starred_expr) {
+                        return None;
+                    }
+                    elements.extend(&group.elts);
+                }
+                let index = Self::literal_sequence_index(slice, elements.len())?;
+                return self.resolve_callee(elements[index]);
+            }
+        }
         if let Expr::Call(asdict_call) = value {
             if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
                 let Expr::StringLiteral(field) = slice else {
@@ -5542,20 +5642,8 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
-            Expr::List(list) => {
-                if list.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, list.elts.len())?;
-                self.resolve_callee(&list.elts[index])
-            }
-            Expr::Tuple(tuple) => {
-                if tuple.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
-                self.resolve_callee(&tuple.elts[index])
-            }
+            Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
+            Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::BinOp(ast::ExprBinOp {
                 left,
                 op: ast::Operator::Add,
@@ -6611,6 +6699,7 @@ impl<'a> CallChecker<'a> {
             "islice",
             "dropwhile",
             "takewhile",
+            "filterfalse",
             "batched",
             "pairwise",
             "permutations",
@@ -6672,7 +6761,7 @@ impl<'a> CallChecker<'a> {
             "compress" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "data")?)
             }
-            "dropwhile" | "takewhile" if selected_index.is_none() => {
+            "dropwhile" | "takewhile" | "filterfalse" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
             }
             "batched" if selected_index.is_some() => {
@@ -6884,6 +6973,72 @@ impl<'a> CallChecker<'a> {
         for item in &dict.items {
             item.key.as_ref()?;
             let signature = self.unnamed_callable_signature(&item.value)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn dict_view_item_signature(
+        &self,
+        expr: &Expr,
+        selected_index: Option<usize>,
+    ) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        let iter_fullname = self.resolve_callee(&iter_call.func)?;
+        if !matches!(
+            iter_fullname.as_str(),
+            "builtins.iter" | "builtins.iter.__new__"
+        ) {
+            return None;
+        }
+        let [Expr::Call(view_call)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = view_call.func.as_ref() else {
+            return None;
+        };
+        if !view_call.arguments.args.is_empty() || !view_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let select_key = match (attribute.attr.as_str(), selected_index) {
+            ("items", Some(1)) => false,
+            ("keys", None) => true,
+            _ => return None,
+        };
+        let dict = match attribute.value.as_ref() {
+            Expr::Dict(dict) => dict,
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| {
+                        matches!(
+                            class.as_str(),
+                            "collections.ChainMap" | "collections.OrderedDict"
+                        )
+                    })
+                    && constructor.arguments.keywords.is_empty() =>
+            {
+                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+                    return None;
+                };
+                dict
+            }
+            _ => return None,
+        };
+        let mut result = None;
+        for item in &dict.items {
+            let key = item.key.as_ref()?;
+            let selected = if select_key { key } else { &item.value };
+            let signature = self.unnamed_callable_signature(selected)?;
             if result
                 .as_ref()
                 .is_some_and(|existing| existing != &signature)
@@ -7720,6 +7875,29 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generator_expression_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Generator(generator) = expr else {
+            return None;
+        };
+        let [comprehension] = generator.generators.as_slice() else {
+            return None;
+        };
+        if comprehension.is_async || !comprehension.ifs.is_empty() {
+            return None;
+        }
+        let Expr::Name(target) = &comprehension.target else {
+            return None;
+        };
+        let Expr::Name(element) = generator.elt.as_ref() else {
+            return None;
+        };
+        if element.id != target.id {
+            return None;
+        }
+        self.literal_iterable_callable_signature(&comprehension.iter)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn counter_elements_item_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Call(elements_call) = expr else {
             return None;
@@ -7756,6 +7934,161 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_unary_plus_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::UnaryOp(ast::ExprUnaryOp {
+            op: ast::UnaryOp::UAdd,
+            operand,
+            ..
+        })] = &*iter_call.arguments.args
+        else {
+            return None;
+        };
+        let Expr::Call(constructor) = operand.as_ref() else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+            != "collections.Counter"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            if Self::literal_signed_integer(&item.value)? <= 0 {
+                continue;
+            }
+            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn same_counter_key(left: &Expr, right: &Expr) -> bool {
+        Self::same_literal_key(left, right)
+            || matches!(
+                (Self::dotted_path(left), Self::dotted_path(right)),
+                (Some(left), Some(right)) if left == right
+            )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_literal_entries<'b>(&self, expr: &'b Expr) -> Option<Vec<(&'b Expr, i64)>> {
+        let Expr::Call(constructor) = expr else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+            != "collections.Counter"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        match &*constructor.arguments.args {
+            [] => Some(Vec::new()),
+            [Expr::Dict(dict)] => {
+                let mut entries: Vec<(&'b Expr, i64)> = Vec::new();
+                // Dict literals retain the last value for a repeated key.
+                for item in dict.items.iter().rev() {
+                    let key = item.key.as_ref()?;
+                    let count = Self::literal_signed_integer(&item.value)?;
+                    if entries
+                        .iter()
+                        .any(|(existing, _)| Self::same_counter_key(key, existing))
+                    {
+                        continue;
+                    }
+                    entries.push((key, count));
+                }
+                entries.reverse();
+                Some(entries)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_binary_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter" {
+            return None;
+        }
+        let [Expr::BinOp(ast::ExprBinOp {
+            left, op, right, ..
+        })] = &*iter_call.arguments.args
+        else {
+            return None;
+        };
+        if !matches!(
+            op,
+            ast::Operator::Add | ast::Operator::Sub | ast::Operator::BitAnd | ast::Operator::BitOr
+        ) {
+            return None;
+        }
+        let left_entries = self.counter_literal_entries(left)?;
+        let right_entries = self.counter_literal_entries(right)?;
+        let mut result = None;
+        let mut include = |key: &Expr, total: i64| {
+            if total <= 0 {
+                return Some(());
+            }
+            let signature = self.unnamed_callable_signature(key)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+            Some(())
+        };
+        for (key, count) in &left_entries {
+            let right_count = right_entries
+                .iter()
+                .find(|(right, _)| Self::same_counter_key(key, right))
+                .map_or(0, |(_, count)| *count);
+            let total = match op {
+                ast::Operator::Add => *count + right_count,
+                ast::Operator::Sub => *count - right_count,
+                ast::Operator::BitAnd => (*count).min(right_count),
+                ast::Operator::BitOr => (*count).max(right_count),
+                _ => unreachable!(),
+            };
+            include(key, total)?;
+        }
+        for (key, count) in right_entries.iter().filter(|(right, _)| {
+            !left_entries
+                .iter()
+                .any(|(left, _)| Self::same_counter_key(left, right))
+        }) {
+            let total = match op {
+                ast::Operator::Add | ast::Operator::BitOr => *count,
+                ast::Operator::Sub => -*count,
+                ast::Operator::BitAnd => 0,
+                _ => unreachable!(),
+            };
+            include(key, total)?;
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
@@ -7773,6 +8106,11 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if selected_index.is_none() {
+            if let Some(signature) = self.generator_expression_item_signature(iterator) {
+                return Some(signature);
+            }
+        }
         if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
             return Some(signature);
         }
@@ -7780,6 +8118,9 @@ impl<'a> CallChecker<'a> {
             return Some(signature);
         }
         if let Some(signature) = self.dict_values_item_signature(iterator) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.dict_view_item_signature(iterator, selected_index) {
             return Some(signature);
         }
         if let Some(signature) = self.weakset_copy_item_signature(iterator) {
@@ -7790,6 +8131,12 @@ impl<'a> CallChecker<'a> {
         }
         if selected_index.is_none() {
             if let Some(signature) = self.counter_elements_item_signature(iterator) {
+                return Some(signature);
+            }
+            if let Some(signature) = self.counter_unary_plus_item_signature(iterator) {
+                return Some(signature);
+            }
+            if let Some(signature) = self.counter_binary_item_signature(iterator) {
                 return Some(signature);
             }
         }
@@ -8200,6 +8547,53 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&factory_call.func)?;
         self.concrete_callable_returns.get(&factory).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn concrete_function_body_return(&self, body: &[Stmt]) -> Option<String> {
+        let return_callable = |stmt: &Stmt| {
+            let Stmt::Return(ast::StmtReturn {
+                value: Some(value), ..
+            }) = stmt
+            else {
+                return None;
+            };
+            self.resolve_callee(value)
+                .filter(|callable| self.index.get(callable).is_some())
+        };
+        if let [stmt] = body {
+            if let Some(callable) = return_callable(stmt) {
+                return Some(callable);
+            }
+            let Stmt::If(if_stmt) = stmt else {
+                return None;
+            };
+            let [body_return] = if_stmt.body.as_slice() else {
+                return None;
+            };
+            let [else_return] = if_stmt.elif_else_clauses.as_slice() else {
+                return None;
+            };
+            if else_return.test.is_some() {
+                return None;
+            }
+            let [else_return] = else_return.body.as_slice() else {
+                return None;
+            };
+            let callable = return_callable(body_return)?;
+            return (return_callable(else_return)? == callable).then_some(callable);
+        }
+        let [Stmt::If(if_stmt), fallback] = body else {
+            return None;
+        };
+        if !if_stmt.elif_else_clauses.is_empty() {
+            return None;
+        }
+        let [branch_return] = if_stmt.body.as_slice() else {
+            return None;
+        };
+        let callable = return_callable(branch_return)?;
+        (return_callable(fallback)? == callable).then_some(callable)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -8933,9 +9327,28 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        if !self.names_stdlib_callable(&call.func, "random.choice")
-            && !self.names_stdlib_callable(&call.func, "secrets.choice")
-        {
+        let is_module_choice = self.names_stdlib_callable(&call.func, "random.choice")
+            || self.names_stdlib_callable(&call.func, "secrets.choice");
+        let is_instance_choice = match call.func.as_ref() {
+            Expr::Attribute(attribute) if attribute.attr.as_str() == "choice" => {
+                match attribute.value.as_ref() {
+                    Expr::Call(constructor) if constructor.arguments.is_empty() => {
+                        let fullname = self.resolve_callee(&constructor.func)?;
+                        let base = fullname
+                            .strip_suffix(".__init__")
+                            .or_else(|| fullname.strip_suffix(".__new__"))
+                            .unwrap_or(fullname.as_str());
+                        matches!(
+                            base,
+                            "random.Random" | "random.SystemRandom" | "secrets.SystemRandom"
+                        )
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !is_module_choice && !is_instance_choice {
             return None;
         }
         let sequence = match &*call.arguments.args {
@@ -8965,12 +9378,12 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(module) = attribute.value.as_ref() else {
             return None;
         };
-        if attribute.attr.as_str() != "sample"
+        if !matches!(attribute.attr.as_str(), "sample" | "choices")
             || self.resolve_module(module.id.as_str()).as_deref() != Some("random")
         {
             return None;
         }
-        // ``sample(population, k)`` / ``sample(population, k=…)`` / ``sample(population=…, k=…)``.
+        // ``sample`` and ``choices`` both preserve their population's element type.
         let sequence = match &*call.arguments.args {
             [sequence] | [sequence, _] => sequence,
             [] => call.arguments.keywords.iter().find_map(|keyword| {
@@ -9100,6 +9513,49 @@ impl<'a> CallChecker<'a> {
             })
         })?;
         self.homogeneous_callable_sequence(iterable)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn counter_popitem_key_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        if Self::literal_sequence_index(&subscript.slice, 2)? != 0 {
+            return None;
+        }
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        if !popitem.arguments.args.is_empty() || !popitem.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem" {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let class = class
+            .strip_suffix(".__new__")
+            .or_else(|| class.strip_suffix(".__init__"))
+            .unwrap_or(&class);
+        if class != "collections.Counter" {
+            return None;
+        }
+        if !constructor.arguments.keywords.is_empty() {
+            return None;
+        }
+        let mapping = constructor.arguments.args.first()?;
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        let mut keys = dict.items.iter().map(|item| item.key.as_ref());
+        let resolved = self.resolve_callee(keys.next()??)?;
+        keys.all(|key| {
+            key.and_then(|key| self.resolve_callee(key)).as_deref() == Some(resolved.as_str())
+        })
+        .then_some(resolved)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -9527,6 +9983,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.counter_popitem_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                         .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
@@ -9538,6 +9995,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.counter_popitem_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                         .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
@@ -10620,16 +11078,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // name (issue #71).
                 self.bind_function_parameters(parameters);
                 if !is_async {
-                    if let [Stmt::Return(ast::StmtReturn {
-                        value: Some(value), ..
-                    })] = body.as_slice()
-                    {
-                        if let Some(callable) = self
-                            .resolve_callee(value)
-                            .filter(|callable| self.index.get(callable).is_some())
-                        {
-                            self.concrete_callable_returns.insert(fullname, callable);
-                        }
+                    if let Some(callable) = self.concrete_function_body_return(body) {
+                        self.concrete_callable_returns
+                            .insert(fullname.clone(), callable);
                     }
                 }
                 self.enter_hover_scope(false);
