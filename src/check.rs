@@ -7422,6 +7422,7 @@ impl<'a> CallChecker<'a> {
             .find_map(|(name, callable)| (name == attribute).then_some(callable))
             .or_else(|| self.dataclass_constructor_field_callable(receiver, attribute))
             .or_else(|| self.namedtuple_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_keyword_field_callable(receiver, attribute))
     }
 
     // Covered end-to-end for positive and negative indices; malformed getter
