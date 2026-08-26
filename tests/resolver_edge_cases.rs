@@ -1430,6 +1430,30 @@ itemgetter(-1)((f,))(1)
     );
 }
 
+/// Starred literal elements make runtime offsets unknowable from AST element
+/// positions, so `itemgetter` result inference must decline (issue #1152).
+#[test]
+fn itemgetter_declines_starred_literal_sequences() {
+    let messages = check_source(
+        r"
+from operator import itemgetter
+def strict(value: int) -> None: ...
+def permissive(*args) -> None: ...
+values = [permissive, permissive]
+itemgetter(1)([*values, strict])(1)
+itemgetter(-2)((strict, *values))(1)
+",
+    );
+    for line in [6, 7] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "starred sequence used static AST position on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// `itemgetter` preserves a callable value selected from a literal dictionary
 /// by a literal key (issue #823).
 #[test]
