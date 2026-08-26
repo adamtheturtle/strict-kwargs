@@ -3658,7 +3658,14 @@ impl<'a> CallChecker<'a> {
     /// poison the names they can narrow.
     fn scan_stmt_for_hover_poison(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::If(if_stmt) => self.poison_hover_bare_receiver(&if_stmt.test),
+            Stmt::If(if_stmt) => {
+                self.poison_hover_bare_receiver(&if_stmt.test);
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        self.poison_hover_bare_receiver(test);
+                    }
+                }
+            }
             Stmt::While(while_stmt) => self.poison_hover_bare_receiver(&while_stmt.test),
             Stmt::Assert(assert_stmt) => self.poison_hover_bare_receiver(&assert_stmt.test),
             Stmt::Match(match_stmt) => {
@@ -13673,6 +13680,22 @@ class C:
         );
         assert_eq!(groups.len(), 1);
         assert!(groups[0].is_some());
+    }
+
+    #[test]
+    fn hover_groups_dropped_by_bare_receiver_elif_test() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self, condition):
+        self.f(1)
+        if condition:
+            pass
+        elif self:
+            pass
+",
+        );
+        assert_eq!(groups, vec![None]);
     }
 
     #[test]
