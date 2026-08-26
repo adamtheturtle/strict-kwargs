@@ -1925,6 +1925,32 @@ choose(f, g)(1)
     );
 }
 
+/// A starred positional before a `TypeVar` slot makes that positional binding
+/// ambiguous; an explicit keyword for the same slot remains deterministic
+/// (issue #1135).
+#[test]
+fn generic_return_declines_positions_after_starred_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def select(prefix: object, value: T) -> T: ...
+def target(value: int) -> None: ...
+args = [object()]
+select(*args, target)(1)
+select(*args, value=target)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred positional mapping must remain unresolved: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result"),
+        "explicit TypeVar keyword must still resolve: {messages:?}"
+    );
+}
+
 /// Generic instance method returns substitute class type arguments (issue #522).
 #[test]
 fn generic_instance_method_return_substitutes_callable_type_arg() {

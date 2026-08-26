@@ -4531,8 +4531,15 @@ impl<'a> CallChecker<'a> {
         name: &str,
     ) -> Option<&'b Expr> {
         index
+            .filter(|index| {
+                !call
+                    .arguments
+                    .args
+                    .iter()
+                    .take(index + 1)
+                    .any(Expr::is_starred_expr)
+            })
             .and_then(|index| call.arguments.args.get(index))
-            .filter(|argument| !argument.is_starred_expr())
             .or_else(|| {
                 call.arguments.keywords.iter().find_map(|keyword| {
                     (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
