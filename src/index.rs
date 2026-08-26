@@ -3624,11 +3624,7 @@ fn index_class_body(
             }) => {
                 exclude_assigned_attribute(store, class_name, target, Some(bindings));
                 exclude_assigned_name(store, class_name, target, value);
-                if let (Expr::Name(name), Some(signature)) =
-                    (target.as_ref(), callable_annotation_signature(annotation))
-                {
-                    store.insert(format!("{class_name}.{}", name.id), signature);
-                }
+                index_callable_field(store, class_name, target, annotation);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -3876,11 +3872,13 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
                 exclude_assigned_attribute(store, class_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
+                index_callable_field(store, class_name, target, annotation);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
