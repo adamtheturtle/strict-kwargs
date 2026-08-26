@@ -4570,6 +4570,28 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// List destructuring is equivalent to tuple destructuring for the two-set
+/// result returned by `concurrent.futures.wait` (Bugbot on #991).
+#[test]
+fn futures_wait_list_target_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    [done, _] = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected list-target wait violation, got: {messages:?}"
+    );
+}
+
 /// Loop-target rebinding discards a tracked wait done-set signature.
 #[test]
 fn futures_wait_done_set_is_cleared_by_loop_target() {

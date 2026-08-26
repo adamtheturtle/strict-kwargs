@@ -9321,10 +9321,13 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         .starred_callable_list_elements
                         .insert(name, callable);
                 }
-                if let (Some(signature), [Expr::Tuple(tuple)]) =
-                    (&waited_future, targets.as_slice())
-                {
-                    if let Some(Expr::Name(done)) = tuple.elts.first() {
+                if let (Some(signature), [target]) = (&waited_future, targets.as_slice()) {
+                    let done = match target {
+                        Expr::Tuple(tuple) => tuple.elts.first(),
+                        Expr::List(list) => list.elts.first(),
+                        _ => None,
+                    };
+                    if let Some(Expr::Name(done)) = done {
                         self.current_scope()
                             .future_set_callables
                             .insert(done.id.to_string(), signature.clone());
