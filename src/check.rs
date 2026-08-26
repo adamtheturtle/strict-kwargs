@@ -9151,9 +9151,28 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = func else {
             return None;
         };
-        if !self.names_stdlib_callable(&call.func, "random.choice")
-            && !self.names_stdlib_callable(&call.func, "secrets.choice")
-        {
+        let is_module_choice = self.names_stdlib_callable(&call.func, "random.choice")
+            || self.names_stdlib_callable(&call.func, "secrets.choice");
+        let is_instance_choice = match call.func.as_ref() {
+            Expr::Attribute(attribute) if attribute.attr.as_str() == "choice" => {
+                match attribute.value.as_ref() {
+                    Expr::Call(constructor) if constructor.arguments.is_empty() => {
+                        let fullname = self.resolve_callee(&constructor.func)?;
+                        let base = fullname
+                            .strip_suffix(".__init__")
+                            .or_else(|| fullname.strip_suffix(".__new__"))
+                            .unwrap_or(fullname.as_str());
+                        matches!(
+                            base,
+                            "random.Random" | "random.SystemRandom" | "secrets.SystemRandom"
+                        )
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !is_module_choice && !is_instance_choice {
             return None;
         }
         let sequence = match &*call.arguments.args {
