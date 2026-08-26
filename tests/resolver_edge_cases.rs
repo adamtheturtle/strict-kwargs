@@ -6311,6 +6311,23 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `itertools.filterfalse` preserves concrete callable elements from its
+/// input iterable through `next()` (issue #784).
+#[test]
+fn itertools_filterfalse_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.filterfalse(lambda _: False, [target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected filterfalse result violation, got: {messages:?}"
+    );
+}
+
 /// `itertools.starmap` preserves a concrete callable returned by its mapping
 /// lambda through `next()` (issue #783).
 #[test]

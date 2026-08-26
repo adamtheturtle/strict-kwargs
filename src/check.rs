@@ -6609,6 +6609,7 @@ impl<'a> CallChecker<'a> {
             "islice",
             "dropwhile",
             "takewhile",
+            "filterfalse",
             "batched",
             "pairwise",
             "permutations",
@@ -6669,7 +6670,7 @@ impl<'a> CallChecker<'a> {
             "compress" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "data")?)
             }
-            "dropwhile" | "takewhile" if selected_index.is_none() => {
+            "dropwhile" | "takewhile" | "filterfalse" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
             }
             "batched" if selected_index.is_some() => {
