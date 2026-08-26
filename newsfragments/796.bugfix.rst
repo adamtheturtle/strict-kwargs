@@ -1,0 +1,2 @@
+Preserve concrete callable elements returned by ``statistics.median_low`` and
+``statistics.median_high`` for singleton literal data.
