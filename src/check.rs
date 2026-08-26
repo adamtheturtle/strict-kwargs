@@ -1144,6 +1144,9 @@ struct CallChecker<'a> {
     /// Callable values yielded by `@contextmanager` functions, keyed by the
     /// manager factory's fullname.
     callable_contextmanager_items: FxHashMap<String, Signature>,
+    /// `@contextmanager` factory fullname -> concrete callable yielded by its
+    /// sole body statement.
+    concrete_contextmanager_items: FxHashMap<String, String>,
     /// Generic function fullname -> parameters whose type variable is also
     /// returned, allowing concrete callable arguments to flow to the result.
     generic_returns: FxHashMap<String, GenericReturn>,
@@ -1558,6 +1561,7 @@ impl<'a> CallChecker<'a> {
             callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
+            concrete_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
@@ -2299,6 +2303,7 @@ impl<'a> CallChecker<'a> {
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
         scope.instance_type_args.remove(local_name);
+        scope.annotations.remove(local_name);
         scope.contextvar_callables.remove(local_name);
         scope.contextvar_token_callables.remove(local_name);
         scope.topological_sorter_nodes.remove(local_name);
@@ -4546,6 +4551,9 @@ impl<'a> CallChecker<'a> {
     fn context_manager_enter_callable(&self, expr: &Expr) -> Option<String> {
         if let Expr::Call(constructor) = expr {
             let factory = self.resolve_callee(&constructor.func)?;
+            if let Some(callable) = self.concrete_contextmanager_items.get(&factory) {
+                return Some(callable.clone());
+            }
             if let Some(generic) =
                 Self::known_stdlib_generic_return(Self::normalize_factory_fullname(&factory))
             {
@@ -4667,6 +4675,20 @@ impl<'a> CallChecker<'a> {
         let [Stmt::Return(ast::StmtReturn {
             value: Some(value), ..
         })] = body
+        else {
+            return None;
+        };
+        Some(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn single_yield_expression(body: &[Stmt]) -> Option<&Expr> {
+        let [Stmt::Expr(ast::StmtExpr { value, .. })] = body else {
+            return None;
+        };
+        let Expr::Yield(ast::ExprYield {
+            value: Some(value), ..
+        }) = value.as_ref()
         else {
             return None;
         };
@@ -6138,6 +6160,7 @@ impl<'a> CallChecker<'a> {
             "islice",
             "dropwhile",
             "takewhile",
+            "batched",
             "pairwise",
             "permutations",
             "combinations",
@@ -6176,6 +6199,20 @@ impl<'a> CallChecker<'a> {
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
+            }
+            "batched" if selected_index.is_some() => {
+                let index = selected_index?;
+                let batch_size = Self::nonnegative_literal_index(first_named(1, "n")?)?;
+                if batch_size == 0 || index >= batch_size {
+                    return None;
+                }
+                let iterable = first_named(0, "iterable")?;
+                let elements = match iterable {
+                    Expr::List(list) => list.elts.as_slice(),
+                    Expr::Tuple(tuple) => tuple.elts.as_slice(),
+                    _ => return None,
+                };
+                self.unnamed_callable_signature(elements.get(index)?)
             }
             "pairwise" | "permutations" | "combinations" | "combinations_with_replacement"
                 if selected_index.is_some() =>
@@ -7149,6 +7186,41 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn getattr_static_simple_namespace_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&call.func, "inspect.getattr_static")
+            || !(2..=3).contains(&call.arguments.len())
+            || call.arguments.keywords.iter().any(|keyword| {
+                !matches!(
+                    keyword.arg.as_ref().map(ast::Identifier::as_str),
+                    Some("obj" | "attr" | "default")
+                )
+            })
+        {
+            return None;
+        }
+        let Expr::Call(namespace) = Self::generic_argument(call, Some(0), "obj")? else {
+            return None;
+        };
+        let Expr::StringLiteral(attribute) = Self::generic_argument(call, Some(1), "attr")? else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&namespace.func)?)
+            != "types.SimpleNamespace"
+        {
+            return None;
+        }
+        self.resolve_callee(
+            &namespace
+                .arguments
+                .find_keyword(attribute.value.to_str())?
+                .value,
+        )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn attrgetter_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(getter_call) = func else {
             return None;
@@ -7758,6 +7830,37 @@ impl<'a> CallChecker<'a> {
         match method.value.as_ref() {
             literal @ Expr::List(_) => self.homogeneous_callable_sequence(literal),
             Expr::Call(sorted) => self.preserving_builtin_result(sorted, &["builtins.sorted"]),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_set_or_dict_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        match method.value.as_ref() {
+            Expr::Set(set) if call.arguments.args.is_empty() => {
+                let mut elements = set.elts.iter();
+                let resolved = self.resolve_callee(elements.next()?)?;
+                elements
+                    .all(|element| {
+                        self.resolve_callee(element).as_deref() == Some(resolved.as_str())
+                    })
+                    .then_some(resolved)
+            }
+            Expr::Dict(_) => {
+                let [key] = &*call.arguments.args else {
+                    return None;
+                };
+                self.resolve_literal_container_item(&method.value, key)
+            }
             _ => None,
         }
     }
@@ -8509,6 +8612,9 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.getattr_simple_namespace_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.getattr_static_simple_namespace_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.literal_setdefault_callable(func) {
                     return Some(callable);
                 }
@@ -8522,6 +8628,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_list_pop_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.literal_set_or_dict_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.heapq_result_callable(func) {
@@ -9208,6 +9317,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
+                self.concrete_contextmanager_items.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -9252,6 +9362,38 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .and_then(Self::typeguard_callable_signature)
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
+                }
+                if !is_async
+                    && decorator_list.iter().any(|decorator| {
+                        decorator_tail(&decorator.expression) == Some("contextmanager")
+                    })
+                {
+                    if let Some(callable) = Self::single_yield_expression(body)
+                        .filter(|yielded| {
+                            let Expr::Name(yielded_name) = yielded else {
+                                return true;
+                            };
+                            !parameters
+                                .posonlyargs
+                                .iter()
+                                .chain(parameters.args.iter())
+                                .chain(parameters.kwonlyargs.iter())
+                                .any(|parameter| {
+                                    parameter.parameter.name.as_str() == yielded_name.id.as_str()
+                                })
+                                && parameters.vararg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                                && parameters.kwarg.as_ref().is_none_or(|parameter| {
+                                    parameter.name.as_str() != yielded_name.id.as_str()
+                                })
+                        })
+                        .and_then(|yielded| self.resolve_callee(yielded))
+                        .filter(|callable| self.index.get(callable).is_some())
+                    {
+                        self.concrete_contextmanager_items
+                            .insert(fullname.clone(), callable);
+                    }
                 }
                 if let Some(signature) = returns
                     .as_deref()
@@ -9611,7 +9753,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
                 walk_stmt(self, stmt);
                 if let Expr::Name(name) = &**target {
-                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
                     } else if is_callable_attribute_alias || is_lambda {
@@ -9619,6 +9760,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     } else {
                         self.clear_instance_binding(name.id.as_str());
                     }
+                    self.define_annotation(name.id.as_str(), annotation);
                     if let Some(callable) = property_getter {
                         self.define(&format!("{}.fget.__return__", name.id.as_str()), callable);
                     }

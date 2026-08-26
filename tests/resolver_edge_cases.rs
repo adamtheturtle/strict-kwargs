@@ -733,6 +733,46 @@ next(iter(lambda: target, None))(1)
     );
 }
 
+/// `itertools.batched` preserves concrete callable elements selected from a
+/// statically known first batch (issue #973).
+#[test]
+fn itertools_batched_preserves_callable_elements() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.batched(iterable=[target], n=1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "itertools.batched must preserve its callable element: {messages:?}"
+    );
+}
+
+/// `batched` resolves only the selected element; siblings and later batches
+/// may contain callables with different signatures.
+#[test]
+fn itertools_batched_selects_the_indexed_callable() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+def other(*, named: int) -> None: ...
+next(itertools.batched([target, other], 2))[0](1)
+next(itertools.batched([target, other], 1))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "messages: {messages:?}"
+    );
+}
+
 /// A true `TypeGuard` branch narrows its argument to the declared callable
 /// signature (issue #456).
 #[test]
@@ -968,6 +1008,26 @@ getattr(types.SimpleNamespace(callback=target), "callback")(1)
     );
 }
 
+/// `inspect.getattr_static` preserves a concrete callable stored on an inline
+/// `SimpleNamespace` (issue #966).
+#[test]
+fn getattr_static_simple_namespace_preserves_callable_attribute() {
+    let messages = check_source(
+        r#"
+import inspect
+import types
+def target(value: int) -> None: ...
+inspect.getattr_static(
+    obj=types.SimpleNamespace(callback=target), attr="callback"
+)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "inspect.getattr_static must preserve the namespace callable: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]
@@ -991,6 +1051,34 @@ current.get()(1)
         has_error_at(&messages, 6, "get() result"),
         "expected ContextVar.get result violation, got: {messages:?}"
     );
+}
+
+/// Rebinding or deleting a specialized `ContextVar` clears its recorded
+/// callable-value signature (issue #755).
+#[test]
+fn contextvar_rebinding_and_deletion_clear_callable_metadata() {
+    for source in [
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+value = ContextVar("replacement")
+value.get()(1)
+"#,
+        r#"
+from collections.abc import Callable
+from contextvars import ContextVar
+value: ContextVar[Callable[[int], None]] = ContextVar("value")
+del value
+value.get()(1)
+"#,
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "stale ContextVar metadata survived invalidation: {messages:?}"
+        );
+    }
 }
 
 /// An unannotated `ContextVar` infers a concrete callable from its default
@@ -2695,6 +2783,47 @@ make("a")(1)
     );
 }
 
+/// Assigning a concrete new instance clears an older receiver annotation so
+/// attribute resolution uses the live class (issue #756).
+#[test]
+fn instance_reassignment_clears_old_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Old:
+    def method(self, value: int) -> None: ...
+class New:
+    def method(self, value: int, /) -> None: ...
+receiver: Old = Old()
+receiver = New()
+receiver.method(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "old annotation must not override the new instance class: {messages:?}"
+    );
+}
+
+/// A valued annotated assignment retains its newly declared receiver type even
+/// when the initializer is a concrete constructor.
+#[test]
+fn annotated_instance_assignment_retains_receiver_annotation() {
+    let messages = check_source(
+        r"
+class Declared:
+    def method(self, value: int) -> None: ...
+class Runtime:
+    def method(self, value: int, /) -> None: ...
+receiver: Declared = Runtime()
+receiver.method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "method"),
+        "declared receiver annotation was lost: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
@@ -3855,6 +3984,28 @@ inspect.unwrap(func=f)(1)
     assert!(has_error_at(&messages, 4, "f"), "messages: {messages:?}");
 }
 
+/// Literal set and dictionary `pop` results preserve their concrete callable
+/// element signatures (issue #758).
+#[test]
+fn literal_set_and_dict_pop_preserve_callable_signatures() {
+    let messages = check_source(
+        r#"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+{first}.pop()(1)
+{"call": second}.pop("call")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "first"),
+        "expected set-pop violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected dict-pop violation, got: {messages:?}"
+    );
+}
+
 /// A directly imported alias of `inspect.unwrap` retains the concrete wrapped
 /// callable signature (issue #858).
 #[test]
@@ -4182,6 +4333,73 @@ LiteralEnter().__enter__()
     assert!(
         messages.is_empty(),
         "non-callable enter results should not emit violations, got: {messages:?}"
+    );
+}
+
+/// Explicit `__enter__` on a `@contextmanager` result preserves the concrete
+/// callable yielded by its single-statement generator body (issue #974).
+#[test]
+fn contextmanager_explicit_enter_preserves_yielded_callable() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "contextmanager __enter__ must preserve its yielded callable: {messages:?}"
+    );
+}
+
+/// A yielded parameter is opaque while the context-manager body executes and
+/// must not resolve to a same-named outer callable.
+#[test]
+fn contextmanager_enter_ignores_outer_callable_shadowed_by_parameter() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager(target):
+    yield target
+manager(object()).__enter__()(1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "shadowed outer callable must not leak into the yield: {messages:?}"
+    );
+}
+
+/// Redefining a context-manager factory clears the concrete callable yielded
+/// by its previous definition.
+#[test]
+fn contextmanager_redefinition_clears_concrete_yield_metadata() {
+    let messages = check_source(
+        r"
+import contextlib
+def target(value: int) -> None: ...
+@contextlib.contextmanager
+def manager():
+    yield target
+manager().__enter__()(1)
+def manager():
+    yield 1
+manager().__enter__()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "messages: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 10, "target"),
+        "stale yielded callable survived redefinition: {messages:?}"
     );
 }
 
