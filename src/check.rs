@@ -6961,6 +6961,15 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn same_counter_key(left: &Expr, right: &Expr) -> bool {
+        Self::same_literal_key(left, right)
+            || matches!(
+                (Self::dotted_path(left), Self::dotted_path(right)),
+                (Some(left), Some(right)) if left == right
+            )
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn counter_literal_entries<'b>(&self, expr: &'b Expr) -> Option<Vec<(&'b Expr, i64)>> {
         let Expr::Call(constructor) = expr else {
             return None;
@@ -6973,16 +6982,23 @@ impl<'a> CallChecker<'a> {
         }
         match &*constructor.arguments.args {
             [] => Some(Vec::new()),
-            [Expr::Dict(dict)] => dict
-                .items
-                .iter()
-                .map(|item| {
-                    Some((
-                        item.key.as_ref()?,
-                        Self::literal_signed_integer(&item.value)?,
-                    ))
-                })
-                .collect(),
+            [Expr::Dict(dict)] => {
+                let mut entries: Vec<(&'b Expr, i64)> = Vec::new();
+                // Dict literals retain the last value for a repeated key.
+                for item in dict.items.iter().rev() {
+                    let key = item.key.as_ref()?;
+                    let count = Self::literal_signed_integer(&item.value)?;
+                    if entries
+                        .iter()
+                        .any(|(existing, _)| Self::same_counter_key(key, existing))
+                    {
+                        continue;
+                    }
+                    entries.push((key, count));
+                }
+                entries.reverse();
+                Some(entries)
+            }
             _ => None,
         }
     }
@@ -7009,10 +7025,6 @@ impl<'a> CallChecker<'a> {
         }
         let left_entries = self.counter_literal_entries(left)?;
         let right_entries = self.counter_literal_entries(right)?;
-        let same_key = |left: &Expr, right: &Expr| {
-            Self::same_literal_key(left, right)
-                || matches!((left, right), (Expr::Name(left), Expr::Name(right)) if left.id == right.id)
-        };
         let mut result = None;
         let mut include = |key: &Expr, total: i64| {
             if total <= 0 {
@@ -7031,7 +7043,7 @@ impl<'a> CallChecker<'a> {
         for (key, count) in &left_entries {
             let right_count = right_entries
                 .iter()
-                .find(|(right, _)| same_key(key, right))
+                .find(|(right, _)| Self::same_counter_key(key, right))
                 .map_or(0, |(_, count)| *count);
             let total = match op {
                 ast::Operator::Add => *count + right_count,
@@ -7042,10 +7054,11 @@ impl<'a> CallChecker<'a> {
             };
             include(key, total)?;
         }
-        for (key, count) in right_entries
-            .iter()
-            .filter(|(right, _)| !left_entries.iter().any(|(left, _)| same_key(left, right)))
-        {
+        for (key, count) in right_entries.iter().filter(|(right, _)| {
+            !left_entries
+                .iter()
+                .any(|(left, _)| Self::same_counter_key(left, right))
+        }) {
             let total = match op {
                 ast::Operator::Add | ast::Operator::BitOr => *count,
                 ast::Operator::Sub => -*count,

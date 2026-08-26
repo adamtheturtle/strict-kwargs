@@ -4741,6 +4741,43 @@ next(iter(Counter({target: 1}) | Counter()))(1)
     );
 }
 
+/// Duplicate Counter mapping keys use the last literal value, matching Python
+/// dict construction semantics (Bugbot on #1028).
+#[test]
+fn counter_binary_operations_use_last_duplicate_key_count() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+next(iter(Counter({target: 1, target: 0}) + Counter()))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("next() result")),
+        "last duplicate count must win: {messages:?}"
+    );
+}
+
+/// Identical dotted callable keys match across Counter operands (Bugbot on
+/// #1028).
+#[test]
+fn counter_intersection_matches_attribute_callable_keys() {
+    let messages = check_source(
+        r"
+from collections import Counter
+class Namespace:
+    def target(value: int) -> None: ...
+next(iter(Counter({Namespace.target: 1}) & Counter({Namespace.target: 1})))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected attribute-key intersection violation, got: {messages:?}"
+    );
+}
+
 /// ``ContextVar.set()`` tokens preserve ``Token.old_value`` callable types
 /// (issue #659).
 #[test]
