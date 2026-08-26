@@ -1,0 +1,2 @@
+Preserve callable results from ``enterAsyncContext`` when an
+``IsolatedAsyncioTestCase`` is stored in a local variable.

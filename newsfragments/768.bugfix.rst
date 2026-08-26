@@ -1,0 +1,1 @@
+Resolve named callable aliases used as the value type of annotated ``ContextVar`` instances.
