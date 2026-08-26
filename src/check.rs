@@ -4427,11 +4427,10 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
-        names
-            .contains(&fullname.as_str())
-            .then(|| call.arguments.args.first())
-            .flatten()
-            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+        if !names.contains(&fullname.as_str()) || call.arguments.args.len() != 1 {
+            return None;
+        }
+        self.homogeneous_literal_callable(call.arguments.args.first()?)
     }
 
     #[cfg_attr(coverage, coverage(off))]
