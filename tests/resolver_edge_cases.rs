@@ -3250,6 +3250,35 @@ deque(iterable=[target])[0](1)
     );
 }
 
+/// Copying an immediately constructed deque preserves its literal callable
+/// elements through subscripting (issue #787).
+#[test]
+fn deque_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+deque(iterable=[target]).copy()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "deque result"),
+        "expected copied-deque violation, got: {messages:?}"
+    );
+
+    let qualified = check_source(
+        r"
+import collections
+def target(value: int) -> None: ...
+collections.deque(iterable=[target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&qualified, 4, "deque result"),
+        "qualified deque constructor must remain supported, got: {qualified:?}"
+    );
+}
+
 /// Iterating an immediate literal dictionary's values preserves a concrete
 /// callable value shape (issue #391).
 #[test]
@@ -6102,6 +6131,23 @@ next(iter({target: 1}))(1)
             "expected next(iter(...)) violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// Iterating a literal `WeakSet` preserves its concrete callable elements
+/// (issue #829).
+#[test]
+fn weak_set_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakSet(data=[target])))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakSet iterator violation, got: {messages:?}"
+    );
 }
 
 /// Selecting the value from an immediate `UserDict.popitem` result preserves
