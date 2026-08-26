@@ -2273,6 +2273,23 @@ next(itertools.zip_longest([f]))[0](1)
     }
 }
 
+/// `product(..., repeat=n)` repeats its positional iterable sequence in the
+/// produced tuple (issue #1078).
+#[test]
+fn itertools_product_repeat_maps_repeated_tuple_indices() {
+    let messages = check_source(
+        r"
+import itertools
+def f(value: int) -> None: ...
+next(itertools.product([f], repeat=2))[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected repeated-product violation, got: {messages:?}"
+    );
+}
+
 /// Tuple-producing builtins preserve literal callable elements at their
 /// documented output positions (issue #390).
 #[test]

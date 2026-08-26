@@ -6239,7 +6239,26 @@ impl<'a> CallChecker<'a> {
             {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
-            "product" | "zip_longest" => {
+            "product" => {
+                let index = selected_index?;
+                let repeat = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("repeat"))
+                            .then_some(&keyword.value)
+                    })
+                    .map_or(Some(1), Self::nonnegative_literal_index)?;
+                let tuple_len = call.arguments.args.len().checked_mul(repeat)?;
+                if index >= tuple_len || call.arguments.args.is_empty() {
+                    return None;
+                }
+                self.literal_iterable_callable_signature(
+                    call.arguments.args.get(index % call.arguments.args.len())?,
+                )
+            }
+            "zip_longest" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
