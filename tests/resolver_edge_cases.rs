@@ -1550,6 +1550,24 @@ for item in values():
     );
 }
 
+/// A comprehension reads callable items from an annotated generator factory
+/// invocation (issue #850).
+#[test]
+fn generator_factory_comprehension_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+[item(1) for item in values()]
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "comprehension item"),
+        "expected generator factory comprehension violation, got: {messages:?}"
+    );
+}
+
 /// ``async with`` preserves a context manager's ``__aenter__`` return type
 /// (issue #454).
 #[test]
