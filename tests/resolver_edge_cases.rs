@@ -2136,6 +2136,23 @@ next(iter(OrderedDict({"x": target}).items()))[1](1)
     );
 }
 
+/// Selecting the value position from a single-mapping immediate `ChainMap`
+/// items iterator preserves its concrete callable signature (issue #929).
+#[test]
+fn chain_map_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+next(iter(ChainMap({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected ChainMap items value violation, got: {messages:?}"
+    );
+}
+
 /// `dict.get` on an existing literal key preserves its callable value
 /// (issue #773).
 #[test]
