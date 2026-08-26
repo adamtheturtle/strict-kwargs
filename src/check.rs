@@ -7892,7 +7892,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn generator_yield_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn generator_yield_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -7904,7 +7904,7 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => tuple.elts.first()?,
             other => other,
         };
-        Self::callable_annotation_signature(yield_type)
+        self.callable_type_alias_signature(yield_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -10311,7 +10311,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
                         self.current_scope()
                             .callable_generator_yields
                             .insert(name.id.to_string(), signature);
@@ -10370,7 +10370,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
                         self.current_scope()
                             .callable_generator_yields
                             .insert(name.id.to_string(), signature);
