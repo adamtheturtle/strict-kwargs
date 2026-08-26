@@ -4433,12 +4433,19 @@ impl<'a> CallChecker<'a> {
         &self,
         parameters: &ast::Parameters,
         returns: Option<&Expr>,
+        type_params: Option<&ast::TypeParams>,
     ) -> Option<GenericReturn> {
         let return_annotation = returns?;
         let Expr::Name(return_name) = return_annotation else {
             return None;
         };
-        if !self.type_vars.contains(return_name.id.as_str()) {
+        let is_pep695_type_var = type_params.is_some_and(|params| {
+            params.iter().any(|param| {
+                matches!(param, ast::TypeParam::TypeVar(type_var)
+                    if type_var.name.id.as_str() == return_name.id.as_str())
+            })
+        });
+        if !self.type_vars.contains(return_name.id.as_str()) && !is_pep695_type_var {
             return None;
         }
         let return_text = self.source[return_annotation.range()].trim();
@@ -4541,8 +4548,15 @@ impl<'a> CallChecker<'a> {
         name: &str,
     ) -> Option<&'b Expr> {
         index
+            .filter(|index| {
+                !call
+                    .arguments
+                    .args
+                    .iter()
+                    .take(index + 1)
+                    .any(Expr::is_starred_expr)
+            })
             .and_then(|index| call.arguments.args.get(index))
-            .filter(|argument| !argument.is_starred_expr())
             .or_else(|| {
                 call.arguments.keywords.iter().find_map(|keyword| {
                     (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
@@ -5546,7 +5560,7 @@ impl<'a> CallChecker<'a> {
         let container = container.rsplit('.').next()?;
         let item = match container {
             "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
-            "Generator" => {
+            "Generator" | "AsyncGenerator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
                 };
@@ -6133,7 +6147,9 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
-            _ => self.resolve_callee(func),
+            _ => self
+                .resolve_callee(func)
+                .and_then(|mapper| self.concrete_callable_returns.get(&mapper).cloned()),
         }
     }
 
@@ -6145,7 +6161,13 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
-            _ => self.unnamed_callable_signature(func),
+            _ => self.resolve_callee(func).and_then(|mapper| {
+                self.callable_returns.get(&mapper).cloned().or_else(|| {
+                    self.concrete_callable_returns
+                        .get(&mapper)
+                        .and_then(|returned| self.callable_fullname_signature(returned))
+                })
+            }),
         }
     }
 
@@ -6245,6 +6267,9 @@ impl<'a> CallChecker<'a> {
             "chain" if selected_index.is_none() => {
                 let mut result = None;
                 for iterable in &call.arguments.args {
+                    if definite_empty_iterable(iterable) {
+                        continue;
+                    }
                     let signature = self.literal_iterable_callable_signature(iterable)?;
                     if result
                         .as_ref()
@@ -6256,7 +6281,23 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "accumulate" | "islice" if selected_index.is_none() => {
+            "accumulate" if selected_index.is_none() => {
+                if let Some(initial) = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
+                            .then_some(&keyword.value)
+                    })
+                    .filter(|initial| !matches!(initial, Expr::NoneLiteral(_)))
+                {
+                    self.unnamed_callable_signature(initial)
+                } else {
+                    self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+                }
+            }
+            "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
             "compress" if selected_index.is_none() => {
@@ -7132,9 +7173,10 @@ impl<'a> CallChecker<'a> {
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
             let class_fullname = self.class_from_constructor(receiver)?;
+            let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
-                .get(&format!("{class_fullname}.__iter__"))
+                .get(&iterator_fullname)
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
@@ -8923,6 +8965,15 @@ impl<'a> CallChecker<'a> {
             .as_deref()
             .and_then(Self::iterator_item_callable_signature)
         {
+            if decorator_list.iter().any(|decorator| {
+                matches!(
+                    decorator_tail(&decorator.expression),
+                    Some("contextmanager" | "asynccontextmanager")
+                )
+            }) {
+                self.callable_contextmanager_items
+                    .insert(method_fullname.clone(), signature.clone());
+            }
             self.callable_iterator_items
                 .insert(method_fullname.clone(), signature);
         }
@@ -9503,6 +9554,7 @@ impl<'a> CallChecker<'a> {
                     }
                 }
             }
+            Stmt::With(with_stmt) => self.visit_with_stmt(with_stmt),
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
                 self.visit_stmt(stmt);
             }
@@ -9530,6 +9582,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     body,
                     decorator_list,
                     returns,
+                    type_params,
                     is_async,
                     ..
                 } = function_def;
@@ -9641,9 +9694,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_returns.insert(fullname.clone(), signature);
                 }
-                if let Some(generic) =
-                    self.generic_return_from_parameters(parameters, returns.as_deref())
-                {
+                if let Some(generic) = self.generic_return_from_parameters(
+                    parameters,
+                    returns.as_deref(),
+                    type_params.as_deref(),
+                ) {
                     self.generic_returns.insert(fullname.clone(), generic);
                 }
                 if self.function_stack.is_empty() {

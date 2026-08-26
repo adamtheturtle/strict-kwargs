@@ -947,6 +947,25 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
+/// before looking up its callable item annotation (issue #1142).
+#[test]
+fn inherited_dunder_iter_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class Base:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+class Child(Base): ...
+next(iter(Child()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "expected inherited __iter__ result violation, got: {messages:?}"
+    );
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]
@@ -1673,6 +1692,24 @@ async def caller() -> None:
     );
 }
 
+/// `anext` also preserves the yielded callable declared by the usual
+/// two-argument `AsyncGenerator` annotation (issue #1140).
+#[test]
+fn annotated_async_generator_anext_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected async-generator anext violation, got: {messages:?}"
+    );
+}
+
 /// A `@contextmanager` factory's callable iterator item becomes the concrete
 /// signature of its `with ... as` binding (issue #385).
 #[test]
@@ -1690,6 +1727,27 @@ with manager() as call:
     assert!(
         has_error_at(&messages, 7, "context result"),
         "expected context-manager binding violation, got: {messages:?}"
+    );
+}
+
+/// Class-body context-manager targets remain visible to statements in the
+/// suite (issue #1139).
+#[test]
+fn class_contextmanager_binding_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def manager() -> Iterator[Callable[[int], None]]: ...
+class C:
+    with manager() as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "context result"),
+        "expected class context-manager binding violation, got: {messages:?}"
     );
 }
 
@@ -1941,6 +1999,49 @@ choose(target)(1)
     assert!(
         has_error_at(&messages, 6, "generic result"),
         "expected defaulted generic-result violation, got: {messages:?}"
+    );
+}
+
+/// PEP 695 function type parameters participate in the same generic-return
+/// propagation as an assigned `TypeVar` (issue #1136).
+#[test]
+fn pep695_generic_return_propagates_callable_argument() {
+    let messages = check_source(
+        r"
+def identity[T](value: T) -> T: ...
+def target(value: int) -> None: ...
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result"),
+        "expected PEP 695 generic-result violation, got: {messages:?}"
+    );
+}
+
+/// A starred positional before a `TypeVar` slot makes that positional binding
+/// ambiguous; an explicit keyword for the same slot remains deterministic
+/// (issue #1135).
+#[test]
+fn generic_return_declines_positions_after_starred_arguments() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def select(prefix: object, value: T) -> T: ...
+def target(value: int) -> None: ...
+args = [object()]
+select(*args, target)(1)
+select(*args, value=target)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred positional mapping must remain unresolved: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "generic result"),
+        "explicit TypeVar keyword must still resolve: {messages:?}"
     );
 }
 
@@ -2252,6 +2353,24 @@ next(chain_items([target]))(1)
     );
 }
 
+/// Empty literal iterables contribute no values to `chain` and therefore do
+/// not erase the signature supplied by a later non-empty iterable (issue
+/// #1133).
+#[test]
+fn itertools_chain_skips_empty_literal_iterables() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain([], (), [target], set()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chained callable violation, got: {messages:?}"
+    );
+}
+
 /// Filtering/slicing itertools helpers preserve callable item types (issue
 /// #448).
 #[test]
@@ -2273,6 +2392,29 @@ next(itertools.islice([f], 1))(1)
             "expected itertools filter-helper violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// The first item from `accumulate(..., initial=...)` is the initial value,
+/// not an item from the iterable (issue #1077).
+#[test]
+fn itertools_accumulate_initial_preserves_initial_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def item(value: int, /) -> None: ...
+def initial() -> None: ...
+next(itertools.accumulate([item], initial=initial))(1)
+next(itertools.accumulate([item], initial=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "initial signature must reject the iterable positional: {messages:?}"
+    );
+    assert!(
+        !has_error_at(&messages, 6, "next() result"),
+        "initial=None must preserve the iterable signature: {messages:?}"
+    );
 }
 
 /// `itertools.compress` names its filtered input `data`, not `iterable`
@@ -2574,6 +2716,38 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
             "expected pool imap violation on line {line}, got: {messages:?}"
         );
     }
+}
+
+/// A named Pool mapper's result type, rather than the mapper's own call
+/// signature, determines whether mapped items are callable (issue #1083).
+#[test]
+fn pool_map_named_mapper_uses_return_callable_signature() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def ordinary(item: int) -> int: ...
+def target() -> None: ...
+def callable_item(item: int):
+    return target
+Pool(1).map(ordinary, [1])[0](unexpected=1)
+Pool(1).map(callable_item, [1])[0](1)
+next(Pool(1).imap(callable_item, [1]))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"ordinary\"")),
+        "ordinary mapper must not become its result signature: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "expected callable-return violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 9, "next() result"),
+        "expected named imap callable-return violation, got: {messages:?}"
+    );
 }
 
 /// Pool mapping helpers return homogeneous lists, so every literal index can
@@ -4240,6 +4414,37 @@ expectedFailure(target)(1)
         has_error_at(&messages, 5, "target"),
         "messages: {messages:?}"
     );
+}
+
+/// Decorated context-manager methods preserve their yielded callable in both
+/// bound-self and constructed-instance calls (issue #1138).
+#[test]
+fn contextmanager_methods_preserve_callable_yield_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+class Managers:
+    @contextmanager
+    def manager(self) -> Iterator[Callable[[int], None]]: ...
+    @asynccontextmanager
+    async def async_manager(self) -> AsyncIterator[Callable[[int], None]]: ...
+    def run(self) -> None:
+        with self.manager() as call:
+            call(1)
+    async def async_run(self) -> None:
+        async with self.async_manager() as call:
+            call(1)
+with Managers().manager() as call:
+    call(1)
+",
+    );
+    for line in [11, 14, 16] {
+        assert!(
+            has_error_at(&messages, line, "context result"),
+            "expected method context-result violation on line {line}: {messages:?}"
+        );
+    }
 }
 
 /// Context-manager helpers and ``__enter__`` preserve managed callable types
