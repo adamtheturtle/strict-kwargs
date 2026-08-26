@@ -6884,6 +6884,72 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn dict_view_item_signature(
+        &self,
+        expr: &Expr,
+        selected_index: Option<usize>,
+    ) -> Option<Signature> {
+        let Expr::Call(iter_call) = expr else {
+            return None;
+        };
+        let iter_fullname = self.resolve_callee(&iter_call.func)?;
+        if !matches!(
+            iter_fullname.as_str(),
+            "builtins.iter" | "builtins.iter.__new__"
+        ) {
+            return None;
+        }
+        let [Expr::Call(view_call)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        let Expr::Attribute(attribute) = view_call.func.as_ref() else {
+            return None;
+        };
+        if !view_call.arguments.args.is_empty() || !view_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let select_key = match (attribute.attr.as_str(), selected_index) {
+            ("items", Some(1)) => false,
+            ("keys", None) => true,
+            _ => return None,
+        };
+        let dict = match attribute.value.as_ref() {
+            Expr::Dict(dict) => dict,
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| {
+                        matches!(
+                            class.as_str(),
+                            "collections.ChainMap" | "collections.OrderedDict"
+                        )
+                    })
+                    && constructor.arguments.keywords.is_empty() =>
+            {
+                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+                    return None;
+                };
+                dict
+            }
+            _ => return None,
+        };
+        let mut result = None;
+        for item in &dict.items {
+            let key = item.key.as_ref()?;
+            let selected = if select_key { key } else { &item.value };
+            let signature = self.unnamed_callable_signature(selected)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn weakset_copy_item_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Call(iter_call) = expr else {
             return None;
@@ -7923,6 +7989,9 @@ impl<'a> CallChecker<'a> {
             return Some(signature);
         }
         if let Some(signature) = self.dict_values_item_signature(iterator) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.dict_view_item_signature(iterator, selected_index) {
             return Some(signature);
         }
         if let Some(signature) = self.weakset_copy_item_signature(iterator) {

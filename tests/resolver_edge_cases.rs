@@ -3426,6 +3426,38 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// Selecting the value position from a literal dictionary's sole `items()`
+/// iterator result preserves its callable signature (issue #789).
+#[test]
+fn dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({"key": target}.items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.items value violation, got: {messages:?}"
+    );
+}
+
+/// Iterating a literal dictionary's `keys()` view preserves its concrete
+/// callable key signature (issue #790).
+#[test]
+fn dict_keys_iterator_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({target: "value"}.keys()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected dict.keys violation, got: {messages:?}"
+    );
+}
+
 /// A `MappingProxyType` around a literal dictionary preserves its concrete
 /// callable values through subscripting (issue #776).
 #[test]
@@ -3528,6 +3560,23 @@ next(iter(OrderedDict({"x": target}).values()))(1)
     );
 }
 
+/// Selecting the value position from an immediate `OrderedDict` items
+/// iterator preserves its concrete callable signature (issue #923).
+#[test]
+fn ordered_dict_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+next(iter(OrderedDict({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected OrderedDict items value violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate `UserDict`'s values preserves a concrete callable
 /// value shape (issue #926).
 #[test]
@@ -3576,6 +3625,23 @@ next(iter(MappingProxyType(mapping={"x": target}).values()))(1)
     assert!(
         has_error_at(&messages, 4, "next() result"),
         "expected MappingProxyType values violation, got: {messages:?}"
+    );
+}
+
+/// Selecting the value position from a single-mapping immediate `ChainMap`
+/// items iterator preserves its concrete callable signature (issue #929).
+#[test]
+fn chain_map_items_iterator_value_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+def target(value: int) -> None: ...
+next(iter(ChainMap({"x": target}).items()))[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected ChainMap items value violation, got: {messages:?}"
     );
 }
 
