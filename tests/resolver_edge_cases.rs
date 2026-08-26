@@ -947,6 +947,25 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
+/// before looking up its callable item annotation (issue #1142).
+#[test]
+fn inherited_dunder_iter_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class Base:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+class Child(Base): ...
+next(iter(Child()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "expected inherited __iter__ result violation, got: {messages:?}"
+    );
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]

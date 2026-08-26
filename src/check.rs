@@ -7138,9 +7138,10 @@ impl<'a> CallChecker<'a> {
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
             let class_fullname = self.class_from_constructor(receiver)?;
+            let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
-                .get(&format!("{class_fullname}.__iter__"))
+                .get(&iterator_fullname)
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
