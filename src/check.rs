@@ -9558,6 +9558,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
                 self.concrete_contextmanager_items.remove(&fullname);
+                self.callable_factory_returns.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
@@ -9740,6 +9741,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.invalidate_bound_callable_targets(target);
                         self.invalidate_globals_subscript_target(target);
                     } else if let Expr::Name(name) = target {
+                        self.callable_factory_returns.remove(&format!(
+                            "{}.{}",
+                            self.current_lexical_scope(),
+                            name.id
+                        ));
                         self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
