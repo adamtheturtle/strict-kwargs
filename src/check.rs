@@ -5533,7 +5533,7 @@ impl<'a> CallChecker<'a> {
         let container = container.rsplit('.').next()?;
         let item = match container {
             "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
-            "Generator" => {
+            "Generator" | "AsyncGenerator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
                 };

@@ -1673,6 +1673,24 @@ async def caller() -> None:
     );
 }
 
+/// `anext` also preserves the yielded callable declared by the usual
+/// two-argument `AsyncGenerator` annotation (issue #1140).
+#[test]
+fn annotated_async_generator_anext_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected async-generator anext violation, got: {messages:?}"
+    );
+}
+
 /// A `@contextmanager` factory's callable iterator item becomes the concrete
 /// signature of its `with ... as` binding (issue #385).
 #[test]
