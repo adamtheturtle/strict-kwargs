@@ -160,6 +160,29 @@ C().bound(1)
     );
 }
 
+/// A `partialmethod` assignment in an uncertain branch does not replace the
+/// unconditional signature visible after the branch (issue #1151).
+#[test]
+fn conditional_partialmethod_does_not_overwrite_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, value: int) -> None: ...
+    def method(self, *args) -> None: ...
+    if enabled:
+        method = partialmethod(base)
+C().method(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "conditional partialmethod overwrote the unconditional signature: {messages:?}"
+    );
+}
+
 /// `del f` removes a local callable binding so later calls are not resolved
 /// against the deleted definition.
 #[test]
@@ -947,6 +970,25 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
+/// before looking up its callable item annotation (issue #1142).
+#[test]
+fn inherited_dunder_iter_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class Base:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+class Child(Base): ...
+next(iter(Child()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "expected inherited __iter__ result violation, got: {messages:?}"
+    );
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]
@@ -1447,6 +1489,31 @@ factory()(1)
     );
 }
 
+/// Calling an async factory produces a coroutine rather than its annotated
+/// result class, so it must not be modeled as a synchronous callable (#1148).
+#[test]
+fn async_factory_result_is_not_treated_as_synchronous() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+async def factory() -> C: ...
+factory()(1)
+def replaced() -> C: ...
+async def replaced() -> C: ...
+replaced()(1)
+",
+    );
+    for line in [5, 8] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "async factory was treated as its result on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// A descriptor's annotated `__get__` callable return becomes the signature
 /// of class attributes assigned from that descriptor (issue #379).
 #[test]
@@ -1506,6 +1573,29 @@ C().call(1)
     assert!(
         has_error_at(&messages, 9, "call"),
         "broad annotation masked descriptor signature: {messages:?}"
+    );
+}
+
+/// Descriptor synthesis resolves constructor aliases when the binding-aware
+/// indexer is active (issue #1147).
+#[test]
+fn aliased_descriptor_get_return_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+Alias = Descriptor
+@dataclass
+class C:
+    call = Alias()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "call"),
+        "expected aliased descriptor-return violation, got: {messages:?}"
     );
 }
 
@@ -1636,6 +1726,40 @@ C(call=f).call(1)
     );
 }
 
+/// A default value does not suppress indexing of a callable-annotated class
+/// field in either the fast or binding-aware indexer (issue #1145).
+#[test]
+fn callable_instance_field_with_default_is_resolved() {
+    for (source, line) in [
+        (
+            r"
+from collections.abc import Callable
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            5,
+        ),
+        (
+            r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            7,
+        ),
+    ] {
+        let messages = check_source(source);
+        assert!(
+            has_error_at(&messages, line, "call"),
+            "expected defaulted callable-field violation, got: {messages:?}"
+        );
+    }
+}
+
 /// A concrete callable return annotation on `__getitem__` supplies the
 /// selected value's signature (issue #381).
 #[test]
@@ -1658,6 +1782,29 @@ C()["call"](1)
     );
 }
 
+/// `__getitem__` callable return metadata applies to tracked instance names
+/// and annotated instance parameters as well as inline constructors (#1144).
+#[test]
+fn bound_getitem_callable_return_is_resolved() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+class C:
+    def __getitem__(self, key: str) -> Callable[[int], None]: ...
+c = C()
+c["call"](1)
+def consume(value: C) -> None:
+    value["call"](1)
+"#,
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "__return__"),
+            "expected bound getitem violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Awaiting a local async factory preserves its concrete callable return
 /// annotation (issue #383).
 #[test]
@@ -1673,6 +1820,25 @@ async def caller() -> None:
     assert!(
         has_error_at(&messages, 5, "awaited result"),
         "expected awaited-result violation, got: {messages:?}"
+    );
+}
+
+/// Awaiting an async method preserves its callable return annotation just as
+/// awaiting a module-level factory does (issue #1141).
+#[test]
+fn awaited_method_callable_result_preserves_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Factory:
+    async def build(self) -> Callable[[int], None]: ...
+async def caller(factory: Factory) -> None:
+    (await factory.build())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "awaited result"),
+        "expected awaited-method result violation, got: {messages:?}"
     );
 }
 
@@ -1712,6 +1878,24 @@ async def caller() -> None:
     assert!(
         has_error_at(&messages, 5, "anext() result"),
         "expected anext-result violation, got: {messages:?}"
+    );
+}
+
+/// `anext` also preserves the yielded callable declared by the usual
+/// two-argument `AsyncGenerator` annotation (issue #1140).
+#[test]
+fn annotated_async_generator_anext_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncGenerator, Callable
+async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
+async def caller() -> None:
+    (await anext(functions()))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "anext() result"),
+        "expected async-generator anext violation, got: {messages:?}"
     );
 }
 
@@ -1985,6 +2169,23 @@ choose(f, g)(1)
         has_error_at(&messages, 8, "generic result")
             && has_error_at(&messages, 9, "generic result"),
         "expected generic-result violations, got: {messages:?}"
+    );
+}
+
+/// PEP 695 function type parameters participate in the same generic-return
+/// propagation as an assigned `TypeVar` (issue #1136).
+#[test]
+fn pep695_generic_return_propagates_callable_argument() {
+    let messages = check_source(
+        r"
+def identity[T](value: T) -> T: ...
+def target(value: int) -> None: ...
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result"),
+        "expected PEP 695 generic-result violation, got: {messages:?}"
     );
 }
 
@@ -2687,6 +2888,38 @@ Pool(1).starmap_async(func=lambda: target, iterable=[()]).get(timeout=1)[0](1)
     }
 }
 
+/// A named Pool mapper's result type, rather than the mapper's own call
+/// signature, determines whether mapped items are callable (issue #1083).
+#[test]
+fn pool_map_named_mapper_uses_return_callable_signature() {
+    let messages = check_source(
+        r"
+from multiprocessing.pool import Pool
+def ordinary(item: int) -> int: ...
+def target() -> None: ...
+def callable_item(item: int):
+    return target
+Pool(1).map(ordinary, [1])[0](unexpected=1)
+Pool(1).map(callable_item, [1])[0](1)
+next(Pool(1).imap(callable_item, [1]))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"ordinary\"")),
+        "ordinary mapper must not become its result signature: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "expected callable-return violation, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 9, "next() result"),
+        "expected named imap callable-return violation, got: {messages:?}"
+    );
+}
+
 /// Pool mapping helpers return homogeneous lists, so every literal index can
 /// preserve the callback result signature (issue #1082).
 #[test]
@@ -3288,6 +3521,100 @@ async def main() -> None:
     assert!(
         has_error_at(&messages, 6, "athrow() result"),
         "expected async generator athrow violation, got: {messages:?}"
+    );
+}
+
+/// Generator-yield metadata follows lexical bindings and must not survive a
+/// function scope or bypass a nearer opaque parameter (issue #1084).
+#[test]
+fn generator_yield_signatures_do_not_leak_across_local_scopes() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def seed() -> None:
+    stream: Generator[Callable[[], None], None, None]
+def caller(stream: object) -> None:
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:6:")),
+        "generator yield signature leaked into a later parameter: {messages:?}"
+    );
+}
+
+/// A nonlocal assignment clears generator-yield metadata in the enclosing
+/// scope that owns the binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_clears_generator_yield_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def replace() -> None:
+        nonlocal stream
+        stream = object()
+    replace()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:9:")),
+        "nonlocal rebind kept a stale generator yield: {messages:?}"
+    );
+}
+
+/// A nearer opaque binding owns a nonlocal assignment, so invalidation must
+/// not continue into an outer callable generator binding (review on #1131).
+#[test]
+fn nonlocal_rebinding_stops_at_nearer_opaque_binding() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    def middle(stream: object) -> None:
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+        replace()
+    middle(object())
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "send() result"),
+        "nearer opaque binding invalidated the outer generator yield: {messages:?}"
+    );
+}
+
+/// Class namespaces are skipped by `nonlocal` lookup, so a class-body binding
+/// must not intercept invalidation of an enclosing function binding (#1131).
+#[test]
+fn nonlocal_rebinding_skips_class_scope() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    class Namespace:
+        stream: object
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "class scope intercepted nonlocal invalidation: {messages:?}"
     );
 }
 
