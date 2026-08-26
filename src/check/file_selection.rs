@@ -47,8 +47,7 @@ pub(super) fn collect_python_files(
                 .follow_links(true)
                 .into_iter()
                 .filter_entry(|entry| {
-                    entry.depth() == 0
-                        || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
+                    entry.depth() == 0 || !walk_entry_is_excluded(&selection, entry)
                 });
             for entry in walk {
                 let entry = entry.map_err(walk_error)?;
@@ -192,7 +191,13 @@ pub(super) fn collect_python_files_with_project_inventory(
             .as_ref()
             .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
 
-        if entry.file_type().is_symlink() && is_directory && !excluded_as_directory {
+        let excluded_symlink_target = entry.file_type().is_symlink()
+            && symlink_target_directory_is_prunable(&selection, path);
+        if entry.file_type().is_symlink()
+            && is_directory
+            && !excluded_as_directory
+            && !excluded_symlink_target
+        {
             symlink_directories.push(path.to_path_buf());
         }
 
@@ -209,10 +214,7 @@ pub(super) fn collect_python_files_with_project_inventory(
         let walk = walkdir::WalkDir::new(directory)
             .follow_links(true)
             .into_iter()
-            .filter_entry(|entry| {
-                entry.depth() == 0
-                    || !selection.is_excluded(entry.path(), entry.file_type().is_dir(), false)
-            });
+            .filter_entry(|entry| entry.depth() == 0 || !walk_entry_is_excluded(&selection, entry));
         for entry in walk {
             let entry = entry.map_err(walk_error)?;
             if entry.file_type().is_file() && is_python_file(entry.path()) {
@@ -257,6 +259,33 @@ fn walk_error(error: walkdir::Error) -> CheckError {
         .io_error()
         .map_or(std::io::ErrorKind::Other, std::io::Error::kind);
     CheckError::Io(std::io::Error::new(kind, error))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn walk_entry_is_excluded(selection: &FileSelection, entry: &walkdir::DirEntry) -> bool {
+    let path = entry.path();
+    let is_directory = entry.file_type().is_dir() || path.is_dir();
+    if selection.is_excluded(path, is_directory, false) {
+        return true;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    is_directory && symlink_target_directory_is_prunable(selection, path)
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn symlink_target_directory_is_prunable(selection: &FileSelection, path: &Path) -> bool {
+    std::fs::canonicalize(path).is_ok_and(|target| {
+        selection.is_extend_excluded(&target, true)
+            || target.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with('.') || name == "venv" || name == "__pycache__"
+            })
+    })
 }
 
 /// The selected paths that the caller named explicitly.
@@ -320,12 +349,26 @@ impl FileSelection {
         if is_ignored_path(project_relative) {
             return true;
         }
-        if self.project_root.is_absolute()
-            && path.is_absolute()
-            && !path.starts_with(&self.project_root)
+        self.is_extend_excluded(path, is_dir)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn is_extend_excluded(&self, path: &Path, is_dir: bool) -> bool {
+        let normalized;
+        let path = if path.is_absolute()
+            && (!self.project_root.is_absolute() || !path.starts_with(&self.project_root))
         {
-            return false;
-        }
+            let Ok(canonical_project_root) = std::fs::canonicalize(&self.project_root) else {
+                return false;
+            };
+            let Ok(relative) = path.strip_prefix(canonical_project_root) else {
+                return false;
+            };
+            normalized = self.project_root.join(relative);
+            normalized.as_path()
+        } else {
+            path
+        };
         self.extend_exclude
             .matched_path_or_any_parents(path, is_dir)
             .is_ignore()
@@ -379,8 +422,11 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod file_selection_coverage {
-    use super::{collect_python_files, collect_python_files_for_fix};
+    #[cfg(unix)]
+    use super::collect_python_files_with_project_inventory;
+    use super::{collect_python_files, collect_python_files_for_fix, FileSelection};
     use crate::config::Config;
+    use std::path::Path;
 
     #[test]
     fn collect_python_files_for_fix_keeps_files_within_directory_scope() {
@@ -439,5 +485,71 @@ mod file_selection_coverage {
         )
         .expect("collect for fix");
         assert_eq!(fixed, collected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_ignored_target_directory_is_pruned() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("project tempdir");
+        let external = tempfile::tempdir().expect("external tempdir");
+        let ignored = external.path().join("venv");
+        let included = external.path().join("source");
+        std::fs::create_dir_all(&ignored).expect("create ignored target");
+        std::fs::create_dir_all(&included).expect("create included target");
+        std::fs::write(ignored.join("dependency.py"), "").expect("write ignored Python file");
+        std::fs::write(included.join("main.py"), "").expect("write included Python file");
+        symlink(&ignored, root.path().join("linked")).expect("symlink ignored directory");
+        symlink(&included, root.path().join("included")).expect("symlink included directory");
+
+        let paths = [root.path().to_path_buf()];
+        let files = collect_python_files(root.path(), &paths, &Config::default())
+            .expect("collect ordinary files");
+        assert_eq!(files, [root.path().join("included/main.py")]);
+
+        let (files, _) =
+            collect_python_files_with_project_inventory(root.path(), &paths, &Config::default())
+                .expect("collect project inventory");
+        assert_eq!(files, [root.path().join("included/main.py")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_extend_excluded_target_directory_is_pruned() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("project tempdir");
+        let generated = root.path().join("generated");
+        std::fs::create_dir_all(&generated).expect("create excluded target");
+        std::fs::write(generated.join("output.py"), "").expect("write excluded Python file");
+        symlink(&generated, root.path().join("linked")).expect("symlink excluded directory");
+        let config = Config {
+            extend_exclude: vec!["generated".to_string()],
+            ..Config::default()
+        };
+        let paths = [root.path().to_path_buf()];
+
+        assert!(collect_python_files(root.path(), &paths, &config)
+            .expect("collect ordinary files")
+            .is_empty());
+        assert!(
+            collect_python_files_with_project_inventory(root.path(), &paths, &config)
+                .expect("collect project inventory")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn relative_project_root_matches_canonical_excluded_target() {
+        let config = Config {
+            extend_exclude: vec![".github".to_string()],
+            ..Config::default()
+        };
+        let selection = FileSelection::new(Path::new("."), &config).expect("selection");
+        let canonical = std::fs::canonicalize(".github").expect("repository .github directory");
+
+        assert!(selection.is_extend_excluded(&canonical, true));
     }
 }
