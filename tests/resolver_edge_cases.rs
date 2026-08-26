@@ -4223,6 +4223,37 @@ expectedFailure(target)(1)
     );
 }
 
+/// Decorated context-manager methods preserve their yielded callable in both
+/// bound-self and constructed-instance calls (issue #1138).
+#[test]
+fn contextmanager_methods_preserve_callable_yield_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+class Managers:
+    @contextmanager
+    def manager(self) -> Iterator[Callable[[int], None]]: ...
+    @asynccontextmanager
+    async def async_manager(self) -> AsyncIterator[Callable[[int], None]]: ...
+    def run(self) -> None:
+        with self.manager() as call:
+            call(1)
+    async def async_run(self) -> None:
+        async with self.async_manager() as call:
+            call(1)
+with Managers().manager() as call:
+    call(1)
+",
+    );
+    for line in [11, 14, 16] {
+        assert!(
+            has_error_at(&messages, line, "context result"),
+            "expected method context-result violation on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Context-manager helpers and ``__enter__`` preserve managed callable types
 /// (issues #618-#621, #627-#632, #444, #630, #631).
 #[test]

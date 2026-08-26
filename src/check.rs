@@ -8903,6 +8903,15 @@ impl<'a> CallChecker<'a> {
             .as_deref()
             .and_then(Self::iterator_item_callable_signature)
         {
+            if decorator_list.iter().any(|decorator| {
+                matches!(
+                    decorator_tail(&decorator.expression),
+                    Some("contextmanager" | "asynccontextmanager")
+                )
+            }) {
+                self.callable_contextmanager_items
+                    .insert(method_fullname.clone(), signature.clone());
+            }
             self.callable_iterator_items
                 .insert(method_fullname.clone(), signature);
         }
