@@ -734,6 +734,22 @@ next(generator())(1)
     );
 }
 
+/// Callable-sentinel `iter` yields the concrete callable returned by its
+/// zero-argument factory when it differs from the sentinel (issue #972).
+#[test]
+fn callable_sentinel_iter_preserves_factory_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(iter(lambda: target, None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "callable-sentinel iter must preserve the factory result: {messages:?}"
+    );
+}
+
 /// `itertools.batched` preserves concrete callable elements selected from a
 /// statically known first batch (issue #973).
 #[test]
