@@ -4565,6 +4565,24 @@ impl<'a> CallChecker<'a> {
             })
     }
 
+    fn generic_argument_is_ambiguous(
+        call: &ast::ExprCall,
+        index: Option<usize>,
+        name: &str,
+    ) -> bool {
+        index.is_some_and(|index| {
+            call.arguments
+                .args
+                .iter()
+                .take(index + 1)
+                .any(Expr::is_starred_expr)
+        }) && !call
+            .arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn callable_fullname_signature(&self, fullname: &str) -> Option<Signature> {
         let signatures = self.index.get(fullname)?;
@@ -4645,7 +4663,7 @@ impl<'a> CallChecker<'a> {
         let mut result = None;
         for (index, name, has_default) in &generic.parameters {
             let Some(argument) = Self::generic_argument(call, *index, name) else {
-                if *has_default {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
                     continue;
                 }
                 return None;
@@ -4675,7 +4693,7 @@ impl<'a> CallChecker<'a> {
         let mut result = None;
         for (index, name, has_default) in &generic.parameters {
             let Some(argument) = Self::generic_argument(call, *index, name) else {
-                if *has_default {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
                     continue;
                 }
                 return None;

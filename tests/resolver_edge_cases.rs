@@ -2002,6 +2002,26 @@ choose(target)(1)
     );
 }
 
+/// A starred argument can fill a defaulted `TypeVar` slot, so it is ambiguous
+/// rather than equivalent to omitting that parameter (review on #1212).
+#[test]
+fn generic_return_declines_starred_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+args = [target]
+choose(target, *args)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred defaulted argument must decline inference: {messages:?}"
+    );
+}
+
 /// PEP 695 function type parameters participate in the same generic-return
 /// propagation as an assigned `TypeVar` (issue #1136).
 #[test]
