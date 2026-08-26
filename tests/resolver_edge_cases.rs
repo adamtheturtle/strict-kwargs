@@ -2153,6 +2153,45 @@ choose(f, g)(1)
     );
 }
 
+/// An omitted defaulted parameter sharing the return `TypeVar` does not erase
+/// the callable shape supplied by another argument (issue #1137).
+#[test]
+fn generic_return_skips_omitted_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+choose(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "expected defaulted generic-result violation, got: {messages:?}"
+    );
+}
+
+/// A starred argument can fill a defaulted `TypeVar` slot, so it is ambiguous
+/// rather than equivalent to omitting that parameter (review on #1212).
+#[test]
+fn generic_return_declines_starred_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+args = [target]
+choose(target, *args)(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 7, "generic result"),
+        "starred defaulted argument must decline inference: {messages:?}"
+    );
+}
+
 /// PEP 695 function type parameters participate in the same generic-return
 /// propagation as an assigned `TypeVar` (issue #1136).
 #[test]
