@@ -4562,6 +4562,27 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// `get` on literal-backed standard-library mapping wrappers preserves the
+/// concrete value callable (issue #799).
+#[test]
+fn collections_mapping_get_preserves_callable_signatures() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict, UserDict
+def target(value: int) -> None: ...
+ChainMap({"x": target}).get(key="x")(1)
+UserDict({"x": target}).get(key="x")(1)
+OrderedDict({"x": target}).get("x")(1)
+"#,
+    );
+    for line in 4..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected mapping get violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]
