@@ -1,0 +1,1 @@
+Preserve concrete callable elements while iterating ``weakref.WeakSet`` instances initialized from literal iterables.
