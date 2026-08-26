@@ -1,0 +1,2 @@
+Preserve concrete callable referents through directly imported aliases of
+``weakref.ref``.

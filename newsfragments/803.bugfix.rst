@@ -1,0 +1,1 @@
+Propagate a concrete callable through a local function whose body is a single unconditional return.
