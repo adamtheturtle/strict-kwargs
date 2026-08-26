@@ -7911,13 +7911,14 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(constructor) = method.value.as_ref() else {
             return None;
         };
+        let class = self.class_from_constructor_func(&constructor.func)?;
         if method.attr.as_str() != "popitem"
             || !popitem.arguments.args.is_empty()
             || !popitem.arguments.keywords.is_empty()
-            || self
-                .class_from_constructor_func(&constructor.func)?
-                .as_str()
-                != "collections.OrderedDict"
+            || !matches!(
+                class.as_str(),
+                "collections.OrderedDict" | "collections.UserDict"
+            )
             || !constructor.arguments.keywords.is_empty()
         {
             return None;
@@ -7925,16 +7926,43 @@ impl<'a> CallChecker<'a> {
         let [entries] = &*constructor.arguments.args else {
             return None;
         };
-        let entry_elements = match entries {
-            Expr::List(entries) => &entries.elts,
-            Expr::Tuple(entries) => &entries.elts,
+        let first = class == "collections.UserDict";
+        let value = match entries {
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => {
+                &if first {
+                    dict.items.first()?
+                } else {
+                    dict.items.last()?
+                }
+                .value
+            }
+            Expr::List(entries) => {
+                let Expr::Tuple(pair) = (if first {
+                    entries.elts.first()?
+                } else {
+                    entries.elts.last()?
+                }) else {
+                    return None;
+                };
+                let [_, value] = &*pair.elts else {
+                    return None;
+                };
+                value
+            }
+            Expr::Tuple(entries) => {
+                let Expr::Tuple(pair) = (if first {
+                    entries.elts.first()?
+                } else {
+                    entries.elts.last()?
+                }) else {
+                    return None;
+                };
+                let [_, value] = &*pair.elts else {
+                    return None;
+                };
+                value
+            }
             _ => return None,
-        };
-        let Expr::Tuple(pair) = entry_elements.last()? else {
-            return None;
-        };
-        let [_, value] = &*pair.elts else {
-            return None;
         };
         self.resolve_callee(value)
     }
