@@ -1487,6 +1487,28 @@ C().call(1)
     );
 }
 
+/// A descriptor's runtime `__get__` signature takes precedence over a broad
+/// callable annotation on the assigned class attribute (review on #1221).
+#[test]
+fn annotated_descriptor_does_not_create_dual_signatures() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+@dataclass
+class C:
+    call: Callable[..., None] = Descriptor()
+C().call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "call"),
+        "broad annotation masked descriptor signature: {messages:?}"
+    );
+}
+
 /// `CPython` descriptor `__get__` methods reject keyword arguments, so both
 /// binding arguments must remain positional (issues #501–#506).
 #[test]
