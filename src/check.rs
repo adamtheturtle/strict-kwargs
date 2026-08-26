@@ -6284,8 +6284,25 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let Expr::Dict(dict) = attribute.value.as_ref() else {
-            return None;
+        let dict = match attribute.value.as_ref() {
+            Expr::Dict(dict) => dict,
+            Expr::Call(constructor)
+                if self
+                    .class_from_constructor_func(&constructor.func)
+                    .is_some_and(|class| {
+                        matches!(
+                            class.as_str(),
+                            "collections.ChainMap" | "collections.OrderedDict"
+                        )
+                    })
+                    && constructor.arguments.keywords.is_empty() =>
+            {
+                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+                    return None;
+                };
+                dict
+            }
+            _ => return None,
         };
         let mut result = None;
         for item in &dict.items {
