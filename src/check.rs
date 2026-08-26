@@ -9863,6 +9863,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.invalidate_bound_callable_targets(target);
                         self.invalidate_globals_subscript_target(target);
                     } else if let Expr::Name(name) = target {
+                        self.callable_factory_returns.remove(&format!(
+                            "{}.{}",
+                            self.current_lexical_scope(),
+                            name.id
+                        ));
                         self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
@@ -10105,6 +10110,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 if let Expr::Name(name) = &**target {
+                    self.callable_factory_returns.remove(&format!(
+                        "{}.{}",
+                        self.current_lexical_scope(),
+                        name.id
+                    ));
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);

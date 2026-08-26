@@ -1613,6 +1613,35 @@ factory()(1)
     );
 }
 
+/// Redefining or assigning over a typed factory clears its recorded callable
+/// result class (issue #1149).
+#[test]
+fn callable_factory_result_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+def redefined() -> C: ...
+def redefined() -> object: ...
+redefined()(1)
+def assigned() -> C: ...
+assigned = lambda: object()
+assigned()(1)
+def annotated() -> C: ...
+annotated: object = lambda: object()
+annotated()(1)
+",
+    );
+    for line in [6, 9, 12] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "stale callable factory survived rebind on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// Calling an async factory produces a coroutine rather than its annotated
 /// result class, so it must not be modeled as a synchronous callable (#1148).
 #[test]
