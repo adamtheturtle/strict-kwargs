@@ -6574,6 +6574,7 @@ impl<'a> CallChecker<'a> {
             "combinations_with_replacement",
             "product",
             "zip_longest",
+            "starmap",
         ]
         .into_iter()
         .find(|operation| {
@@ -6670,6 +6671,37 @@ impl<'a> CallChecker<'a> {
             "zip_longest" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
+            }
+            "starmap" if selected_index.is_none() => {
+                if !call.arguments.keywords.is_empty() {
+                    return None;
+                }
+                let [Expr::Lambda(mapper), _iterable] = &*call.arguments.args else {
+                    return None;
+                };
+                if let (Some(parameters), Expr::Name(body)) =
+                    (mapper.parameters.as_deref(), mapper.body.as_ref())
+                {
+                    let body_name = body.id.as_str();
+                    let shadows_outer = parameters
+                        .posonlyargs
+                        .iter()
+                        .chain(parameters.args.iter())
+                        .chain(parameters.kwonlyargs.iter())
+                        .any(|parameter| parameter.parameter.name.as_str() == body_name)
+                        || parameters
+                            .vararg
+                            .as_ref()
+                            .is_some_and(|parameter| parameter.name.as_str() == body_name)
+                        || parameters
+                            .kwarg
+                            .as_ref()
+                            .is_some_and(|parameter| parameter.name.as_str() == body_name);
+                    if shadows_outer {
+                        return None;
+                    }
+                }
+                self.unnamed_callable_signature(&mapper.body)
             }
             _ => None,
         }
