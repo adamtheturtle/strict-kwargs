@@ -1461,9 +1461,12 @@ redefined()(1)
 def assigned() -> C: ...
 assigned = lambda: object()
 assigned()(1)
+def annotated() -> C: ...
+annotated: object = lambda: object()
+annotated()(1)
 ",
     );
-    for line in [6, 9] {
+    for line in [6, 9, 12] {
         assert!(
             !messages
                 .iter()

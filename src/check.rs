@@ -9989,6 +9989,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 if let Expr::Name(name) = &**target {
+                    self.callable_factory_returns.remove(&format!(
+                        "{}.{}",
+                        self.current_lexical_scope(),
+                        name.id
+                    ));
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
