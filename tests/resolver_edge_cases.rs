@@ -1531,6 +1531,23 @@ sum(([second],), [first])[1](1)
     );
 }
 
+/// Starred list elements make flattened offsets dynamic, so sum indexing is
+/// intentionally conservative (Bugbot on #1040).
+#[test]
+fn sum_literal_lists_do_not_resolve_across_starred_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+extras = [object(), object()]
+sum([[*extras, target]], start=[])[1](1)
+",
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "dynamic starred offsets must not resolve a later callable: {messages:?}"
+    );
+}
+
 /// `getattr` returns its concrete callable default when an inline namespace
 /// provably lacks the requested attribute (issue #954).
 #[test]

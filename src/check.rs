@@ -5391,6 +5391,9 @@ impl<'a> CallChecker<'a> {
                 let Expr::List(start) = start else {
                     return None;
                 };
+                if start.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let groups = match iterable {
                     Expr::List(groups) => groups.elts.as_slice(),
                     Expr::Tuple(groups) => groups.elts.as_slice(),
@@ -5401,6 +5404,9 @@ impl<'a> CallChecker<'a> {
                     let Expr::List(group) = group else {
                         return None;
                     };
+                    if group.elts.iter().any(Expr::is_starred_expr) {
+                        return None;
+                    }
                     elements.extend(&group.elts);
                 }
                 let index = Self::literal_sequence_index(slice, elements.len())?;
