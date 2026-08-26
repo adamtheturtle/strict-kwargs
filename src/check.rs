@@ -4433,12 +4433,19 @@ impl<'a> CallChecker<'a> {
         &self,
         parameters: &ast::Parameters,
         returns: Option<&Expr>,
+        type_params: Option<&ast::TypeParams>,
     ) -> Option<GenericReturn> {
         let return_annotation = returns?;
         let Expr::Name(return_name) = return_annotation else {
             return None;
         };
-        if !self.type_vars.contains(return_name.id.as_str()) {
+        let is_pep695_type_var = type_params.is_some_and(|params| {
+            params.iter().any(|param| {
+                matches!(param, ast::TypeParam::TypeVar(type_var)
+                    if type_var.name.id.as_str() == return_name.id.as_str())
+            })
+        });
+        if !self.type_vars.contains(return_name.id.as_str()) && !is_pep695_type_var {
             return None;
         }
         let return_text = self.source[return_annotation.range()].trim();
@@ -9510,6 +9517,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     body,
                     decorator_list,
                     returns,
+                    type_params,
                     is_async,
                     ..
                 } = function_def;
@@ -9621,9 +9629,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_returns.insert(fullname.clone(), signature);
                 }
-                if let Some(generic) =
-                    self.generic_return_from_parameters(parameters, returns.as_deref())
-                {
+                if let Some(generic) = self.generic_return_from_parameters(
+                    parameters,
+                    returns.as_deref(),
+                    type_params.as_deref(),
+                ) {
                     self.generic_returns.insert(fullname.clone(), generic);
                 }
                 if self.function_stack.is_empty() {

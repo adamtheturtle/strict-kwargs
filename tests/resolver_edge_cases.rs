@@ -1925,6 +1925,23 @@ choose(f, g)(1)
     );
 }
 
+/// PEP 695 function type parameters participate in the same generic-return
+/// propagation as an assigned `TypeVar` (issue #1136).
+#[test]
+fn pep695_generic_return_propagates_callable_argument() {
+    let messages = check_source(
+        r"
+def identity[T](value: T) -> T: ...
+def target(value: int) -> None: ...
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result"),
+        "expected PEP 695 generic-result violation, got: {messages:?}"
+    );
+}
+
 /// Generic instance method returns substitute class type arguments (issue #522).
 #[test]
 fn generic_instance_method_return_substitutes_callable_type_arg() {
