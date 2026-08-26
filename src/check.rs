@@ -7644,7 +7644,7 @@ impl<'a> CallChecker<'a> {
             Expr::Call(constructor) => {
                 let class = self.resolve_callee(&constructor.func)?;
                 match Self::normalize_factory_fullname(&class) {
-                    "collections.ChainMap" | "collections.UserDict" | "collections.OrderedDict"
+                    "collections.ChainMap" | "collections.UserDict"
                         if constructor.arguments.keywords.is_empty()
                             && call.arguments.args.len() <= 2
                             && call.arguments.keywords.iter().all(|keyword| {
@@ -7658,6 +7658,16 @@ impl<'a> CallChecker<'a> {
                             return None;
                         };
                         (mapping, Self::generic_argument(call, Some(0), "key")?)
+                    }
+                    "collections.OrderedDict"
+                        if constructor.arguments.keywords.is_empty()
+                            && call.arguments.keywords.is_empty()
+                            && (1..=2).contains(&call.arguments.args.len()) =>
+                    {
+                        let [mapping] = &*constructor.arguments.args else {
+                            return None;
+                        };
+                        (mapping, call.arguments.args.first()?)
                     }
                     "collections.defaultdict"
                         if constructor.arguments.keywords.is_empty()

@@ -4583,6 +4583,23 @@ OrderedDict({"x": target}).get("x")(1)
     }
 }
 
+/// `OrderedDict.get` inherits the positional-only `dict.get` parameters, so an
+/// invalid keyword call must not synthesize a callable result.
+#[test]
+fn ordered_dict_get_rejects_keyword_key_resolution() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"x": target}).get(key="x")(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 4, "target"),
+        "invalid keyword call resolved a concrete value: {messages:?}"
+    );
+}
+
 /// A single-mapping `ChainMap` preserves concrete callable values through
 /// subscripting (issue #777).
 #[test]
