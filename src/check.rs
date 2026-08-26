@@ -6126,7 +6126,7 @@ impl<'a> CallChecker<'a> {
             if let Some(signature) = scope.callable_type_aliases.get(name) {
                 return signature.is_some();
             }
-            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+            if scope.names.contains_key(name) {
                 return false;
             }
         }

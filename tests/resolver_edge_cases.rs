@@ -1072,6 +1072,27 @@ Callback("word", "extra")
     );
 }
 
+/// An opaque local binding must stop lookup before an outer callable-type
+/// alias of the same name. Rebinding the local must not invalidate the outer
+/// alias or treat the shadow as a callable alias.
+#[test]
+fn opaque_parameter_hides_outer_callable_alias_during_rebind() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+Callback = Callable[[int], None]
+def wrapper(Callback: object) -> None:
+    for Callback in []:
+        pass
+    Callback(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "opaque parameter must hide the outer alias: {messages:?}"
+    );
+}
+
 #[test]
 fn optional_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(
