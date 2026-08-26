@@ -4273,6 +4273,26 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "dispatch" {
             return None;
         }
+        if let Expr::Call(dispatcher) = method.value.as_ref() {
+            if self.names_stdlib_callable(&dispatcher.func, "functools.singledispatch")
+                && call.arguments.len() == 1
+                && call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .all(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("cls"))
+            {
+                let implementation = dispatcher.arguments.args.first().or_else(|| {
+                    dispatcher
+                        .arguments
+                        .find_keyword("func")
+                        .map(|keyword| &keyword.value)
+                })?;
+                if dispatcher.arguments.len() == 1 {
+                    return self.resolve_callee(implementation);
+                }
+            }
+        }
         let generic_fullname = self.resolve_callee(method.value.as_ref())?;
         if !self.index.is_excluded(&generic_fullname) {
             return None;
