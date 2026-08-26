@@ -551,7 +551,7 @@ struct CacheManifest {
     dependency_fingerprint: u64,
     project_fingerprint: u64,
     project_files: Option<Vec<FingerprintFile>>,
-    entries: Vec<(PathBuf, CacheEntry)>,
+    entries: Vec<(PathBuf, serde_json::Value)>,
 }
 
 /// Persistent bounded on-disk diagnostic cache.
@@ -600,11 +600,12 @@ impl DiagnosticCache {
                 } = manifest;
                 let entries = entries
                     .into_iter()
-                    .map(|(path, mut entry)| {
+                    .filter_map(|(path, value)| {
+                        let mut entry = serde_json::from_value::<CacheEntry>(value).ok()?;
                         entry
                             .diagnostics
                             .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-                        (path, entry)
+                        Some((path, entry))
                     })
                     .collect::<BTreeMap<_, _>>();
                 (project_fingerprint, previous_project_files, entries)
@@ -1137,6 +1138,34 @@ mod tests {
     }
 
     #[test]
+    fn invalid_manifest_entry_does_not_discard_valid_entries() {
+        let dir = tempdir().expect("tempdir");
+        let valid = PathBuf::from("a.py");
+        let invalid = PathBuf::from("b.py");
+        let mut cache = open_cache(dir.path(), 1);
+        cache.put_all(vec![
+            (valid.clone(), vec![sample_diagnostic()], None),
+            (invalid.clone(), vec![sample_diagnostic()], None),
+        ]);
+
+        let manifest_path = dir.path().join(MANIFEST_NAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        let entries = manifest["entries"].as_array_mut().expect("entries array");
+        entries[1][1]["diagnostics"] = serde_json::Value::String("invalid".to_string());
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("corrupt one entry");
+
+        let cache = open_cache(dir.path(), 1);
+        assert!(cache.contains(&valid), "valid sibling entry was discarded");
+        assert!(!cache.contains(&invalid), "invalid entry was retained");
+    }
+
+    #[test]
     fn cache_stores_diagnostic_path_once_per_entry() {
         let dir = tempdir().expect("tempdir");
         let path = PathBuf::from("pkg/mod.py");
@@ -1538,6 +1567,29 @@ mod tests {
         )
         .expect("rewrite");
         let after = compute_global_fingerprint(project.path(), "{}", None, &[]);
+        assert_ne!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_follows_nested_tree_reached_through_directory_symlink() {
+        // Issue #1163: file selection follows the entire linked tree, so the
+        // cache fingerprint must include descendants rather than only files
+        // immediately below the symlink target.
+        use std::os::unix::fs::symlink;
+
+        let project = tempdir().expect("project tempdir");
+        let external = tempdir().expect("external tempdir");
+        let nested = external.path().join("pkg/deep");
+        std::fs::create_dir_all(&nested).expect("create nested tree");
+        let source = nested.join("mod.py");
+        std::fs::write(&source, "def target(value): ...\ntarget(1)\n").expect("write");
+        symlink(external.path(), project.path().join("src")).expect("symlink tree");
+
+        let before = compute_global_fingerprint(project.path(), "{}", None, &[]);
+        std::fs::write(&source, "def target(value, /): ...\ntarget(1)\n").expect("rewrite");
+        let after = compute_global_fingerprint(project.path(), "{}", None, &[]);
+
         assert_ne!(before, after);
     }
 
