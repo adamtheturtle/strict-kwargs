@@ -993,6 +993,28 @@ def consume(value: C) -> None:
     }
 }
 
+/// An opaque inner binding shadows an outer tracked instance when resolving
+/// `iter()` receivers (review on #1218).
+#[test]
+fn shadowed_instance_does_not_supply_dunder_iter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+value = C()
+def consume(value: object) -> None:
+    next(iter(value))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "outer instance leaked through shadowing parameter: {messages:?}"
+    );
+}
+
 /// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
 /// before looking up its callable item annotation (issue #1142).
 #[test]

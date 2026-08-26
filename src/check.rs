@@ -2159,6 +2159,21 @@ impl<'a> CallChecker<'a> {
             .and_then(|annotation| self.class_from_annotation(annotation))
     }
 
+    fn class_from_instance_binding(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(fullname) = scope.names.get(name) {
+                return scope.instances.contains(name).then(|| fullname.clone());
+            }
+            if let Some(annotation) = scope.annotations.get(name) {
+                return self.class_from_annotation(annotation);
+            }
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -7171,11 +7186,7 @@ impl<'a> CallChecker<'a> {
                 let Expr::Name(name) = receiver else {
                     return None;
                 };
-                if self.binding_is_instance(name.id.as_str()) {
-                    self.resolve_local(name.id.as_str())
-                } else {
-                    self.class_from_name_annotation(name.id.as_str())
-                }
+                self.class_from_instance_binding(name.id.as_str())
             })?;
             let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
