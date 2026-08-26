@@ -961,6 +961,138 @@ def caller(value: object) -> None:
     );
 }
 
+/// `TypeIs` resolves a callable type alias before narrowing (regression #762).
+#[test]
+fn typeis_narrowing_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def is_callback(value: object) -> typing.TypeIs[Callback]: return callable(value)
+def caller(value: object) -> None:
+    if is_callback(value=value):
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "narrowed"),
+        "expected alias-narrowed violation, got: {messages:?}"
+    );
+
+    let reassigned = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+Callback = int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value):
+        value(1)
+",
+    );
+    assert!(
+        reassigned.is_empty(),
+        "reassigned aliases must not leave stale narrowing: {reassigned:?}"
+    );
+
+    for source in [
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: object) -> None:
+    Callback = int
+    def is_callback(item: object) -> typing.TypeIs[Callback]: return isinstance(item, int)
+    if is_callback(item=value): value(1)
+",
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+Callback, other = int, int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+",
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+for Callback in [int]: pass
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+",
+        r#"
+import typing
+Callback = typing.Callable[[int], int]
+globals()["Callback"] = int
+def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+def caller(value: object) -> None:
+    if is_callback(value=value): value(1)
+"#,
+        r"
+import typing
+def outer() -> None:
+    Callback = typing.Callable[[int], int]
+    def rebind() -> None:
+        nonlocal Callback
+        Callback = int
+    def is_callback(value: object) -> typing.TypeIs[Callback]: return isinstance(value, int)
+    def caller(value: object) -> None:
+        if is_callback(value=value): value(1)
+",
+    ] {
+        let messages = check_source(source);
+        assert!(
+            messages.is_empty(),
+            "shadowed alias must not leave stale narrowing: {messages:?}"
+        );
+    }
+}
+
+/// Clearing a callable-type alias leaves an internal tombstone. Later
+/// rebinding forms must not mistake that tombstone for a live callable and
+/// suppress the ty fallback (Bugbot on #862).
+#[test]
+fn cleared_callable_alias_tombstone_is_not_live() {
+    let messages = check_source(
+        r#"
+import typing
+from contextlib import nullcontext
+class Language:
+    def word_filter(self, word: str) -> bool: ...
+Callback = typing.Callable[[int], None]
+Callback = Language().word_filter
+with nullcontext(Callback) as Callback:
+    pass
+Callback("word", "extra")
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 10, "Too many positional"),
+        "cleared alias tombstone must still defer to ty, got: {messages:?}"
+    );
+}
+
+/// An opaque local binding must stop lookup before an outer callable-type
+/// alias of the same name. Rebinding the local must not invalidate the outer
+/// alias or treat the shadow as a callable alias.
+#[test]
+fn opaque_parameter_hides_outer_callable_alias_during_rebind() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+Callback = Callable[[int], None]
+def wrapper(Callback: object) -> None:
+    for Callback in []:
+        pass
+    Callback(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "opaque parameter must hide the outer alias: {messages:?}"
+    );
+}
+
 #[test]
 fn optional_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(
@@ -974,6 +1106,44 @@ def caller(value: Callable[[int], None] | None) -> None:
     assert!(
         has_error_at(&messages, 5, "narrowed") || has_error_at(&messages, 5, "Too many"),
         "expected optional narrowing violation, got: {messages:?}"
+    );
+}
+
+/// Optional narrowing resolves a named callable alias before restoring the
+/// parameter's signature (regression #763).
+#[test]
+fn optional_callable_alias_is_narrowed_after_is_not_none() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    if value is not None:
+        value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed callable"),
+        "expected alias-narrowed violation, got: {messages:?}"
+    );
+}
+
+/// Assertion-based optional narrowing also retains a named callable alias
+/// (regression #764).
+#[test]
+fn assert_narrows_optional_callable_alias() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    assert value is not None
+    value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed callable"),
+        "expected assertion-narrowed violation, got: {messages:?}"
     );
 }
 
@@ -3096,6 +3266,22 @@ next(iter({"call": f}.values()))(1)
     );
 }
 
+/// A literal dictionary copy preserves the concrete callable at a static key
+/// (issue #775).
+#[test]
+fn literal_dict_copy_subscript_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"key": target}.copy()["key"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict-copy violation, got: {messages:?}"
+    );
+}
+
 /// Iterating an immediate `OrderedDict`'s values preserves a concrete callable
 /// value shape (issue #922).
 #[test]
@@ -3938,6 +4124,25 @@ generator.throw(typ=RuntimeError)(1)
     );
 }
 
+/// `Generator.throw` resolves a named callable alias used as the yield type
+/// (regression #765).
+#[test]
+fn generator_throw_result_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+generator: collections.abc.Generator[Callback, None, None]
+generator.throw(typ=RuntimeError)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "throw() result"),
+        "expected alias yield violation, got: {messages:?}"
+    );
+}
+
 /// An `AsyncGenerator.asend` result retains the declared callable yield signature
 /// (issue #657).
 #[test]
@@ -3954,6 +4159,46 @@ async def main() -> None:
     assert!(
         has_error_at(&messages, 6, "asend() result"),
         "expected async generator asend violation, got: {messages:?}"
+    );
+}
+
+/// `AsyncGenerator.asend` resolves a named callable alias used as the yield
+/// type (regression #766).
+#[test]
+fn async_generator_asend_result_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+agen: collections.abc.AsyncGenerator[Callback, None]
+async def main() -> None:
+    (await agen.asend(value=None))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "asend() result"),
+        "expected alias yield violation, got: {messages:?}"
+    );
+}
+
+/// `AsyncGenerator.athrow` resolves a named callable alias used as the yield
+/// type (regression #767).
+#[test]
+fn async_generator_athrow_result_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+agen: collections.abc.AsyncGenerator[Callback, None]
+async def main() -> None:
+    (await agen.athrow(typ=RuntimeError))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "athrow() result"),
+        "expected alias yield violation, got: {messages:?}"
     );
 }
 
@@ -6163,6 +6408,28 @@ if old is not contextvars.Token.MISSING:
     );
 }
 
+/// `Token.old_value` resolves a named callable alias used as its `ContextVar`
+/// value type (regression #768).
+#[test]
+fn contextvar_token_old_value_resolves_callable_alias() {
+    let messages = check_source(
+        r"
+import contextvars
+import typing
+Callback = typing.Callable[[int], int]
+var: contextvars.ContextVar[Callback]
+token = var.set(lambda value: value)
+old = token.old_value
+if old is not contextvars.Token.MISSING:
+    old(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "old_value"),
+        "expected alias-valued token violation, got: {messages:?}"
+    );
+}
+
 /// ``MappingProxyType.get`` preserves generic mapping value types (issue #660).
 #[test]
 fn mapping_proxy_get_preserves_callable_value_signatures() {
@@ -6178,6 +6445,27 @@ value(1)
     assert!(
         has_error_at(&messages, 6, "get() result"),
         "expected MappingProxyType.get violation, got: {messages:?}"
+    );
+}
+
+/// `MappingProxyType.get` resolves a named callable alias used as its value
+/// type (regression #769).
+#[test]
+fn mapping_proxy_get_resolves_callable_value_alias() {
+    let messages = check_source(
+        r#"
+import types
+import typing
+Callback = typing.Callable[[int], int]
+mapping: types.MappingProxyType[str, Callback]
+value = mapping.get("key")
+if value is not None:
+    value(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 8, "get() result"),
+        "expected alias-valued mapping violation, got: {messages:?}"
     );
 }
 
