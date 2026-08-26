@@ -160,6 +160,25 @@ C().bound(1)
     );
 }
 
+/// Annotating a class attribute assigned from `partialmethod` does not prevent
+/// synthesis of its remaining bound-method signature (issue #1150).
+#[test]
+fn annotated_partialmethod_preserves_remaining_method_signature() {
+    let messages = check_source(
+        r"
+from functools import partialmethod
+class C:
+    def base(self, required: int, /, value: int) -> None: ...
+    method: object = partialmethod(base, 0)
+C().method(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "method"),
+        "expected annotated partialmethod violation, got: {messages:?}"
+    );
+}
+
 /// A `partialmethod` assignment in an uncertain branch does not replace the
 /// unconditional signature visible after the branch (issue #1151).
 #[test]
