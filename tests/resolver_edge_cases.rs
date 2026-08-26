@@ -3113,6 +3113,41 @@ MappingProxyType({"key": target})["key"](1)
     );
 }
 
+/// An inline `MappingProxyType.get` preserves the concrete callable at a
+/// present literal key (issue #930).
+#[test]
+fn inline_mapping_proxy_get_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "get() result"),
+        "expected inline MappingProxyType.get violation, got: {messages:?}"
+    );
+}
+
+/// A dictionary unpack can override an earlier key, so inline proxy lookup is
+/// intentionally conservative when an unpack is present.
+#[test]
+fn inline_mapping_proxy_get_does_not_resolve_across_unpacking() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def first(value: int) -> None: ...
+def replacement(value: int) -> None: ...
+MappingProxyType(mapping={"x": first, **{"x": replacement}}).get("x")(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "did not expect an ambiguous proxy lookup to resolve, got: {messages:?}"
+    );
+}
+
 /// Copying an immediate `MappingProxyType` preserves its concrete callable
 /// values (issue #932).
 #[test]
