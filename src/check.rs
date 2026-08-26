@@ -8653,12 +8653,16 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
                     return Some(callable);
                 }
-                if let Some((_, callable)) = self
-                    .simple_namespace_callable_attributes(value)
-                    .into_iter()
-                    .find(|(attribute, _)| attribute == attr_name)
+                if matches!(value.as_ref(), Expr::Call(call) if Self::dotted_path(&call.func)
+                    .is_some_and(|path| path.rsplit('.').next() == Some("SimpleNamespace")))
                 {
-                    return Some(callable);
+                    if let Some((_, callable)) = self
+                        .simple_namespace_callable_attributes(value)
+                        .into_iter()
+                        .find(|(attribute, _)| attribute == attr_name)
+                    {
+                        return Some(callable);
+                    }
                 }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
