@@ -1468,6 +1468,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Sets of futures known to share one concrete callable result signature.
+    future_set_callables: FxHashMap<String, Signature>,
     /// Locals bound by a stdlib futures executor context manager.
     executor_instances: FxHashSet<String>,
     /// `asyncio.as_completed` local -> callable result of each yielded awaitable.
@@ -1650,6 +1652,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.future_set_callables.remove(local_name);
         scope.executor_instances.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -1689,6 +1692,7 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope.future_set_callables.remove(local_name);
             scope.executor_instances.remove(local_name);
             scope.as_completed_callables.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
@@ -1912,6 +1916,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.future_set_callables.remove(name);
         scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -1958,6 +1963,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.future_set_callables.remove(name);
         scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -2274,6 +2280,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope.future_set_callables.remove(local_name);
         scope.executor_instances.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -5532,6 +5539,7 @@ impl<'a> CallChecker<'a> {
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
                 || scope.starred_callable_list_elements.contains_key(name)
+                || scope.future_set_callables.contains_key(name)
                 || scope.executor_instances.contains(name)
         });
         if was_known_callable {
@@ -5678,6 +5686,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.future_set_callables.remove(name);
         scope.executor_instances.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -6418,8 +6427,11 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "result" {
             return None;
         }
-        if let Expr::Call(submit_call) = method.value.as_ref() {
-            return self.executor_submit_callable_signature(submit_call);
+        if let Expr::Call(inner_call) = method.value.as_ref() {
+            return self
+                .executor_submit_callable_signature(inner_call)
+                .or_else(|| self.completed_future_callable_signature(inner_call))
+                .or_else(|| self.future_set_pop_callable_signature(inner_call));
         }
         let Expr::Name(value) = method.value.as_ref() else {
             return None;
@@ -6430,6 +6442,118 @@ impl<'a> CallChecker<'a> {
             }
             if scope.names.contains_key(value.id.as_str())
                 || scope.opaque_locals.contains(value.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn future_set_pop_callable_signature(&self, pop_call: &ast::ExprCall) -> Option<Signature> {
+        if !pop_call.arguments.args.is_empty() || !pop_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = pop_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop" {
+            return None;
+        }
+        let Expr::Name(set) = method.value.as_ref() else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_set_callables.get(set.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(set.id.as_str())
+                || scope.opaque_locals.contains(set.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn wait_done_callable_signature(&self, value: &Expr) -> Option<Signature> {
+        let Expr::Call(wait_call) = value else {
+            return None;
+        };
+        if self.resolve_callee(&wait_call.func)? != "concurrent.futures.wait" {
+            return None;
+        }
+        let futures = wait_call
+            .arguments
+            .find_keyword("fs")
+            .map(|keyword| &keyword.value)
+            .or_else(|| wait_call.arguments.args.first())?;
+        let future = match futures {
+            Expr::List(list) => {
+                let [Expr::Name(future)] = &*list.elts else {
+                    return None;
+                };
+                future
+            }
+            Expr::Tuple(tuple) => {
+                let [Expr::Name(future)] = &*tuple.elts else {
+                    return None;
+                };
+                future
+            }
+            _ => return None,
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_callables.get(future.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(future.id.as_str())
+                || scope.opaque_locals.contains(future.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn completed_future_callable_signature(&self, next_call: &ast::ExprCall) -> Option<Signature> {
+        if self.resolve_callee(&next_call.func)? != "builtins.next" {
+            return None;
+        }
+        let [Expr::Call(completed_call)] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&completed_call.func)? != "concurrent.futures.as_completed" {
+            return None;
+        }
+        let futures = completed_call
+            .arguments
+            .find_keyword("fs")
+            .map(|keyword| &keyword.value)
+            .or_else(|| completed_call.arguments.args.first())?;
+        let future = match futures {
+            Expr::List(list) => {
+                let [Expr::Name(future)] = &*list.elts else {
+                    return None;
+                };
+                future
+            }
+            Expr::Tuple(tuple) => {
+                let [Expr::Name(future)] = &*tuple.elts else {
+                    return None;
+                };
+                future
+            }
+            _ => return None,
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.future_callables.get(future.id.as_str()) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(future.id.as_str())
+                || scope.opaque_locals.contains(future.id.as_str())
             {
                 return None;
             }
@@ -9095,6 +9219,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     None
                 };
                 let as_completed_item = self.as_completed_item_signature(value);
+                let submitted_future = if let Expr::Call(call) = value.as_ref() {
+                    self.executor_submit_callable_signature(call)
+                } else {
+                    None
+                };
+                let waited_future = self.wait_done_callable_signature(value);
                 // Snapshot before ``walk_stmt``: visiting the assign target can
                 // clear the prior ``def`` binding we need to detect replacement.
                 let lambda_replaces_function = is_lambda
@@ -9208,12 +9338,29 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .as_completed_callables
                                 .insert(name.id.to_string(), signature.clone());
                         }
+                        if let Some(signature) = &submitted_future {
+                            self.current_scope()
+                                .future_callables
+                                .insert(name.id.to_string(), signature.clone());
+                        }
                     }
                 }
                 for (name, callable) in starred_callable_lists {
                     self.current_scope()
                         .starred_callable_list_elements
                         .insert(name, callable);
+                }
+                if let (Some(signature), [target]) = (&waited_future, targets.as_slice()) {
+                    let done = match target {
+                        Expr::Tuple(tuple) => tuple.elts.first(),
+                        Expr::List(list) => list.elts.first(),
+                        _ => None,
+                    };
+                    if let Some(Expr::Name(done)) = done {
+                        self.current_scope()
+                            .future_set_callables
+                            .insert(done.id.to_string(), signature.clone());
+                    }
                 }
             }
             Stmt::Delete(ast::StmtDelete { targets, .. }) => {
