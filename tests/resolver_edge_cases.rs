@@ -6787,6 +6787,41 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// Tuple position zero from an immediately constructed `Counter.popitem()`
+/// preserves its literal callable key (issue #798).
+#[test]
+fn counter_popitem_preserves_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter.popitem violation, got: {messages:?}"
+    );
+}
+
+/// Counter keyword counts are inserted after a positional mapping, while
+/// `iterable=` itself is a count key because the input is positional-only.
+#[test]
+fn counter_popitem_with_keyword_counts_does_not_preserve_mapping_key() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}, other=1).popitem()[0](1)
+Counter(iterable={target: 1}).popitem()[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "keyword count keys must hide the mapping key: {messages:?}"
+    );
+}
+
 /// `Counter.elements()` preserves concrete callable keys through `next()`
 /// for an immediately constructed counter (issue #797).
 #[test]

@@ -9340,6 +9340,49 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn counter_popitem_key_callable(&self, subscript: &ast::ExprSubscript) -> Option<String> {
+        if Self::literal_sequence_index(&subscript.slice, 2)? != 0 {
+            return None;
+        }
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        if !popitem.arguments.args.is_empty() || !popitem.arguments.keywords.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem" {
+            return None;
+        }
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let class = class
+            .strip_suffix(".__new__")
+            .or_else(|| class.strip_suffix(".__init__"))
+            .unwrap_or(&class);
+        if class != "collections.Counter" {
+            return None;
+        }
+        if !constructor.arguments.keywords.is_empty() {
+            return None;
+        }
+        let mapping = constructor.arguments.args.first()?;
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        let mut keys = dict.items.iter().map(|item| item.key.as_ref());
+        let resolved = self.resolve_callee(keys.next()??)?;
+        keys.all(|key| {
+            key.and_then(|key| self.resolve_callee(key)).as_deref() == Some(resolved.as_str())
+        })
+        .then_some(resolved)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn topological_sorter_get_ready_callable(
         &self,
         subscript: &ast::ExprSubscript,
@@ -9764,6 +9807,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.counter_popitem_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                         .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
@@ -9775,6 +9819,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
                         .or_else(|| self.counter_most_common_key_callable(subscript))
+                        .or_else(|| self.counter_popitem_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
                         .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
