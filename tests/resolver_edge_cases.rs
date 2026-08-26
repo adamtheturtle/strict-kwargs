@@ -1946,6 +1946,23 @@ choose(f, g)(1)
     );
 }
 
+/// PEP 695 function type parameters participate in the same generic-return
+/// propagation as an assigned `TypeVar` (issue #1136).
+#[test]
+fn pep695_generic_return_propagates_callable_argument() {
+    let messages = check_source(
+        r"
+def identity[T](value: T) -> T: ...
+def target(value: int) -> None: ...
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "generic result"),
+        "expected PEP 695 generic-result violation, got: {messages:?}"
+    );
+}
+
 /// A starred positional before a `TypeVar` slot makes that positional binding
 /// ambiguous; an explicit keyword for the same slot remains deterministic
 /// (issue #1135).
