@@ -1137,8 +1137,6 @@ struct CallChecker<'a> {
     /// Concrete callable item signatures declared by local iterator/generator
     /// return annotations, keyed by the function's indexed fullname.
     callable_iterator_items: FxHashMap<String, Signature>,
-    /// Local generator name -> concrete callable yield signature.
-    callable_generator_yields: FxHashMap<String, Signature>,
     /// Concrete `Callable` signatures declared as local function returns.
     callable_returns: FxHashMap<String, Signature>,
     /// Callable values yielded by `@contextmanager` functions, keyed by the
@@ -1154,6 +1152,9 @@ struct CallChecker<'a> {
     /// ``__aenter__`` when the method body is a single ``return`` of a
     /// resolved callable.
     context_manager_enter_callables: FxHashMap<String, String>,
+    /// Property method fullname -> concrete callable returned by its sole
+    /// unconditional body statement.
+    property_body_callables: FxHashMap<String, String>,
     /// Concrete signatures returned by ``__enter__`` / ``__aenter__`` when the
     /// method body is a single ``return`` of a literal lambda.
     context_manager_enter_signatures: FxHashMap<String, Signature>,
@@ -1412,6 +1413,8 @@ struct PendingTyOverloadFix {
 
 #[derive(Debug, Default, Clone)]
 struct Scope {
+    /// Class namespaces do not participate in Python's `nonlocal` lookup.
+    is_class_namespace: bool,
     /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
     /// Local name -> the currently visible local function signature.
@@ -1458,6 +1461,8 @@ struct Scope {
     weak_value_dict_callables: FxHashMap<String, Signature>,
     /// Annotated iterable local -> concrete callable item signature.
     callable_iterable_items: FxHashMap<String, Signature>,
+    /// Local generator name -> concrete callable yield signature.
+    callable_generator_yields: FxHashMap<String, Signature>,
     /// Annotated ``WeakKeyDictionary[K, V]`` locals when ``K`` is callable.
     /// Kept separate from [`Self::callable_iterable_items`] so ``.pop()``
     /// (value) is not confused with list-item / ``popitem`` key tracking.
@@ -1479,6 +1484,8 @@ struct Scope {
     /// Local `Future[Callable[...]]` / `Task[Callable[...]]` bindings and
     /// the callable value signature returned by their zero-argument `result()`.
     future_callables: FxHashMap<String, Signature>,
+    /// Local type aliases whose value is a concrete ``Callable`` annotation.
+    callable_type_aliases: FxHashMap<String, Option<Signature>>,
     /// Locals bound by an `asyncio.TaskGroup` context manager.
     asyncio_task_groups: FxHashSet<String>,
     /// `asyncio.as_completed` local -> callable result of each yielded awaitable.
@@ -1505,7 +1512,7 @@ struct LocalFunction {
 
 #[derive(Debug, Clone)]
 struct GenericReturn {
-    parameters: Vec<(Option<usize>, String)>,
+    parameters: Vec<(Option<usize>, String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1558,12 +1565,12 @@ impl<'a> CallChecker<'a> {
             callable_factory_returns: FxHashMap::default(),
             concrete_callable_returns: FxHashMap::default(),
             callable_iterator_items: FxHashMap::default(),
-            callable_generator_yields: FxHashMap::default(),
             callable_returns: FxHashMap::default(),
             callable_contextmanager_items: FxHashMap::default(),
             concrete_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
+            property_body_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             class_type_params: FxHashMap::default(),
@@ -1656,6 +1663,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -1667,6 +1675,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         scope.asyncio_task_groups.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -1700,6 +1711,7 @@ impl<'a> CallChecker<'a> {
             scope.concrete_asyncio_queues.remove(local_name);
             scope.concrete_sync_queues.remove(local_name);
             scope.callable_iterable_items.remove(local_name);
+            scope.callable_generator_yields.remove(local_name);
             scope.weak_key_dict_callables.remove(local_name);
             scope.callable_list_elements.remove(local_name);
             scope.starred_callable_list_elements.remove(local_name);
@@ -1710,6 +1722,9 @@ impl<'a> CallChecker<'a> {
             scope.weak_value_dict_callables.remove(local_name);
             scope.optional_callables.remove(local_name);
             scope.future_callables.remove(local_name);
+            scope
+                .callable_type_aliases
+                .insert(local_name.to_string(), None);
             scope.asyncio_task_groups.remove(local_name);
             scope.as_completed_callables.remove(local_name);
             scope.unittest_enter_instances.remove(local_name);
@@ -1927,6 +1942,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -1938,6 +1954,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -1978,6 +1995,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -1989,6 +2007,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -2094,7 +2113,7 @@ impl<'a> CallChecker<'a> {
         self.mark_param_opaque(name);
         if let Some(annotation) = annotation {
             self.define_annotation(name, annotation);
-            if let Some(signature) = Self::optional_callable_signature(annotation) {
+            if let Some(signature) = self.optional_callable_signature(annotation) {
                 self.current_scope()
                     .optional_callables
                     .insert(name.to_string(), signature);
@@ -2152,6 +2171,22 @@ impl<'a> CallChecker<'a> {
     fn class_from_name_annotation(&self, name: &str) -> Option<String> {
         self.resolve_annotation(name)
             .and_then(|annotation| self.class_from_annotation(annotation))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_instance_binding(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(fullname) = scope.names.get(name) {
+                return scope.instances.contains(name).then(|| fullname.clone());
+            }
+            if let Some(annotation) = scope.annotations.get(name) {
+                return self.class_from_annotation(annotation);
+            }
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
     }
 
     /// Whether `name` is a function parameter in the innermost scope that
@@ -2299,6 +2334,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(local_name);
         scope.concrete_sync_queues.remove(local_name);
         scope.callable_iterable_items.remove(local_name);
+        scope.callable_generator_yields.remove(local_name);
         scope.weak_key_dict_callables.remove(local_name);
         scope.callable_list_elements.remove(local_name);
         scope.starred_callable_list_elements.remove(local_name);
@@ -2311,6 +2347,9 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(local_name);
         scope.optional_callables.remove(local_name);
         scope.future_callables.remove(local_name);
+        scope
+            .callable_type_aliases
+            .insert(local_name.to_string(), None);
         scope.asyncio_task_groups.remove(local_name);
         scope.as_completed_callables.remove(local_name);
         scope.unittest_enter_instances.remove(local_name);
@@ -2387,6 +2426,10 @@ impl<'a> CallChecker<'a> {
     ) -> bool {
         const DUNDER_RECEIVERS: [&str; 5] =
             [".__init__", ".__new__", ".__call__", ".__get__", ".__set__"];
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_unbound_class_method_call(body, callee_fullname, first_param)
+                && self.is_unbound_class_method_call(orelse, callee_fullname, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -2454,6 +2497,10 @@ impl<'a> CallChecker<'a> {
         callee_fullname: &str,
         first_param: Option<&str>,
     ) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_explicit_dunder_receiver_call(body, callee_fullname, first_param)
+                && self.is_explicit_dunder_receiver_call(orelse, callee_fullname, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -2485,7 +2532,12 @@ impl<'a> CallChecker<'a> {
         }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_bound_instance_method_call(&self, func: &Expr, first_param: Option<&str>) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.is_bound_instance_method_call(body, first_param)
+                && self.is_bound_instance_method_call(orelse, first_param);
+        }
         if first_param != Some("self") {
             return false;
         }
@@ -2834,6 +2886,14 @@ impl<'a> CallChecker<'a> {
     // coverage gate because llvm-cov reports duplicate branch holes for this
     // dispatcher across the unit, integration, and CLI test binaries.
     #[cfg_attr(coverage, coverage(off))]
+    fn unwrap_named_callee(mut func: &Expr) -> &Expr {
+        while let Expr::Named(ast::ExprNamed { value, .. }) = func {
+            func = value;
+        }
+        func
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
         self.record_singledispatch_registration(call);
         // A `# noqa` on the call's line suppresses the diagnostic and any
@@ -3036,8 +3096,9 @@ impl<'a> CallChecker<'a> {
         }
         let is_constructor =
             callee_fullname.ends_with(".__init__") || callee_fullname.ends_with(".__new__");
+        let callable_expr = Self::unwrap_named_callee(&call.func);
         let constructed_class = is_constructor
-            .then(|| self.class_from_constructor_func(&call.func))
+            .then(|| self.class_from_constructor_func(callable_expr))
             .flatten();
         let constructor_positional_requirement =
             if !is_constructor || self.index.is_synthesized(&callee_fullname) {
@@ -3063,11 +3124,12 @@ impl<'a> CallChecker<'a> {
             .and_then(|s| s.parameters.first())
             .and_then(|p| p.name.as_deref());
         let receiver_is_explicit =
-            self.is_unbound_class_method_call(&call.func, &callee_fullname, first_param_name);
-        let receiver_is_implicit = self.is_bound_instance_method_call(&call.func, first_param_name);
+            self.is_unbound_class_method_call(callable_expr, &callee_fullname, first_param_name);
+        let receiver_is_implicit =
+            self.is_bound_instance_method_call(callable_expr, first_param_name);
         let receiver_is_explicit_for_fix = receiver_is_explicit
             || self.is_explicit_dunder_receiver_call(
-                &call.func,
+                callable_expr,
                 &callee_fullname,
                 first_param_name,
             );
@@ -3182,25 +3244,39 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::SynthesizedConstructor);
             return;
         }
-        if self.call_uses_opaque_receiver_boundary(&call.func) {
+        let callable_expr = Self::unwrap_named_callee(&call.func);
+        let first_param = signatures
+            .first()
+            .and_then(|signature| signature.parameters.first())
+            .and_then(|parameter| parameter.name.as_deref());
+        if self.conditional_callee_has_mixed_receiver_binding(
+            callable_expr,
+            callee_fullname,
+            first_param,
+        ) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
+            return;
+        }
+        if self.call_uses_opaque_receiver_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
         if self.call_may_dispatch_to_override_with_different_parameter_names(
-            &call.func,
+            callable_expr,
             callee_fullname,
         ) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.self_call_uses_inherited_method_boundary(&call.func, callee_fullname) {
+        if self.self_call_uses_inherited_method_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.constructor_call_uses_inherited_boundary(&call.func, callee_fullname) {
+        if self.constructor_call_uses_inherited_boundary(callable_expr, callee_fullname) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3210,7 +3286,7 @@ impl<'a> CallChecker<'a> {
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
-        if self.call_uses_imported_callable_boundary(&call.func) {
+        if self.call_uses_imported_callable_boundary(callable_expr) {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
@@ -3218,7 +3294,7 @@ impl<'a> CallChecker<'a> {
         if let [signature] = signatures {
             // `receiver.method(...)` omits the bound receiver at the call
             // site; a plain `name(...)` call passes every parameter explicitly.
-            let is_attribute_call = matches!(&*call.func, Expr::Attribute(_));
+            let is_attribute_call = Self::call_is_attribute(callable_expr);
             match call_fix_insertions(
                 call,
                 self.tokens,
@@ -3262,6 +3338,15 @@ impl<'a> CallChecker<'a> {
         func: &Expr,
         callee_fullname: &str,
     ) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.call_may_dispatch_to_override_with_different_parameter_names(
+                body,
+                callee_fullname,
+            ) || self.call_may_dispatch_to_override_with_different_parameter_names(
+                orelse,
+                callee_fullname,
+            );
+        }
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
             return false;
         };
@@ -3274,11 +3359,24 @@ impl<'a> CallChecker<'a> {
         method == attr.as_str() && self.index.has_overriding_method(class_fullname, method)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn call_uses_imported_callable_boundary(&self, func: &Expr) -> bool {
-        matches!(func, Expr::Name(name) if self.binding_is_imported_callable(name.id.as_str()))
+        match func {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                self.call_uses_imported_callable_boundary(body)
+                    || self.call_uses_imported_callable_boundary(orelse)
+            }
+            Expr::Name(name) => self.binding_is_imported_callable(name.id.as_str()),
+            _ => false,
+        }
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn call_uses_opaque_receiver_boundary(&self, func: &Expr) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.call_uses_opaque_receiver_boundary(body)
+                || self.call_uses_opaque_receiver_boundary(orelse);
+        }
         let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
             return false;
         };
@@ -3290,6 +3388,10 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn self_call_uses_inherited_method_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.self_call_uses_inherited_method_boundary(body, callee_fullname)
+                || self.self_call_uses_inherited_method_boundary(orelse, callee_fullname);
+        }
         let Expr::Attribute(ast::ExprAttribute { value, .. }) = func else {
             return false;
         };
@@ -3304,7 +3406,12 @@ impl<'a> CallChecker<'a> {
             .is_some_and(|current| owner != current)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn constructor_call_uses_inherited_boundary(&self, func: &Expr, callee_fullname: &str) -> bool {
+        if let Expr::If(ast::ExprIf { body, orelse, .. }) = func {
+            return self.constructor_call_uses_inherited_boundary(body, callee_fullname)
+                || self.constructor_call_uses_inherited_boundary(orelse, callee_fullname);
+        }
         let Some(owner) = callee_fullname
             .strip_suffix(".__init__")
             .or_else(|| callee_fullname.strip_suffix(".__new__"))
@@ -3315,6 +3422,47 @@ impl<'a> CallChecker<'a> {
             return false;
         };
         owner != constructed_class && self.index.class_inherits_from(&constructed_class, owner)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn call_is_attribute(func: &Expr) -> bool {
+        match func {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                Self::call_is_attribute(body) && Self::call_is_attribute(orelse)
+            }
+            Expr::Attribute(_) => true,
+            _ => false,
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn conditional_callee_has_mixed_receiver_binding(
+        &self,
+        func: &Expr,
+        callee_fullname: &str,
+        first_param: Option<&str>,
+    ) -> bool {
+        let Expr::If(ast::ExprIf { body, orelse, .. }) = func else {
+            return false;
+        };
+        let binding = |branch: &Expr| {
+            (
+                self.is_unbound_class_method_call(branch, callee_fullname, first_param),
+                self.is_bound_instance_method_call(branch, first_param),
+                self.is_explicit_dunder_receiver_call(branch, callee_fullname, first_param),
+            )
+        };
+        binding(body) != binding(orelse)
+            || self.conditional_callee_has_mixed_receiver_binding(
+                body,
+                callee_fullname,
+                first_param,
+            )
+            || self.conditional_callee_has_mixed_receiver_binding(
+                orelse,
+                callee_fullname,
+                first_param,
+            )
     }
 
     fn pending_ty_for_call(&self, call: &ast::ExprCall) -> Option<PendingTy> {
@@ -3636,7 +3784,14 @@ impl<'a> CallChecker<'a> {
     /// poison the names they can narrow.
     fn scan_stmt_for_hover_poison(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::If(if_stmt) => self.poison_hover_bare_receiver(&if_stmt.test),
+            Stmt::If(if_stmt) => {
+                self.poison_hover_bare_receiver(&if_stmt.test);
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        self.poison_hover_bare_receiver(test);
+                    }
+                }
+            }
             Stmt::While(while_stmt) => self.poison_hover_bare_receiver(&while_stmt.test),
             Stmt::Assert(assert_stmt) => self.poison_hover_bare_receiver(&assert_stmt.test),
             Stmt::Match(match_stmt) => {
@@ -4118,6 +4273,26 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "dispatch" {
             return None;
         }
+        if let Expr::Call(dispatcher) = method.value.as_ref() {
+            if self.names_stdlib_callable(&dispatcher.func, "functools.singledispatch")
+                && call.arguments.len() == 1
+                && call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .all(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("cls"))
+            {
+                let implementation = dispatcher.arguments.args.first().or_else(|| {
+                    dispatcher
+                        .arguments
+                        .find_keyword("func")
+                        .map(|keyword| &keyword.value)
+                })?;
+                if dispatcher.arguments.len() == 1 {
+                    return self.resolve_callee(implementation);
+                }
+            }
+        }
         let generic_fullname = self.resolve_callee(method.value.as_ref())?;
         if !self.index.is_excluded(&generic_fullname) {
             return None;
@@ -4358,6 +4533,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn staticmethod_get_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(get_method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(descriptor) = get_method.value.as_ref() else {
+            return None;
+        };
+        if get_method.attr.as_str() != "__get__"
+            || !get_call.arguments.keywords.is_empty()
+            || !matches!(&*get_call.arguments.args, [_] | [_, _])
+            || !self.names_stdlib_callable(&descriptor.func, "builtins.staticmethod")
+            || !descriptor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [wrapped] = &*descriptor.arguments.args else {
+            return None;
+        };
+        self.resolve_callee(wrapped)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn create_autospec_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -4396,11 +4596,22 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
-        names
-            .contains(&fullname.as_str())
-            .then(|| call.arguments.args.first())
-            .flatten()
-            .and_then(|iterable| self.homogeneous_literal_callable(iterable))
+        if !names.contains(&fullname.as_str()) || call.arguments.args.len() != 1 {
+            return None;
+        }
+        self.homogeneous_literal_callable(call.arguments.args.first()?)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn sorted_subscript_result(&self, call: &ast::ExprCall, slice: &Expr) -> Option<String> {
+        let len = match call.arguments.args.first()? {
+            Expr::List(list) => list.elts.len(),
+            Expr::Tuple(tuple) => tuple.elts.len(),
+            Expr::Set(set) => set.elts.len(),
+            _ => return None,
+        };
+        Self::literal_sequence_index(slice, len)?;
+        self.preserving_builtin_result(call, &["builtins.sorted"])
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4408,12 +4619,19 @@ impl<'a> CallChecker<'a> {
         &self,
         parameters: &ast::Parameters,
         returns: Option<&Expr>,
+        type_params: Option<&ast::TypeParams>,
     ) -> Option<GenericReturn> {
         let return_annotation = returns?;
         let Expr::Name(return_name) = return_annotation else {
             return None;
         };
-        if !self.type_vars.contains(return_name.id.as_str()) {
+        let is_pep695_type_var = type_params.is_some_and(|params| {
+            params.iter().any(|param| {
+                matches!(param, ast::TypeParam::TypeVar(type_var)
+                    if type_var.name.id.as_str() == return_name.id.as_str())
+            })
+        });
+        if !self.type_vars.contains(return_name.id.as_str()) && !is_pep695_type_var {
             return None;
         }
         let return_text = self.source[return_annotation.range()].trim();
@@ -4424,13 +4642,23 @@ impl<'a> CallChecker<'a> {
             .enumerate()
             .filter_map(|(index, parameter)| {
                 let annotation = parameter.parameter.annotation.as_deref()?;
-                (self.source[annotation.range()].trim() == return_text)
-                    .then(|| (Some(index), parameter.parameter.name.to_string()))
+                (self.source[annotation.range()].trim() == return_text).then(|| {
+                    (
+                        Some(index),
+                        parameter.parameter.name.to_string(),
+                        parameter.default.is_some(),
+                    )
+                })
             });
         let keyword_only = parameters.kwonlyargs.iter().filter_map(|parameter| {
             let annotation = parameter.parameter.annotation.as_deref()?;
-            (self.source[annotation.range()].trim() == return_text)
-                .then(|| (None, parameter.parameter.name.to_string()))
+            (self.source[annotation.range()].trim() == return_text).then(|| {
+                (
+                    None,
+                    parameter.parameter.name.to_string(),
+                    parameter.default.is_some(),
+                )
+            })
         });
         let matching = positional.chain(keyword_only).collect::<Vec<_>>();
         (!matching.is_empty()).then_some(GenericReturn {
@@ -4450,18 +4678,18 @@ impl<'a> CallChecker<'a> {
     fn known_stdlib_generic_return(factory: &str) -> Option<GenericReturn> {
         match Self::normalize_factory_fullname(factory) {
             "copy.copy" | "copy.deepcopy" => Some(GenericReturn {
-                parameters: vec![(Some(0), "x".to_string())],
+                parameters: vec![(Some(0), "x".to_string(), false)],
             }),
             "contextlib.closing" | "contextlib.aclosing" => Some(GenericReturn {
-                parameters: vec![(Some(0), "thing".to_string())],
+                parameters: vec![(Some(0), "thing".to_string(), false)],
             }),
             "contextlib.redirect_stdout"
             | "contextlib.redirect_stderr"
             | "contextlib._RedirectStream" => Some(GenericReturn {
-                parameters: vec![(Some(0), "new_target".to_string())],
+                parameters: vec![(Some(0), "new_target".to_string(), false)],
             }),
             "contextlib.nullcontext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "enter_result".to_string())],
+                parameters: vec![(Some(0), "enter_result".to_string(), false)],
             }),
             "contextlib._BaseExitStack.enter_context"
             | "contextlib.ExitStack.enter_context"
@@ -4474,10 +4702,10 @@ impl<'a> CallChecker<'a> {
             | "unittest.TestCase.enterClassContext"
             | "unittest.async_case.IsolatedAsyncioTestCase.enterAsyncContext"
             | "unittest.IsolatedAsyncioTestCase.enterAsyncContext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "cm".to_string())],
+                parameters: vec![(Some(0), "cm".to_string(), false)],
             }),
             "contextlib.ContextDecorator.__call__" => Some(GenericReturn {
-                parameters: vec![(Some(0), "func".to_string())],
+                parameters: vec![(Some(0), "func".to_string(), false)],
             }),
             _ => None,
         }
@@ -4506,14 +4734,40 @@ impl<'a> CallChecker<'a> {
         name: &str,
     ) -> Option<&'b Expr> {
         index
+            .filter(|index| {
+                !call
+                    .arguments
+                    .args
+                    .iter()
+                    .take(index + 1)
+                    .any(Expr::is_starred_expr)
+            })
             .and_then(|index| call.arguments.args.get(index))
-            .filter(|argument| !argument.is_starred_expr())
             .or_else(|| {
                 call.arguments.keywords.iter().find_map(|keyword| {
                     (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
                         .then_some(&keyword.value)
                 })
             })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generic_argument_is_ambiguous(
+        call: &ast::ExprCall,
+        index: Option<usize>,
+        name: &str,
+    ) -> bool {
+        index.is_some_and(|index| {
+            call.arguments
+                .args
+                .iter()
+                .take(index + 1)
+                .any(Expr::is_starred_expr)
+        }) && !call
+            .arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some(name))
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4594,8 +4848,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<String> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
+                    continue;
+                }
+                return None;
+            };
             let callable = if name == "cm" {
                 self.context_manager_enter_callable(argument)?
             } else {
@@ -4619,8 +4878,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<Signature> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default && !Self::generic_argument_is_ambiguous(call, *index, name) {
+                    continue;
+                }
+                return None;
+            };
             let signature = if name == "cm" {
                 self.context_manager_enter_signature(argument)?
             } else {
@@ -4679,7 +4943,7 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&call.func)?;
         let generic = self.context_decorator_generic_return(&factory)?;
-        let (index, name) = generic.parameters.first()?;
+        let (index, name, _) = generic.parameters.first()?;
         let argument = Self::generic_argument(call, *index, name)?;
         self.resolve_callee(argument)
     }
@@ -4893,8 +5157,22 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
         if let Expr::Subscript(subscript) = func {
-            let Expr::Call(constructor) = subscript.value.as_ref() else {
+            let Expr::Call(value_call) = subscript.value.as_ref() else {
                 return None;
+            };
+            let constructor = match value_call.func.as_ref() {
+                Expr::Attribute(method) if method.attr.as_str() == "copy" => {
+                    if !value_call.arguments.args.is_empty()
+                        || !value_call.arguments.keywords.is_empty()
+                    {
+                        return None;
+                    }
+                    let Expr::Call(constructor) = method.value.as_ref() else {
+                        return None;
+                    };
+                    constructor
+                }
+                _ => value_call,
             };
             let constructor_name = self.resolve_callee(&constructor.func)?;
             if !matches!(
@@ -5201,16 +5479,25 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
-            Self::literal_sequence_index(slice, 1)?;
+            Self::literal_signed_integer(slice)?;
             return self.pool_map_callable_fullname(map_call);
         }
         if let Expr::Call(copy_call) = value {
             if copy_call.arguments.is_empty() {
                 if let Expr::Attribute(method) = copy_call.func.as_ref() {
-                    if method.attr.as_str() == "copy"
-                        && matches!(method.value.as_ref(), Expr::List(_))
-                    {
-                        return self.resolve_literal_container_item(&method.value, slice);
+                    if method.attr.as_str() == "copy" {
+                        if matches!(method.value.as_ref(), Expr::List(_) | Expr::Dict(_)) {
+                            return self.resolve_literal_container_item(&method.value, slice);
+                        }
+                        if let Expr::Call(constructor) = method.value.as_ref() {
+                            if self
+                                .class_from_constructor_func(&constructor.func)
+                                .as_deref()
+                                == Some("types.MappingProxyType")
+                            {
+                                return self.resolve_literal_container_item(&method.value, slice);
+                            }
+                        }
                     }
                 }
             }
@@ -5256,23 +5543,38 @@ impl<'a> CallChecker<'a> {
                 }
             }
             let factory = self.resolve_callee(&wrapper.func)?;
+            let factory = Self::normalize_factory_fullname(&factory);
             if matches!(
-                Self::normalize_factory_fullname(&factory),
-                "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
-            ) && wrapper.arguments.keywords.is_empty()
-            {
-                let [mapping] = &*wrapper.arguments.args else {
-                    return None;
+                factory,
+                "collections.ChainMap"
+                    | "collections.OrderedDict"
+                    | "collections.UserDict"
+                    | "types.MappingProxyType"
+            ) {
+                let mapping = match &*wrapper.arguments.args {
+                    [mapping] if wrapper.arguments.keywords.is_empty() => mapping,
+                    [] if factory == "types.MappingProxyType"
+                        && wrapper.arguments.keywords.len() == 1 =>
+                    {
+                        &wrapper.arguments.find_keyword("mapping")?.value
+                    }
+                    _ => return None,
                 };
                 return self.resolve_literal_container_item(mapping, slice);
             }
         }
         match value {
             Expr::List(list) => {
+                if list.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, list.elts.len())?;
                 self.resolve_callee(&list.elts[index])
             }
             Expr::Tuple(tuple) => {
+                if tuple.elts.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
                 self.resolve_callee(&tuple.elts[index])
             }
@@ -5291,6 +5593,9 @@ impl<'a> CallChecker<'a> {
                     }
                     _ => return None,
                 };
+                if left.iter().chain(right).any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let len = left.len().checked_add(right.len())?;
                 let index = Self::literal_sequence_index(slice, len)?;
                 let element = if index < left.len() {
@@ -5309,6 +5614,9 @@ impl<'a> CallChecker<'a> {
                     Expr::Tuple(tuple) => tuple.elts.as_slice(),
                     _ => return None,
                 };
+                if elements.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
                 self.resolve_callee(&elements[index])
             }
@@ -5537,7 +5845,7 @@ impl<'a> CallChecker<'a> {
         let container = container.rsplit('.').next()?;
         let item = match container {
             "Iterator" | "Iterable" | "AsyncIterator" | "AsyncIterable" => slice.as_ref(),
-            "Generator" => {
+            "Generator" | "AsyncGenerator" => {
                 let Expr::Tuple(tuple) = slice.as_ref() else {
                     return None;
                 };
@@ -5549,7 +5857,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn optional_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn optional_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         match annotation {
             Expr::BinOp(ast::ExprBinOp {
                 left,
@@ -5564,7 +5872,7 @@ impl<'a> CallChecker<'a> {
                 } else {
                     return None;
                 };
-                Self::callable_annotation_signature(callable)
+                self.callable_type_alias_signature(callable)
             }
             Expr::Subscript(ast::ExprSubscript { value, slice, .. })
                 if Self::dotted_path(value)?
@@ -5572,7 +5880,7 @@ impl<'a> CallChecker<'a> {
                     .next()
                     .is_some_and(|name| name == "Optional") =>
             {
-                Self::callable_annotation_signature(slice)
+                self.callable_type_alias_signature(slice)
             }
             _ => None,
         }
@@ -5675,13 +5983,15 @@ impl<'a> CallChecker<'a> {
     /// walrus, etc.).
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_local_name_if_callable(&mut self, name: &str) {
+        let was_callable_alias = self.has_visible_callable_type_alias(name);
         let was_known_callable = self.scopes.last().is_some_and(|scope| {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
+                || matches!(scope.callable_type_aliases.get(name), Some(Some(_)))
                 || scope.starred_callable_list_elements.contains_key(name)
                 || scope.asyncio_task_groups.contains(name)
-        });
+        }) || was_callable_alias;
         if was_known_callable {
             self.mark_opaque_local(name);
             self.current_scope()
@@ -5801,7 +6111,8 @@ impl<'a> CallChecker<'a> {
         };
         let was_known = scope.functions.contains_key(name)
             || scope.names.contains_key(name)
-            || scope.modules.contains_key(name);
+            || scope.modules.contains_key(name)
+            || matches!(scope.callable_type_aliases.get(name), Some(Some(_)));
         if !was_known {
             return;
         }
@@ -5820,6 +6131,7 @@ impl<'a> CallChecker<'a> {
         scope.concrete_asyncio_queues.remove(name);
         scope.concrete_sync_queues.remove(name);
         scope.callable_iterable_items.remove(name);
+        scope.callable_generator_yields.remove(name);
         scope.weak_key_dict_callables.remove(name);
         scope.callable_list_elements.remove(name);
         scope.starred_callable_list_elements.remove(name);
@@ -5830,6 +6142,7 @@ impl<'a> CallChecker<'a> {
         scope.weak_value_dict_callables.remove(name);
         scope.optional_callables.remove(name);
         scope.future_callables.remove(name);
+        scope.callable_type_aliases.insert(name.to_string(), None);
         scope.asyncio_task_groups.remove(name);
         scope.as_completed_callables.remove(name);
         scope.unittest_enter_instances.remove(name);
@@ -5884,13 +6197,25 @@ impl<'a> CallChecker<'a> {
         }
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            if self.scopes[index].is_class_namespace {
+                continue;
+            }
             let owns = self.scopes[index].functions.contains_key(name)
-                || self.scopes[index].names.contains_key(name);
+                || self.scopes[index].names.contains_key(name)
+                || self.scopes[index].opaque_locals.contains(name)
+                || self.scopes[index]
+                    .callable_generator_yields
+                    .contains_key(name)
+                || self.scopes[index].callable_type_aliases.contains_key(name);
             if !owns {
                 continue;
             }
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
+            self.scopes[index].callable_generator_yields.remove(name);
+            self.scopes[index]
+                .callable_type_aliases
+                .insert(name.to_string(), None);
             self.scopes[index]
                 .invalidated_callables
                 .insert(name.to_string());
@@ -5966,7 +6291,39 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn typeguard_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn callable_type_alias_signature(&self, annotation: &Expr) -> Option<Signature> {
+        if let Some(signature) = Self::callable_annotation_signature(annotation) {
+            return Some(signature);
+        }
+        let Expr::Name(name) = annotation else {
+            return None;
+        };
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name.id.as_str()) {
+                return signature.clone();
+            }
+            if scope.names.contains_key(name.id.as_str())
+                || scope.opaque_locals.contains(name.id.as_str())
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn has_visible_callable_type_alias(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_type_aliases.get(name) {
+                return signature.is_some();
+            }
+            if scope.names.contains_key(name) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn typeguard_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -5974,7 +6331,7 @@ impl<'a> CallChecker<'a> {
             Self::dotted_path(value)?.rsplit('.').next(),
             Some("TypeGuard" | "TypeIs")
         )
-        .then(|| Self::callable_annotation_signature(slice))
+        .then(|| self.callable_type_alias_signature(slice))
         .flatten()
     }
 
@@ -6124,7 +6481,9 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.resolve_callee(&lambda.body),
-            _ => self.resolve_callee(func),
+            _ => self
+                .resolve_callee(func)
+                .and_then(|mapper| self.concrete_callable_returns.get(&mapper).cloned()),
         }
     }
 
@@ -6136,7 +6495,13 @@ impl<'a> CallChecker<'a> {
         let func = Self::pool_map_func_argument(call)?;
         match func {
             Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
-            _ => self.unnamed_callable_signature(func),
+            _ => self.resolve_callee(func).and_then(|mapper| {
+                self.callable_returns.get(&mapper).cloned().or_else(|| {
+                    self.concrete_callable_returns
+                        .get(&mapper)
+                        .and_then(|returned| self.callable_fullname_signature(returned))
+                })
+            }),
         }
     }
 
@@ -6236,6 +6601,9 @@ impl<'a> CallChecker<'a> {
             "chain" if selected_index.is_none() => {
                 let mut result = None;
                 for iterable in &call.arguments.args {
+                    if definite_empty_iterable(iterable) {
+                        continue;
+                    }
                     let signature = self.literal_iterable_callable_signature(iterable)?;
                     if result
                         .as_ref()
@@ -6247,8 +6615,27 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "accumulate" | "compress" | "islice" if selected_index.is_none() => {
+            "accumulate" if selected_index.is_none() => {
+                if let Some(initial) = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
+                            .then_some(&keyword.value)
+                    })
+                    .filter(|initial| !matches!(initial, Expr::NoneLiteral(_)))
+                {
+                    self.unnamed_callable_signature(initial)
+                } else {
+                    self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+                }
+            }
+            "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+            }
+            "compress" if selected_index.is_none() => {
+                self.literal_iterable_callable_signature(first_named(0, "data")?)
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(1, "iterable")?)
@@ -6272,7 +6659,26 @@ impl<'a> CallChecker<'a> {
             {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
-            "product" | "zip_longest" => {
+            "product" => {
+                let index = selected_index?;
+                let repeat = call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("repeat"))
+                            .then_some(&keyword.value)
+                    })
+                    .map_or(Some(1), Self::nonnegative_literal_index)?;
+                let tuple_len = call.arguments.args.len().checked_mul(repeat)?;
+                if index >= tuple_len || call.arguments.args.is_empty() {
+                    return None;
+                }
+                self.literal_iterable_callable_signature(
+                    call.arguments.args.get(index % call.arguments.args.len())?,
+                )
+            }
+            "zip_longest" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
@@ -6369,13 +6775,29 @@ impl<'a> CallChecker<'a> {
         }
         let dict = match attribute.value.as_ref() {
             Expr::Dict(dict) => dict,
-            Expr::Call(constructor)
-                if self
-                    .class_from_constructor_func(&constructor.func)
-                    .is_some_and(|class| class == "collections.OrderedDict")
-                    && constructor.arguments.keywords.is_empty() =>
-            {
-                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            Expr::Call(constructor) => {
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                let mapping = if class == "types.MappingProxyType" {
+                    match &*constructor.arguments.args {
+                        [mapping] if constructor.arguments.keywords.is_empty() => mapping,
+                        [] if constructor.arguments.keywords.len() == 1 => {
+                            &constructor.arguments.find_keyword("mapping")?.value
+                        }
+                        _ => return None,
+                    }
+                } else if matches!(
+                    class.as_str(),
+                    "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
+                ) && constructor.arguments.keywords.is_empty()
+                {
+                    let [mapping] = &*constructor.arguments.args else {
+                        return None;
+                    };
+                    mapping
+                } else {
+                    return None;
+                };
+                let Expr::Dict(dict) = mapping else {
                     return None;
                 };
                 dict
@@ -6545,14 +6967,14 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn contextvar_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn contextvar_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
         if Self::dotted_path(value)?.rsplit('.').next() != Some("ContextVar") {
             return None;
         }
-        Self::callable_annotation_signature(slice)
+        self.callable_type_alias_signature(slice)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6688,7 +7110,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn mapping_proxy_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn mapping_proxy_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -6699,7 +7121,7 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let value_type = tuple.elts.get(1)?;
-        Self::callable_annotation_signature(value_type)
+        self.callable_type_alias_signature(value_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6715,6 +7137,34 @@ impl<'a> CallChecker<'a> {
         };
         if method.attr.as_str() != "get" {
             return None;
+        }
+        if let Expr::Call(constructor) = method.value.as_ref() {
+            if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "types.MappingProxyType"
+            {
+                return None;
+            }
+            let [key] = &*get_call.arguments.args else {
+                return None;
+            };
+            let mapping = constructor.arguments.args.first().or_else(|| {
+                constructor
+                    .arguments
+                    .find_keyword("mapping")
+                    .map(|keyword| &keyword.value)
+            })?;
+            let Expr::Dict(dict) = mapping else {
+                return None;
+            };
+            if !dict.items.iter().all(|item| item.key.is_some()) {
+                return None;
+            }
+            let item = dict.items.iter().rev().find(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            })?;
+            return self.unnamed_callable_signature(&item.value);
         }
         let Expr::Name(mapping) = method.value.as_ref() else {
             return None;
@@ -7069,6 +7519,9 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
+            return Some(signature);
+        }
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {
             return Some(signature);
         }
@@ -7096,14 +7549,96 @@ impl<'a> CallChecker<'a> {
         };
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
-            let receiver = factory_call.arguments.args.first()?;
-            let class_fullname = self.class_from_constructor(receiver)?;
+            if !factory_call.arguments.keywords.is_empty() {
+                return None;
+            }
+            let [receiver] = &*factory_call.arguments.args else {
+                return None;
+            };
+            if let Some(signature) = self.literal_iterable_callable_signature(receiver) {
+                return Some(signature);
+            }
+            if let Expr::Dict(dict) = receiver {
+                let [item] = dict.items.as_slice() else {
+                    return None;
+                };
+                return self.unnamed_callable_signature(item.key.as_ref()?);
+            }
+            if let Expr::Call(constructor) = receiver {
+                if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                    == "weakref.WeakSet"
+                {
+                    let data = constructor
+                        .arguments
+                        .find_keyword("data")
+                        .map(|keyword| &keyword.value)
+                        .or_else(|| constructor.arguments.args.first())?;
+                    return self.literal_iterable_callable_signature(data);
+                }
+            }
+            let class_fullname = self.class_from_constructor(receiver).or_else(|| {
+                let Expr::Name(name) = receiver else {
+                    return None;
+                };
+                self.class_from_instance_binding(name.id.as_str())
+            })?;
+            let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items
-                .get(&format!("{class_fullname}.__iter__"))
+                .get(&iterator_fullname)
                 .cloned();
         }
         self.callable_iterator_items.get(&factory_fullname).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn next_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iter_call), default] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterable] = &*iter_call.arguments.args else {
+            return None;
+        };
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
+        let Expr::Call(iter_call) = iterator else {
+            return None;
+        };
+        if !self.names_stdlib_callable(&iter_call.func, "builtins.iter")
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Lambda(factory), Expr::NoneLiteral(_)] = &*iter_call.arguments.args else {
+            return None;
+        };
+        if factory
+            .parameters
+            .as_deref()
+            .is_some_and(|parameters| parameters.iter().next().is_some())
+        {
+            return None;
+        }
+        self.single_signature_for_expr(&factory.body)
+            .map(|function| function.signature)
     }
 
     // Covered end-to-end by the SimpleNamespace attribute regression. Other
@@ -7123,15 +7658,35 @@ impl<'a> CallChecker<'a> {
         if constructor != "types.SimpleNamespace" {
             return Vec::new();
         }
-        call.arguments
-            .keywords
-            .iter()
-            .filter_map(|keyword| {
-                let name = keyword.arg.as_ref()?;
-                let callable = self.resolve_callee(&keyword.value)?;
-                Some((name.to_string(), callable))
-            })
-            .collect()
+        let mut seen = FxHashSet::default();
+        let mut attributes = Vec::new();
+        for keyword in &call.arguments.keywords {
+            if let Some(name) = &keyword.arg {
+                if !seen.insert(name.to_string()) {
+                    return Vec::new();
+                }
+                if let Some(callable) = self.resolve_callee(&keyword.value) {
+                    attributes.push((name.to_string(), callable));
+                }
+                continue;
+            }
+            let Expr::Dict(mapping) = &keyword.value else {
+                return Vec::new();
+            };
+            for item in &mapping.items {
+                let Some(Expr::StringLiteral(name)) = &item.key else {
+                    return Vec::new();
+                };
+                let name = name.value.to_str();
+                if !seen.insert(name.to_string()) {
+                    return Vec::new();
+                }
+                if let Some(callable) = self.resolve_callee(&item.value) {
+                    attributes.push((name.to_string(), callable));
+                }
+            }
+        }
+        attributes
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7160,7 +7715,11 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let class_fullname = self.class_from_constructor_func(&constructor.func)?;
-        if !self.index.is_dataclass(&class_fullname) {
+        if !self
+            .index
+            .is_synthesized(&format!("{class_fullname}.__init__"))
+            || !self.index.is_dataclass_runtime_field(&class_fullname, attr)
+        {
             return None;
         }
         let field = constructor.arguments.find_keyword(attr)?;
@@ -7235,7 +7794,8 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
+        let [Expr::Call(namespace), Expr::StringLiteral(attribute), default @ ..] =
+            &*getattr_call.arguments.args
         else {
             return None;
         };
@@ -7244,12 +7804,22 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        self.resolve_callee(
-            &namespace
+        if let Some(keyword) = namespace.arguments.find_keyword(attribute.value.to_str()) {
+            return self.resolve_callee(&keyword.value);
+        }
+        if namespace.arguments.args.is_empty()
+            && namespace
                 .arguments
-                .find_keyword(attribute.value.to_str())?
-                .value,
-        )
+                .keywords
+                .iter()
+                .all(|keyword| keyword.arg.is_some())
+        {
+            let [default] = default else {
+                return None;
+            };
+            return self.resolve_callee(default);
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7314,11 +7884,15 @@ impl<'a> CallChecker<'a> {
         if let Expr::Name(receiver) = receiver {
             return self.resolve_bound_callable_attribute(receiver.id.as_str(), attribute);
         }
-        let Expr::Call(constructor) = receiver else {
+        let Expr::Call(_) = receiver else {
             return None;
         };
-        let field = constructor.arguments.find_keyword(attribute)?;
-        self.resolve_callee(&field.value)
+        self.simple_namespace_callable_attributes(receiver)
+            .into_iter()
+            .find_map(|(name, callable)| (name == attribute).then_some(callable))
+            .or_else(|| self.dataclass_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_constructor_field_callable(receiver, attribute))
+            .or_else(|| self.namedtuple_keyword_field_callable(receiver, attribute))
     }
 
     // Covered end-to-end for positive and negative indices; malformed getter
@@ -7615,7 +8189,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn generator_yield_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn generator_yield_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -7627,7 +8201,7 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => tuple.elts.first()?,
             other => other,
         };
-        Self::callable_annotation_signature(yield_type)
+        self.callable_type_alias_signature(yield_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7648,10 +8222,21 @@ impl<'a> CallChecker<'a> {
             "throw" => "Generator.throw() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn generator_yield_signature(&self, name: &str) -> Option<Signature> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(signature) = scope.callable_generator_yields.get(name) {
+                return Some(signature.clone());
+            }
+            if scope.names.contains_key(name) || scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -7686,9 +8271,7 @@ impl<'a> CallChecker<'a> {
             "athrow" => "AsyncGenerator.athrow() result",
             _ => return None,
         };
-        self.callable_generator_yields
-            .get(generator.id.as_str())
-            .cloned()
+        self.generator_yield_signature(generator.id.as_str())
             .map(|signature| (signature, label))
     }
 
@@ -8509,14 +9092,127 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        if let Expr::Set(set) = iter_method.value.as_ref() {
+        self.homogeneous_literal_container_callable(&iter_method.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn homogeneous_literal_container_callable(&self, value: &Expr) -> Option<String> {
+        if let Expr::Set(set) = value {
             let mut elements = set.elts.iter();
             let first = self.resolve_callee(elements.next()?)?;
             return elements
                 .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
                 .then_some(first);
         }
-        self.homogeneous_callable_sequence(&iter_method.value)
+        self.homogeneous_callable_sequence(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_builtin_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [container] = &*iter_call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_literal_container_callable(container)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_values_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(values_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(values_method) = values_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = values_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || values_method.attr.as_str() != "values"
+            || !values_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_items_iterator_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(next_call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(items_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(items_method) = items_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = items_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || items_method.attr.as_str() != "items"
+            || !items_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
@@ -8548,13 +9244,23 @@ impl<'a> CallChecker<'a> {
             Expr::Subscript(subscript) => {
                 if let Some(returned) = self
                     .class_from_constructor(&subscript.value)
+                    .or_else(|| {
+                        let Expr::Name(name) = subscript.value.as_ref() else {
+                            return None;
+                        };
+                        if self.binding_is_instance(name.id.as_str()) {
+                            self.resolve_local(name.id.as_str())
+                        } else {
+                            self.class_from_name_annotation(name.id.as_str())
+                        }
+                    })
                     .map(|class| format!("{class}.__getitem__.__return__"))
                     .filter(|returned| self.index.get(returned).is_some())
                 {
                     return Some(returned);
                 }
                 if let Expr::Call(sorted) = subscript.value.as_ref() {
-                    self.preserving_builtin_result(sorted, &["builtins.sorted"])
+                    self.sorted_subscript_result(sorted, &subscript.slice)
                         .or_else(|| {
                             self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         })
@@ -8566,6 +9272,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
@@ -8576,6 +9283,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 }
             }
             Expr::Name(name) => {
@@ -8642,9 +9350,31 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
                     return Some(callable);
                 }
+                if matches!(value.as_ref(), Expr::Call(call)
+                    if Self::dotted_path(&call.func)
+                        .is_some_and(|path| path.rsplit('.').next() == Some("SimpleNamespace"))
+                    || matches!(call.func.as_ref(), Expr::Name(name)
+                        if self.resolve_local(name.id.as_str()).as_deref()
+                            == Some("types.SimpleNamespace")))
+                {
+                    if let Some((_, callable)) = self
+                        .simple_namespace_callable_attributes(value)
+                        .into_iter()
+                        .find(|(attribute, _)| attribute == attr_name)
+                    {
+                        return Some(callable);
+                    }
+                }
                 if let Some(class_fullname) = self.class_from_constructor(value) {
                     if class_fullname == "builtins.super" {
                         return None;
+                    }
+                    let method_fullname = self
+                        .index
+                        .resolve_method(&class_fullname, attr_name)
+                        .unwrap_or_else(|| format!("{class_fullname}.{attr_name}"));
+                    if let Some(callable) = self.property_body_callables.get(&method_fullname) {
+                        return Some(callable.clone());
                     }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
@@ -8701,6 +9431,9 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.identity_return_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.staticmethod_get_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.create_autospec_callable(func) {
                     return Some(callable);
                 }
@@ -8719,7 +9452,16 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.literal_list_getitem_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.next_empty_default_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_builtin_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_dict_values_iterator_next_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
@@ -8820,6 +9562,18 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if decorator_list
+            .iter()
+            .any(|decorator| self.names_stdlib_callable(&decorator.expression, "builtins.property"))
+        {
+            if let Some(callable) = Self::single_return_expression(body)
+                .and_then(|returned| self.resolve_callee(returned))
+                .filter(|callable| self.index.get(callable).is_some())
+            {
+                self.property_body_callables
+                    .insert(method_fullname.clone(), callable);
+            }
+        }
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
             self.index_context_manager_enter_method(&class_fullname, returns.as_deref(), body);
         }
@@ -8827,7 +9581,23 @@ impl<'a> CallChecker<'a> {
             .as_deref()
             .and_then(Self::iterator_item_callable_signature)
         {
+            if decorator_list.iter().any(|decorator| {
+                matches!(
+                    decorator_tail(&decorator.expression),
+                    Some("contextmanager" | "asynccontextmanager")
+                )
+            }) {
+                self.callable_contextmanager_items
+                    .insert(method_fullname.clone(), signature.clone());
+            }
             self.callable_iterator_items
+                .insert(method_fullname.clone(), signature);
+        }
+        if let Some(signature) = returns
+            .as_deref()
+            .and_then(Self::callable_annotation_signature)
+        {
+            self.callable_returns
                 .insert(method_fullname.clone(), signature);
         }
         if let Some(Expr::Name(return_name)) = returns.as_deref() {
@@ -9407,6 +10177,7 @@ impl<'a> CallChecker<'a> {
                     }
                 }
             }
+            Stmt::With(with_stmt) => self.visit_with_stmt(with_stmt),
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
                 self.visit_stmt(stmt);
             }
@@ -9434,6 +10205,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     body,
                     decorator_list,
                     returns,
+                    type_params,
                     is_async,
                     ..
                 } = function_def;
@@ -9445,6 +10217,10 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 let fullname = format!("{}.{}", self.current_lexical_scope(), name);
                 self.concrete_callable_returns.remove(&fullname);
+                self.callable_factory_returns.remove(&fullname);
+                self.callable_iterator_items.remove(&fullname);
+                self.callable_contextmanager_items.remove(&fullname);
+                self.generic_returns.remove(&fullname);
                 self.concrete_contextmanager_items.remove(&fullname);
                 if decorator_list
                     .iter()
@@ -9474,20 +10250,22 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.completed_overload_sets.insert(fullname.clone());
                     }
                 }
-                if let Some(class) = returns.as_deref().and_then(|annotation| {
-                    self.class_from_annotation(&self.source[annotation.range()])
-                }) {
-                    let dunder_call = format!("{class}.__call__");
-                    if self.index.resolve_method(&class, "__call__").is_some()
-                        || self.index.get(&dunder_call).is_some()
-                    {
-                        self.callable_factory_returns
-                            .insert(fullname.clone(), class);
+                if !is_async {
+                    if let Some(class) = returns.as_deref().and_then(|annotation| {
+                        self.class_from_annotation(&self.source[annotation.range()])
+                    }) {
+                        let dunder_call = format!("{class}.__call__");
+                        if self.index.resolve_method(&class, "__call__").is_some()
+                            || self.index.get(&dunder_call).is_some()
+                        {
+                            self.callable_factory_returns
+                                .insert(fullname.clone(), class);
+                        }
                     }
                 }
                 if let Some(signature) = returns
                     .as_deref()
-                    .and_then(Self::typeguard_callable_signature)
+                    .and_then(|annotation| self.typeguard_callable_signature(annotation))
                 {
                     self.callable_typeguards.insert(fullname.clone(), signature);
                 }
@@ -9545,9 +10323,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 {
                     self.callable_returns.insert(fullname.clone(), signature);
                 }
-                if let Some(generic) =
-                    self.generic_return_from_parameters(parameters, returns.as_deref())
-                {
+                if let Some(generic) = self.generic_return_from_parameters(
+                    parameters,
+                    returns.as_deref(),
+                    type_params.as_deref(),
+                ) {
                     self.generic_returns.insert(fullname.clone(), generic);
                 }
                 if self.function_stack.is_empty() {
@@ -9610,6 +10390,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.current_scope().is_class_namespace = true;
                 self.enter_hover_scope(true);
                 self.class_body_depth += 1;
                 for inner in body {
@@ -9628,6 +10409,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                         self.invalidate_bound_callable_targets(target);
                         self.invalidate_globals_subscript_target(target);
                     } else if let Expr::Name(name) = target {
+                        self.callable_factory_returns.remove(&format!(
+                            "{}.{}",
+                            self.current_lexical_scope(),
+                            name.id
+                        ));
                         self.invalidate_nonlocal_name(name.id.as_str());
                     }
                 }
@@ -9650,6 +10436,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 let class_fullname = self.class_from_obvious_instance(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
@@ -9699,12 +10486,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 walk_stmt(self, stmt);
                 for target in targets {
                     if let Expr::Name(name) = target {
-                        if let Some(signature) = &generator_yield {
-                            self.callable_generator_yields
-                                .insert(name.id.to_string(), signature.clone());
-                        } else {
-                            self.callable_generator_yields.remove(name.id.as_str());
-                        }
                         if is_functional_namedtuple || is_collections_namedtuple {
                             self.functional_namedtuple_names.insert(name.id.to_string());
                         }
@@ -9744,6 +10525,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             self.current_scope()
                                 .unittest_enter_instances
                                 .insert(name.id.to_string(), class.clone());
+                        }
+                        if let Some(signature) = &callable_type_alias {
+                            self.current_scope()
+                                .callable_type_aliases
+                                .insert(name.id.to_string(), Some(signature.clone()));
                         }
                         // Record after instance clearing so WeakSet/list element
                         // tracking is not wiped by ``clear_instance_binding``.
@@ -9809,6 +10595,11 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                                 .concrete_sync_queues
                                 .insert(name.id.to_string());
                         }
+                        if let Some(signature) = &generator_yield {
+                            self.current_scope()
+                                .callable_generator_yields
+                                .insert(name.id.to_string(), signature.clone());
+                        }
                     }
                 }
                 for (name, callable) in starred_callable_lists {
@@ -9849,11 +10640,17 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                     .filter_map(|item| item.optional_vars.as_deref())
                 {
                     if let Expr::Name(name) = target {
+                        let was_callable_alias =
+                            self.has_visible_callable_type_alias(name.id.as_str());
                         let was_known_callable = self.scopes.last().is_some_and(|scope| {
                             scope.functions.contains_key(name.id.as_str())
                                 || scope.names.contains_key(name.id.as_str())
                                 || scope.modules.contains_key(name.id.as_str())
-                        });
+                                || matches!(
+                                    scope.callable_type_aliases.get(name.id.as_str()),
+                                    Some(Some(_))
+                                )
+                        }) || was_callable_alias;
                         self.mark_opaque_local(name.id.as_str());
                         if was_known_callable {
                             self.current_scope()
@@ -9871,11 +10668,18 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 ..
             }) => {
                 if let Expr::Name(name) = &**target {
+                    self.callable_factory_returns.remove(&format!(
+                        "{}.{}",
+                        self.current_lexical_scope(),
+                        name.id
+                    ));
                     self.invalidate_nonlocal_name(name.id.as_str());
                 }
                 let class_fullname = self.class_from_obvious_instance(value);
+                let callable_type_alias = Self::callable_annotation_signature(value);
                 let property_getter = self.property_getter_callable(value);
                 let unittest_enter_class = self.unittest_case_constructor(value);
+                let namespace_attributes = self.simple_namespace_callable_attributes(value);
                 let is_callable_attribute_alias =
                     self.value_is_bound_callable_attribute_alias(value);
                 let is_lambda = matches!(value.as_ref(), Expr::Lambda(_));
@@ -9883,6 +10687,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 if let Expr::Name(name) = &**target {
                     if let Some(class_fullname) = class_fullname {
                         self.record_instance(name.id.as_str(), class_fullname);
+                        for (attribute, callable) in &namespace_attributes {
+                            self.define(
+                                &format!("{}.{}", name.id.as_str(), attribute),
+                                callable.clone(),
+                            );
+                        }
                     } else if is_callable_attribute_alias || is_lambda {
                         self.mark_opaque_local(name.id.as_str());
                     } else {
@@ -9897,9 +10707,14 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .unittest_enter_instances
                             .insert(name.id.to_string(), class);
                     }
+                    if let Some(signature) = callable_type_alias {
+                        self.current_scope()
+                            .callable_type_aliases
+                            .insert(name.id.to_string(), Some(signature));
+                    }
                     // After clear/opaque so specialization is not wiped (Bugbot on #718).
                     self.record_annotated_generic_instance(name.id.as_str(), annotation);
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
@@ -9928,7 +10743,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
@@ -9938,8 +10753,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
@@ -9972,12 +10788,12 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::contextvar_callable_signature(annotation) {
+                    if let Some(signature) = self.contextvar_callable_signature(annotation) {
                         if let Some(scope) = self.scopes.last_mut() {
                             scope
                                 .contextvar_callables
@@ -9996,8 +10812,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .callable_iterable_items
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::generator_yield_callable_signature(annotation) {
-                        self.callable_generator_yields
+                    if let Some(signature) = self.generator_yield_callable_signature(annotation) {
+                        self.current_scope()
+                            .callable_generator_yields
                             .insert(name.id.to_string(), signature);
                     }
                 }
@@ -10892,7 +11709,13 @@ fn resolve_def_location_cached(
         character: loc.character,
     };
     if let Some(cached) = def_caches.locations.get(&key) {
-        return cached.clone();
+        // A cross-file lookup can fail because the target is not readable
+        // from disk, while a later same-file lookup still has the retained
+        // scan source. Do not let that weaker negative result mask the
+        // stronger same-file source (issue #1170).
+        if cached.is_some() || !same_path(&loc.path, current_path) {
+            return cached.clone();
+        }
     }
 
     let resolved = (|| {
@@ -11290,6 +12113,13 @@ fn resolve_file_with_ty(
     // contention instead of load-dependent.
     let baseline = diagnostics.len();
     let mut fixes = fixes;
+    let fix_baseline = fixes.as_ref().map(|fixes| {
+        (
+            fixes.insertions.len(),
+            *fixes.fixed_calls,
+            fixes.declined_fix_reasons.len(),
+        )
+    });
     for _ in 0..TY_FILE_ATTEMPTS {
         resolve_pending_with_ty(
             ty,
@@ -11303,12 +12133,19 @@ fn resolve_file_with_ty(
             ty_file_cache,
             ty_def_caches,
             diagnostics,
-            fixes.take(),
+            &mut fixes,
         );
         if !ty.is_disabled() {
             return Ok(());
         }
         diagnostics.truncate(baseline);
+        if let (Some(fixes), Some((insertions, fixed_calls, declined))) =
+            (fixes.as_mut(), fix_baseline)
+        {
+            fixes.insertions.truncate(insertions);
+            *fixes.fixed_calls = fixed_calls;
+            fixes.declined_fix_reasons.truncate(declined);
+        }
         ty.reenable();
     }
     Err(CheckError::TyServerFailed)
@@ -11702,7 +12539,7 @@ fn resolve_pending_with_ty(
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
     diagnostics: &mut Vec<Diagnostic>,
-    mut fixes: Option<TyFixes<'_>>,
+    fixes: &mut Option<TyFixes<'_>>,
 ) {
     if pending.is_empty() || ty.ensure_open(path, source).is_none() {
         return;
@@ -11840,7 +12677,7 @@ fn resolve_pending_with_ty(
                         p.positional_count,
                     ) {
                         record_ty_fix(
-                            &mut fixes,
+                            fixes,
                             Some(index),
                             fix_ast,
                             p,
@@ -11852,10 +12689,7 @@ fn resolve_pending_with_ty(
                             receiver_already_omitted,
                         );
                     } else {
-                        record_declined_fix(
-                            &mut fixes,
-                            DeclinedFixReason::UnsupportedSignatureShape,
-                        );
+                        record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
                     }
                 }
                 continue;
@@ -11907,7 +12741,7 @@ fn resolve_pending_with_ty(
             ) {
                 if let [signature] = overloads.as_slice() {
                     record_ty_fix(
-                        &mut fixes,
+                        fixes,
                         Some(index),
                         fix_ast,
                         p,
@@ -11919,7 +12753,7 @@ fn resolve_pending_with_ty(
                         true,
                     );
                 } else if fixes.is_some() {
-                    record_declined_fix(&mut fixes, DeclinedFixReason::AmbiguousTyHover);
+                    record_declined_fix(fixes, DeclinedFixReason::AmbiguousTyHover);
                 }
             }
         }
@@ -11993,7 +12827,7 @@ fn resolve_pending_with_ty(
                         if let [signature] = sigs.as_slice() {
                             attempted_fix = true;
                             record_ty_fix(
-                                &mut fixes,
+                                fixes,
                                 Some(index),
                                 fix_ast,
                                 &pending[i],
@@ -12007,7 +12841,7 @@ fn resolve_pending_with_ty(
                         }
                     }
                     if !attempted_fix {
-                        record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+                        record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
                     }
                 }
             }
@@ -12032,7 +12866,7 @@ fn resolve_pending_with_ty(
             &source_line_starts,
             diagnostics,
         ) {
-            record_declined_fix(&mut fixes, DeclinedFixReason::TyDefinitionOnly);
+            record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
         }
     }
 }
@@ -12050,15 +12884,16 @@ mod tests {
         should_balance_grouped_ty, signature_is_fully_named, skipped_cache_miss_warnings,
         strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
         CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection, FixOptIns,
-        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyFixAst,
-        TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyDefCaches,
+        TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
     use crate::error::CheckError;
     use crate::fix::Insertion;
     use crate::signature::{Parameter, ParameterKind, Signature};
-    use rustc_hash::FxHashSet;
+    use crate::ty_resolver::DefLocation;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -12078,6 +12913,43 @@ mod tests {
             pending_groups: vec![None; pending_calls],
             balancing_hover_requests: pending_calls,
         }
+    }
+
+    #[test]
+    fn same_file_definition_retries_cross_file_negative_cache_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("not-on-disk.py");
+        let location = DefLocation {
+            path: target.clone(),
+            line: 0,
+            character: 4,
+        };
+        let mut file_cache = FxHashMap::default();
+        let mut def_caches = TyDefCaches::default();
+        let indexed_files = FxHashMap::default();
+
+        assert_eq!(
+            super::resolve_def_location_cached(
+                Path::new("caller.py"),
+                "",
+                &location,
+                &indexed_files,
+                &mut file_cache,
+                &mut def_caches,
+            ),
+            None,
+        );
+
+        let resolved = super::resolve_def_location_cached(
+            &target,
+            "def target(value): ...\n",
+            &location,
+            &indexed_files,
+            &mut file_cache,
+            &mut def_caches,
+        )
+        .expect("retained same-file source must override a cached disk-read failure");
+        assert_eq!(resolved.0, "ty.target");
     }
 
     #[test]
@@ -13388,6 +14260,22 @@ class C:
         );
         assert_eq!(groups.len(), 1);
         assert!(groups[0].is_some());
+    }
+
+    #[test]
+    fn hover_groups_dropped_by_bare_receiver_elif_test() {
+        let groups = pending_hover_groups(
+            "\
+class C:
+    def a(self, condition):
+        self.f(1)
+        if condition:
+            pass
+        elif self:
+            pass
+",
+        );
+        assert_eq!(groups, vec![None]);
     }
 
     #[test]
