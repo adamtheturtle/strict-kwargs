@@ -8705,6 +8705,46 @@ factory()(1)
     );
 }
 
+/// Identical concrete callables across every explicit return path preserve the
+/// callable signature (issue #804).
+#[test]
+fn identical_conditional_returns_preserve_concrete_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def factory(flag: bool) -> object:
+    if flag:
+        return target
+    return target
+factory(flag=True)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected identical-return violation, got: {messages:?}"
+    );
+}
+
+/// Differing conditional return targets remain ambiguous.
+#[test]
+fn differing_conditional_returns_do_not_propagate_callable_signature() {
+    let messages = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+def factory(flag: bool) -> object:
+    if flag:
+        return first
+    return second
+factory(flag=True)(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "ambiguous returns should decline: {messages:?}"
+    );
+}
+
 /// Parameters shadow enclosing concrete callables inside the factory body.
 #[test]
 fn single_return_factory_does_not_resolve_shadowed_parameter() {
