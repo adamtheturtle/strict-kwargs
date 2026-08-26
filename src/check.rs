@@ -5384,6 +5384,64 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn expanded_literal_element_len(element: &Expr) -> Option<usize> {
+        let nested_len = |elements: &[Expr]| {
+            elements.iter().try_fold(0usize, |len, element| {
+                len.checked_add(Self::expanded_literal_element_len(element)?)
+            })
+        };
+        match element {
+            Expr::Starred(starred) => match starred.value.as_ref() {
+                Expr::List(list) => nested_len(&list.elts),
+                Expr::Tuple(tuple) => nested_len(&tuple.elts),
+                _ => None,
+            },
+            _ => Some(1),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_expanded_literal_sequence_index(
+        &self,
+        elements: &[Expr],
+        mut index: usize,
+    ) -> Option<String> {
+        for element in elements {
+            let width = Self::expanded_literal_element_len(element)?;
+            if index >= width {
+                index -= width;
+                continue;
+            }
+            return match element {
+                Expr::Starred(starred) => match starred.value.as_ref() {
+                    Expr::List(list) => {
+                        self.resolve_expanded_literal_sequence_index(&list.elts, index)
+                    }
+                    Expr::Tuple(tuple) => {
+                        self.resolve_expanded_literal_sequence_index(&tuple.elts, index)
+                    }
+                    _ => None,
+                },
+                _ => self.resolve_callee(element),
+            };
+        }
+        None
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_starred_literal_sequence_item(
+        &self,
+        elements: &[Expr],
+        slice: &Expr,
+    ) -> Option<String> {
+        let len = elements.iter().try_fold(0usize, |len, element| {
+            len.checked_add(Self::expanded_literal_element_len(element)?)
+        })?;
+        let index = Self::literal_sequence_index(slice, len)?;
+        self.resolve_expanded_literal_sequence_index(elements, index)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Expr::Call(sum_call) = value {
             if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
@@ -5588,20 +5646,8 @@ impl<'a> CallChecker<'a> {
                 let body = self.resolve_literal_container_item(body, slice)?;
                 (self.resolve_literal_container_item(orelse, slice)? == body).then_some(body)
             }
-            Expr::List(list) => {
-                if list.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, list.elts.len())?;
-                self.resolve_callee(&list.elts[index])
-            }
-            Expr::Tuple(tuple) => {
-                if tuple.elts.iter().any(Expr::is_starred_expr) {
-                    return None;
-                }
-                let index = Self::literal_sequence_index(slice, tuple.elts.len())?;
-                self.resolve_callee(&tuple.elts[index])
-            }
+            Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
+            Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::BinOp(ast::ExprBinOp {
                 left,
                 op: ast::Operator::Add,
@@ -7778,6 +7824,29 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn generator_expression_item_signature(&self, expr: &Expr) -> Option<Signature> {
+        let Expr::Generator(generator) = expr else {
+            return None;
+        };
+        let [comprehension] = generator.generators.as_slice() else {
+            return None;
+        };
+        if comprehension.is_async || !comprehension.ifs.is_empty() {
+            return None;
+        }
+        let Expr::Name(target) = &comprehension.target else {
+            return None;
+        };
+        let Expr::Name(element) = generator.elt.as_ref() else {
+            return None;
+        };
+        if element.id != target.id {
+            return None;
+        }
+        self.literal_iterable_callable_signature(&comprehension.iter)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn counter_elements_item_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Call(elements_call) = expr else {
             return None;
@@ -7986,6 +8055,11 @@ impl<'a> CallChecker<'a> {
             return None;
         }
         let iterator = next_call.arguments.args.first()?;
+        if selected_index.is_none() {
+            if let Some(signature) = self.generator_expression_item_signature(iterator) {
+                return Some(signature);
+            }
+        }
         if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
             return Some(signature);
         }
@@ -8422,6 +8496,53 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&factory_call.func)?;
         self.concrete_callable_returns.get(&factory).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn concrete_function_body_return(&self, body: &[Stmt]) -> Option<String> {
+        let return_callable = |stmt: &Stmt| {
+            let Stmt::Return(ast::StmtReturn {
+                value: Some(value), ..
+            }) = stmt
+            else {
+                return None;
+            };
+            self.resolve_callee(value)
+                .filter(|callable| self.index.get(callable).is_some())
+        };
+        if let [stmt] = body {
+            if let Some(callable) = return_callable(stmt) {
+                return Some(callable);
+            }
+            let Stmt::If(if_stmt) = stmt else {
+                return None;
+            };
+            let [body_return] = if_stmt.body.as_slice() else {
+                return None;
+            };
+            let [else_return] = if_stmt.elif_else_clauses.as_slice() else {
+                return None;
+            };
+            if else_return.test.is_some() {
+                return None;
+            }
+            let [else_return] = else_return.body.as_slice() else {
+                return None;
+            };
+            let callable = return_callable(body_return)?;
+            return (return_callable(else_return)? == callable).then_some(callable);
+        }
+        let [Stmt::If(if_stmt), fallback] = body else {
+            return None;
+        };
+        if !if_stmt.elif_else_clauses.is_empty() {
+            return None;
+        }
+        let [branch_return] = if_stmt.body.as_slice() else {
+            return None;
+        };
+        let callable = return_callable(branch_return)?;
+        (return_callable(fallback)? == callable).then_some(callable)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -10906,16 +11027,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 // name (issue #71).
                 self.bind_function_parameters(parameters);
                 if !is_async {
-                    if let [Stmt::Return(ast::StmtReturn {
-                        value: Some(value), ..
-                    })] = body.as_slice()
-                    {
-                        if let Some(callable) = self
-                            .resolve_callee(value)
-                            .filter(|callable| self.index.get(callable).is_some())
-                        {
-                            self.concrete_callable_returns.insert(fullname, callable);
-                        }
+                    if let Some(callable) = self.concrete_function_body_return(body) {
+                        self.concrete_callable_returns
+                            .insert(fullname.clone(), callable);
                     }
                 }
                 self.enter_hover_scope(false);
