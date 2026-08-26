@@ -5647,6 +5647,9 @@ impl<'a> CallChecker<'a> {
                     ),
                     _ => return None,
                 };
+                if elements.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
                 let len = elements.len().checked_mul(repetitions)?;
                 let index = Self::literal_sequence_index(slice, len)?;
                 self.resolve_callee(&elements[index % elements.len()])

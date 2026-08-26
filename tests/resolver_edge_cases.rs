@@ -699,6 +699,24 @@ def target(value: int) -> None: ...
     }
 }
 
+/// Repeated literals with starred elements do not have a statically known
+/// element-to-index mapping.
+#[test]
+fn repeated_starred_literal_sequences_decline() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+([*[other, target]] * 2)[0](1)
+((*[other, target],) * 2)[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "repeated starred literals must decline: {messages:?}"
+    );
+}
+
 /// Literal slices retain the concrete callable at a statically selected result
 /// index, including negative and stepped slices (issue #805).
 #[test]
