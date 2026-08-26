@@ -1,0 +1,1 @@
+Preserve concrete callable results yielded by ``Executor.map``.
