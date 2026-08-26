@@ -1,0 +1,1 @@
+Preserve wrapped callable signatures returned by direct ``staticmethod.__get__`` calls.
