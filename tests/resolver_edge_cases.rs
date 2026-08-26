@@ -1576,6 +1576,31 @@ C().call(1)
     );
 }
 
+/// Descriptor synthesis in an uncertain branch unions with a sibling
+/// callable-field signature instead of overwriting it (review on #1221).
+#[test]
+fn conditional_descriptor_assignment_preserves_sibling_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Descriptor:
+    def __get__(self, instance, owner) -> Callable[[int], None]: ...
+class C:
+    if condition:
+        call: Callable[..., None] = lambda *args: None
+    else:
+        call: Descriptor = Descriptor()
+C().call(1, 2)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "descriptor branch overwrote sibling callable signature: {messages:?}"
+    );
+}
+
 /// Descriptor synthesis resolves constructor aliases when the binding-aware
 /// indexer is active (issue #1147).
 #[test]

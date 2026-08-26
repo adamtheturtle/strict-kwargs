@@ -455,8 +455,7 @@ fn synthesize_descriptor_attribute(
         return false;
     };
     let fullname = format!("{class_name}.{}", target.id);
-    store.excluded.remove(&fullname);
-    store.signatures.insert(fullname, vec![signature]);
+    store.insert_definition(fullname, signature, false);
     true
 }
 
