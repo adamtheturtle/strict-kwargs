@@ -7335,6 +7335,66 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     );
 }
 
+/// A property with one unconditional concrete callable return preserves that
+/// callable when read from a freshly constructed instance (issue #959).
+#[test]
+fn property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+class Owner:
+    @property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "property body return must preserve its callable: {messages:?}"
+    );
+}
+
+/// Inherited properties preserve the concrete callable returned by their
+/// defining method.
+#[test]
+fn inherited_property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+class Parent:
+    @property
+    def callback(self) -> object:
+        return target
+class Child(Parent): pass
+Child().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "inherited property must preserve its callable: {messages:?}"
+    );
+}
+
+/// A property return expression that merely resolves to a non-callable name
+/// must retain the normal property-call skip.
+#[test]
+fn non_callable_property_body_return_remains_skipped() {
+    let messages = check_source(
+        r"
+class Owner:
+    @property
+    def label(self) -> object:
+        return self._label
+Owner().label(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "non-callable property return must remain skipped: {messages:?}"
+    );
+}
+
 /// `NamedTuple._make` maps a statically known iterable element to its named
 /// field and preserves a concrete callable value (issue #969).
 #[test]
