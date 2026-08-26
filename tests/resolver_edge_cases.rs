@@ -1925,6 +1925,25 @@ choose(f, g)(1)
     );
 }
 
+/// An omitted defaulted parameter sharing the return `TypeVar` does not erase
+/// the callable shape supplied by another argument (issue #1137).
+#[test]
+fn generic_return_skips_omitted_defaulted_typevar_parameter() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def choose(first: T, second: T = None) -> T: ...  # type: ignore[assignment]
+def target(value: int) -> None: ...
+choose(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "generic result"),
+        "expected defaulted generic-result violation, got: {messages:?}"
+    );
+}
+
 /// Generic instance method returns substitute class type arguments (issue #522).
 #[test]
 fn generic_instance_method_return_substitutes_callable_type_arg() {

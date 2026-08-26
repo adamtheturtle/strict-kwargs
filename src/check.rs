@@ -1505,7 +1505,7 @@ struct LocalFunction {
 
 #[derive(Debug, Clone)]
 struct GenericReturn {
-    parameters: Vec<(Option<usize>, String)>,
+    parameters: Vec<(Option<usize>, String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -4449,13 +4449,23 @@ impl<'a> CallChecker<'a> {
             .enumerate()
             .filter_map(|(index, parameter)| {
                 let annotation = parameter.parameter.annotation.as_deref()?;
-                (self.source[annotation.range()].trim() == return_text)
-                    .then(|| (Some(index), parameter.parameter.name.to_string()))
+                (self.source[annotation.range()].trim() == return_text).then(|| {
+                    (
+                        Some(index),
+                        parameter.parameter.name.to_string(),
+                        parameter.default.is_some(),
+                    )
+                })
             });
         let keyword_only = parameters.kwonlyargs.iter().filter_map(|parameter| {
             let annotation = parameter.parameter.annotation.as_deref()?;
-            (self.source[annotation.range()].trim() == return_text)
-                .then(|| (None, parameter.parameter.name.to_string()))
+            (self.source[annotation.range()].trim() == return_text).then(|| {
+                (
+                    None,
+                    parameter.parameter.name.to_string(),
+                    parameter.default.is_some(),
+                )
+            })
         });
         let matching = positional.chain(keyword_only).collect::<Vec<_>>();
         (!matching.is_empty()).then_some(GenericReturn {
@@ -4475,18 +4485,18 @@ impl<'a> CallChecker<'a> {
     fn known_stdlib_generic_return(factory: &str) -> Option<GenericReturn> {
         match Self::normalize_factory_fullname(factory) {
             "copy.copy" | "copy.deepcopy" => Some(GenericReturn {
-                parameters: vec![(Some(0), "x".to_string())],
+                parameters: vec![(Some(0), "x".to_string(), false)],
             }),
             "contextlib.closing" | "contextlib.aclosing" => Some(GenericReturn {
-                parameters: vec![(Some(0), "thing".to_string())],
+                parameters: vec![(Some(0), "thing".to_string(), false)],
             }),
             "contextlib.redirect_stdout"
             | "contextlib.redirect_stderr"
             | "contextlib._RedirectStream" => Some(GenericReturn {
-                parameters: vec![(Some(0), "new_target".to_string())],
+                parameters: vec![(Some(0), "new_target".to_string(), false)],
             }),
             "contextlib.nullcontext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "enter_result".to_string())],
+                parameters: vec![(Some(0), "enter_result".to_string(), false)],
             }),
             "contextlib._BaseExitStack.enter_context"
             | "contextlib.ExitStack.enter_context"
@@ -4499,10 +4509,10 @@ impl<'a> CallChecker<'a> {
             | "unittest.TestCase.enterClassContext"
             | "unittest.async_case.IsolatedAsyncioTestCase.enterAsyncContext"
             | "unittest.IsolatedAsyncioTestCase.enterAsyncContext" => Some(GenericReturn {
-                parameters: vec![(Some(0), "cm".to_string())],
+                parameters: vec![(Some(0), "cm".to_string(), false)],
             }),
             "contextlib.ContextDecorator.__call__" => Some(GenericReturn {
-                parameters: vec![(Some(0), "func".to_string())],
+                parameters: vec![(Some(0), "func".to_string(), false)],
             }),
             _ => None,
         }
@@ -4619,8 +4629,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<String> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default {
+                    continue;
+                }
+                return None;
+            };
             let callable = if name == "cm" {
                 self.context_manager_enter_callable(argument)?
             } else {
@@ -4644,8 +4659,13 @@ impl<'a> CallChecker<'a> {
         generic: &GenericReturn,
     ) -> Option<Signature> {
         let mut result = None;
-        for (index, name) in &generic.parameters {
-            let argument = Self::generic_argument(call, *index, name)?;
+        for (index, name, has_default) in &generic.parameters {
+            let Some(argument) = Self::generic_argument(call, *index, name) else {
+                if *has_default {
+                    continue;
+                }
+                return None;
+            };
             let signature = if name == "cm" {
                 self.context_manager_enter_signature(argument)?
             } else {
@@ -4704,7 +4724,7 @@ impl<'a> CallChecker<'a> {
         };
         let factory = self.resolve_callee(&call.func)?;
         let generic = self.context_decorator_generic_return(&factory)?;
-        let (index, name) = generic.parameters.first()?;
+        let (index, name, _) = generic.parameters.first()?;
         let argument = Self::generic_argument(call, *index, name)?;
         self.resolve_callee(argument)
     }
