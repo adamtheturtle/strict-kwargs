@@ -2740,6 +2740,30 @@ next(values())(1)
     );
 }
 
+/// Redefining a contextmanager with a non-callable yield clears the earlier
+/// callable context-item annotation metadata (issue #754).
+#[test]
+fn contextmanager_redefinition_clears_callable_item_return() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def managed() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+@contextmanager
+def managed() -> Iterator[int]:
+    yield 0
+with managed() as value:
+    value(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "redefined contextmanager must not retain callable-item metadata: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]
