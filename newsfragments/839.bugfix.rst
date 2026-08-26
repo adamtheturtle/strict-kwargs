@@ -1,0 +1,1 @@
+Preserve callable coroutine result signatures for tasks created by ``asyncio.TaskGroup.create_task``.
