@@ -2159,6 +2159,22 @@ impl<'a> CallChecker<'a> {
             .and_then(|annotation| self.class_from_annotation(annotation))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_from_instance_binding(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(fullname) = scope.names.get(name) {
+                return scope.instances.contains(name).then(|| fullname.clone());
+            }
+            if let Some(annotation) = scope.annotations.get(name) {
+                return self.class_from_annotation(annotation);
+            }
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether `name` is a function parameter in the innermost scope that
     /// sees it.  A real `names` binding in the same or an inner scope shadows
     /// any outer opaque entry (the parameter was re-assigned to a known def).
@@ -7217,7 +7233,12 @@ impl<'a> CallChecker<'a> {
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
-            let class_fullname = self.class_from_constructor(receiver)?;
+            let class_fullname = self.class_from_constructor(receiver).or_else(|| {
+                let Expr::Name(name) = receiver else {
+                    return None;
+                };
+                self.class_from_instance_binding(name.id.as_str())
+            })?;
             let iterator_fullname = self.resolve_instance_method(&class_fullname, "__iter__");
             return self
                 .callable_iterator_items

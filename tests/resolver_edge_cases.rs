@@ -1011,6 +1011,51 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter()` accepts tracked instance bindings and annotated instance
+/// parameters, not only inline constructor expressions (issue #1143).
+#[test]
+fn bound_instance_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+c = C()
+next(iter(c))(1)
+def consume(value: C) -> None:
+    next(iter(value))(1)
+",
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected bound-instance __iter__ violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// An opaque inner binding shadows an outer tracked instance when resolving
+/// `iter()` receivers (review on #1218).
+#[test]
+fn shadowed_instance_does_not_supply_dunder_iter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+value = C()
+def consume(value: object) -> None:
+    next(iter(value))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:7:")),
+        "outer instance leaked through shadowing parameter: {messages:?}"
+    );
+}
+
 /// `iter(subclass())` resolves an inherited `__iter__` through the class MRO
 /// before looking up its callable item annotation (issue #1142).
 #[test]
