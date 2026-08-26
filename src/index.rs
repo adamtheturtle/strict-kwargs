@@ -3065,13 +3065,14 @@ fn index_stmt(
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
+            let mut class_bindings = bindings.clone();
             index_class_body(
                 store,
                 module_name,
                 is_package,
                 &class_name,
                 &class_def.body,
-                bindings,
+                &mut class_bindings,
             );
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
@@ -3513,6 +3514,7 @@ fn index_class_body(
     bindings: &mut FxHashMap<String, String>,
 ) {
     for stmt in body {
+        update_constructor_base_bindings(module_name, is_package, class_name, stmt, bindings);
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
                 name,
@@ -3583,13 +3585,14 @@ fn index_class_body(
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
                 store.classes.insert(nested.clone());
+                let mut nested_bindings = bindings.clone();
                 index_class_body(
                     store,
                     module_name,
                     is_package,
                     &nested,
                     &class_def.body,
-                    bindings,
+                    &mut nested_bindings,
                 );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
