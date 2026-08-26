@@ -279,7 +279,7 @@ fn walk_entry_is_excluded(selection: &FileSelection, entry: &walkdir::DirEntry) 
 
 #[cfg_attr(coverage, coverage(off))]
 fn symlink_target_directory_is_prunable(selection: &FileSelection, path: &Path) -> bool {
-    std::fs::canonicalize(path).ok().is_some_and(|target| {
+    std::fs::canonicalize(path).is_ok_and(|target| {
         selection.is_extend_excluded(&target, true)
             || target.file_name().is_some_and(|name| {
                 let name = name.to_string_lossy();
@@ -316,7 +316,6 @@ pub(super) fn explicit_python_files(paths: &[PathBuf], selected: &[PathBuf]) -> 
 
 pub(super) struct FileSelection {
     project_root: PathBuf,
-    canonical_project_root: PathBuf,
     extend_exclude: Gitignore,
     force_exclude: bool,
 }
@@ -337,8 +336,6 @@ impl FileSelection {
         let extend_exclude = build_extend_exclude(&builder, project_root)?;
         Ok(Self {
             project_root: project_root.to_path_buf(),
-            canonical_project_root: std::fs::canonicalize(project_root)
-                .unwrap_or_else(|_| project_root.to_path_buf()),
             extend_exclude,
             force_exclude: config.force_exclude,
         })
@@ -355,13 +352,17 @@ impl FileSelection {
         self.is_extend_excluded(path, is_dir)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn is_extend_excluded(&self, path: &Path, is_dir: bool) -> bool {
         let normalized;
         let path = if self.project_root.is_absolute()
             && path.is_absolute()
             && !path.starts_with(&self.project_root)
         {
-            let Ok(relative) = path.strip_prefix(&self.canonical_project_root) else {
+            let Ok(canonical_project_root) = std::fs::canonicalize(&self.project_root) else {
+                return false;
+            };
+            let Ok(relative) = path.strip_prefix(canonical_project_root) else {
                 return false;
             };
             normalized = self.project_root.join(relative);
