@@ -1,0 +1,1 @@
+Preserve concrete callable values through explicit iterator protocol calls on literal dictionary items views.

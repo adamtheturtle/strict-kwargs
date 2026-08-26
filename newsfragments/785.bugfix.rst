@@ -1,0 +1,2 @@
+Preserve concrete callable elements when ``random.choice`` and
+``secrets.choice`` receive their sequence through the ``seq`` keyword.
