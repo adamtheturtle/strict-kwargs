@@ -679,6 +679,47 @@ Child(base=1, child=2)
 }
 
 #[test]
+fn nested_dataclass_resolves_base_imported_in_enclosing_class() {
+    let project = TestProject::new()
+        .dep(
+            "models.py",
+            r"
+from dataclasses import dataclass
+
+@dataclass
+class Base:
+    base: int
+",
+        )
+        .file(
+            "app.py",
+            r"
+from dataclasses import dataclass
+
+class Namespace:
+    from models import Base
+
+    @dataclass
+    class Child(Base):
+        child: int
+
+Namespace.Child(1)
+Namespace.Child(base=1, child=2)
+",
+        );
+    let messages = project.check_explicit();
+    assert!(
+        has(&messages, "app.py:11:", "Too many positional"),
+        "class-scoped import must resolve the nested dataclass base; got: {messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        1,
+        "keyword construction should pass: {messages:?}"
+    );
+}
+
+#[test]
 fn dataclass_imported_base_checked_file_is_not_indexed_twice() {
     let project = TestProject::new()
         .file(
