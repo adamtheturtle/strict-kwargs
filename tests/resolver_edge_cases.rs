@@ -7195,6 +7195,245 @@ future.result()(1)
     );
 }
 
+/// `Executor.submit` returns a future carrying the submitted callable's
+/// concrete callable return signature (issue #843).
+#[test]
+fn thread_pool_submit_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "result() result"),
+        "expected Executor.submit result violation, got: {messages:?}"
+    );
+}
+
+/// Rebinding the context-manager local discards executor identity.
+#[test]
+fn thread_pool_submit_identity_is_cleared_on_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor = object()
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound executor must not retain result metadata: {messages:?}"
+    );
+}
+
+/// Loop targets discard callable-result metadata stored for submitted futures
+/// (Bugbot on #989).
+#[test]
+fn thread_pool_submitted_future_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    for future in [object()]:
+        pass
+    future.result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "rebound future must not retain submitted result metadata: {messages:?}"
+    );
+}
+
+/// A nested nonlocal assignment clears executor identity in its owning scope
+/// (Bugbot on #989).
+#[test]
+fn thread_pool_executor_is_cleared_by_nonlocal_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+def outer() -> None:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        def replace() -> None:
+            nonlocal executor
+            executor = object()
+        executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "nonlocal rebind must discard executor identity: {messages:?}"
+    );
+}
+
+/// `concurrent.futures.as_completed` preserves a singleton submitted future's
+/// concrete callable result (issue #845).
+#[test]
+fn futures_as_completed_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    next(concurrent.futures.as_completed(fs=[future])).result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "result() result"),
+        "expected as_completed Future result violation, got: {messages:?}"
+    );
+}
+
+/// `concurrent.futures.wait` preserves the singleton future result through
+/// the returned done set (issue #846).
+#[test]
+fn futures_wait_done_set_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected wait done-set Future result violation, got: {messages:?}"
+    );
+}
+
+/// List destructuring is equivalent to tuple destructuring for the two-set
+/// result returned by `concurrent.futures.wait` (Bugbot on #991).
+#[test]
+fn futures_wait_list_target_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    [done, _] = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected list-target wait violation, got: {messages:?}"
+    );
+}
+
+/// Loop-target rebinding discards a tracked wait done-set signature.
+#[test]
+fn futures_wait_done_set_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    for done in [set()]:
+        done.pop().result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear wait done-set metadata: {messages:?}"
+    );
+}
+
+/// `Executor.map` preserves a lambda's concrete callable result in its
+/// returned iterator (issue #844).
+#[test]
+fn thread_pool_map_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+def target(value: int) -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    next(executor.map(lambda _: target, [0]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected Executor.map result violation, got: {messages:?}"
+    );
+}
+
+/// Destructuring rebinding also discards executor identity.
+#[test]
+fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor, other = object(), object()
+    executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "destructuring rebound executor must not retain metadata: {messages:?}"
+    );
+}
+
+/// `Executor.submit` treats `fn` as positional-only; a forwarded `fn=`
+/// keyword is not the submitted callback.
+#[test]
+fn thread_pool_submit_ignores_forwarded_fn_keyword_for_inference() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def submitted() -> object: ...
+def forwarded() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    executor.submit(submitted, fn=forwarded).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "forwarded fn keyword must not determine Future result: {messages:?}"
+    );
+}
+
 /// `Context.run` preserves a lambda callback result callable signature
 /// (issue #480).
 #[test]
