@@ -4325,6 +4325,50 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn cached_property_get_result_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(get_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(get_method) = get_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(descriptor) = get_method.value.as_ref() else {
+            return None;
+        };
+        if get_method.attr.as_str() != "__get__"
+            || !self.names_stdlib_callable(&descriptor.func, "functools.cached_property")
+            || get_call.arguments.args.len() > 2
+            || get_call.arguments.keywords.iter().any(|keyword| {
+                !matches!(
+                    keyword.arg.as_ref().map(ast::Identifier::as_str),
+                    Some("instance" | "owner")
+                )
+            })
+            || get_call.arguments.is_empty()
+            || get_call.arguments.len() > 2
+        {
+            return None;
+        }
+        let getter = match &*descriptor.arguments.args {
+            [getter] if descriptor.arguments.keywords.is_empty() => getter,
+            [] => {
+                let [keyword] = &*descriptor.arguments.keywords else {
+                    return None;
+                };
+                if keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("func") {
+                    return None;
+                }
+                &keyword.value
+            }
+            _ => return None,
+        };
+        let Expr::Lambda(lambda) = getter else {
+            return None;
+        };
+        self.resolve_callee(&lambda.body)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn identity_return_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -8488,6 +8532,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.property_fget_result_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.cached_property_get_result_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.context_manager_enter_callable_result(func) {
