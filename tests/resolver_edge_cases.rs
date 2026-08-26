@@ -5612,6 +5612,61 @@ property(fget=lambda self: target).fget(self=Owner())(1)
     );
 }
 
+/// `NamedTuple._make` maps a statically known iterable element to its named
+/// field and preserves a concrete callable value (issue #969).
+#[test]
+fn namedtuple_make_attribute_preserves_callable_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair._make(iterable=[target]).callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "NamedTuple._make attribute must preserve its callable: {messages:?}"
+    );
+}
+
+/// `_make` field lookup excludes the synthetic `cls` receiver, so a real field
+/// with that name maps to the first iterable element.
+#[test]
+fn namedtuple_make_attribute_handles_cls_field() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    cls: object
+def target(value: int) -> None: ...
+Item._make([target]).cls(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "messages: {messages:?}"
+    );
+}
+
+/// An opaque local that shadows a `NamedTuple` class must not reuse the class's
+/// `_make` field metadata.
+#[test]
+fn namedtuple_make_ignores_opaque_shadowing_receiver() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Item(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+def consume(Item: object) -> None:
+    Item._make([target]).callback(1)
+",
+    );
+    assert!(messages.is_empty(), "messages: {messages:?}");
+}
+
 /// A stored `property` retains the callable returned by its getter
 /// (regression #761).
 #[test]

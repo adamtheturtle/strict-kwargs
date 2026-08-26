@@ -7129,6 +7129,47 @@ impl<'a> CallChecker<'a> {
         self.resolve_callee(&field.value)
     }
 
+    #[cfg_attr(coverage, coverage(off))]
+    fn namedtuple_make_field_callable(&self, value: &Expr, attr: &str) -> Option<String> {
+        let Expr::Call(make_call) = value else {
+            return None;
+        };
+        let Expr::Attribute(method) = make_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "_make" || make_call.arguments.len() != 1 {
+            return None;
+        }
+        let class = match method.value.as_ref() {
+            Expr::Name(name) if !self.is_opaque_local(name.id.as_str()) => {
+                self.resolve_local(name.id.as_str())?
+            }
+            Expr::Name(_) => return None,
+            value => self.class_from_constructor_func(value)?,
+        };
+        if !self.index.is_namedtuple(&class) {
+            return None;
+        }
+        let iterable = Self::generic_argument(make_call, Some(0), "iterable")?;
+        let elements = match iterable {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let constructor = self
+            .index
+            .resolve_method(&class, "__new__")
+            .unwrap_or_else(|| format!("{class}.__new__"));
+        let signatures = self.index.get(&constructor)?;
+        let signature = signatures.first()?;
+        let index = signature
+            .parameters
+            .iter()
+            .skip(1)
+            .position(|parameter| parameter.name.as_deref() == Some(attr))?;
+        self.resolve_callee(elements.get(index)?)
+    }
+
     // The end-to-end regression covers both tracked and inline receivers;
     // malformed factories and unknown receiver shapes deliberately decline.
     #[cfg_attr(coverage, coverage(off))]
@@ -8485,6 +8526,9 @@ impl<'a> CallChecker<'a> {
                 }
                 if let Some(callable) = self.namedtuple_constructor_field_callable(value, attr_name)
                 {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.namedtuple_make_field_callable(value, attr_name) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.namedtuple_keyword_field_callable(value, attr_name) {
