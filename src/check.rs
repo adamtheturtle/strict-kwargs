@@ -6904,7 +6904,7 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn mapping_proxy_callable_signature(annotation: &Expr) -> Option<Signature> {
+    fn mapping_proxy_callable_signature(&self, annotation: &Expr) -> Option<Signature> {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = annotation else {
             return None;
         };
@@ -6915,7 +6915,7 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let value_type = tuple.elts.get(1)?;
-        Self::callable_annotation_signature(value_type)
+        self.callable_type_alias_signature(value_type)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -10301,7 +10301,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);
@@ -10346,7 +10346,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                             .weak_key_dict_callables
                             .insert(name.id.to_string(), signature);
                     }
-                    if let Some(signature) = Self::mapping_proxy_callable_signature(annotation) {
+                    if let Some(signature) = self.mapping_proxy_callable_signature(annotation) {
                         self.current_scope()
                             .mapping_proxy_callables
                             .insert(name.id.to_string(), signature);

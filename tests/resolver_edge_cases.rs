@@ -6239,6 +6239,27 @@ value(1)
     );
 }
 
+/// `MappingProxyType.get` resolves a named callable alias used as its value
+/// type (regression #769).
+#[test]
+fn mapping_proxy_get_resolves_callable_value_alias() {
+    let messages = check_source(
+        r#"
+import types
+import typing
+Callback = typing.Callable[[int], int]
+mapping: types.MappingProxyType[str, Callback]
+value = mapping.get("key")
+if value is not None:
+    value(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 8, "get() result"),
+        "expected alias-valued mapping violation, got: {messages:?}"
+    );
+}
+
 /// ``TopologicalSorter.get_ready`` preserves callable graph node types
 /// (issue #516).
 #[test]
