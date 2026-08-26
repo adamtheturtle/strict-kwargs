@@ -2764,6 +2764,34 @@ with managed() as value:
     );
 }
 
+/// Redefining a generic identity function as non-generic clears the obsolete
+/// parameter-to-result specialization (issue #757).
+#[test]
+fn function_redefinition_clears_generic_return_metadata() {
+    let messages = check_source(
+        r#"
+from typing import TypeVar
+T = TypeVar("T")
+def identity(value: T) -> T:
+    return value
+def identity(value: int) -> int:
+    return value
+def target(value: int) -> None: ...
+identity(target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 9, "identity"),
+        "live identity call should still be checked: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("generic result")),
+        "redefined function retained generic-result metadata: {messages:?}"
+    );
+}
+
 /// A second `@overload` group replaces a completed one rather than extending
 /// it, so only the new group's arms can be selected.
 #[test]

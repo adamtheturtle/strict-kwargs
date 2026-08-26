@@ -9222,6 +9222,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.callable_factory_returns.remove(&fullname);
                 self.callable_iterator_items.remove(&fullname);
                 self.callable_contextmanager_items.remove(&fullname);
+                self.generic_returns.remove(&fullname);
                 if decorator_list
                     .iter()
                     .any(|decorator| decorator_tail(&decorator.expression) == Some("overload"))
