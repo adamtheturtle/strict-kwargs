@@ -5439,7 +5439,9 @@ impl<'a> CallChecker<'a> {
     ) -> Option<String> {
         let mut result = None;
         for (index, value) in expression.values.iter().enumerate() {
-            let truthiness = Self::literal_container_truthiness(value);
+            let candidate = self.resolve_literal_container_item(value, slice);
+            let truthiness = Self::literal_container_truthiness(value)
+                .or_else(|| candidate.as_ref().map(|_| true));
             let last = index + 1 == expression.values.len();
             let can_return = last
                 || match expression.op {
@@ -5447,7 +5449,7 @@ impl<'a> CallChecker<'a> {
                     ast::BoolOp::And => truthiness != Some(true),
                 };
             if can_return {
-                let candidate = self.resolve_literal_container_item(value, slice)?;
+                let candidate = candidate?;
                 if result
                     .as_ref()
                     .is_some_and(|existing| existing != &candidate)

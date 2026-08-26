@@ -753,9 +753,11 @@ def target(value: int) -> None: ...
 ([] or [target])[0](1)
 ([target] and [target])[0](1)
 ([target] or [0])[0](1)
+([*[target]] or [0])[0](1)
+([target] + [] or [0])[0](1)
 ",
     );
-    for line in 3..=6 {
+    for line in 3..=8 {
         assert!(
             has_error_at(&messages, line, "target"),
             "expected boolean-container violation on line {line}, got: {messages:?}"
