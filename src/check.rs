@@ -7488,6 +7488,18 @@ impl<'a> CallChecker<'a> {
                 };
                 return self.unnamed_callable_signature(item.key.as_ref()?);
             }
+            if let Expr::Call(constructor) = receiver {
+                if Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                    == "weakref.WeakSet"
+                {
+                    let data = constructor
+                        .arguments
+                        .find_keyword("data")
+                        .map(|keyword| &keyword.value)
+                        .or_else(|| constructor.arguments.args.first())?;
+                    return self.literal_iterable_callable_signature(data);
+                }
+            }
             let class_fullname = self.class_from_constructor(receiver).or_else(|| {
                 let Expr::Name(name) = receiver else {
                     return None;
