@@ -6237,18 +6237,29 @@ impl<'a> CallChecker<'a> {
         }
         let dict = match attribute.value.as_ref() {
             Expr::Dict(dict) => dict,
-            Expr::Call(constructor)
-                if self
-                    .class_from_constructor_func(&constructor.func)
-                    .is_some_and(|class| {
-                        matches!(
-                            class.as_str(),
-                            "collections.OrderedDict" | "collections.UserDict"
-                        )
-                    })
-                    && constructor.arguments.keywords.is_empty() =>
-            {
-                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            Expr::Call(constructor) => {
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                let mapping = if class == "types.MappingProxyType" {
+                    match &*constructor.arguments.args {
+                        [mapping] if constructor.arguments.keywords.is_empty() => mapping,
+                        [] if constructor.arguments.keywords.len() == 1 => {
+                            &constructor.arguments.find_keyword("mapping")?.value
+                        }
+                        _ => return None,
+                    }
+                } else if matches!(
+                    class.as_str(),
+                    "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
+                ) && constructor.arguments.keywords.is_empty()
+                {
+                    let [mapping] = &*constructor.arguments.args else {
+                        return None;
+                    };
+                    mapping
+                } else {
+                    return None;
+                };
+                let Expr::Dict(dict) = mapping else {
                     return None;
                 };
                 dict
