@@ -541,6 +541,38 @@ iter([target]).__next__()(1)
     );
 }
 
+/// Explicit dict-values iterator protocol calls preserve homogeneous concrete
+/// callable values (issue #950).
+#[test]
+fn explicit_dict_values_iterator_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"x": target}.values().__iter__().__next__()(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit dict-values iterator violation, got: {messages:?}"
+    );
+}
+
+/// Explicit dict-items iterator protocol calls preserve homogeneous concrete
+/// callable values selected from tuple position one (issue #951).
+#[test]
+fn explicit_dict_items_iterator_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{"x": target}.items().__iter__().__next__()[1](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected explicit dict-items iterator violation, got: {messages:?}"
+    );
+}
+
 /// Concatenated literal sequences retain the concrete callable selected from
 /// either operand (issue #806).
 #[test]
