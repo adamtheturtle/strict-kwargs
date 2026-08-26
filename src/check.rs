@@ -1410,6 +1410,8 @@ struct PendingTyOverloadFix {
 
 #[derive(Debug, Default, Clone)]
 struct Scope {
+    /// Class namespaces do not participate in Python's `nonlocal` lookup.
+    is_class_namespace: bool,
     /// Local name -> fully-qualified callable/class name.
     names: FxHashMap<String, String>,
     /// Local name -> the currently visible local function signature.
@@ -5853,6 +5855,9 @@ impl<'a> CallChecker<'a> {
         }
         // Skip the current (nested) scope; invalidate the enclosing binding.
         for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            if self.scopes[index].is_class_namespace {
+                continue;
+            }
             let owns = self.scopes[index].functions.contains_key(name)
                 || self.scopes[index].names.contains_key(name)
                 || self.scopes[index].opaque_locals.contains(name)
@@ -9620,6 +9625,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 }
                 self.class_stack.push(class_fullname);
                 self.push_scope();
+                self.current_scope().is_class_namespace = true;
                 self.enter_hover_scope(true);
                 self.class_body_depth += 1;
                 for inner in body {

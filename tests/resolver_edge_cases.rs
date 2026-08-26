@@ -3153,6 +3153,31 @@ def outer() -> None:
     );
 }
 
+/// Class namespaces are skipped by `nonlocal` lookup, so a class-body binding
+/// must not intercept invalidation of an enclosing function binding (#1131).
+#[test]
+fn nonlocal_rebinding_skips_class_scope() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def outer() -> None:
+    stream: Generator[Callable[[], None], None, None]
+    class Namespace:
+        stream: object
+        def replace() -> None:
+            nonlocal stream
+            stream = object()
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:10:")),
+        "class scope intercepted nonlocal invalidation: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
