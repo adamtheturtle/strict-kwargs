@@ -2233,6 +2233,24 @@ next(itertools.islice([f], 1))(1)
     }
 }
 
+/// The first item from `accumulate(..., initial=...)` is the initial value,
+/// not an item from the iterable (issue #1077).
+#[test]
+fn itertools_accumulate_initial_preserves_initial_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def item(value: str) -> None: ...
+def initial() -> None: ...
+next(itertools.accumulate([item], initial=initial))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected accumulate-initial violation, got: {messages:?}"
+    );
+}
+
 /// Combinatoric itertools helpers preserve callable tuple-element types
 /// (issue #449).
 #[test]

@@ -6211,7 +6211,17 @@ impl<'a> CallChecker<'a> {
                 }
                 result
             }
-            "accumulate" | "compress" | "islice" if selected_index.is_none() => {
+            "accumulate" if selected_index.is_none() => {
+                if let Some(initial) = call.arguments.keywords.iter().find_map(|keyword| {
+                    (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initial"))
+                        .then_some(&keyword.value)
+                }) {
+                    self.unnamed_callable_signature(initial)
+                } else {
+                    self.literal_iterable_callable_signature(first_named(0, "iterable")?)
+                }
+            }
+            "compress" | "islice" if selected_index.is_none() => {
                 self.literal_iterable_callable_signature(first_named(0, "iterable")?)
             }
             "dropwhile" | "takewhile" if selected_index.is_none() => {
