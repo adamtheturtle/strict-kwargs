@@ -1798,6 +1798,44 @@ dataclasses.asdict(obj=Record(callback=target))["callback"](1)
     );
 }
 
+/// A `NamedTuple._asdict` result preserves a concrete callable constructor
+/// field selected by its literal name (issue #832).
+#[test]
+fn namedtuple_asdict_preserves_callable_field_signature() {
+    let messages = check_source(
+        r#"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair(callback=target)._asdict()["callback"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected NamedTuple._asdict violation, got: {messages:?}"
+    );
+}
+
+/// Literal tuple indexing of a `NamedTuple._replace` result preserves an
+/// unchanged concrete callable field (issue #833).
+#[test]
+fn namedtuple_replace_index_preserves_callable_field_signature() {
+    let messages = check_source(
+        r"
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+Pair(callback=target)._replace()[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected NamedTuple._replace index violation, got: {messages:?}"
+    );
+}
+
 /// `asdict` omits constructor-only `InitVar` entries.
 #[test]
 fn dataclasses_asdict_ignores_initvar_fields() {
