@@ -5384,6 +5384,25 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn immediate_userlist_copy_receiver<'b>(&self, call: &'b ast::ExprCall) -> Option<&'b Expr> {
+        if !call.arguments.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "copy" {
+            return None;
+        }
+        let Expr::Call(receiver) = method.value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&receiver.func)?;
+        (Self::normalize_factory_fullname(&factory) == "collections.UserList")
+            .then_some(method.value.as_ref())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn immediate_userlist_iterable<'b>(&self, value: &'b Expr) -> Option<&'b Expr> {
         let Expr::Call(constructor) = value else {
             return None;
@@ -5564,6 +5583,9 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Expr::Call(wrapper) = value {
+            if let Some(receiver) = self.immediate_userlist_copy_receiver(wrapper) {
+                return self.resolve_literal_container_item(receiver, slice);
+            }
             if let Some(iterable) = self.immediate_userlist_iterable(value) {
                 return self.resolve_userlist_item(iterable, slice);
             }
