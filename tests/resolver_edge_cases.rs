@@ -2041,9 +2041,11 @@ itemgetter(1)([*values, strict])(1)
 itemgetter(-2)((strict, *values))(1)
 itemgetter(0)([*values, strict][1:])(1)
 itemgetter(0)((*values, strict)[1:])(1)
+itemgetter(slice(1, None))([*values, strict])[0](1)
+itemgetter(slice(1, None))((*values, strict))[0](1)
 ",
     );
-    for line in [6, 7, 8, 9] {
+    for line in [6, 7, 8, 9, 10, 11] {
         assert!(
             !messages
                 .iter()

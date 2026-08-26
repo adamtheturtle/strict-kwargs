@@ -8520,6 +8520,9 @@ impl<'a> CallChecker<'a> {
             Expr::Tuple(tuple) => tuple.elts.as_slice(),
             _ => return None,
         };
+        if elements.iter().any(Expr::is_starred_expr) {
+            return None;
+        }
         let index =
             Self::literal_slice_original_index(lower, upper, step, elements.len(), selected)?;
         self.resolve_callee(&elements[index])
