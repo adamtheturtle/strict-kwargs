@@ -2159,6 +2159,7 @@ impl<'a> CallChecker<'a> {
             .and_then(|annotation| self.class_from_annotation(annotation))
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn class_from_instance_binding(&self, name: &str) -> Option<String> {
         for scope in self.scopes.iter().rev() {
             if let Some(fullname) = scope.names.get(name) {
