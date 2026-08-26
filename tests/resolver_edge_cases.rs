@@ -3084,6 +3084,27 @@ async def main() -> None:
     );
 }
 
+/// Generator-yield metadata follows lexical bindings and must not survive a
+/// function scope or bypass a nearer opaque parameter (issue #1084).
+#[test]
+fn generator_yield_signatures_do_not_leak_across_local_scopes() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def seed() -> None:
+    stream: Generator[Callable[[], None], None, None]
+def caller(stream: object) -> None:
+    stream.send(None)(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:6:")),
+        "generator yield signature leaked into a later parameter: {messages:?}"
+    );
+}
+
 /// A forward reference to a class defined later in the module resolves via
 /// the module candidate to its `__init__`, flagging surplus args.
 #[test]
