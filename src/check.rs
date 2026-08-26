@@ -7260,7 +7260,11 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let class_fullname = self.class_from_constructor_func(&constructor.func)?;
-        if !self.index.is_dataclass(&class_fullname) {
+        if !self
+            .index
+            .is_synthesized(&format!("{class_fullname}.__init__"))
+            || !self.index.is_dataclass_runtime_field(&class_fullname, attr)
+        {
             return None;
         }
         let field = constructor.arguments.find_keyword(attr)?;
