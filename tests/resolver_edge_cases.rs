@@ -3183,6 +3183,22 @@ next(itertools.chain.from_iterable([[target]]))(1)
     );
 }
 
+/// Empty inner groups yield no values and must not erase a known signature.
+#[test]
+fn chain_from_iterable_skips_empty_literal_iterables() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.chain.from_iterable([[], [target], ()]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected chain.from_iterable violation, got: {messages:?}"
+    );
+}
+
 /// A directly imported alias of `itertools.chain` retains its concrete
 /// callable items (issue #855).
 #[test]

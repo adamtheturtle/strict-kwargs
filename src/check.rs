@@ -6435,6 +6435,9 @@ impl<'a> CallChecker<'a> {
         };
         let mut result = None;
         for iterable in iterables {
+            if definite_empty_iterable(iterable) {
+                continue;
+            }
             let signature = self.literal_iterable_callable_signature(iterable)?;
             if result
                 .as_ref()
