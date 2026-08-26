@@ -3746,3 +3746,27 @@ func(1)
         "Too many positional",
     );
 }
+
+/// Hyperfine executes its prepare string in a fresh shell, so that string
+/// needs its own errexit setting rather than relying on the parent script
+/// (issue #1161).
+#[test]
+fn edit_cache_benchmark_prepare_enables_errexit() {
+    let script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/compare-real-project-edit-cache.sh"),
+    )
+    .expect("read edit-cache benchmark script");
+    let prepare = script
+        .split_once("printf -v prepare_command")
+        .expect("prepare command construction")
+        .1;
+    let before_hyperfine = prepare
+        .split_once("hyperfine")
+        .expect("hyperfine invocation")
+        .0;
+    assert!(
+        before_hyperfine.contains("'set -e; "),
+        "hyperfine prepare shell must fail fast"
+    );
+}
