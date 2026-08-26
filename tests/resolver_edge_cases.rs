@@ -1222,6 +1222,29 @@ Holder(call=f).call(1)
     );
 }
 
+/// Constructor keywords are treated as stored dataclass fields only when the
+/// indexed field model synthesized the constructor (issue #1154).
+#[test]
+fn handwritten_dataclass_init_keyword_is_not_a_stored_field() {
+    let messages = check_source(
+        r"
+from dataclasses import dataclass
+@dataclass
+class C:
+    def __init__(self, call) -> None: ...
+    def call(self, *args) -> None: ...
+def strict(value: int) -> None: ...
+C(call=strict).call(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:8:")),
+        "custom init keyword was treated as a stored field: {messages:?}"
+    );
+}
+
 /// `dataclasses.astuple` preserves concrete callable constructor fields at a
 /// literal tuple index (issue #830).
 #[test]
