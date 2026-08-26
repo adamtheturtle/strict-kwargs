@@ -5165,7 +5165,7 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
-            Self::literal_sequence_index(slice, 1)?;
+            Self::literal_signed_integer(slice)?;
             return self.pool_map_callable_fullname(map_call);
         }
         if let Expr::Call(copy_call) = value {
