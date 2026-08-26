@@ -355,9 +355,8 @@ impl FileSelection {
     #[cfg_attr(coverage, coverage(off))]
     fn is_extend_excluded(&self, path: &Path, is_dir: bool) -> bool {
         let normalized;
-        let path = if self.project_root.is_absolute()
-            && path.is_absolute()
-            && !path.starts_with(&self.project_root)
+        let path = if path.is_absolute()
+            && (!self.project_root.is_absolute() || !path.starts_with(&self.project_root))
         {
             let Ok(canonical_project_root) = std::fs::canonicalize(&self.project_root) else {
                 return false;
@@ -425,9 +424,10 @@ pub(super) fn is_ignored_path(path: &Path) -> bool {
 mod file_selection_coverage {
     use super::{
         collect_python_files, collect_python_files_for_fix,
-        collect_python_files_with_project_inventory,
+        collect_python_files_with_project_inventory, FileSelection,
     };
     use crate::config::Config;
+    use std::path::Path;
 
     #[test]
     fn collect_python_files_for_fix_keeps_files_within_directory_scope() {
@@ -540,5 +540,17 @@ mod file_selection_coverage {
                 .0
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn relative_project_root_matches_canonical_excluded_target() {
+        let config = Config {
+            extend_exclude: vec![".github".to_string()],
+            ..Config::default()
+        };
+        let selection = FileSelection::new(Path::new("."), &config).expect("selection");
+        let canonical = std::fs::canonicalize(".github").expect("repository .github directory");
+
+        assert!(selection.is_extend_excluded(&canonical, true));
     }
 }
