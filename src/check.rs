@@ -7605,7 +7605,7 @@ impl<'a> CallChecker<'a> {
         };
         if !is_module_create_task && !is_task_group_create_task && !is_ensure_future {
             return None;
-        };
+        }
         let argument_name = if is_ensure_future {
             "coro_or_future"
         } else {
