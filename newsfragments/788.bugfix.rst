@@ -1,0 +1,1 @@
+Preserve concrete callable elements returned by ``next(reversed(deque(...)))``.
