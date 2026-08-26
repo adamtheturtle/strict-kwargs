@@ -4548,6 +4548,51 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// `concurrent.futures.wait` preserves the singleton future result through
+/// the returned done set (issue #846).
+#[test]
+fn futures_wait_done_set_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "result() result"),
+        "expected wait done-set Future result violation, got: {messages:?}"
+    );
+}
+
+/// Loop-target rebinding discards a tracked wait done-set signature.
+#[test]
+fn futures_wait_done_set_is_cleared_by_loop_target() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    done, _ = concurrent.futures.wait(fs=[future])
+    for done in [set()]:
+        done.pop().result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "loop target must clear wait done-set metadata: {messages:?}"
+    );
+}
+
 /// Destructuring rebinding also discards executor identity.
 #[test]
 fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {
