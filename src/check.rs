@@ -7137,7 +7137,16 @@ impl<'a> CallChecker<'a> {
         let factory_fullname = self.resolve_callee(&factory_call.func)?;
         if factory_fullname == "builtins.iter" {
             let receiver = factory_call.arguments.args.first()?;
-            let class_fullname = self.class_from_constructor(receiver)?;
+            let class_fullname = self.class_from_constructor(receiver).or_else(|| {
+                let Expr::Name(name) = receiver else {
+                    return None;
+                };
+                if self.binding_is_instance(name.id.as_str()) {
+                    self.resolve_local(name.id.as_str())
+                } else {
+                    self.class_from_name_annotation(name.id.as_str())
+                }
+            })?;
             return self
                 .callable_iterator_items
                 .get(&format!("{class_fullname}.__iter__"))

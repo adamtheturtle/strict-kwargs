@@ -947,6 +947,29 @@ next(iter(C()))(1)
     );
 }
 
+/// `iter()` accepts tracked instance bindings and annotated instance
+/// parameters, not only inline constructor expressions (issue #1143).
+#[test]
+fn bound_instance_dunder_iter_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+class C:
+    def __iter__(self) -> Iterator[Callable[[int], None]]: ...
+c = C()
+next(iter(c))(1)
+def consume(value: C) -> None:
+    next(iter(value))(1)
+",
+    );
+    for line in [6, 8] {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected bound-instance __iter__ violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A single irrefutable capture aliases the match subject and therefore keeps
 /// its concrete callable signature (issue #371).
 #[test]
