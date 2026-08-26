@@ -5443,6 +5443,54 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
+        if let Expr::Call(replace_call) = value {
+            if let Expr::Attribute(method) = replace_call.func.as_ref() {
+                if method.attr.as_str() == "_replace" {
+                    let Expr::Call(constructor) = method.value.as_ref() else {
+                        return None;
+                    };
+                    let class = self.class_from_constructor_func(&constructor.func)?;
+                    let index = Self::literal_sequence_index(
+                        slice,
+                        self.index.namedtuple_field_count(&class)?,
+                    )?;
+                    let field = self.index.namedtuple_field(&class, index)?;
+                    let value = replace_call
+                        .arguments
+                        .find_keyword(&field)
+                        .map(|keyword| &keyword.value)
+                        .or_else(|| {
+                            constructor
+                                .arguments
+                                .find_keyword(&field)
+                                .map(|keyword| &keyword.value)
+                        })?;
+                    return self.resolve_callee(value);
+                }
+            }
+        }
+        if let Expr::Call(asdict_call) = value {
+            if let Expr::Attribute(method) = asdict_call.func.as_ref() {
+                if method.attr.as_str() == "_asdict" && asdict_call.arguments.is_empty() {
+                    let Expr::Call(constructor) = method.value.as_ref() else {
+                        return None;
+                    };
+                    let Expr::StringLiteral(field) = slice else {
+                        return None;
+                    };
+                    let class = self.class_from_constructor_func(&constructor.func)?;
+                    if !self.index.is_namedtuple(&class) {
+                        return None;
+                    }
+                    return self.resolve_callee(
+                        &constructor
+                            .arguments
+                            .find_keyword(field.value.to_str())?
+                            .value,
+                    );
+                }
+            }
+        }
         if let Expr::Call(sum_call) = value {
             if self.names_stdlib_callable(&sum_call.func, "builtins.sum") {
                 let (iterable, positional_start) = match &*sum_call.arguments.args {
