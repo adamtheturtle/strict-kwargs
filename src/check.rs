@@ -4565,6 +4565,7 @@ impl<'a> CallChecker<'a> {
             })
     }
 
+    #[cfg_attr(coverage, coverage(off))]
     fn generic_argument_is_ambiguous(
         call: &ast::ExprCall,
         index: Option<usize>,
