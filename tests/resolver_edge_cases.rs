@@ -1442,9 +1442,11 @@ def permissive(*args) -> None: ...
 values = [permissive, permissive]
 itemgetter(1)([*values, strict])(1)
 itemgetter(-2)((strict, *values))(1)
+itemgetter(0)([*values, strict][1:])(1)
+itemgetter(0)((*values, strict)[1:])(1)
 ",
     );
-    for line in [6, 7] {
+    for line in [6, 7, 8, 9] {
         assert!(
             !messages
                 .iter()
