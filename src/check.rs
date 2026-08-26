@@ -9483,6 +9483,7 @@ impl<'a> CallChecker<'a> {
                     }
                 }
             }
+            Stmt::With(with_stmt) => self.visit_with_stmt(with_stmt),
             Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
                 self.visit_stmt(stmt);
             }

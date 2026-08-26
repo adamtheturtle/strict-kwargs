@@ -1693,6 +1693,27 @@ with manager() as call:
     );
 }
 
+/// Class-body context-manager targets remain visible to statements in the
+/// suite (issue #1139).
+#[test]
+fn class_contextmanager_binding_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def manager() -> Iterator[Callable[[int], None]]: ...
+class C:
+    with manager() as call:
+        call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "context result"),
+        "expected class context-manager binding violation, got: {messages:?}"
+    );
+}
+
 /// `reversed` preserves an annotated list's concrete callable item type when
 /// binding a simple loop target (issue #397).
 #[test]
