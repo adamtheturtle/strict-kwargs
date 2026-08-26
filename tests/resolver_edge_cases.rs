@@ -1613,6 +1613,40 @@ C(call=f).call(1)
     );
 }
 
+/// A default value does not suppress indexing of a callable-annotated class
+/// field in either the fast or binding-aware indexer (issue #1145).
+#[test]
+fn callable_instance_field_with_default_is_resolved() {
+    for (source, line) in [
+        (
+            r"
+from collections.abc import Callable
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            5,
+        ),
+        (
+            r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass
+class C:
+    call: Callable[[int], None] = lambda value: None
+C().call(1)
+",
+            7,
+        ),
+    ] {
+        let messages = check_source(source);
+        assert!(
+            has_error_at(&messages, line, "call"),
+            "expected defaulted callable-field violation, got: {messages:?}"
+        );
+    }
+}
+
 /// A concrete callable return annotation on `__getitem__` supplies the
 /// selected value's signature (issue #381).
 #[test]
