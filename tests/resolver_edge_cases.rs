@@ -1466,6 +1466,31 @@ factory()(1)
     );
 }
 
+/// Calling an async factory produces a coroutine rather than its annotated
+/// result class, so it must not be modeled as a synchronous callable (#1148).
+#[test]
+fn async_factory_result_is_not_treated_as_synchronous() {
+    let messages = check_source(
+        r"
+class C:
+    def __call__(self, value: int) -> None: ...
+async def factory() -> C: ...
+factory()(1)
+def replaced() -> C: ...
+async def replaced() -> C: ...
+replaced()(1)
+",
+    );
+    for line in [5, 8] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}:"))),
+            "async factory was treated as its result on line {line}: {messages:?}"
+        );
+    }
+}
+
 /// A descriptor's annotated `__get__` callable return becomes the signature
 /// of class attributes assigned from that descriptor (issue #379).
 #[test]
