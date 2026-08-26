@@ -1152,6 +1152,9 @@ struct CallChecker<'a> {
     /// ``__aenter__`` when the method body is a single ``return`` of a
     /// resolved callable.
     context_manager_enter_callables: FxHashMap<String, String>,
+    /// Property method fullname -> concrete callable returned by its sole
+    /// unconditional body statement.
+    property_body_callables: FxHashMap<String, String>,
     /// Concrete signatures returned by ``__enter__`` / ``__aenter__`` when the
     /// method body is a single ``return`` of a literal lambda.
     context_manager_enter_signatures: FxHashMap<String, Signature>,
@@ -1567,6 +1570,7 @@ impl<'a> CallChecker<'a> {
             concrete_contextmanager_items: FxHashMap::default(),
             generic_returns: FxHashMap::default(),
             context_manager_enter_callables: FxHashMap::default(),
+            property_body_callables: FxHashMap::default(),
             context_manager_enter_signatures: FxHashMap::default(),
             type_vars: FxHashSet::default(),
             class_type_params: FxHashMap::default(),
@@ -4269,6 +4273,26 @@ impl<'a> CallChecker<'a> {
         if method.attr.as_str() != "dispatch" {
             return None;
         }
+        if let Expr::Call(dispatcher) = method.value.as_ref() {
+            if self.names_stdlib_callable(&dispatcher.func, "functools.singledispatch")
+                && call.arguments.len() == 1
+                && call
+                    .arguments
+                    .keywords
+                    .iter()
+                    .all(|keyword| keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("cls"))
+            {
+                let implementation = dispatcher.arguments.args.first().or_else(|| {
+                    dispatcher
+                        .arguments
+                        .find_keyword("func")
+                        .map(|keyword| &keyword.value)
+                })?;
+                if dispatcher.arguments.len() == 1 {
+                    return self.resolve_callee(implementation);
+                }
+            }
+        }
         let generic_fullname = self.resolve_callee(method.value.as_ref())?;
         if !self.index.is_excluded(&generic_fullname) {
             return None;
@@ -6525,6 +6549,7 @@ impl<'a> CallChecker<'a> {
             "combinations_with_replacement",
             "product",
             "zip_longest",
+            "starmap",
         ]
         .into_iter()
         .find(|operation| {
@@ -6622,6 +6647,37 @@ impl<'a> CallChecker<'a> {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
             }
+            "starmap" if selected_index.is_none() => {
+                if !call.arguments.keywords.is_empty() {
+                    return None;
+                }
+                let [Expr::Lambda(mapper), _iterable] = &*call.arguments.args else {
+                    return None;
+                };
+                if let (Some(parameters), Expr::Name(body)) =
+                    (mapper.parameters.as_deref(), mapper.body.as_ref())
+                {
+                    let body_name = body.id.as_str();
+                    let shadows_outer = parameters
+                        .posonlyargs
+                        .iter()
+                        .chain(parameters.args.iter())
+                        .chain(parameters.kwonlyargs.iter())
+                        .any(|parameter| parameter.parameter.name.as_str() == body_name)
+                        || parameters
+                            .vararg
+                            .as_ref()
+                            .is_some_and(|parameter| parameter.name.as_str() == body_name)
+                        || parameters
+                            .kwarg
+                            .as_ref()
+                            .is_some_and(|parameter| parameter.name.as_str() == body_name);
+                    if shadows_outer {
+                        return None;
+                    }
+                }
+                self.unnamed_callable_signature(&mapper.body)
+            }
             _ => None,
         }
     }
@@ -6715,13 +6771,29 @@ impl<'a> CallChecker<'a> {
         }
         let dict = match attribute.value.as_ref() {
             Expr::Dict(dict) => dict,
-            Expr::Call(constructor)
-                if self
-                    .class_from_constructor_func(&constructor.func)
-                    .is_some_and(|class| class == "collections.OrderedDict")
-                    && constructor.arguments.keywords.is_empty() =>
-            {
-                let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            Expr::Call(constructor) => {
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                let mapping = if class == "types.MappingProxyType" {
+                    match &*constructor.arguments.args {
+                        [mapping] if constructor.arguments.keywords.is_empty() => mapping,
+                        [] if constructor.arguments.keywords.len() == 1 => {
+                            &constructor.arguments.find_keyword("mapping")?.value
+                        }
+                        _ => return None,
+                    }
+                } else if matches!(
+                    class.as_str(),
+                    "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
+                ) && constructor.arguments.keywords.is_empty()
+                {
+                    let [mapping] = &*constructor.arguments.args else {
+                        return None;
+                    };
+                    mapping
+                } else {
+                    return None;
+                };
+                let Expr::Dict(dict) = mapping else {
                     return None;
                 };
                 dict
@@ -7585,6 +7657,32 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn next_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)?.as_str() != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Call(iter_call), default] = &*next_call.arguments.args else {
+            return None;
+        };
+        if self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterable] = &*iter_call.arguments.args else {
+            return None;
+        };
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
         let Expr::Call(iter_call) = iterator else {
             return None;
@@ -7761,7 +7859,8 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        let [Expr::Call(namespace), Expr::StringLiteral(attribute)] = &*getattr_call.arguments.args
+        let [Expr::Call(namespace), Expr::StringLiteral(attribute), default @ ..] =
+            &*getattr_call.arguments.args
         else {
             return None;
         };
@@ -7770,12 +7869,22 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        self.resolve_callee(
-            &namespace
+        if let Some(keyword) = namespace.arguments.find_keyword(attribute.value.to_str()) {
+            return self.resolve_callee(&keyword.value);
+        }
+        if namespace.arguments.args.is_empty()
+            && namespace
                 .arguments
-                .find_keyword(attribute.value.to_str())?
-                .value,
-        )
+                .keywords
+                .iter()
+                .all(|keyword| keyword.arg.is_some())
+        {
+            let [default] = default else {
+                return None;
+            };
+            return self.resolve_callee(default);
+        }
+        None
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -9048,14 +9157,127 @@ impl<'a> CallChecker<'a> {
         {
             return None;
         }
-        if let Expr::Set(set) = iter_method.value.as_ref() {
+        self.homogeneous_literal_container_callable(&iter_method.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn homogeneous_literal_container_callable(&self, value: &Expr) -> Option<String> {
+        if let Expr::Set(set) = value {
             let mut elements = set.elts.iter();
             let first = self.resolve_callee(elements.next()?)?;
             return elements
                 .all(|element| self.resolve_callee(element).as_deref() == Some(first.as_str()))
                 .then_some(first);
         }
-        self.homogeneous_callable_sequence(&iter_method.value)
+        self.homogeneous_callable_sequence(value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_builtin_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || self.resolve_callee(&iter_call.func)?.as_str() != "builtins.iter"
+            || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [container] = &*iter_call.arguments.args else {
+            return None;
+        };
+        self.homogeneous_literal_container_callable(container)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_values_iterator_next_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(next_call) = func else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(values_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(values_method) = values_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = values_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || values_method.attr.as_str() != "values"
+            || !values_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn explicit_dict_items_iterator_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(next_call) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(next_method) = next_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(iter_call) = next_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(iter_method) = iter_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(items_call) = iter_method.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(items_method) = items_call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Dict(dict) = items_method.value.as_ref() else {
+            return None;
+        };
+        if next_method.attr.as_str() != "__next__"
+            || !next_call.arguments.is_empty()
+            || iter_method.attr.as_str() != "__iter__"
+            || !iter_call.arguments.is_empty()
+            || items_method.attr.as_str() != "items"
+            || !items_call.arguments.is_empty()
+            || !dict.items.iter().all(|item| item.key.is_some())
+        {
+            return None;
+        }
+        let mut values = dict.items.iter();
+        let first = self.resolve_callee(&values.next()?.value)?;
+        values
+            .all(|item| self.resolve_callee(&item.value).as_deref() == Some(first.as_str()))
+            .then_some(first)
     }
 
     // Exercised extensively by resolver integration tests. Excluded because
@@ -9115,6 +9337,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 } else {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
@@ -9125,6 +9348,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.counter_most_common_key_callable(subscript))
                         .or_else(|| self.topological_sorter_get_ready_callable(subscript))
                         .or_else(|| self.weak_key_dict_popitem_key_callable(subscript))
+                        .or_else(|| self.explicit_dict_items_iterator_value_callable(subscript))
                 }
             }
             Expr::Name(name) => {
@@ -9210,6 +9434,13 @@ impl<'a> CallChecker<'a> {
                     if class_fullname == "builtins.super" {
                         return None;
                     }
+                    let method_fullname = self
+                        .index
+                        .resolve_method(&class_fullname, attr_name)
+                        .unwrap_or_else(|| format!("{class_fullname}.{attr_name}"));
+                    if let Some(callable) = self.property_body_callables.get(&method_fullname) {
+                        return Some(callable.clone());
+                    }
                     return Some(self.resolve_instance_method(&class_fullname, attr_name));
                 }
                 if let Some(class_fullname) = Self::class_from_literal_expr(value) {
@@ -9286,7 +9517,16 @@ impl<'a> CallChecker<'a> {
                 if let Some(callable) = self.literal_list_getitem_callable(func) {
                     return Some(callable);
                 }
+                if let Some(callable) = self.next_empty_default_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_builtin_iterator_next_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.explicit_dict_values_iterator_next_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weakref_result_callable(func) {
@@ -9387,6 +9627,18 @@ impl<'a> CallChecker<'a> {
         }
         let class_fullname = self.class_stack.last().cloned().unwrap_or_default();
         let method_fullname = format!("{class_fullname}.{name}");
+        if decorator_list
+            .iter()
+            .any(|decorator| self.names_stdlib_callable(&decorator.expression, "builtins.property"))
+        {
+            if let Some(callable) = Self::single_return_expression(body)
+                .and_then(|returned| self.resolve_callee(returned))
+                .filter(|callable| self.index.get(callable).is_some())
+            {
+                self.property_body_callables
+                    .insert(method_fullname.clone(), callable);
+            }
+        }
         if matches!(name.as_str(), "__enter__" | "__aenter__") {
             self.index_context_manager_enter_method(&class_fullname, returns.as_deref(), body);
         }
