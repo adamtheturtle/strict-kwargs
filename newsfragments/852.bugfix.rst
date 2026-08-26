@@ -1,0 +1,2 @@
+Preserve callable signatures selected through directly imported aliases of
+``random.choice`` and ``secrets.choice``.
