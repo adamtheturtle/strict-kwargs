@@ -1,0 +1,2 @@
+Preserve concrete callable values while iterating the values view of an
+immediately constructed ``UserDict``.

@@ -42,6 +42,18 @@ fn is_class_var(annotation: &Expr) -> bool {
     matches!(callee_tail(core), Some("ClassVar"))
 }
 
+pub(super) fn is_init_var(annotation: &Expr) -> bool {
+    let core = match annotation {
+        Expr::Subscript(ast::ExprSubscript { value, .. }) => value.as_ref(),
+        other => other,
+    };
+    matches!(callee_tail(core), Some("InitVar"))
+}
+
+fn is_kw_only(annotation: &Expr) -> bool {
+    matches!(callee_tail(annotation), Some("KW_ONLY"))
+}
+
 /// Whether a ``@dataclass`` field assignment opts out of ``__init__`` via
 /// ``= field(init=False)``.
 fn dataclass_field_excluded(value: &Expr) -> bool {
@@ -143,25 +155,30 @@ pub(super) fn synthesize_data_constructor(
     };
 
     let mut init_fields = Vec::new();
+    let mut runtime_fields = Vec::new();
     for model in base_models.iter().rev().filter(|model| model.kind == kind) {
         extend_unique(&mut init_fields, model.init_fields.iter().cloned());
+        extend_unique(&mut runtime_fields, model.runtime_fields.iter().cloned());
     }
     if kind == ClassDataKind::Dataclass && decorator.is_some() {
         extend_unique(
             &mut init_fields,
             own_constructor_fields(class_def, OwnFieldKind::Dataclass),
         );
+        extend_unique(&mut runtime_fields, own_runtime_fields(class_def));
     } else if kind == ClassDataKind::NamedTuple && directly_namedtuple {
         extend_unique(
             &mut init_fields,
             own_constructor_fields(class_def, OwnFieldKind::NamedTuple),
         );
+        runtime_fields.clone_from(&init_fields);
     }
     store.data_models.insert(
         class_name.to_string(),
         ClassDataModel {
             kind,
             init_fields: init_fields.clone(),
+            runtime_fields,
         },
     );
 
@@ -195,6 +212,22 @@ pub(super) fn synthesize_data_constructor(
     let fullname = format!("{class_name}.{ctor}");
     store.insert(fullname.clone(), Signature { parameters });
     store.synthesized.insert(fullname);
+}
+
+fn own_runtime_fields(class_def: &ast::StmtClassDef) -> impl Iterator<Item = String> + '_ {
+    class_def.body.iter().filter_map(|stmt| {
+        let Stmt::AnnAssign(ast::StmtAnnAssign {
+            target, annotation, ..
+        }) = stmt
+        else {
+            return None;
+        };
+        let Expr::Name(name) = target.as_ref() else {
+            return None;
+        };
+        (!is_class_var(annotation) && !is_init_var(annotation) && !is_kw_only(annotation))
+            .then(|| name.id.to_string())
+    })
 }
 
 fn class_has_constructor(store: &Store, class_name: &str) -> bool {
