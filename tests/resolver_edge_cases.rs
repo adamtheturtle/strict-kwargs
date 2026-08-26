@@ -1107,6 +1107,25 @@ def caller(value: Callback | None) -> None:
     );
 }
 
+/// Assertion-based optional narrowing also retains a named callable alias
+/// (regression #764).
+#[test]
+fn assert_narrows_optional_callable_alias() {
+    let messages = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    assert value is not None
+    value(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "narrowed callable"),
+        "expected assertion-narrowed violation, got: {messages:?}"
+    );
+}
+
 #[test]
 fn assert_is_not_none_narrowing_preserves_callable_signature() {
     let messages = check_source(
