@@ -6960,6 +6960,31 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// A nested nonlocal assignment clears executor identity in its owning scope
+/// (Bugbot on #989).
+#[test]
+fn thread_pool_executor_is_cleared_by_nonlocal_rebind() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable
+def factory() -> Callable[[int], None]: ...
+def outer() -> None:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        def replace() -> None:
+            nonlocal executor
+            executor = object()
+        executor.submit(factory).result()(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("result() result")),
+        "nonlocal rebind must discard executor identity: {messages:?}"
+    );
+}
+
 /// `concurrent.futures.as_completed` preserves a singleton submitted future's
 /// concrete callable result (issue #845).
 #[test]

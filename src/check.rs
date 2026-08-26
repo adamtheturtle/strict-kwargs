@@ -6151,6 +6151,9 @@ impl<'a> CallChecker<'a> {
                 || self.scopes[index]
                     .callable_generator_yields
                     .contains_key(name)
+                || self.scopes[index].future_callables.contains_key(name)
+                || self.scopes[index].future_set_callables.contains_key(name)
+                || self.scopes[index].executor_instances.contains(name)
                 || self.scopes[index].callable_type_aliases.contains_key(name);
             if !owns {
                 continue;
@@ -6158,6 +6161,9 @@ impl<'a> CallChecker<'a> {
             remove_function_binding(&mut self.scopes[index], name);
             self.scopes[index].names.remove(name);
             self.scopes[index].callable_generator_yields.remove(name);
+            self.scopes[index].future_callables.remove(name);
+            self.scopes[index].future_set_callables.remove(name);
+            self.scopes[index].executor_instances.remove(name);
             self.scopes[index]
                 .callable_type_aliases
                 .insert(name.to_string(), None);
