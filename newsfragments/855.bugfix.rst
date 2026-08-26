@@ -1,0 +1,2 @@
+Preserve concrete callable items from directly imported aliases of
+``itertools.chain``.

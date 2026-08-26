@@ -24,7 +24,7 @@ mod data_model;
 #[cfg(test)]
 use data_model::extend_unique;
 use data_model::{
-    callee_tail, dataclass_decorator, is_namedtuple_class, synthesize_data_constructor,
+    callee_tail, dataclass_decorator, is_init_var, is_namedtuple_class, synthesize_data_constructor,
 };
 
 /// Safety bound on re-export alias chain length during lazy resolution. Real
@@ -83,7 +83,6 @@ struct Store {
     descriptor_get_returns: FxHashMap<String, Signature>,
     /// Unqualified descriptor class names, used as a cheap assignment filter
     /// before resolving a constructor reference.
-    descriptor_get_names: FxHashSet<String>,
     /// Modules supplied as check targets rather than loaded from vendored
     /// typeshed or lazily resolved dependencies.
     first_party_modules: FxHashSet<String>,
@@ -130,6 +129,7 @@ enum ClassDataKind {
 struct ClassDataModel {
     kind: ClassDataKind,
     init_fields: Vec<String>,
+    runtime_fields: Vec<String>,
 }
 
 impl Store {
@@ -319,6 +319,9 @@ fn synthesize_partialmethod(
     value: &Expr,
     bindings: &mut FxHashMap<String, String>,
 ) -> bool {
+    if store.conditional_depth > 0 {
+        return false;
+    }
     let Expr::Name(target) = target else {
         return false;
     };
@@ -439,29 +442,21 @@ fn synthesize_descriptor_attribute(
     target: &Expr,
     value: &Expr,
     bindings: &FxHashMap<String, String>,
-) {
+) -> bool {
     let (Expr::Name(target), Expr::Call(constructor)) = (target, value) else {
-        return;
+        return false;
     };
     let Some(descriptor_class) = reference_path(&constructor.func)
         .and_then(|path| resolve_reference(bindings, module_name, &path))
     else {
-        return;
-    };
-    let Some(signature) = store.descriptor_get_returns.get(&descriptor_class).cloned() else {
-        return;
-    };
-    let fullname = format!("{class_name}.{}", target.id);
-    store.excluded.remove(&fullname);
-    store.signatures.insert(fullname, vec![signature]);
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn assignment_may_construct_descriptor(store: &Store, value: &Expr) -> bool {
-    let Expr::Call(call) = value else {
         return false;
     };
-    callee_tail(&call.func).is_some_and(|name| store.descriptor_get_names.contains(name))
+    let Some(signature) = store.descriptor_get_returns.get(&descriptor_class).cloned() else {
+        return false;
+    };
+    let fullname = format!("{class_name}.{}", target.id);
+    store.insert_definition(fullname, signature, false);
+    true
 }
 
 #[cfg_attr(coverage, coverage(off))]
@@ -1341,6 +1336,41 @@ impl DefinitionIndex {
             .is_some_and(|model| model.kind == ClassDataKind::Dataclass)
     }
 
+    /// Return the number of fields in a synthesized dataclass constructor.
+    pub fn dataclass_runtime_field_count(&self, fullname: &str) -> Option<usize> {
+        Some(
+            self.read()
+                .store
+                .data_models
+                .get(fullname)
+                .filter(|model| model.kind == ClassDataKind::Dataclass)?
+                .runtime_fields
+                .len(),
+        )
+    }
+
+    /// Return a dataclass constructor field by its runtime positional order.
+    pub fn dataclass_runtime_field(&self, fullname: &str, index: usize) -> Option<String> {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::Dataclass)?
+            .runtime_fields
+            .get(index)
+            .cloned()
+    }
+
+    /// Whether a name corresponds to a stored dataclass runtime field.
+    pub fn is_dataclass_runtime_field(&self, fullname: &str, field: &str) -> bool {
+        self.read()
+            .store
+            .data_models
+            .get(fullname)
+            .filter(|model| model.kind == ClassDataKind::Dataclass)
+            .is_some_and(|model| model.runtime_fields.iter().any(|name| name == field))
+    }
+
     /// Whether `fullname` is an indexed `NamedTuple` with a synthesized field
     /// model.
     pub fn is_namedtuple(&self, fullname: &str) -> bool {
@@ -1920,6 +1950,17 @@ fn collect_scoped(
     out: &mut Collected,
 ) {
     for stmt in stmts {
+        let assigned_value = match stmt {
+            Stmt::Assign(ast::StmtAssign { value, .. })
+            | Stmt::AnnAssign(ast::StmtAnnAssign {
+                value: Some(value), ..
+            }) => Some(value.as_ref()),
+            _ => None,
+        };
+        out.has_partialmethod_candidates |= matches!(
+            assigned_value,
+            Some(Expr::Call(call)) if callee_tail(&call.func) == Some("partialmethod")
+        );
         match stmt {
             Stmt::Import(ast::StmtImport { names, .. }) => {
                 for alias in names {
@@ -2015,12 +2056,6 @@ fn collect_scoped(
                         }
                     }
                 }
-            }
-            Stmt::Assign(ast::StmtAssign { value, .. }) => {
-                out.has_partialmethod_candidates |= matches!(
-                    value.as_ref(),
-                    Expr::Call(call) if callee_tail(&call.func) == Some("partialmethod")
-                );
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -2878,6 +2913,7 @@ fn synthesize_functional_namedtuple(
         ClassDataModel {
             kind: ClassDataKind::NamedTuple,
             init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            runtime_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
         },
     );
     let mut parameters = vec![Parameter {
@@ -2949,6 +2985,11 @@ fn synthesize_make_dataclass(
         ClassDataModel {
             kind: ClassDataKind::Dataclass,
             init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            runtime_fields: fields
+                .iter()
+                .filter(|(_, annotation)| !is_init_var(annotation))
+                .map(|(name, _)| name.clone())
+                .collect(),
         },
     );
     let mut parameters = vec![Parameter {
@@ -3024,13 +3065,14 @@ fn index_stmt(
         Stmt::ClassDef(class_def) => {
             let class_name = format!("{scope_name}.{}", class_def.name);
             store.classes.insert(class_name.clone());
+            let mut class_bindings = bindings.clone();
             index_class_body(
                 store,
                 module_name,
                 is_package,
                 &class_name,
                 &class_def.body,
-                bindings,
+                &mut class_bindings,
             );
             synthesize_data_constructor(store, &class_name, scope_name, class_def, bindings);
             bind(bindings, class_def.name.as_str(), class_name);
@@ -3472,6 +3514,7 @@ fn index_class_body(
     bindings: &mut FxHashMap<String, String>,
 ) {
     for stmt in body {
+        update_constructor_base_bindings(module_name, is_package, class_name, stmt, bindings);
         match stmt {
             Stmt::FunctionDef(ast::StmtFunctionDef {
                 name,
@@ -3516,9 +3559,6 @@ fn index_class_body(
                         store
                             .descriptor_get_returns
                             .insert(class_name.to_string(), signature);
-                        if let Some(name) = class_name.rsplit('.').next() {
-                            store.descriptor_get_names.insert(name.to_string());
-                        }
                     }
                 }
                 if name.as_str() == "__getitem__" {
@@ -3545,13 +3585,14 @@ fn index_class_body(
             Stmt::ClassDef(class_def) => {
                 let nested = format!("{class_name}.{}", class_def.name);
                 store.classes.insert(nested.clone());
+                let mut nested_bindings = bindings.clone();
                 index_class_body(
                     store,
                     module_name,
                     is_package,
                     &nested,
                     &class_def.body,
-                    bindings,
+                    &mut nested_bindings,
                 );
                 synthesize_data_constructor(store, &nested, class_name, class_def, bindings);
             }
@@ -3560,17 +3601,15 @@ fn index_class_body(
                     if synthesize_partialmethod(store, class_name, target, value, bindings) {
                         continue;
                     }
-                    if assignment_may_construct_descriptor(store, value) {
-                        synthesize_descriptor_attribute(
-                            store,
-                            module_name,
-                            class_name,
-                            target,
-                            value,
-                            bindings,
-                        );
-                    }
-                    exclude_assigned_attribute(store, class_name, target, Some(bindings));
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        bindings,
+                    );
+                    exclude_assigned_attribute(store, module_name, target, Some(bindings));
                     exclude_assigned_name(store, class_name, target, value);
                 }
             }
@@ -3580,12 +3619,20 @@ fn index_class_body(
                 value: Some(value),
                 ..
             }) => {
-                exclude_assigned_attribute(store, class_name, target, Some(bindings));
-                exclude_assigned_name(store, class_name, target, value);
-                if let (Expr::Name(name), Some(signature)) =
-                    (target.as_ref(), callable_annotation_signature(annotation))
-                {
-                    store.insert(format!("{class_name}.{}", name.id), signature);
+                if !synthesize_partialmethod(store, class_name, target, value, bindings) {
+                    exclude_assigned_attribute(store, module_name, target, Some(bindings));
+                    exclude_assigned_name(store, class_name, target, value);
+                    let synthesized_descriptor = synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        bindings,
+                    );
+                    if !synthesized_descriptor {
+                        index_callable_field(store, class_name, target, annotation);
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
@@ -3794,9 +3841,6 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
                         store
                             .descriptor_get_returns
                             .insert(class_name.to_string(), signature);
-                        if let Some(name) = class_name.rsplit('.').next() {
-                            store.descriptor_get_names.insert(name.to_string());
-                        }
                     }
                 }
                 if name.as_str() == "__getitem__" {
@@ -3818,27 +3862,37 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
             }
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 for target in targets {
-                    if assignment_may_construct_descriptor(store, value) {
-                        synthesize_descriptor_attribute(
-                            store,
-                            module_name,
-                            class_name,
-                            target,
-                            value,
-                            &bindings,
-                        );
-                    }
-                    exclude_assigned_attribute(store, class_name, target, None);
+                    synthesize_descriptor_attribute(
+                        store,
+                        module_name,
+                        class_name,
+                        target,
+                        value,
+                        &bindings,
+                    );
+                    exclude_assigned_attribute(store, module_name, target, None);
                     exclude_assigned_name(store, class_name, target, value);
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
+                annotation,
                 value: Some(value),
                 ..
             }) => {
-                exclude_assigned_attribute(store, class_name, target, None);
+                exclude_assigned_attribute(store, module_name, target, None);
                 exclude_assigned_name(store, class_name, target, value);
+                let synthesized_descriptor = synthesize_descriptor_attribute(
+                    store,
+                    module_name,
+                    class_name,
+                    target,
+                    value,
+                    &bindings,
+                );
+                if !synthesized_descriptor {
+                    index_callable_field(store, class_name, target, annotation);
+                }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
