@@ -4952,24 +4952,35 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn immediate_userlist_iterable<'b>(&self, value: &'b Expr) -> Option<&'b Expr> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let factory = self.resolve_callee(&constructor.func)?;
+        if Self::normalize_factory_fullname(&factory) != "collections.UserList"
+            || constructor.arguments.len() != 1
+        {
+            return None;
+        }
+        constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initlist"))
+                    .then_some(&keyword.value)
+            })
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn resolve_literal_container_item(&self, value: &Expr, slice: &Expr) -> Option<String> {
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_sequence_index(slice, 1)?;
             return self.pool_map_callable_fullname(map_call);
         }
         if let Expr::Call(wrapper) = value {
-            let factory = self.resolve_callee(&wrapper.func)?;
-            if Self::normalize_factory_fullname(&factory) == "collections.UserList"
-                && wrapper.arguments.len() == 1
-            {
-                let iterable = wrapper.arguments.args.first().or_else(|| {
-                    wrapper.arguments.keywords.iter().find_map(|keyword| {
-                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initlist"))
-                            .then_some(&keyword.value)
-                    })
-                })?;
+            if let Some(iterable) = self.immediate_userlist_iterable(value) {
                 return self.resolve_literal_container_item(iterable, slice);
             }
+            let factory = self.resolve_callee(&wrapper.func)?;
             if matches!(
                 Self::normalize_factory_fullname(&factory),
                 "collections.OrderedDict" | "collections.UserDict"
@@ -5928,6 +5939,9 @@ impl<'a> CallChecker<'a> {
         };
         let fullname = self.resolve_callee(&call.func)?;
         match fullname.as_str() {
+            "builtins.iter" | "builtins.iter.__new__" if selected_index.is_none() => self
+                .immediate_userlist_iterable(call.arguments.args.first()?)
+                .and_then(|iterable| self.literal_iterable_callable_signature(iterable)),
             "builtins.zip" | "builtins.zip.__new__" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
