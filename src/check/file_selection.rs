@@ -191,8 +191,8 @@ pub(super) fn collect_python_files_with_project_inventory(
             .as_ref()
             .map_or_else(|| entry.file_type().is_file(), std::fs::FileType::is_file);
 
-        let excluded_symlink_target =
-            entry.file_type().is_symlink() && symlink_target_directory_is_prunable(path);
+        let excluded_symlink_target = entry.file_type().is_symlink()
+            && symlink_target_directory_is_prunable(&selection, path);
         if entry.file_type().is_symlink()
             && is_directory
             && !excluded_as_directory
@@ -274,18 +274,18 @@ fn walk_entry_is_excluded(selection: &FileSelection, entry: &walkdir::DirEntry) 
     if !metadata.file_type().is_symlink() {
         return false;
     }
-    is_directory && symlink_target_directory_is_prunable(path)
+    is_directory && symlink_target_directory_is_prunable(selection, path)
 }
 
 #[cfg_attr(coverage, coverage(off))]
-fn symlink_target_directory_is_prunable(path: &Path) -> bool {
-    std::fs::canonicalize(path)
-        .ok()
-        .and_then(|target| target.file_name().map(std::ffi::OsStr::to_owned))
-        .is_some_and(|name| {
-            let name = name.to_string_lossy();
-            name.starts_with('.') || name == "venv" || name == "__pycache__"
-        })
+fn symlink_target_directory_is_prunable(selection: &FileSelection, path: &Path) -> bool {
+    std::fs::canonicalize(path).ok().is_some_and(|target| {
+        selection.is_extend_excluded(&target, true)
+            || target.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with('.') || name == "venv" || name == "__pycache__"
+            })
+    })
 }
 
 /// The selected paths that the caller named explicitly.
@@ -316,6 +316,7 @@ pub(super) fn explicit_python_files(paths: &[PathBuf], selected: &[PathBuf]) -> 
 
 pub(super) struct FileSelection {
     project_root: PathBuf,
+    canonical_project_root: PathBuf,
     extend_exclude: Gitignore,
     force_exclude: bool,
 }
@@ -336,6 +337,8 @@ impl FileSelection {
         let extend_exclude = build_extend_exclude(&builder, project_root)?;
         Ok(Self {
             project_root: project_root.to_path_buf(),
+            canonical_project_root: std::fs::canonicalize(project_root)
+                .unwrap_or_else(|_| project_root.to_path_buf()),
             extend_exclude,
             force_exclude: config.force_exclude,
         })
@@ -349,12 +352,23 @@ impl FileSelection {
         if is_ignored_path(project_relative) {
             return true;
         }
-        if self.project_root.is_absolute()
+        self.is_extend_excluded(path, is_dir)
+    }
+
+    fn is_extend_excluded(&self, path: &Path, is_dir: bool) -> bool {
+        let normalized;
+        let path = if self.project_root.is_absolute()
             && path.is_absolute()
             && !path.starts_with(&self.project_root)
         {
-            return false;
-        }
+            let Ok(relative) = path.strip_prefix(&self.canonical_project_root) else {
+                return false;
+            };
+            normalized = self.project_root.join(relative);
+            normalized.as_path()
+        } else {
+            path
+        };
         self.extend_exclude
             .matched_path_or_any_parents(path, is_dir)
             .is_ignore()
@@ -498,5 +512,32 @@ mod file_selection_coverage {
             collect_python_files_with_project_inventory(root.path(), &paths, &Config::default())
                 .expect("collect project inventory");
         assert_eq!(files, [root.path().join("included/main.py")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_extend_excluded_target_directory_is_pruned() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("project tempdir");
+        let generated = root.path().join("generated");
+        std::fs::create_dir_all(&generated).expect("create excluded target");
+        std::fs::write(generated.join("output.py"), "").expect("write excluded Python file");
+        symlink(&generated, root.path().join("linked")).expect("symlink excluded directory");
+        let config = Config {
+            extend_exclude: vec!["generated".to_string()],
+            ..Config::default()
+        };
+        let paths = [root.path().to_path_buf()];
+
+        assert!(collect_python_files(root.path(), &paths, &config)
+            .expect("collect ordinary files")
+            .is_empty());
+        assert!(
+            collect_python_files_with_project_inventory(root.path(), &paths, &config)
+                .expect("collect project inventory")
+                .0
+                .is_empty()
+        );
     }
 }
