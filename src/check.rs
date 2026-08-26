@@ -6448,9 +6448,17 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(executor) = method.value.as_ref() else {
             return None;
         };
-        let name = executor.id.as_str();
-        let is_executor = self
-            .scopes
+        if !self.binding_is_executor(executor.id.as_str()) {
+            return None;
+        }
+        let callback = submit_call.arguments.args.first()?;
+        let callback = self.resolve_callee(callback)?;
+        self.callable_returns.get(&callback).cloned()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn binding_is_executor(&self, name: &str) -> bool {
+        self.scopes
             .iter()
             .rev()
             .find_map(|scope| {
@@ -6462,13 +6470,31 @@ impl<'a> CallChecker<'a> {
                     None
                 }
             })
-            .unwrap_or(false);
-        if !is_executor {
+            .unwrap_or(false)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn executor_map_callable_signature(&self, map_call: &ast::ExprCall) -> Option<Signature> {
+        let Expr::Attribute(method) = map_call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "map" {
             return None;
         }
-        let callback = submit_call.arguments.args.first()?;
-        let callback = self.resolve_callee(callback)?;
-        self.callable_returns.get(&callback).cloned()
+        let Expr::Name(executor) = method.value.as_ref() else {
+            return None;
+        };
+        if !self.binding_is_executor(executor.id.as_str()) {
+            return None;
+        }
+        let callback = map_call.arguments.args.first()?;
+        match callback {
+            Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
+            other => {
+                let callback = self.resolve_callee(other)?;
+                self.callable_returns.get(&callback).cloned()
+            }
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -6742,6 +6768,9 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Expr::Call(map_call) = iterator {
+            if let Some(signature) = self.executor_map_callable_signature(map_call) {
+                return Some(signature);
+            }
             if self.pool_map_call(map_call) {
                 return self.pool_map_callable_signature(map_call);
             }

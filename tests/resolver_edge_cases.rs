@@ -4527,6 +4527,24 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     );
 }
 
+/// `Executor.map` preserves a lambda's concrete callable result in its
+/// returned iterator (issue #844).
+#[test]
+fn thread_pool_map_preserves_callable_result_signature() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+def target(value: int) -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    next(executor.map(lambda _: target, [0]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "expected Executor.map result violation, got: {messages:?}"
+    );
+}
+
 /// Destructuring rebinding also discards executor identity.
 #[test]
 fn thread_pool_submit_identity_is_cleared_on_destructuring_rebind() {
