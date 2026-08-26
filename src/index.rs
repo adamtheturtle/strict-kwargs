@@ -320,6 +320,9 @@ fn synthesize_partialmethod(
     value: &Expr,
     bindings: &mut FxHashMap<String, String>,
 ) -> bool {
+    if store.conditional_depth > 0 {
+        return false;
+    }
     let Expr::Name(target) = target else {
         return false;
     };
