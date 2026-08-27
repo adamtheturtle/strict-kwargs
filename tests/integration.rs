@@ -2234,19 +2234,11 @@ def f(value: int) -> None: ...
 Point(f).call(1)
 "#,
     );
-    assert_eq!(messages.len(), 2, "got: {messages:?}");
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "Point""#)),
-        "got: {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "call" of "Point""#)),
-        "got: {messages:?}"
-    );
+    // Only the constructor call is reported: `Point(call=f)` is a valid
+    // rewrite. The field's type is a bare `Callable[...]`, which names no
+    // parameter, so `.call(1)` has no keyword form to move to (issue #1246).
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains(r#"for "Point""#), "got: {messages:?}");
 }
 
 #[test]
@@ -2260,19 +2252,68 @@ def f(value: int) -> None: ...
 Point(f).call(1)
 "#,
     );
-    assert_eq!(messages.len(), 2, "got: {messages:?}");
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "Point""#)),
-        "got: {messages:?}"
+    // Only the constructor call is reported: `Point(call=f)` is a valid
+    // rewrite. The field's type is a bare `Callable[...]`, which names no
+    // parameter, so `.call(1)` has no keyword form to move to (issue #1246).
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains(r#"for "Point""#), "got: {messages:?}");
+}
+
+#[test]
+fn bare_callable_field_call_is_not_reported() {
+    // A `Callable[...]` annotation carries no parameter names, so a call
+    // through the field has no keyword spelling. Reporting it asked for a
+    // rewrite that raises at runtime (issue #1246).
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass(frozen=True)
+class Cfg:
+    opener: Callable[[list[int]], str]
+def main(cfg: Cfg, items: list[int]) -> None:
+    print(cfg.opener(items))
+",
     );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains(r#"for "call" of "Point""#)),
-        "got: {messages:?}"
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn bare_callable_field_still_checks_arity() {
+    // Dropping the keyword demand keeps the arity the annotation does state:
+    // one parameter, so two positional arguments remain wrong.
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+@dataclass(frozen=True)
+class Cfg:
+    opener: Callable[[int], str]
+def main(cfg: Cfg) -> None:
+    print(cfg.opener(1, 2))
+",
     );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains("maximum 1"), "got: {messages:?}");
+}
+
+#[test]
+fn callable_field_traced_to_a_named_function_is_still_reported() {
+    // The field's value traces to `f`, which has named parameters, so a
+    // keyword form exists and the call is reported against it (issue #373).
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass
+def f(value: int) -> None: ...
+@dataclass
+class Holder:
+    call: Callable[[int], None]
+Holder(call=f).call(1)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains(r#"for "f""#), "got: {messages:?}");
 }
 
 #[test]

@@ -2626,12 +2626,13 @@ cached.__get__(Owner())
     );
 }
 
-/// Callable-annotated instance fields retain the annotation's concrete
-/// signature when accessed on a newly constructed instance (issue #380).
+/// Callable-annotated instance fields retain the annotation's arity when
+/// accessed on a newly constructed instance (issue #380). The annotation
+/// names no parameter, so the one-argument call is correct as written and
+/// only a surplus argument is reported (issue #1246).
 #[test]
 fn callable_instance_field_annotation_is_resolved() {
-    let messages = check_source(
-        r"
+    let source = r"
 from collections.abc import Callable
 
 class C:
@@ -2641,16 +2642,23 @@ class C:
 
 def f(value: int) -> None: ...
 C(call=f).call(1)
-",
+";
+    assert!(
+        check_source(source).is_empty(),
+        "got: {:?}",
+        check_source(source)
     );
+    let messages = check_source(&source.replace("call(1)", "call(1, 2)"));
     assert!(
         has_error_at(&messages, 10, "call"),
-        "expected callable-field violation, got: {messages:?}"
+        "expected callable-field arity violation, got: {messages:?}"
     );
 }
 
 /// A default value does not suppress indexing of a callable-annotated class
-/// field in either the fast or binding-aware indexer (issue #1145).
+/// field in either the fast or binding-aware indexer (issue #1145). The
+/// annotation names no parameter, so the field is checked for arity rather
+/// than for a keyword form it cannot offer (issue #1246).
 #[test]
 fn callable_instance_field_with_default_is_resolved() {
     for (source, line) in [
@@ -2659,7 +2667,7 @@ fn callable_instance_field_with_default_is_resolved() {
 from collections.abc import Callable
 class C:
     call: Callable[[int], None] = lambda value: None
-C().call(1)
+C().call(1, 2)
 ",
             5,
         ),
@@ -2670,7 +2678,7 @@ from dataclasses import dataclass
 @dataclass
 class C:
     call: Callable[[int], None] = lambda value: None
-C().call(1)
+C().call(1, 2)
 ",
             7,
         ),
@@ -2678,7 +2686,7 @@ C().call(1)
         let messages = check_source(source);
         assert!(
             has_error_at(&messages, line, "call"),
-            "expected defaulted callable-field violation, got: {messages:?}"
+            "expected defaulted callable-field arity violation, got: {messages:?}"
         );
     }
 }
