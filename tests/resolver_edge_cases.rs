@@ -7652,6 +7652,25 @@ weakref.WeakKeyDictionary(dict={key: target}).get(key=key)(1)
     );
 }
 
+/// Selecting the value from an immediate `WeakKeyDictionary.popitem` result
+/// preserves its concrete callable (issue #939).
+#[test]
+fn weak_key_dictionary_popitem_preserves_literal_callable() {
+    let messages = check_source(
+        r"
+import weakref
+class Key: pass
+key = Key()
+def target(value: int) -> None: ...
+weakref.WeakKeyDictionary(dict={key: target}).popitem()[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "expected WeakKeyDictionary.popitem value violation, got: {messages:?}"
+    );
+}
+
 /// Annotated ``WeakKeyDictionary.popitem`` preserves callable key types
 /// (issue #517).
 #[test]

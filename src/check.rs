@@ -10019,6 +10019,44 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weak_key_dict_popitem_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.is_empty()
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakKeyDictionary"
+        {
+            return None;
+        }
+        let mapping = match &*constructor.arguments.args {
+            [mapping] if constructor.arguments.keywords.is_empty() => mapping,
+            [] if constructor.arguments.keywords.len() == 1 => {
+                &constructor.arguments.find_keyword("dict")?.value
+            }
+            _ => return None,
+        };
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        if !dict.items.iter().all(|item| item.key.is_some()) {
+            return None;
+        }
+        self.resolve_callee(&dict.items.last()?.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn heapq_result_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -10710,6 +10748,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.weak_value_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.weak_key_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
@@ -10723,6 +10762,7 @@ impl<'a> CallChecker<'a> {
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
                         .or_else(|| self.weak_value_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.weak_key_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
