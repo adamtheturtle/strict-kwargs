@@ -434,6 +434,25 @@ fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
     Some(Signature { parameters })
 }
 
+/// The signature an *attribute* gets from a bare ``Callable[...]`` annotation.
+///
+/// Such an annotation names no parameter, so a call through the attribute has
+/// no keyword spelling and reporting one would ask for a rewrite that fails at
+/// runtime. Marking the parameters positional-only keeps the arity check while
+/// dropping the unactionable "too many positional arguments" report (issue
+/// #1246). A field whose *value* traces to a concrete named function is
+/// resolved through that function instead, and is still reported (issue #373).
+#[cfg_attr(coverage, coverage(off))]
+fn callable_attribute_signature(annotation: &Expr) -> Option<Signature> {
+    let mut signature = callable_annotation_signature(annotation)?;
+    for parameter in &mut signature.parameters {
+        if parameter.kind == ParameterKind::PositionalOrKeyword {
+            parameter.kind = ParameterKind::PositionalOnly;
+        }
+    }
+    Some(signature)
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn synthesize_descriptor_attribute(
     store: &mut Store,
@@ -461,7 +480,7 @@ fn synthesize_descriptor_attribute(
 
 #[cfg_attr(coverage, coverage(off))]
 fn index_callable_field(store: &mut Store, class_name: &str, target: &Expr, annotation: &Expr) {
-    let (Expr::Name(name), Some(signature)) = (target, callable_annotation_signature(annotation))
+    let (Expr::Name(name), Some(signature)) = (target, callable_attribute_signature(annotation))
     else {
         return;
     };
@@ -2953,7 +2972,7 @@ fn synthesize_functional_namedtuple(
     store.insert(constructor.clone(), Signature { parameters });
     store.synthesized.insert(constructor);
     for (name, annotation) in fields {
-        if let Some(signature) = callable_annotation_signature(annotation) {
+        if let Some(signature) = callable_attribute_signature(annotation) {
             store.insert(format!("{class_name}.{name}"), signature);
         }
     }
@@ -3029,7 +3048,7 @@ fn synthesize_make_dataclass(
     store.insert(constructor.clone(), Signature { parameters });
     store.synthesized.insert(constructor);
     for (name, annotation) in fields {
-        if let Some(signature) = callable_annotation_signature(annotation) {
+        if let Some(signature) = callable_attribute_signature(annotation) {
             store.insert(format!("{class_name}.{name}"), signature);
         }
     }
