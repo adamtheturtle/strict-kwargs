@@ -9584,3 +9584,98 @@ operator.iconcat([], [*[target]])[0](1)
         );
     }
 }
+
+
+/// `dict.get` returns a concrete callable default when a literal key is known
+/// to be absent (issue #918).
+#[test]
+fn literal_dict_get_missing_key_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.get("missing", target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict.get default violation, got: {messages:?}"
+    );
+}
+
+
+/// `dict.pop` returns a concrete callable default when a literal key is known
+/// to be absent (issue #919).
+#[test]
+fn literal_dict_pop_missing_key_preserves_callable_default() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.pop("missing", target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected dict.pop default violation, got: {messages:?}"
+    );
+}
+
+
+/// A non-literal dictionary key prevents proving that `dict.pop` will return
+/// its default (follow-up to Bugbot on #1005).
+#[test]
+fn literal_dict_pop_nonliteral_key_does_not_assume_default() {
+    let messages = check_source(
+        r#"
+def existing(value: int) -> None: ...
+def fallback(first: int, second: int) -> None: ...
+key = "missing"
+{key: existing}.pop("missing", fallback)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "non-literal key may match at runtime: {messages:?}"
+    );
+}
+
+
+/// A non-literal dictionary key prevents proving that a literal lookup is
+/// absent (Bugbot on #1005).
+#[test]
+fn literal_dict_get_nonliteral_key_does_not_assume_default() {
+    let messages = check_source(
+        r#"
+def existing(value: int) -> None: ...
+def fallback(first: int, second: int) -> None: ...
+key = "missing"
+{key: existing}.get("missing", fallback)(1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "non-literal key may match at runtime: {messages:?}"
+    );
+}
+
+
+/// Python-equal numeric keys must select the stored value rather than a
+/// supplied `dict.pop` default.
+#[test]
+fn literal_dict_pop_treats_equal_numeric_keys_as_existing() {
+    let messages = check_source(
+        r"
+def existing(value: int) -> None: ...
+def fallback(value: int) -> None: ...
+{True: existing}.pop(1, fallback)(1)
+{1: existing}.pop(1.0, fallback)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "existing") && has_error_at(&messages, 5, "existing"),
+        "expected existing-value violations, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("fallback")),
+        "did not expect default-value violations, got: {messages:?}"
+    );
+}

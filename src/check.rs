@@ -5409,6 +5409,33 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn same_literal_key(left: &Expr, right: &Expr) -> bool {
+        fn number_matches_bool(number: &Number, boolean: bool) -> bool {
+            match number {
+                Number::Int(value) => value.as_u8() == Some(u8::from(boolean)),
+                Number::Float(value) => value.to_bits() == f64::from(u8::from(boolean)).to_bits(),
+                Number::Complex { real, imag } => {
+                    real.to_bits() == f64::from(u8::from(boolean)).to_bits()
+                        && imag.to_bits() == 0.0f64.to_bits()
+                }
+            }
+        }
+
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            clippy::cast_sign_loss,
+            clippy::float_cmp
+        )]
+        fn same_number(left: &Number, right: &Number) -> bool {
+            match (left, right) {
+                (Number::Int(left), Number::Float(right))
+                | (Number::Float(right), Number::Int(left)) => left
+                    .as_u64()
+                    .is_some_and(|left| left as f64 == *right && left == *right as u64),
+                _ => left == right,
+            }
+        }
+
         match (left, right) {
             (Expr::StringLiteral(left), Expr::StringLiteral(right)) => {
                 left.value.to_str() == right.value.to_str()
@@ -5416,8 +5443,16 @@ impl<'a> CallChecker<'a> {
             (
                 Expr::NumberLiteral(ast::ExprNumberLiteral { value: left, .. }),
                 Expr::NumberLiteral(ast::ExprNumberLiteral { value: right, .. }),
-            ) => left == right,
+            ) => same_number(left, right),
             (Expr::BooleanLiteral(left), Expr::BooleanLiteral(right)) => left.value == right.value,
+            (
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }),
+                Expr::BooleanLiteral(boolean),
+            )
+            | (
+                Expr::BooleanLiteral(boolean),
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }),
+            ) => number_matches_bool(value, boolean.value),
             (Expr::NoneLiteral(_), Expr::NoneLiteral(_)) => true,
             _ => false,
         }
@@ -9608,7 +9643,41 @@ impl<'a> CallChecker<'a> {
             }
             _ => return None,
         };
-        self.resolve_literal_container_item(mapping, key)
+        if let Some(existing) = self.resolve_literal_container_item(mapping, key) {
+            return Some(existing);
+        }
+        let default = call.arguments.args.get(1)?;
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        let literal_key = |key: &Expr| {
+            matches!(
+                key,
+                Expr::StringLiteral(_)
+                    | Expr::NumberLiteral(_)
+                    | Expr::BooleanLiteral(_)
+                    | Expr::NoneLiteral(_)
+            )
+        };
+        let key_is_literal = matches!(
+            key,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NoneLiteral(_)
+        );
+        (key_is_literal
+            && dict
+                .items
+                .iter()
+                .all(|item| item.key.as_ref().is_some_and(literal_key))
+            && !dict.items.iter().any(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            }))
+        .then(|| self.resolve_callee(default))
+        .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -9663,27 +9732,68 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        let Expr::Call(constructor) = method.value.as_ref() else {
-            return None;
-        };
-        if method.attr.as_str() != "pop" || !call.arguments.keywords.is_empty() {
-            return None;
-        }
-        let [key] = &*call.arguments.args else {
-            return None;
-        };
-        let class = self.class_from_constructor_func(&constructor.func)?;
-        if !matches!(
-            class.as_str(),
-            "collections.ChainMap" | "collections.UserDict"
-        ) || !constructor.arguments.keywords.is_empty()
+        if method.attr.as_str() != "pop"
+            || !call.arguments.keywords.is_empty()
+            || !(1..=2).contains(&call.arguments.args.len())
         {
             return None;
         }
-        let [mapping] = &*constructor.arguments.args else {
+        let mapping = match method.value.as_ref() {
+            mapping @ Expr::Dict(_) => mapping,
+            Expr::Call(constructor) => {
+                let class = self.class_from_constructor_func(&constructor.func)?;
+                if !matches!(
+                    class.as_str(),
+                    "collections.ChainMap" | "collections.UserDict"
+                ) || !constructor.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let [mapping] = &*constructor.arguments.args else {
+                    return None;
+                };
+                mapping
+            }
+            _ => return None,
+        };
+        let key = call.arguments.args.first()?;
+        if let Some(existing) = self.resolve_literal_container_item(mapping, key) {
+            return Some(existing);
+        }
+        let [_, default] = &*call.arguments.args else {
             return None;
         };
-        self.resolve_literal_container_item(mapping, key)
+        let Expr::Dict(dict) = mapping else {
+            return None;
+        };
+        let literal_key = |key: &Expr| {
+            matches!(
+                key,
+                Expr::StringLiteral(_)
+                    | Expr::NumberLiteral(_)
+                    | Expr::BooleanLiteral(_)
+                    | Expr::NoneLiteral(_)
+            )
+        };
+        let key_is_literal = matches!(
+            key,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NoneLiteral(_)
+        );
+        (key_is_literal
+            && dict
+                .items
+                .iter()
+                .all(|item| item.key.as_ref().is_some_and(literal_key))
+            && !dict.items.iter().any(|item| {
+                item.key
+                    .as_ref()
+                    .is_some_and(|existing| Self::same_literal_key(existing, key))
+            }))
+        .then(|| self.resolve_callee(default))
+        .flatten()
     }
 
     #[cfg_attr(coverage, coverage(off))]
