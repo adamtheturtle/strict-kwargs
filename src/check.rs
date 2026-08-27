@@ -1408,7 +1408,14 @@ struct PendingTyOverloadFix {
     pending: PendingTy,
     callee_fullname: String,
     candidate_signatures: Vec<Signature>,
-    rewrite_args_are_statically_precise: bool,
+    /// Whether each positional argument pins the overload arm, indexed as the
+    /// call site writes them.
+    ///
+    /// Which arguments the rewrite touches is not known until ty names the
+    /// selected arm, and that arm's positional limit can be lower than the
+    /// maximum across candidates. Judging a single span here left the
+    /// arguments between the two limits rewritten unchecked (issue #1186).
+    positional_arg_is_precise: Vec<bool>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -3244,7 +3251,6 @@ impl<'a> CallChecker<'a> {
             signatures,
             max_positional,
             positional_count,
-            receiver_is_explicit,
             receiver_is_explicit_for_fix,
         );
     }
@@ -3264,7 +3270,6 @@ impl<'a> CallChecker<'a> {
         signatures: &[Signature],
         max_positional: usize,
         positional_count: usize,
-        receiver_is_explicit: bool,
         receiver_is_explicit_for_fix: bool,
     ) {
         if !self.plan_fixes {
@@ -3353,12 +3358,10 @@ impl<'a> CallChecker<'a> {
             // if ty has selected one concrete arm, that selected arm provides
             // the only parameter-name mapping we may rewrite with. A hover
             // that still shows multiple arms, or no callable arm, is declined.
-            let rewrite_start = max_positional + usize::from(receiver_is_explicit);
             if !self.record_ty_overload_fix_pending(
                 call,
                 callee_fullname,
                 signatures,
-                rewrite_start,
                 positional_count,
             ) {
                 self.declined_fix_reasons
@@ -4059,21 +4062,22 @@ impl<'a> CallChecker<'a> {
         call: &ast::ExprCall,
         callee_fullname: &str,
         candidate_signatures: &[Signature],
-        rewrite_start: usize,
         positional_count: usize,
     ) -> bool {
         if let Some(pending) = self.pending_ty_for_call(call) {
-            let rewrite_args_are_statically_precise = (rewrite_start..positional_count).all(|i| {
-                call.arguments
-                    .args
-                    .get(i)
-                    .is_some_and(|arg| self.arg_is_precise_for_overload_fix(arg))
-            });
+            let positional_arg_is_precise = (0..positional_count)
+                .map(|i| {
+                    call.arguments
+                        .args
+                        .get(i)
+                        .is_some_and(|arg| self.arg_is_precise_for_overload_fix(arg))
+                })
+                .collect();
             self.ty_overload_fix_pending.push(PendingTyOverloadFix {
                 pending,
                 callee_fullname: callee_fullname.to_string(),
                 candidate_signatures: candidate_signatures.to_vec(),
-                rewrite_args_are_statically_precise,
+                positional_arg_is_precise,
             });
             true
         } else {
@@ -14320,7 +14324,15 @@ fn record_selected_overload_fix(
         } else {
             positional_count
         };
-        if !item.rewrite_args_are_statically_precise {
+        // The selected arm decides which arguments the rewrite renames, and
+        // its limit can be lower than the maximum across candidates
+        // (issue #1186).
+        let rewrite_start = max_positional + usize::from(receiver_is_explicit);
+        if !item
+            .positional_arg_is_precise
+            .get(rewrite_start..)
+            .is_some_and(|args| args.iter().copied().all(|precise| precise))
+        {
             record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
             return;
         }
@@ -14368,8 +14380,13 @@ fn record_selected_overload_fix(
         return;
     };
     // The selected callable-type arm is already call-site oriented (as in the
-    // normal ty fallback). It is safe only if it has complete parameter names.
-    if !item.rewrite_args_are_statically_precise {
+    // normal ty fallback). It is safe only if it has complete parameter names,
+    // and only the arguments this arm renames need to pin it (issue #1186).
+    if !item
+        .positional_arg_is_precise
+        .get(max_positional..)
+        .is_some_and(|args| args.iter().copied().all(|precise| precise))
+    {
         record_declined_fix(fixes, DeclinedFixReason::UnresolvedOverload);
         return;
     }
