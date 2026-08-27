@@ -464,7 +464,7 @@ pub fn parse_hover_signature(value: &str) -> Option<HoverSignature> {
 }
 
 /// Split `s` on top-level `sep` (bracket/paren/brace depth 0 only).
-fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+pub fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut start = 0usize;

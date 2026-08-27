@@ -35,7 +35,7 @@ use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
-    same_path, ty_binary_present, LspLineIndex, TyResolver,
+    same_path, split_top_level, ty_binary_present, LspLineIndex, TyResolver,
 };
 
 mod file_selection;
@@ -13368,12 +13368,89 @@ fn call_at_start(suite: &[Stmt], start: usize, callee_offset: usize) -> Option<&
 // from the gate for the same reasons as the rest of the ty glue.
 #[cfg_attr(coverage, coverage(off))]
 fn signature_from_param_text(params: &str) -> Option<Signature> {
+    parse_param_text(params).or_else(|| parse_param_text(&params_with_placeholder_names(params)?))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn parse_param_text(params: &str) -> Option<Signature> {
     let src = format!("def __sk__({params}): ...\n");
     let parsed = parse_module(&src).ok()?;
     parsed.suite().iter().find_map(|stmt| match stmt {
         Stmt::FunctionDef(f) => Some(signature_from_parameters(&f.parameters)),
         _ => None,
     })
+}
+
+/// Whether a ty hover names a `functools.singledispatch` callable.
+///
+/// `@singledispatch` dispatches on `args[0].__class__`, so calling it with the
+/// dispatch argument by keyword raises `TypeError: … requires at least 1
+/// positional argument`. The index-side `is_excluded` guard only applies to a
+/// function the index resolved; when the call reaches the ty fallback instead,
+/// the hover is the decorated type (`_SingleDispatchCallable[str | None]`)
+/// rather than a signature, and goto-definition then lands on the undecorated
+/// `def` and reports the call (issue #1263).
+#[cfg_attr(coverage, coverage(off))]
+fn hover_names_single_dispatch(value: &str) -> bool {
+    let head = value.split("\n---").next().unwrap_or(value).trim();
+    head.split(['[', ' '])
+        .next()
+        .is_some_and(|name| name == "_SingleDispatchCallable" || name == "_SingleDispatchMethod")
+}
+
+/// Give every unnamed parameter in a ty callable-type display a placeholder name.
+///
+/// ty renders an unnamed callable parameter as a bare type: `(bytes, /) -> str`,
+/// `(list[Value], /) -> str`. Wrapping that text in a `def` only parses when the
+/// type also happens to be a valid identifier, so `bytes` survived while
+/// `list[Value]`, `Sequence[str]` and `Value | None` did not. Losing the
+/// signature sent the call to the goto-definition fallback, which for a
+/// `@property` returning a bare `Callable` lands on the getter and reports
+/// `(got 1, maximum 0)` (issue #1262).
+///
+/// ty emits `/` for these parameters, so the placeholders stay positional-only
+/// and no keyword rewrite is ever offered for them.
+#[cfg_attr(coverage, coverage(off))]
+fn params_with_placeholder_names(params: &str) -> Option<String> {
+    let entries = split_top_level(params, ',');
+    // `(...)` is ty's "parameters unknown" display, not a parameter. Naming it
+    // would invent a one-positional signature for every callable ty could not
+    // describe, so leave those unparsed exactly as before.
+    if entries.iter().any(|entry| entry.trim() == "...") {
+        return None;
+    }
+    let rewritten = entries
+        .into_iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let entry = entry.trim();
+            if entry.is_empty() || entry == "/" || entry == "*" {
+                return entry.to_string();
+            }
+            let (stars, rest) = if let Some(rest) = entry.strip_prefix("**") {
+                ("**", rest)
+            } else if let Some(rest) = entry.strip_prefix('*') {
+                ("*", rest)
+            } else {
+                ("", entry)
+            };
+            let head = rest.trim();
+            let head = head.split([':', '=']).next().unwrap_or(head).trim();
+            let is_identifier = !head.is_empty()
+                && head
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && head.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_identifier {
+                entry.to_string()
+            } else {
+                format!("{stars}_sk_p{position}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(rewritten)
 }
 
 /// ty renders a *bound* call's receiver away (`"x".upper()` -> `def upper()`,
@@ -14575,6 +14652,13 @@ fn resolve_pending_with_ty(
                     signature_from_param_text_cached(params, &mut def_caches.param_signatures)
                 })
                 .collect();
+            if hover_names_single_dispatch(raw) {
+                // `@singledispatch` dispatches on `args[0].__class__`, so the
+                // first argument must stay positional. `Index::is_excluded`
+                // covers this when the function is indexed; in the ty fallback
+                // the hover names the decorated type instead (issue #1263).
+                continue;
+            }
             if overloads.is_empty() {
                 needs_def.push(i);
                 continue;
@@ -14746,15 +14830,16 @@ mod tests {
     use super::{
         apply_unused_noqa, bound_import_name, call_shape_fingerprint, collect_python_files,
         collect_python_files_with_project_inventory, decorator_tail, estimated_hover_requests,
-        has_staticmethod_or_classmethod_decorator, is_ignored_path, is_receiver_dunder,
-        is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
-        parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
-        process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
-        should_balance_grouped_ty, signature_is_fully_named, signature_mapping_fullname,
-        skipped_cache_miss_warnings, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
-        without_leading_self, CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection,
-        FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome,
-        TyDefCaches, TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        has_staticmethod_or_classmethod_decorator, hover_names_single_dispatch, is_ignored_path,
+        is_receiver_dunder, is_typing_special_form_constructor, line_starts,
+        normalize_static_ty_fallback, parameter_name_is_safe_keyword_target,
+        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
+        record_ty_fix, should_balance_grouped_ty, signature_is_fully_named,
+        signature_mapping_fullname, skipped_cache_miss_warnings, strip_unbound_receiver,
+        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
+        FileNoqa, FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser,
+        PendingTy, PendingTyWork, ScanOutcome, TyDefCaches, TyFixAst, TyFixes, TyShardAssigner,
+        REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -15201,6 +15286,61 @@ mod tests {
                 "{fullname} must not be exempt"
             );
         }
+    }
+
+    #[test]
+    fn single_dispatch_hover_is_recognized() {
+        // ty hovers a `@singledispatch` callee as the decorated type rather
+        // than a signature, so the fallback needs to recognize it by name
+        // (issue #1263).
+        assert!(hover_names_single_dispatch(
+            "_SingleDispatchCallable[str | None]"
+        ));
+        assert!(hover_names_single_dispatch(
+            "_SingleDispatchCallable[str]\n---\nDocs here"
+        ));
+        assert!(hover_names_single_dispatch("_SingleDispatchMethod[int]"));
+        // A plain callable display is not a dispatch callable.
+        assert!(!hover_names_single_dispatch("(list[Value], /) -> str"));
+        assert!(!hover_names_single_dispatch("def f(a: int) -> None"));
+        // A name that merely starts with the same characters is not a match.
+        assert!(!hover_names_single_dispatch(
+            "_SingleDispatchCallableish[str]"
+        ));
+    }
+
+    #[test]
+    fn param_text_reads_unnamed_non_identifier_parameters() {
+        // ty renders an unnamed callable parameter as a bare type. Wrapping the
+        // text in a `def` only parses when that type is also a valid identifier,
+        // so `bytes` survived while `list[Value]` did not, and losing the
+        // signature sent the call to goto-definition (issue #1262).
+        let named = signature_from_param_text("bytes, /").expect("identifier-shaped type");
+        assert_eq!(named.parameters.len(), 1);
+        assert_eq!(named.parameters[0].kind, ParameterKind::PositionalOnly);
+
+        for params in ["list[Value], /", "Sequence[str], /", "int | float, /"] {
+            let signature =
+                signature_from_param_text(params).unwrap_or_else(|| panic!("parse {params}"));
+            assert_eq!(signature.parameters.len(), 1, "params: {params}");
+            assert_eq!(
+                signature.parameters[0].kind,
+                ParameterKind::PositionalOnly,
+                "params: {params}"
+            );
+        }
+
+        let two = signature_from_param_text("str, Value | None, /").expect("two unnamed");
+        assert_eq!(two.parameters.len(), 2);
+
+        // Named parameters keep their names, so a keyword rewrite stays available.
+        let mixed = signature_from_param_text("value: list[int], *, prefix: str").expect("mixed");
+        assert_eq!(mixed.parameters[0].name.as_deref(), Some("value"));
+        assert_eq!(mixed.parameters[1].name.as_deref(), Some("prefix"));
+
+        // `(...)` means "parameters unknown"; naming it would invent a
+        // one-positional signature for every callable ty cannot describe.
+        assert!(signature_from_param_text("...").is_none());
     }
 
     #[test]
