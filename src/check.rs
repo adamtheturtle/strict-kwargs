@@ -5891,6 +5891,18 @@ impl<'a> CallChecker<'a> {
                     })?;
                     return self.resolve_literal_container_item(copied, slice);
                 }
+                if matches!(
+                    Self::normalize_factory_fullname(&factory),
+                    "collections.OrderedDict"
+                        | "collections.UserDict"
+                        | "weakref.WeakValueDictionary"
+                ) && wrapper.arguments.keywords.is_empty()
+                {
+                    let [mapping] = &*wrapper.arguments.args else {
+                        return None;
+                    };
+                    return self.resolve_literal_container_item(mapping, slice);
+                }
             }
             if let Some(receiver) = self.immediate_userlist_copy_receiver(wrapper) {
                 return self.resolve_literal_container_item(receiver, slice);
@@ -7382,7 +7394,10 @@ impl<'a> CallChecker<'a> {
                     }
                 } else if matches!(
                     class.as_str(),
-                    "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
+                    "collections.ChainMap"
+                        | "collections.OrderedDict"
+                        | "collections.UserDict"
+                        | "weakref.WeakValueDictionary"
                 ) && constructor.arguments.keywords.is_empty()
                 {
                     let [mapping] = &*constructor.arguments.args else {
