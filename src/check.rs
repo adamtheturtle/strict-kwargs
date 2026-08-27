@@ -11170,6 +11170,14 @@ impl<'a> CallChecker<'a> {
                     continue;
                 };
                 let normalized_factory = Self::normalize_factory_fullname(&factory);
+                if normalized_factory.contains("multiprocessing")
+                    && matches!(
+                        normalized_factory.rsplit('.').next(),
+                        Some("Pool" | "ThreadPool")
+                    )
+                {
+                    self.record_instance(name.id.as_str(), normalized_factory.to_string());
+                }
                 if normalized_factory.starts_with("concurrent.futures.")
                     && matches!(
                         normalized_factory.rsplit('.').next(),
