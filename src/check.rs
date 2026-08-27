@@ -8511,7 +8511,28 @@ impl<'a> CallChecker<'a> {
         ) {
             return None;
         }
-        let [Expr::Name(source)] = &*reversed_call.arguments.args else {
+        let [source] = &*reversed_call.arguments.args else {
+            return None;
+        };
+        if !reversed_call.arguments.keywords.is_empty() {
+            return None;
+        }
+        if let Expr::Call(deque_call) = source {
+            let deque = self.resolve_callee(&deque_call.func)?;
+            if matches!(
+                deque.as_str(),
+                "collections.deque" | "collections.deque.__init__" | "collections.deque.__new__"
+            ) {
+                let contents = deque_call.arguments.args.first().or_else(|| {
+                    deque_call.arguments.keywords.iter().find_map(|keyword| {
+                        (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                            .then_some(&keyword.value)
+                    })
+                })?;
+                return self.literal_iterable_callable_signature(contents);
+            }
+        }
+        let Expr::Name(source) = source else {
             return None;
         };
         for scope in self.scopes.iter().rev() {
@@ -8826,6 +8847,9 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Some(signature) = self.callable_sentinel_iter_signature(iterator) {
+            return Some(signature);
+        }
+        if let Some(signature) = self.reversed_item_signature(iterator) {
             return Some(signature);
         }
         if let Some(signature) = self.builtin_iterator_item_signature(iterator, selected_index) {

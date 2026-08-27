@@ -2882,6 +2882,23 @@ for call in reversed(calls):
     );
 }
 
+/// `next(reversed(deque(...)))` retains a concrete callable from the literal
+/// deque contents (issue #788).
+#[test]
+fn reversed_deque_next_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections import deque
+def target(value: int) -> None: ...
+next(reversed(deque(iterable=[target])))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected reversed deque violation, got: {messages:?}"
+    );
+}
+
 /// ``async for`` preserves an annotated async iterator's callable item type
 /// (issue #455).
 #[test]
