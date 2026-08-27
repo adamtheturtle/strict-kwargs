@@ -8706,6 +8706,54 @@ Owner().callback(1)
     );
 }
 
+/// A `cached_property` with one unconditional concrete callable return is
+/// attributed to that callable rather than to the descriptor getter (issue
+/// #960).
+#[test]
+fn cached_property_body_return_preserves_concrete_callable() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "cached_property body return must preserve its callable: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("callback\"")),
+        "cached_property result must not be attributed to its getter: {messages:?}"
+    );
+}
+
+/// Inline `cached_property.__get__` evaluates a concrete lambda getter and
+/// preserves the callable it returns (issue #961).
+#[test]
+fn inline_cached_property_get_preserves_returned_callable() {
+    let messages = check_source(
+        r"
+import functools
+class Owner: pass
+def target(value: int) -> None: ...
+functools.cached_property(func=lambda self: target).__get__(
+    instance=Owner(), owner=Owner
+)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "cached_property.__get__ must preserve its returned callable: {messages:?}"
+    );
+}
+
 /// Inherited properties preserve the concrete callable returned by their
 /// defining method.
 #[test]

@@ -1243,3 +1243,26 @@ fn unified_diff_keeps_safe_paths_unquoted() {
     let diff = unified_diff(Path::new("pkg/main.py"), "f(1)\n", "f(x=1)\n", false);
     assert!(diff.starts_with("--- a/pkg/main.py\n+++ b/pkg/main.py\n"));
 }
+
+
+#[test]
+fn fixes_callable_returned_by_cached_property() {
+    assert_fixed(
+        r"import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(1)
+",
+        r"import functools
+def target(value: int) -> None: ...
+class Owner:
+    @functools.cached_property
+    def callback(self) -> object:
+        return target
+Owner().callback(value=1)
+",
+    );
+}
