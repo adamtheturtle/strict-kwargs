@@ -6631,6 +6631,23 @@ mock.create_autospec(spec=target)(1)
     );
 }
 
+/// A callable `Mock` with an explicit concrete `wraps` target delegates to
+/// that target's signature (issue #968).
+#[test]
+fn mock_wraps_preserves_target_signature() {
+    let messages = check_source(
+        r"
+from unittest import mock
+def target(value: int) -> None: ...
+mock.Mock(wraps=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "Mock wraps must preserve its target signature: {messages:?}"
+    );
+}
+
 /// `functools.wraps` preserves the decorated wrapper signature (issue #493).
 #[test]
 fn functools_wraps_preserves_callable_signature() {
