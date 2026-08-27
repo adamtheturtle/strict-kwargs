@@ -13,9 +13,18 @@ if [ "$fragments" -eq 0 ]; then
     exit 0
 fi
 
+# `uvx` runs towncrier standalone. `uv run --extra=release` would install
+# this project first, compiling the Rust binary just to read a TOML table,
+# and an unrelated compile error would surface here as a changelog failure.
+# towncrier reads its configuration from the working directory either way.
+#
 # Match towncrier's marker as a whole line: a fragment may legitimately
 # mention the phrase in its own prose.
-notes=$(uv run --extra=release towncrier build --draft --version 0.0.0 2>/dev/null)
+if ! notes=$(uvx towncrier==25.8.0 build --draft --version 0.0.0 2>&1); then
+    echo "towncrier failed:" >&2
+    printf '%s\n' "$notes" >&2
+    exit 1
+fi
 if printf '%s\n' "$notes" | grep -qx 'No significant changes\.'; then
     echo "towncrier ignored all $fragments news fragment(s) in newsfragments/." >&2
     echo "Every fragment suffix must be listed under [tool.towncrier] type." >&2
