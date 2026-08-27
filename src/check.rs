@@ -5767,6 +5767,10 @@ impl<'a> CallChecker<'a> {
             }
         }
         match value {
+            Expr::If(ast::ExprIf { body, orelse, .. }) => {
+                let body = self.resolve_literal_container_item(body, slice)?;
+                (self.resolve_literal_container_item(orelse, slice)? == body).then_some(body)
+            }
             Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
             Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::BinOp(ast::ExprBinOp {
