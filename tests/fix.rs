@@ -823,6 +823,46 @@ fn fixes_overloaded_callee_for_precisely_annotated_argument() {
 }
 
 #[test]
+fn does_not_fix_overload_arm_narrower_than_the_candidate_maximum() {
+    // The diagnostic's limit is the maximum across arms (here 1, from the
+    // positional-only arm), but ty selects the two-parameter arm whose limit
+    // is 0 — so the rewrite renames `value` too. Precision was only judged
+    // from the maximum, leaving `value` renamed without ever being checked
+    // (issue #1186). An unannotated argument does not pin the arm, so the
+    // whole rewrite must be declined.
+    assert_unchanged(
+        "from typing import overload\n\
+         @overload\n\
+         def f(alpha: int, /) -> None: ...\n\
+         @overload\n\
+         def f(alpha: str, beta: str) -> None: ...\n\
+         def f(alpha, beta=None):\n    return None\n\
+         def g(value):\n    f(value, \"x\")\n",
+    );
+}
+
+#[test]
+fn fixes_overload_arm_narrower_than_the_candidate_maximum_when_args_are_precise() {
+    // The same shape with every argument pinning the arm still rewrites.
+    assert_fixed(
+        "from typing import overload\n\
+         @overload\n\
+         def f(alpha: int, /) -> None: ...\n\
+         @overload\n\
+         def f(alpha: str, beta: str) -> None: ...\n\
+         def f(alpha, beta=None):\n    return None\n\
+         f(\"a\", \"x\")\n",
+        "from typing import overload\n\
+         @overload\n\
+         def f(alpha: int, /) -> None: ...\n\
+         @overload\n\
+         def f(alpha: str, beta: str) -> None: ...\n\
+         def f(alpha, beta=None):\n    return None\n\
+         f(alpha=\"a\", beta=\"x\")\n",
+    );
+}
+
+#[test]
 fn does_not_fix_overloaded_callee_when_ty_selection_is_not_unique() {
     // `x` could match either overload arm, whose first parameter names differ.
     // The union annotation is not precise enough for the fixer to trust any
