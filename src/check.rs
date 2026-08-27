@@ -9732,19 +9732,29 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        if method.attr.as_str() != "pop"
-            || !call.arguments.keywords.is_empty()
-            || !(1..=2).contains(&call.arguments.args.len())
-        {
+        if method.attr.as_str() != "pop" {
             return None;
         }
+        let key = match &*call.arguments.args {
+            [key] | [key, _] if call.arguments.keywords.is_empty() => key,
+            [] => {
+                let [keyword] = &*call.arguments.keywords else {
+                    return None;
+                };
+                if keyword.arg.as_ref().map(ast::Identifier::as_str) != Some("key") {
+                    return None;
+                }
+                &keyword.value
+            }
+            _ => return None,
+        };
         let mapping = match method.value.as_ref() {
             mapping @ Expr::Dict(_) => mapping,
             Expr::Call(constructor) => {
                 let class = self.class_from_constructor_func(&constructor.func)?;
                 if !matches!(
                     class.as_str(),
-                    "collections.ChainMap" | "collections.UserDict"
+                    "collections.ChainMap" | "collections.OrderedDict" | "collections.UserDict"
                 ) || !constructor.arguments.keywords.is_empty()
                 {
                     return None;
@@ -9756,7 +9766,6 @@ impl<'a> CallChecker<'a> {
             }
             _ => return None,
         };
-        let key = call.arguments.args.first()?;
         if let Some(existing) = self.resolve_literal_container_item(mapping, key) {
             return Some(existing);
         }

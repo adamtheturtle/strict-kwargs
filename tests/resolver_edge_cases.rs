@@ -9679,3 +9679,21 @@ def fallback(value: int) -> None: ...
         "did not expect default-value violations, got: {messages:?}"
     );
 }
+
+
+/// `OrderedDict.pop` preserves a present literal mapping value supplied via
+/// its keyword key argument (issue #924).
+#[test]
+fn ordered_dict_pop_preserves_callable_value() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"x": target}).pop(key="x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected OrderedDict.pop violation, got: {messages:?}"
+    );
+}
