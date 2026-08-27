@@ -710,11 +710,27 @@ fn fixes_callable_instance_value_returned_by_factory() {
 }
 
 #[test]
-fn does_not_fix_private_parameter_name() {
-    // Private/stub-style double-underscore parameter names are not safe
-    // keyword targets. The checker can still report the call, but `fix` must
-    // not emit an unsafe keyword such as `load(__fp=fp)` (issue #114).
+fn positional_private_parameter_name_is_not_reported_at_all() {
+    // `__fp` is positional-only by the PEP 484 convention, so the call has
+    // no keyword form and is correct as written. Issue #114 stopped the fixer
+    // emitting the unsafe `load(__fp=fp)`; issue #1247 removed the report it
+    // was declining to act on.
     let source = "def load(__fp):\n    return __fp\n\nfp = object()\nload(fp)\n";
+    let proj = project(source);
+    let main = proj.root.join("main.py");
+    let config = Config::load(&proj.root).expect("valid config");
+    let outcome = fix_paths(&proj.root, std::slice::from_ref(&main), &config, None).expect("fix");
+    assert!(outcome.files.is_empty());
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(std::fs::read_to_string(main).expect("read source"), source);
+}
+
+#[test]
+fn does_not_fix_keyword_only_private_parameter_name() {
+    // A keyword-only `__fp` is outside the positional-only convention, so the
+    // call is still reported, but `load(__fp=fp)` is not a safe rewrite:
+    // inside a class body that keyword would be name-mangled (issue #114).
+    let source = "def load(*, __fp):\n    return __fp\n\nfp = object()\nload(fp)\n";
     let proj = project(source);
     let main = proj.root.join("main.py");
     let config = Config::load(&proj.root).expect("valid config");

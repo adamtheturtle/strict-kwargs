@@ -82,6 +82,58 @@ func(1)
 }
 
 #[test]
+fn pep484_double_underscore_is_positional_only() {
+    // A leading double underscore is the pre-PEP-570 spelling of
+    // positional-only, which the typing spec still requires checkers to
+    // honor. There is no keyword form to rewrite to, so a call passing it
+    // positionally is correct as written (issue #1247).
+    assert_ok(
+        r"
+def legacy(__value: str, *, upper: bool = False) -> str: ...
+legacy('x')
+",
+    );
+}
+
+#[test]
+fn dunder_parameter_name_is_still_keyword_passable() {
+    // A trailing double underscore takes the name out of the convention.
+    assert_error(
+        r"
+def func(__value__: int) -> None: ...
+func(1)
+",
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn pep484_positional_only_does_not_cover_later_parameters() {
+    // `__first` is positional-only; `second` still has a keyword form.
+    assert_error(
+        r"
+def func(__first: int, second: int) -> None: ...
+func(1, 2)
+",
+        3,
+        "Too many positional",
+    );
+}
+
+#[test]
+fn pep484_double_underscore_method_parameter_is_positional_only() {
+    assert_ok(
+        r"
+class C:
+    def method(self, __value: int) -> None: ...
+    def __init__(self, __value: int) -> None: ...
+C(1).method(1)
+",
+    );
+}
+
+#[test]
 fn positional() {
     assert_error(
         r"
