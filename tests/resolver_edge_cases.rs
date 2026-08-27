@@ -7547,6 +7547,23 @@ sorter.get_ready()[0](1)
     );
 }
 
+/// Iterating a literal `WeakKeyDictionary` preserves its concrete callable
+/// keys (issue #828).
+#[test]
+fn weak_key_dictionary_iteration_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+import weakref
+def target(value: int) -> None: ...
+next(iter(weakref.WeakKeyDictionary(dict={target: "x"})))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected WeakKeyDictionary iterator violation, got: {messages:?}"
+    );
+}
+
 /// An immediate `WeakKeyDictionary.get` preserves the concrete callable at a
 /// known object key (issue #938).
 #[test]
