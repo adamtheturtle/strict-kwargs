@@ -805,6 +805,18 @@ mod tests {
     }
 
     #[test]
+    fn non_post_prerelease_minimum_is_satisfied_by_its_base_release() {
+        // Reaches the post-release ordering correction with a minimum whose
+        // prerelease is *not* `post`, so the correction does not apply and
+        // ordinary SemVer ordering decides. Stated with synthetic versions:
+        // pinning `CARGO_PKG_VERSION` made this outcome depend on whether the
+        // release in hand carried a `-post.N` suffix, and the gate broke on
+        // the first release that did.
+        validate_required_version(">=2026.5.19-alpha.1", "2026.5.19")
+            .expect("a base release is newer than its own alpha");
+    }
+
+    #[test]
     fn required_version_rejects_empty_specifier() {
         let message = validate_required_version("   ", "2026.5.19-post.3")
             .expect_err("empty specifier must be rejected");
