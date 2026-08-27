@@ -1,0 +1,1 @@
+Cover the post-release version ordering rule with fixed versions, so the coverage gate no longer depends on whether the release in hand carries a ``-post.N`` suffix.
