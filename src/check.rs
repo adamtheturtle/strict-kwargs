@@ -9681,6 +9681,35 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn weak_value_dict_literal_pop_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "pop"
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakValueDictionary"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [mapping] = &*constructor.arguments.args else {
+            return None;
+        };
+        let key = match &*call.arguments.args {
+            [key] if call.arguments.keywords.is_empty() => key,
+            [] if call.arguments.keywords.len() == 1 => &call.arguments.find_keyword("key")?.value,
+            _ => return None,
+        };
+        self.resolve_literal_container_item(mapping, key)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn weak_key_dict_literal_get_callable(&self, func: &Expr) -> Option<String> {
         let Expr::Call(call) = func else {
             return None;
@@ -9952,6 +9981,38 @@ impl<'a> CallChecker<'a> {
             || !popitem.arguments.is_empty()
             || !dict.items.iter().all(|item| item.key.is_some())
         {
+            return None;
+        }
+        self.resolve_callee(&dict.items.last()?.value)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn weak_value_dict_popitem_value_callable(
+        &self,
+        subscript: &ast::ExprSubscript,
+    ) -> Option<String> {
+        (Self::literal_sequence_index(&subscript.slice, 2)? == 1).then_some(())?;
+        let Expr::Call(popitem) = subscript.value.as_ref() else {
+            return None;
+        };
+        let Expr::Attribute(method) = popitem.func.as_ref() else {
+            return None;
+        };
+        let Expr::Call(constructor) = method.value.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "popitem"
+            || !popitem.arguments.is_empty()
+            || Self::normalize_factory_fullname(&self.resolve_callee(&constructor.func)?)
+                != "weakref.WeakValueDictionary"
+            || !constructor.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [Expr::Dict(dict)] = &*constructor.arguments.args else {
+            return None;
+        };
+        if !dict.items.iter().all(|item| item.key.is_some()) {
             return None;
         }
         self.resolve_callee(&dict.items.last()?.value)
@@ -10648,6 +10709,7 @@ impl<'a> CallChecker<'a> {
                         })
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.weak_value_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
@@ -10660,6 +10722,7 @@ impl<'a> CallChecker<'a> {
                     self.resolve_literal_container_item(&subscript.value, &subscript.slice)
                         .or_else(|| self.ordered_dict_popitem_value_callable(subscript))
                         .or_else(|| self.literal_dict_popitem_value_callable(subscript))
+                        .or_else(|| self.weak_value_dict_popitem_value_callable(subscript))
                         .or_else(|| self.random_sample_element_callable(subscript))
                         .or_else(|| self.heapq_selection_element_callable(subscript))
                         .or_else(|| self.statistics_multimode_element_callable(subscript))
@@ -10873,6 +10936,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.literal_dict_get_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.weak_value_dict_literal_pop_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.weak_key_dict_literal_get_callable(func) {

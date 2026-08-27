@@ -1,0 +1,1 @@
+Preserve concrete callable values returned by ``WeakValueDictionary.pop`` on immediate literal mappings.
