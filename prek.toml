@@ -141,6 +141,15 @@ hooks = [
     pass_filenames = false
   },
   {
+    id = "check-newsfragments",
+    name = "news fragments are assembled",
+    stages = ["pre-commit"],
+    entry = "scripts/check-newsfragments.sh",
+    language = "system",
+    files = '^(newsfragments/.*|pyproject\.toml)$',
+    pass_filenames = false
+  },
+  {
     id = "no-defaults",
     name = "no-defaults",
     entry = "uvx no-defaults@1.0.1",
