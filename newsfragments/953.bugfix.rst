@@ -1,0 +1,1 @@
+Preserve concrete callable defaults returned by ``min`` and ``max`` for statically empty iterables.

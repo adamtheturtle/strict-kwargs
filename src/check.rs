@@ -8762,6 +8762,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn min_max_empty_default_callable(&self, func: &Expr) -> Option<String> {
+        let Expr::Call(call) = func else {
+            return None;
+        };
+        if !matches!(
+            self.resolve_callee(&call.func)?.as_str(),
+            "builtins.min" | "builtins.max"
+        ) || !call.arguments.keywords.iter().all(|keyword| {
+            keyword
+                .arg
+                .as_ref()
+                .is_some_and(|name| matches!(name.as_str(), "default" | "key"))
+        }) {
+            return None;
+        }
+        let [iterable] = &*call.arguments.args else {
+            return None;
+        };
+        let default = &call.arguments.find_keyword("default")?.value;
+        definite_empty_iterable(iterable)
+            .then(|| self.resolve_callee(default))
+            .flatten()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn callable_sentinel_iter_signature(&self, iterator: &Expr) -> Option<Signature> {
         let Expr::Call(iter_call) = iterator else {
             return None;
@@ -10960,6 +10985,9 @@ impl<'a> CallChecker<'a> {
                     return Some(callable);
                 }
                 if let Some(callable) = self.next_empty_default_callable(func) {
+                    return Some(callable);
+                }
+                if let Some(callable) = self.min_max_empty_default_callable(func) {
                     return Some(callable);
                 }
                 if let Some(callable) = self.explicit_sequence_iterator_next_callable(func) {

@@ -608,6 +608,25 @@ next(iter([present]), target)(1)
     );
 }
 
+/// `min` and `max` return their concrete callable defaults when their iterable
+/// is statically empty (issue #953).
+#[test]
+fn min_max_empty_iterable_preserve_callable_default() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+min([], default=target)(1)
+max([], default=target)(1)
+",
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected min/max default violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Explicit sequence iterator protocol calls preserve homogeneous concrete
 /// callable elements (issue #948).
 #[test]
