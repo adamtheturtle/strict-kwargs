@@ -11823,7 +11823,16 @@ impl<'a> CallChecker<'a> {
             // hover-binding scan itself; scanning here too would record a
             // `def`/`class` binding twice and wrongly poison it as a
             // same-scope rebinding.
-            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+            // `With` is delegated for the `as` target's callable
+            // invalidation, which lives in `visit_stmt`'s arm: calling
+            // `visit_with_stmt` from here skipped it, so a function-local
+            // `with ... as name` kept an enclosing `def name` visible and
+            // rewrote calls with its parameter names (issue #1125).
+            Stmt::Assign(_)
+            | Stmt::AnnAssign(_)
+            | Stmt::FunctionDef(_)
+            | Stmt::ClassDef(_)
+            | Stmt::With(_) => {
                 self.visit_stmt(stmt);
             }
             Stmt::If(if_stmt) => {
@@ -11909,10 +11918,6 @@ impl<'a> CallChecker<'a> {
             Stmt::Nonlocal(nonlocal_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.record_nonlocal_names(&nonlocal_stmt.names);
-            }
-            Stmt::With(with_stmt) => {
-                self.scan_stmt_for_hover_poison(stmt);
-                self.visit_with_stmt(with_stmt);
             }
             Stmt::For(for_stmt) => {
                 self.scan_stmt_for_hover_poison(stmt);
