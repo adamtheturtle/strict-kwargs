@@ -2097,6 +2097,35 @@ fn dotted_module_class_method_is_still_an_unbound_call() {
     );
 }
 
+#[test]
+fn reexported_class_is_still_an_unbound_call() {
+    // `classes` only records defining names, so a class reached through a
+    // package `__init__` re-export is not there under the name the call
+    // site uses. Without following the alias the owner check failed and the
+    // explicit receiver was counted (Bugbot on #1193).
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "import lib\n\nobj = object()\nlib.D.method(obj, 1)\n",
+        )],
+        &[
+            (
+                "lib/__init__.py",
+                "from .impl import D\n\n__all__ = [\"D\"]\n",
+            ),
+            (
+                "lib/impl.py",
+                "class D:\n    def method(self, alpha): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("(got 1, maximum 0)"),
+        "the explicit receiver must not be counted: {messages:?}"
+    );
+}
+
 /// Locate the `site-packages` directory inside a freshly created venv
 /// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
 fn venv_site_packages(venv: &std::path::Path) -> Option<PathBuf> {

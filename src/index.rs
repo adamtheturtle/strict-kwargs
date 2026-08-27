@@ -1514,6 +1514,48 @@ impl DefinitionIndex {
         self.read().store.classes.contains(fullname)
     }
 
+    /// Whether `fullname` names a class, following re-export aliases the way
+    /// [`Self::get`] does.
+    ///
+    /// `classes` only records defining names, so a class reached through a
+    /// package `__init__` re-export (`lib.D` for `lib.impl.D`) is absent
+    /// under the name a call site uses. Kept separate from [`Self::is_class`]
+    /// because that one also drives name-to-class resolution, where widening
+    /// the answer changes which callee is picked (Bugbot on #1193).
+    pub fn is_class_through_reexports(&self, fullname: &str) -> bool {
+        let mut query_budget = MAX_QUERY_MODULES;
+        let mut visited = FxHashSet::default();
+        let mut steps = MAX_QUERY_STEPS;
+        self.is_class_resolved(fullname, &mut visited, 0, &mut query_budget, &mut steps)
+    }
+
+    fn is_class_resolved(
+        &self,
+        fullname: &str,
+        visited: &mut FxHashSet<String>,
+        depth: usize,
+        query_budget: &mut usize,
+        steps: &mut usize,
+    ) -> bool {
+        if Self::resolution_exhausted(*steps, depth) {
+            return false;
+        }
+        *steps -= 1;
+        self.ensure_for(fullname, query_budget);
+        self.ensure_star_import_sources(fullname, query_budget);
+        if self.read().store.classes.contains(fullname) {
+            return true;
+        }
+        // Cycle guard, mirroring `resolve_alias`.
+        if !visited.insert(fullname.to_string()) {
+            return false;
+        }
+        let (candidates, _) = self.alias_candidates(fullname);
+        candidates.into_iter().any(|candidate| {
+            self.is_class_resolved(&candidate, visited, depth + 1, query_budget, steps)
+        })
+    }
+
     /// Number of leading user arguments that must remain positional across
     /// the runtime boundaries of a class call.
     ///

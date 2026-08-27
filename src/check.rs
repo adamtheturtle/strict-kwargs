@@ -2459,7 +2459,7 @@ impl<'a> CallChecker<'a> {
         if !callee_fullname
             .strip_suffix(attr.as_str())
             .and_then(|owner| owner.strip_suffix('.'))
-            .is_some_and(|owner| self.index.is_class(owner))
+            .is_some_and(|owner| self.index.is_class_through_reexports(owner))
         {
             return false;
         }
