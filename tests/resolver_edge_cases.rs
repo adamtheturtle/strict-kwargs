@@ -1776,6 +1776,65 @@ inspect.getattr_static(
     );
 }
 
+/// Module-scope `locals` and `globals` literal lookups preserve a concrete
+/// function binding (issue #956).
+#[test]
+fn module_namespace_literal_lookups_preserve_callable_functions() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+locals()["target"](1)
+globals()["target"](1)
+"#,
+    );
+    for line in 3..=4 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected namespace lookup violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Namespace lookups of callable instances use the instance's `__call__`
+/// signature rather than its class constructor signature.
+#[test]
+fn module_namespace_literal_lookups_preserve_callable_instances() {
+    let messages = check_source(
+        r#"
+class Handler:
+    def __init__(self, label: str) -> None: ...
+    def __call__(self, value: int) -> None: ...
+handler = Handler("ready")
+locals()["handler"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "__call__"),
+        "expected callable-instance lookup violation, got: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("__init__")),
+        "namespace lookup must not use the constructor: {messages:?}"
+    );
+}
+
+/// At module scope `locals()` aliases `globals()`, so a write invalidates the
+/// previously resolved callable before a subsequent namespace lookup.
+#[test]
+fn module_locals_write_invalidates_callable_lookup() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+locals()["target"] = lambda *args: None
+locals()["target"](1)
+"#,
+    );
+    assert!(
+        messages.is_empty(),
+        "module locals write must invalidate the old callable: {messages:?}"
+    );
+}
+
 /// `ContextVar` accepts its required name positionally and `get()` preserves
 /// the configured callable value type (issue #409).
 #[test]

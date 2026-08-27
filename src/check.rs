@@ -5787,6 +5787,29 @@ impl<'a> CallChecker<'a> {
                 return self.resolve_callee(elements[index]);
             }
         }
+        if self.scopes.len() == 1 {
+            if let (Expr::Call(namespace), Expr::StringLiteral(name)) = (value, slice) {
+                let namespace_is_module_scope = namespace.arguments.is_empty()
+                    && (self.names_stdlib_callable(&namespace.func, "builtins.locals")
+                        || self.names_stdlib_callable(&namespace.func, "builtins.globals"));
+                if namespace_is_module_scope {
+                    let name = name.value.to_str();
+                    let scope = self.scopes.first()?;
+                    if scope.opaque_locals.contains(name)
+                        || scope.deleted_names.contains(name)
+                        || scope.invalidated_callables.contains(name)
+                    {
+                        return None;
+                    }
+                    let resolved = self.resolve_local(name)?;
+                    if self.binding_is_instance(name) {
+                        let dunder_call = format!("{resolved}.__call__");
+                        return self.index.get(&dunder_call).map(|_| dunder_call);
+                    }
+                    return Some(self.callable_fullname(&resolved).unwrap_or(resolved));
+                }
+            }
+        }
         if let Expr::Call(asdict_call) = value {
             if self.names_stdlib_callable(&asdict_call.func, "dataclasses.asdict") {
                 let Expr::StringLiteral(field) = slice else {
@@ -6580,7 +6603,8 @@ impl<'a> CallChecker<'a> {
             .exclude_rebinding(&format!("{class_fullname}.{attr_name}"));
     }
 
-    /// ``globals()["f"] = …`` / ``globals()['f'] = …`` rebinds a module-level name.
+    /// A literal write through ``globals()`` or module-scope ``locals()``
+    /// rebinds a module-level name.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_globals_subscript_target(&mut self, target: &Expr) {
         let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = target else {
@@ -6594,7 +6618,16 @@ impl<'a> CallChecker<'a> {
             Expr::Name(name) if name.id.as_str() == "globals"
                 && self.resolve_local(name.id.as_str()).is_none()
         ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.globals");
-        if !is_globals || !call.arguments.args.is_empty() || !call.arguments.keywords.is_empty() {
+        let is_module_locals = self.scopes.len() == 1
+            && (matches!(
+                call.func.as_ref(),
+                Expr::Name(name) if name.id.as_str() == "locals"
+                    && self.resolve_local(name.id.as_str()).is_none()
+            ) || self.names_stdlib_callable(call.func.as_ref(), "builtins.locals"));
+        if !(is_globals || is_module_locals)
+            || !call.arguments.args.is_empty()
+            || !call.arguments.keywords.is_empty()
+        {
             return;
         }
         let Expr::StringLiteral(key) = slice.as_ref() else {
@@ -6603,7 +6636,7 @@ impl<'a> CallChecker<'a> {
         self.invalidate_module_name_if_callable(key.value.to_str());
     }
 
-    /// Invalidate a module-scope callable rebinding (for ``globals()`` writes).
+    /// Invalidate a module-scope callable rebinding through its namespace.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_module_name_if_callable(&mut self, name: &str) {
         let Some(scope) = self.scopes.first_mut() else {
