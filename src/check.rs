@@ -5670,6 +5670,18 @@ impl<'a> CallChecker<'a> {
             }
             let factory = self.resolve_callee(&wrapper.func)?;
             let factory = Self::normalize_factory_fullname(&factory);
+            if factory == "collections.defaultdict" && wrapper.arguments.keywords.is_empty() {
+                let [Expr::Lambda(default_factory)] = &*wrapper.arguments.args else {
+                    return None;
+                };
+                let accepts_no_arguments = default_factory
+                    .parameters
+                    .as_deref()
+                    .is_none_or(|parameters| parameters.iter().next().is_none());
+                if accepts_no_arguments {
+                    return self.resolve_callee(&default_factory.body);
+                }
+            }
             if matches!(
                 factory,
                 "collections.ChainMap"
@@ -5686,6 +5698,19 @@ impl<'a> CallChecker<'a> {
                     }
                     _ => return None,
                 };
+                // Copying wrappers do not preserve ``defaultdict``'s missing-key
+                // factory behavior. They may copy existing entries, but a lookup
+                // cannot invoke the wrapped factory.
+                if matches!(factory, "collections.OrderedDict" | "collections.UserDict")
+                    && matches!(mapping, Expr::Call(call)
+                        if self.resolve_callee(&call.func).is_some_and(|callee| {
+                            Self::normalize_factory_fullname(&callee)
+                                == "collections.defaultdict"
+                        }) && matches!(&*call.arguments.args, [Expr::Lambda(_)])
+                            && call.arguments.keywords.is_empty())
+                {
+                    return None;
+                }
                 return self.resolve_literal_container_item(mapping, slice);
             }
         }
@@ -8960,6 +8985,16 @@ impl<'a> CallChecker<'a> {
                     .class_from_constructor_func(&constructor.func)
                     .is_some_and(|class| class == "collections.OrderedDict")
         );
+        let factory_only_defaultdict = matches!(
+            method.value.as_ref(),
+            Expr::Call(constructor)
+                if constructor.arguments.keywords.is_empty()
+                    && matches!(&*constructor.arguments.args, [Expr::Lambda(_)])
+                    && self
+                        .resolve_callee(&constructor.func)
+                        .is_some_and(|class| Self::normalize_factory_fullname(&class)
+                            == "collections.defaultdict")
+        );
         if !ordered_dict && !call.arguments.keywords.is_empty() {
             return None;
         }
@@ -8973,8 +9008,10 @@ impl<'a> CallChecker<'a> {
                 .find_keyword("default")
                 .map(|keyword| &keyword.value)
         })?;
-        if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
-            return Some(existing);
+        if !factory_only_defaultdict {
+            if let Some(existing) = self.resolve_literal_container_item(&method.value, key) {
+                return Some(existing);
+            }
         }
         let known_missing = match method.value.as_ref() {
             Expr::Dict(dict) => {
@@ -8993,7 +9030,7 @@ impl<'a> CallChecker<'a> {
             {
                 true
             }
-            _ => false,
+            _ => factory_only_defaultdict,
         };
         let key_is_literal = matches!(
             key,

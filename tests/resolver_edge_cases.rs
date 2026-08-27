@@ -6464,6 +6464,64 @@ UserDict({"call": third}).pop("call")(1)
     }
 }
 
+/// A missing `defaultdict` key invokes its zero-argument factory and preserves
+/// the concrete callable returned by that factory (issue #780).
+#[test]
+fn defaultdict_factory_result_preserves_callable_signature() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def target(value: int) -> None: ...
+defaultdict(lambda: target)["missing"](1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected defaultdict result violation, got: {messages:?}"
+    );
+}
+
+/// Mapping wrappers copy a defaultdict's entries, not its missing-key factory
+/// (Bugbot on #873).
+#[test]
+fn ordered_dict_does_not_preserve_defaultdict_factory() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict, OrderedDict
+def target(value: int) -> None: ...
+OrderedDict(defaultdict(lambda: target))["missing"](1)
+"#,
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("target")),
+        "copied mapping must not invoke defaultdict factory: {messages:?}"
+    );
+}
+
+/// `defaultdict.setdefault` does not invoke the default factory. For a known
+/// missing key, its explicit default is the returned callable.
+#[test]
+fn defaultdict_setdefault_prefers_explicit_default() {
+    let messages = check_source(
+        r#"
+from collections import defaultdict
+def factory_result(value: int) -> None: ...
+def explicit_default(first: int, second: int) -> None: ...
+defaultdict(lambda: factory_result).setdefault("missing", explicit_default)(1, 2)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "explicit_default"),
+        "expected explicit-default violation, got: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("factory_result")),
+        "factory must not be used by setdefault: {messages:?}"
+    );
+}
+
 /// `itertools.filterfalse` preserves concrete callable elements from its
 /// input iterable through `next()` (issue #784).
 #[test]
