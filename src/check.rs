@@ -35,6 +35,7 @@ use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
+    split_top_level,
     same_path, ty_binary_present, LspLineIndex, TyResolver,
 };
 
@@ -13355,12 +13356,73 @@ fn call_at_start(suite: &[Stmt], start: usize, callee_offset: usize) -> Option<&
 // from the gate for the same reasons as the rest of the ty glue.
 #[cfg_attr(coverage, coverage(off))]
 fn signature_from_param_text(params: &str) -> Option<Signature> {
+    parse_param_text(params)
+        .or_else(|| parse_param_text(&params_with_placeholder_names(params)?))
+}
+
+#[cfg_attr(coverage, coverage(off))]
+fn parse_param_text(params: &str) -> Option<Signature> {
     let src = format!("def __sk__({params}): ...\n");
     let parsed = parse_module(&src).ok()?;
     parsed.suite().iter().find_map(|stmt| match stmt {
         Stmt::FunctionDef(f) => Some(signature_from_parameters(&f.parameters)),
         _ => None,
     })
+}
+
+/// Give every unnamed parameter in a ty callable-type display a placeholder name.
+///
+/// ty renders an unnamed callable parameter as a bare type: `(bytes, /) -> str`,
+/// `(list[Value], /) -> str`. Wrapping that text in a `def` only parses when the
+/// type also happens to be a valid identifier, so `bytes` survived while
+/// `list[Value]`, `Sequence[str]` and `Value | None` did not. Losing the
+/// signature sent the call to the goto-definition fallback, which for a
+/// `@property` returning a bare `Callable` lands on the getter and reports
+/// `(got 1, maximum 0)` (issue #1262).
+///
+/// ty emits `/` for these parameters, so the placeholders stay positional-only
+/// and no keyword rewrite is ever offered for them.
+#[cfg_attr(coverage, coverage(off))]
+fn params_with_placeholder_names(params: &str) -> Option<String> {
+    let entries = split_top_level(params, ',');
+    // `(...)` is ty's "parameters unknown" display, not a parameter. Naming it
+    // would invent a one-positional signature for every callable ty could not
+    // describe, so leave those unparsed exactly as before.
+    if entries.iter().any(|entry| entry.trim() == "...") {
+        return None;
+    }
+    let rewritten = entries
+        .into_iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let entry = entry.trim();
+            if entry.is_empty() || entry == "/" || entry == "*" {
+                return entry.to_string();
+            }
+            let (stars, rest) = if let Some(rest) = entry.strip_prefix("**") {
+                ("**", rest)
+            } else if let Some(rest) = entry.strip_prefix('*') {
+                ("*", rest)
+            } else {
+                ("", entry)
+            };
+            let head = rest.trim();
+            let head = head.split([':', '=']).next().unwrap_or(head).trim();
+            let is_identifier = !head.is_empty()
+                && head
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && head.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_identifier {
+                entry.to_string()
+            } else {
+                format!("{stars}_sk_p{position}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(rewritten)
 }
 
 /// ty renders a *bound* call's receiver away (`"x".upper()` -> `def upper()`,
@@ -15188,6 +15250,40 @@ mod tests {
                 "{fullname} must not be exempt"
             );
         }
+    }
+
+    #[test]
+    fn param_text_reads_unnamed_non_identifier_parameters() {
+        // ty renders an unnamed callable parameter as a bare type. Wrapping the
+        // text in a `def` only parses when that type is also a valid identifier,
+        // so `bytes` survived while `list[Value]` did not, and losing the
+        // signature sent the call to goto-definition (issue #1262).
+        let named = signature_from_param_text("bytes, /").expect("identifier-shaped type");
+        assert_eq!(named.parameters.len(), 1);
+        assert_eq!(named.parameters[0].kind, ParameterKind::PositionalOnly);
+
+        for params in ["list[Value], /", "Sequence[str], /", "int | float, /"] {
+            let signature =
+                signature_from_param_text(params).unwrap_or_else(|| panic!("parse {params}"));
+            assert_eq!(signature.parameters.len(), 1, "params: {params}");
+            assert_eq!(
+                signature.parameters[0].kind,
+                ParameterKind::PositionalOnly,
+                "params: {params}"
+            );
+        }
+
+        let two = signature_from_param_text("str, Value | None, /").expect("two unnamed");
+        assert_eq!(two.parameters.len(), 2);
+
+        // Named parameters keep their names, so a keyword rewrite stays available.
+        let mixed = signature_from_param_text("value: list[int], *, prefix: str").expect("mixed");
+        assert_eq!(mixed.parameters[0].name.as_deref(), Some("value"));
+        assert_eq!(mixed.parameters[1].name.as_deref(), Some("prefix"));
+
+        // `(...)` means "parameters unknown"; naming it would invent a
+        // one-positional signature for every callable ty cannot describe.
+        assert!(signature_from_param_text("...").is_none());
     }
 
     #[test]
