@@ -1244,7 +1244,6 @@ fn unified_diff_keeps_safe_paths_unquoted() {
     assert!(diff.starts_with("--- a/pkg/main.py\n+++ b/pkg/main.py\n"));
 }
 
-
 #[test]
 fn fixes_callable_returned_by_cached_property() {
     assert_fixed(

@@ -9609,7 +9609,6 @@ factory()(1)
     );
 }
 
-
 /// Conditional containers preserve a selected callable when both branches
 /// resolve to the same concrete target (issue #811).
 #[test]
@@ -9641,7 +9640,6 @@ def second(value: int) -> None: ...
         "differing container branches must decline: {ambiguous:?}"
     );
 }
-
 
 /// Boolean expressions preserve a selected callable when short-circuit
 /// truthiness identifies it or every possible result agrees (issue #812).
@@ -9691,7 +9689,6 @@ def target(value: int) -> None: ...
     );
 }
 
-
 /// `collections.UserList` preserves concrete callable elements from its
 /// positional or `initlist=` literal input (issue #814).
 #[test]
@@ -9711,7 +9708,6 @@ collections.UserList((target,))[0](1)
     );
 }
 
-
 /// A mapping passed to `UserList` is iterated into its keys, not its values.
 #[test]
 fn userlist_mapping_subscript_resolves_callable_key() {
@@ -9729,7 +9725,6 @@ UserList({key: value})[0](1)
     );
 }
 
-
 /// Repeated callable keys in a mapping occupy one insertion-order slot.
 #[test]
 fn userlist_mapping_subscript_deduplicates_callable_keys() {
@@ -9746,7 +9741,6 @@ UserList({first: 1, first: 2, second: 3})[1](1)
         "expected the second unique callable key, got: {messages:?}"
     );
 }
-
 
 /// Iterating an immediately constructed `UserList` preserves the homogeneous
 /// literal callable element selected by `next` (issue #817).
@@ -9767,7 +9761,6 @@ next(iter(collections.UserList(initlist=(target,))))(1)
     );
 }
 
-
 /// `UserList.pop()` preserves the homogeneous callable element from an
 /// immediately constructed literal-backed list (issue #816).
 #[test]
@@ -9786,7 +9779,6 @@ collections.UserList(initlist=(target,)).pop()(1)
         "expected UserList.pop violations, got: {messages:?}"
     );
 }
-
 
 /// A zero-argument `UserList.copy()` preserves the immediately constructed
 /// list's concrete callable elements (issue #815).
@@ -9807,7 +9799,6 @@ collections.UserList((target,)).copy()[-1](1)
     );
 }
 
-
 /// An explicit `deque.__getitem__` call preserves a statically selected
 /// literal callable element (issue #819).
 #[test]
@@ -9826,7 +9817,6 @@ collections.deque(iterable=(target,)).__getitem__(-1)(1)
         "expected explicit deque getitem violations, got: {messages:?}"
     );
 }
-
 
 /// `operator.concat` and `iconcat` preserve callable elements selected from
 /// their literal sequence results (issue #825).
@@ -9851,7 +9841,6 @@ iconcat([target], [])[0](1)
     }
 }
 
-
 /// Literal starred elements contribute their expanded sequence width.
 #[test]
 fn operator_concat_expands_literal_starred_elements() {
@@ -9871,7 +9860,6 @@ operator.iconcat([], [*[target]])[0](1)
     }
 }
 
-
 /// `dict.get` returns a concrete callable default when a literal key is known
 /// to be absent (issue #918).
 #[test]
@@ -9888,7 +9876,6 @@ def target(value: int) -> None: ...
     );
 }
 
-
 /// `dict.pop` returns a concrete callable default when a literal key is known
 /// to be absent (issue #919).
 #[test]
@@ -9904,7 +9891,6 @@ def target(value: int) -> None: ...
         "expected dict.pop default violation, got: {messages:?}"
     );
 }
-
 
 /// A non-literal dictionary key prevents proving that `dict.pop` will return
 /// its default (follow-up to Bugbot on #1005).
@@ -9924,7 +9910,6 @@ key = "missing"
     );
 }
 
-
 /// A non-literal dictionary key prevents proving that a literal lookup is
 /// absent (Bugbot on #1005).
 #[test]
@@ -9942,7 +9927,6 @@ key = "missing"
         "non-literal key may match at runtime: {messages:?}"
     );
 }
-
 
 /// Python-equal numeric keys must select the stored value rather than a
 /// supplied `dict.pop` default.
@@ -9966,7 +9950,6 @@ def fallback(value: int) -> None: ...
     );
 }
 
-
 /// `OrderedDict.pop` preserves a present literal mapping value supplied via
 /// its keyword key argument (issue #924).
 #[test]
@@ -9983,7 +9966,6 @@ OrderedDict({"x": target}).pop(key="x")(1)
         "expected OrderedDict.pop violation, got: {messages:?}"
     );
 }
-
 
 /// Registering on a freshly constructed inline singledispatch wrapper returns
 /// the concrete implementation supplied to the two-argument form (issue
@@ -10003,7 +9985,6 @@ functools.singledispatch(func=target).register(cls=int, func=target)(1)
     );
 }
 
-
 /// A literal tuple index on `NamedTuple._make` preserves the corresponding
 /// concrete callable iterable element (issue #970).
 #[test]
@@ -10022,7 +10003,6 @@ Pair._make(iterable=[target])[0](1)
         "NamedTuple._make index must preserve its callable: {messages:?}"
     );
 }
-
 
 /// `get` on literal-backed standard-library mapping wrappers preserves the
 /// concrete value callable (issue #799).
@@ -10044,7 +10024,6 @@ OrderedDict({"x": target}).get("x")(1)
         );
     }
 }
-
 
 /// `OrderedDict.get` inherits the positional-only `dict.get` parameters, so an
 /// invalid keyword call must not synthesize a callable result.
