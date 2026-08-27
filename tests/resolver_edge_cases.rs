@@ -7324,6 +7324,41 @@ Counter([target]).most_common(n=1)[0][0](1)
     );
 }
 
+/// `Counter.most_common` preserves callable keys supplied through mapping
+/// initialization (issue #942).
+#[test]
+fn counter_most_common_preserves_mapping_callable_key_signature() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}).most_common()[0][0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected Counter mapping-most-common violation, got: {messages:?}"
+    );
+}
+
+/// Counter keyword counts can outrank a positional mapping key, and the
+/// positional-only input cannot be supplied as `iterable=`.
+#[test]
+fn counter_most_common_with_keyword_counts_does_not_preserve_mapping_key() {
+    let messages = check_source(
+        r"
+from collections import Counter
+def target(value: int) -> None: ...
+Counter({target: 1}, other=2).most_common()[0][0](1)
+Counter(iterable={target: 1}).most_common()[0][0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "keyword count keys must hide the mapping key: {messages:?}"
+    );
+}
+
 /// Tuple position zero from an immediately constructed `Counter.popitem()`
 /// preserves its literal callable key (issue #798).
 #[test]

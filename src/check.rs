@@ -6947,6 +6947,25 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn homogeneous_callable_mapping_keys(&self, expr: &Expr) -> Option<String> {
+        let Expr::Dict(dict) = expr else {
+            return None;
+        };
+        let mut result = None;
+        for item in &dict.items {
+            let callable = self.resolve_callee(item.key.as_ref()?)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &callable)
+            {
+                return None;
+            }
+            result = Some(callable);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn is_multiprocessing_pool_map_method(fullname: &str) -> bool {
         let Some((class, method)) = fullname.rsplit_once('.') else {
             return false;
@@ -10274,13 +10293,14 @@ impl<'a> CallChecker<'a> {
         if class != "collections.Counter" {
             return None;
         }
-        let iterable = constructor.arguments.args.first().or_else(|| {
-            constructor.arguments.keywords.iter().find_map(|keyword| {
-                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
-                    .then_some(&keyword.value)
-            })
-        })?;
+        let [iterable] = &*constructor.arguments.args else {
+            return None;
+        };
+        if !constructor.arguments.keywords.is_empty() {
+            return None;
+        }
         self.homogeneous_callable_sequence(iterable)
+            .or_else(|| self.homogeneous_callable_mapping_keys(iterable))
     }
 
     #[cfg_attr(coverage, coverage(off))]
