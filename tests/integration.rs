@@ -2047,6 +2047,52 @@ class Child(Base):
     );
 }
 
+#[test]
+fn narrowed_optional_bare_callable_is_not_reported() {
+    // A `Callable[...] | None` narrowed to its callable arm names no
+    // parameter, so the call has no keyword spelling (issue #1255).
+    assert_ok(
+        r"
+from collections.abc import Callable
+def main(transform: Callable[[str], str] | None, text: str) -> str:
+    if transform is not None:
+        return transform(text)
+    return text
+",
+    );
+}
+
+#[test]
+fn bare_callable_annotation_still_checks_arity() {
+    // The annotation states an arity even though it names no parameter, so a
+    // surplus argument is still reported — this is how the resolver's
+    // signature propagation stays observable (issue #1252).
+    assert_error(
+        r"
+from collections.abc import Callable, Iterator
+def iterator() -> Iterator[Callable[[int], None]]: ...
+next(iterator())(1, 2)
+",
+        4,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn callable_with_a_concrete_target_is_still_reported() {
+    // Names erased from a *concrete* definition keep their real kinds, so a
+    // callable propagated out of a literal container is still reported and
+    // still fixable. Only annotation-derived signatures go quiet.
+    assert_error(
+        r"
+def target(value: int) -> None: ...
+next(iter([target]))(1)
+",
+        3,
+        "Too many positional",
+    );
+}
+
 /// Locate the `site-packages` directory inside a freshly created venv
 /// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
 fn venv_site_packages(venv: &std::path::Path) -> Option<PathBuf> {

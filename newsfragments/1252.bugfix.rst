@@ -1,0 +1,1 @@
+Treat the parameters of a bare ``Callable[...]`` annotation as positional-only, as the typing spec requires, so calls through a value typed only that way are no longer reported. Their arity is still checked, and callables traced to a concrete function are unaffected.

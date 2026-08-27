@@ -6308,12 +6308,15 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let parameters = match tuple.elts.first()? {
+            // See the matching note on the indexer's copy: a bare `Callable`
+            // annotation names no parameter, so its parameters are
+            // positional-only per the typing spec (issue #1252).
             Expr::List(list) => list
                 .elts
                 .iter()
                 .map(|_| Parameter {
                     name: None,
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::PositionalOnly,
                 })
                 .collect(),
             Expr::EllipsisLiteral(_) => vec![Parameter {
@@ -15200,7 +15203,9 @@ mod tests {
         let fixed = CallChecker::callable_annotation_signature(&expression("Callable[[int], str]"))
             .expect("fixed Callable");
         assert_eq!(fixed.parameters.len(), 1);
-        assert_eq!(fixed.parameters[0].kind, ParameterKind::PositionalOrKeyword);
+        // The annotation names no parameter, so it is positional-only per the
+        // typing spec (issue #1252).
+        assert_eq!(fixed.parameters[0].kind, ParameterKind::PositionalOnly);
 
         let variadic = CallChecker::callable_annotation_signature(&expression(
             "collections.abc.Callable[..., str]",

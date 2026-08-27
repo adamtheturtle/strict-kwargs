@@ -1,0 +1,1 @@
+Stop reporting calls through a ``Callable[...] | None`` value that has been narrowed to its callable arm.

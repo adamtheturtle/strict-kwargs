@@ -417,12 +417,18 @@ fn callable_annotation_signature(annotation: &Expr) -> Option<Signature> {
         return None;
     };
     let parameters = match tuple.elts.first()? {
+        // `Callable[[X], Y]` names no parameter, so its parameters are
+        // positional-only per the typing spec and a call through a value
+        // typed this way has no keyword spelling to move to (issue #1252).
+        // Signatures whose names are erased from a *concrete* definition
+        // (`unnamed_callable_signature` and friends) keep their real kinds
+        // and stay reportable.
         Expr::List(list) => list
             .elts
             .iter()
             .map(|_| Parameter {
                 name: None,
-                kind: ParameterKind::PositionalOrKeyword,
+                kind: ParameterKind::PositionalOnly,
             })
             .collect(),
         Expr::EllipsisLiteral(_) => vec![Parameter {
@@ -2814,7 +2820,16 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
             callee_tail(&decorator.expression),
-            Some("property" | "_builtins_property" | "_magic_enum_attr" | "DynamicClassAttribute")
+            // `cached_property` is a non-data descriptor: `obj.attr` yields the
+            // getter's return value, exactly as `property` does, so a call
+            // through it must not be checked against the getter (issue #1254).
+            Some(
+                "property"
+                    | "cached_property"
+                    | "_builtins_property"
+                    | "_magic_enum_attr"
+                    | "DynamicClassAttribute"
+            )
         )
     })
 }

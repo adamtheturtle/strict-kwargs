@@ -1037,7 +1037,7 @@ fn typing_cast_callable_result_is_checked_without_flagging_cast() {
 from collections.abc import Callable
 from typing import cast
 def f(value: int) -> None: ...
-cast(Callable[[int], None], f)(1)
+cast(Callable[[int], None], f)(1, 2)
 ",
     );
     assert_eq!(
@@ -1095,8 +1095,8 @@ fn annotated_iterator_results_preserve_callable_signature() {
 from collections.abc import Callable, Iterator, Generator
 def iterator() -> Iterator[Callable[[int], None]]: ...
 def generator() -> Generator[Callable[[int], None], None, None]: ...
-next(iterator())(1)
-next(generator())(1)
+next(iterator())(1, 2)
+next(generator())(1, 2)
 ",
     );
     assert!(
@@ -1172,7 +1172,7 @@ from typing import TypeGuard
 def is_call(value: object) -> TypeGuard[Callable[[int], None]]: ...
 def caller(value: object) -> None:
     if is_call(value=value):
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1190,7 +1190,7 @@ from typing import TypeGuard
 def is_call(value: object) -> TypeGuard[Callable[[int], None]]: ...
 def caller(value: object) -> None:
     if is_call(value):
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1208,7 +1208,7 @@ from typing import TypeIs
 def is_call(value: object) -> TypeIs[Callable[[int], None]]: ...
 def caller(value: object) -> None:
     if is_call(value=value):
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1227,7 +1227,7 @@ Callback = typing.Callable[[int], int]
 def is_callback(value: object) -> typing.TypeIs[Callback]: return callable(value)
 def caller(value: object) -> None:
     if is_callback(value=value):
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1356,7 +1356,7 @@ fn optional_is_not_none_narrowing_preserves_callable_signature() {
 from collections.abc import Callable
 def caller(value: Callable[[int], None] | None) -> None:
     if value is not None:
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1375,7 +1375,7 @@ import typing
 Callback = typing.Callable[[int], int]
 def caller(value: Callback | None) -> None:
     if value is not None:
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1394,7 +1394,7 @@ import typing
 Callback = typing.Callable[[int], int]
 def caller(value: Callback | None) -> None:
     assert value is not None
-    value(1)
+    value(1, 2)
 ",
     );
     assert!(
@@ -1410,7 +1410,7 @@ fn assert_is_not_none_narrowing_preserves_callable_signature() {
 from collections.abc import Callable
 def caller(value: Callable[[int], None] | None) -> None:
     assert value is not None, "present"
-    value(1)
+    value(1, 2)
 "#,
     );
     assert!(
@@ -1427,7 +1427,7 @@ from collections.abc import Callable
 from typing import Optional
 def caller(value: Optional[Callable[[int], None]]) -> None:
     if value is not None:
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1443,7 +1443,7 @@ fn optional_none_union_left_narrowing_preserves_callable_signature() {
 from collections.abc import Callable
 def caller(value: None | Callable[[int], None]) -> None:
     if value is not None:
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1461,7 +1461,7 @@ from collections.abc import Callable
 def is_call(value: object) -> typing.TypeGuard[Callable[[int], None]]: ...
 def caller(value: object) -> None:
     if is_call(value):
-        value(1)
+        value(1, 2)
 ",
     );
     assert!(
@@ -1479,7 +1479,7 @@ fn annotated_dunder_iter_results_preserve_callable_signature() {
 from collections.abc import Callable, Iterator
 class C:
     def __iter__(self) -> Iterator[Callable[[int], None]]: ...
-next(iter(C()))(1)
+next(iter(C()))(1, 2)
 ",
     );
     assert!(
@@ -1499,9 +1499,9 @@ class C:
     def iterator(self) -> Iterator[Callable[[int], None]]: ...
     def iterable(self) -> Iterable[Callable[[int], None]]: ...
     def generator(self) -> Generator[Callable[[int], None], None, None]: ...
-next(C().iterator())(1)
-next(C().iterable())(1)
-next(C().generator())(1)
+next(C().iterator())(1, 2)
+next(C().iterable())(1, 2)
+next(C().generator())(1, 2)
 ",
     );
     for line in [7, 8, 9] {
@@ -1522,9 +1522,9 @@ from collections.abc import Callable, Iterator
 class C:
     def __iter__(self) -> Iterator[Callable[[int], None]]: ...
 c = C()
-next(iter(c))(1)
+next(iter(c))(1, 2)
 def consume(value: C) -> None:
-    next(iter(value))(1)
+    next(iter(value))(1, 2)
 ",
     );
     for line in [6, 8] {
@@ -1567,7 +1567,7 @@ from collections.abc import Callable, Iterator
 class Base:
     def __iter__(self) -> Iterator[Callable[[int], None]]: ...
 class Child(Base): ...
-next(iter(Child()))(1)
+next(iter(Child()))(1, 2)
 ",
     );
     assert!(
@@ -1845,7 +1845,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 def f(value: int) -> None: ...
 current: ContextVar[Callable[[int], None]] = ContextVar("current", default=f)
-current.get()(1)
+current.get()(1, 2)
 "#,
     );
     assert!(
@@ -2423,7 +2423,7 @@ class Descriptor:
     def __get__(self, instance, owner) -> Callable[[int], None]: ...
 class C:
     call = Descriptor()
-C().call(1)
+C().call(1, 2)
 ",
     );
     assert!(
@@ -2443,7 +2443,7 @@ class Descriptor:
     def __get__(self, instance, owner) -> Callable[[int], None]: ...
 class C:
     call: Descriptor = Descriptor()
-C().call(1)
+C().call(1, 2)
 ",
     );
     assert!(
@@ -2465,7 +2465,7 @@ class Descriptor:
 @dataclass
 class C:
     call: Callable[..., None] = Descriptor()
-C().call(1)
+C().call(1, 2)
 ",
     );
     assert!(
@@ -2513,7 +2513,7 @@ Alias = Descriptor
 @dataclass
 class C:
     call = Alias()
-C().call(1)
+C().call(1, 2)
 ",
     );
     assert!(
@@ -2704,7 +2704,7 @@ class C:
         def inner(value: int) -> None: ...
         return inner
 
-C()["call"](1)
+C()["call"](1, 2)
 "#,
     );
     assert!(
@@ -2723,9 +2723,9 @@ from collections.abc import Callable
 class C:
     def __getitem__(self, key: str) -> Callable[[int], None]: ...
 c = C()
-c["call"](1)
+c["call"](1, 2)
 def consume(value: C) -> None:
-    value["call"](1)
+    value["call"](1, 2)
 "#,
     );
     for line in [6, 8] {
@@ -2745,7 +2745,7 @@ fn awaited_callable_result_preserves_signature() {
 from collections.abc import Callable
 async def factory() -> Callable[[int], None]: ...
 async def caller() -> None:
-    (await factory())(1)
+    (await factory())(1, 2)
 ",
     );
     assert!(
@@ -2764,7 +2764,7 @@ from collections.abc import Callable
 class Factory:
     async def build(self) -> Callable[[int], None]: ...
 async def caller(factory: Factory) -> None:
-    (await factory.build())(1)
+    (await factory.build())(1, 2)
 ",
     );
     assert!(
@@ -2785,7 +2785,7 @@ async def factory() -> Callable[[int], None]:
     return lambda value: None
 async def main() -> None:
     completed = asyncio.as_completed(fs=[factory()])
-    (await next(iter(completed)))(1)
+    (await next(iter(completed)))(1, 2)
 ",
     );
     assert!(
@@ -2803,7 +2803,7 @@ fn annotated_anext_result_preserves_callable_signature() {
 from collections.abc import AsyncIterator, Callable
 async def functions() -> AsyncIterator[Callable[[int], None]]: ...
 async def caller() -> None:
-    (await anext(functions()))(1)
+    (await anext(functions()))(1, 2)
 ",
     );
     assert!(
@@ -2821,7 +2821,7 @@ fn annotated_async_generator_anext_preserves_callable_signature() {
 from collections.abc import AsyncGenerator, Callable
 async def functions() -> AsyncGenerator[Callable[[int], None], None]: ...
 async def caller() -> None:
-    (await anext(functions()))(1)
+    (await anext(functions()))(1, 2)
 ",
     );
     assert!(
@@ -2841,7 +2841,7 @@ from contextlib import contextmanager
 @contextmanager
 def manager() -> Iterator[Callable[[int], None]]: ...
 with manager() as call:
-    call(1)
+    call(1, 2)
 ",
     );
     assert!(
@@ -2862,7 +2862,7 @@ from contextlib import contextmanager
 def manager() -> Iterator[Callable[[int], None]]: ...
 class C:
     with manager() as call:
-        call(1)
+        call(1, 2)
 ",
     );
     assert!(
@@ -2881,7 +2881,7 @@ from collections.abc import Callable
 def f(value: int) -> None: ...
 calls: list[Callable[[int], None]] = [f]
 for call in reversed(calls):
-    call(1)
+    call(1, 2)
 ",
     );
     assert!(
@@ -2916,7 +2916,7 @@ fn async_for_preserves_callable_item_signature() {
 from collections.abc import AsyncIterator, Callable
 async def caller(values: AsyncIterator[Callable[[int], None]]) -> None:
     async for call in values:
-        call(1)
+        call(1, 2)
 ",
     );
     assert!(
@@ -2936,7 +2936,7 @@ async def values() -> AsyncIterator[Callable[[int], None]]:
     yield lambda value: None
 async def main() -> None:
     async for item in values():
-        item(1)
+        item(1, 2)
 ",
     );
     assert!(
@@ -2955,7 +2955,7 @@ from collections.abc import Callable, Iterator
 def values() -> Iterator[Callable[[int], None]]:
     yield lambda value: None
 for item in values():
-    item(1)
+    item(1, 2)
 ",
     );
     assert!(
@@ -2973,7 +2973,7 @@ fn generator_factory_comprehension_preserves_callable_item_signature() {
 from collections.abc import Callable, Iterator
 def values() -> Iterator[Callable[[int], None]]:
     yield lambda value: None
-[item(1) for item in values()]
+[item(1, 2) for item in values()]
 ",
     );
     assert!(
@@ -2992,7 +2992,7 @@ from collections.abc import AsyncIterator, Callable
 async def values() -> AsyncIterator[Callable[[int], None]]:
     yield lambda value: None
 async def main() -> None:
-    [item(1) async for item in values()]
+    [item(1, 2) async for item in values()]
 ",
     );
     assert!(
@@ -3015,7 +3015,7 @@ class Manager:
 
 async def caller(manager: Manager) -> None:
     async with manager as call:
-        call(1)
+        call(1, 2)
 ",
     );
     assert!(
@@ -3250,7 +3250,7 @@ T = TypeVar('T')
 class Box(Generic[T]):
     def get(self) -> T: ...
 box: Box[Callable[[int], None]]
-box.get()(1)
+box.get()(1, 2)
 ",
     );
     assert!(
@@ -3271,7 +3271,7 @@ class Box(Generic[T]):
     @classmethod
     def get(cls) -> T: ...
 box: Box[Callable[[int], None]]
-box.get()(1)
+box.get()(1, 2)
 ",
     );
     assert!(
@@ -3292,7 +3292,7 @@ class Box(Generic[T]):
     @staticmethod
     def get() -> T: ...
 box: Box[Callable[[int], None]]
-box.get()(1)
+box.get()(1, 2)
 ",
     );
     assert!(
@@ -3313,7 +3313,7 @@ class Base(Generic[T]):
     def get(self) -> T: ...
 class Concrete(Base[Callable[[int], None]]):
     pass
-Concrete().get()(1)
+Concrete().get()(1, 2)
 ",
     );
     assert!(
@@ -3370,7 +3370,7 @@ def inner() -> None:
     box: Box[Callable[[], None]]
     box.get()()
 inner()
-box.get()(1)
+box.get()(1, 2)
 ",
     );
     assert!(
@@ -3392,7 +3392,7 @@ class Box(Generic[T]):
     def get(self) -> T: ...
 def make() -> object: ...
 box: Box[Callable[[int], None]] = make()  # type: ignore[assignment]
-box.get()(1)
+box.get()(1, 2)
 ",
     );
     assert!(
@@ -4150,8 +4150,8 @@ fn queue_get_preserves_declared_callable_signature() {
 from collections.abc import Callable
 from queue import Queue
 queue: Queue[Callable[[int], None]] = Queue()
-queue.get()(1)
-queue.get_nowait()(1)
+queue.get()(1, 2)
+queue.get_nowait()(1, 2)
 ",
     );
     assert!(
@@ -4307,7 +4307,7 @@ import asyncio
 from collections.abc import Callable
 queue: asyncio.Queue[Callable[[int], None]] = asyncio.Queue()
 async def caller() -> None:
-    (await queue.get())(1)
+    (await queue.get())(1, 2)
 ",
     );
     assert!(
@@ -4726,8 +4726,8 @@ def make(kind): ...
 def make(kind: int) -> Callable[[int], None]: ...
 def make(kind): ...
 
-make(kind=1)(1)
-make(kind='a')(1)
+make(kind=1)(1, 2)
+make(kind='a')(1, 2)
 ",
     );
     assert!(
@@ -4753,7 +4753,7 @@ def make(kind: str) -> Callable[[int], None]: ...
 def make(kind: int) -> Callable[[int], None]: ...
 def make(kind): ...
 
-make(-1)(1)
+make(-1)(1, 2)
 ",
     );
     assert!(
@@ -4775,8 +4775,8 @@ def factory(kind: int) -> Callable[[int], None]: ...
 @overload
 def factory(kind: str) -> Callable[[str], None]: ...
 def factory(kind): ...
-factory(kind=1)(1)
-factory("text")("value")
+factory(kind=1)(1, 2)
+factory("text")("value", "extra")
 "#,
     );
     assert!(
@@ -4796,7 +4796,7 @@ from collections.abc import Callable
 def f(value: int) -> None: ...
 calls: list[Callable[[int], None]] = [f]
 call = calls.pop()
-call(1)
+call(1, 2)
 ",
     );
     assert!(
@@ -4888,7 +4888,7 @@ from collections.abc import Callable, Generator
 def functions() -> Generator[Callable[[int], None], None, None]: ...
 gen = functions()
 next(gen)
-gen.send(None)(1)
+gen.send(None)(1, 2)
 ",
     );
     assert!(
@@ -4906,7 +4906,7 @@ fn generator_throw_result_preserves_callable_signature() {
 import collections.abc
 import typing
 generator: collections.abc.Generator[typing.Callable[[int], int], None, None]
-generator.throw(typ=RuntimeError)(1)
+generator.throw(typ=RuntimeError)(1, 2)
 ",
     );
     assert!(
@@ -4925,7 +4925,7 @@ import collections.abc
 import typing
 Callback = typing.Callable[[int], int]
 generator: collections.abc.Generator[Callback, None, None]
-generator.throw(typ=RuntimeError)(1)
+generator.throw(typ=RuntimeError)(1, 2)
 ",
     );
     assert!(
@@ -4944,7 +4944,7 @@ import collections.abc
 import typing
 agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
 async def main() -> None:
-    (await agen.asend(value=None))(1)
+    (await agen.asend(value=None))(1, 2)
 ",
     );
     assert!(
@@ -4964,7 +4964,7 @@ import typing
 Callback = typing.Callable[[int], int]
 agen: collections.abc.AsyncGenerator[Callback, None]
 async def main() -> None:
-    (await agen.asend(value=None))(1)
+    (await agen.asend(value=None))(1, 2)
 ",
     );
     assert!(
@@ -4984,7 +4984,7 @@ import typing
 Callback = typing.Callable[[int], int]
 agen: collections.abc.AsyncGenerator[Callback, None]
 async def main() -> None:
-    (await agen.athrow(typ=RuntimeError))(1)
+    (await agen.athrow(typ=RuntimeError))(1, 2)
 ",
     );
     assert!(
@@ -5003,7 +5003,7 @@ import collections.abc
 import typing
 agen: collections.abc.AsyncGenerator[typing.Callable[[int], int], None]
 async def main() -> None:
-    (await agen.athrow(typ=RuntimeError))(1)
+    (await agen.athrow(typ=RuntimeError))(1, 2)
 ",
     );
     assert!(
@@ -6183,12 +6183,12 @@ class Managers:
     async def async_manager(self) -> AsyncIterator[Callable[[int], None]]: ...
     def run(self) -> None:
         with self.manager() as call:
-            call(1)
+            call(1, 2)
     async def async_run(self) -> None:
         async with self.async_manager() as call:
-            call(1)
+            call(1, 2)
 with Managers().manager() as call:
-    call(1)
+    call(1, 2)
 ",
     );
     for line in [11, 14, 16] {
@@ -7703,7 +7703,7 @@ var: contextvars.ContextVar[Callable[[int], int]]
 token = var.set(lambda value: value)
 old = token.old_value
 if old is not contextvars.Token.MISSING:
-    old(1)
+    old(1, 2)
 ",
     );
     assert!(
@@ -7725,7 +7725,7 @@ var: contextvars.ContextVar[Callback]
 token = var.set(lambda value: value)
 old = token.old_value
 if old is not contextvars.Token.MISSING:
-    old(1)
+    old(1, 2)
 ",
     );
     assert!(
@@ -7743,7 +7743,7 @@ import types
 from collections.abc import Callable
 mapping: types.MappingProxyType[str, Callable[[int], int]]
 value = mapping.get('key')
-value(1)
+value(1, 2)
 ",
     );
     assert!(
@@ -7764,7 +7764,7 @@ Callback = typing.Callable[[int], int]
 mapping: types.MappingProxyType[str, Callback]
 value = mapping.get("key")
 if value is not None:
-    value(1)
+    value(1, 2)
 "#,
     );
     assert!(
@@ -7858,7 +7858,7 @@ from collections.abc import Callable
 keys: weakref.WeakKeyDictionary[Callable[[int], None], int] = weakref.WeakKeyDictionary()
 def target(value: int) -> None: ...
 keys[target] = 1
-keys.popitem()[0](1)
+keys.popitem()[0](1, 2)
 ",
     );
     assert!(
@@ -7881,7 +7881,7 @@ keys[target] = 1
 value = keys.pop(target)
 calls: list[Callable[[int], None]] = [target]
 call = calls.pop()
-call(1)
+call(1, 2)
 ",
     );
     assert!(
@@ -7959,11 +7959,11 @@ import weakref
 from collections.abc import Callable
 def f(value: int) -> None: ...
 values = weakref.WeakSet([f])
-values.pop()(1)
+values.pop()(1, 2)
 mapping: weakref.WeakValueDictionary[str, Callable[[int], None]] = weakref.WeakValueDictionary()
 mapping['call'] = f
-mapping.pop('call')(1)
-weakref.WeakSet([f]).pop()(1)
+mapping.pop('call')(1, 2)
+weakref.WeakSet([f]).pop()(1, 2)
 ",
     );
     assert!(
@@ -8056,7 +8056,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 def f(value: int) -> None: ...
 future: Future[Callable[[int], None]] = Future()
-future.result()(1)
+future.result()(1, 2)
 ",
     );
     assert!(
@@ -8078,7 +8078,7 @@ async def factory() -> Callable[[int], None]:
 async def main() -> None:
     task = asyncio.create_task(coro=factory())
     await task
-    task.result()(1)
+    task.result()(1, 2)
 ",
     );
     assert!(
@@ -8100,7 +8100,7 @@ async def factory() -> Callable[[int], None]:
 async def main() -> None:
     future = asyncio.ensure_future(coro_or_future=factory())
     await future
-    future.result()(1)
+    future.result()(1, 2)
 ",
     );
     assert!(
@@ -8119,7 +8119,7 @@ from collections.abc import Callable
 async def factory() -> Callable[[int], None]: ...
 async def main() -> None:
     task = asyncio.tasks.create_task(coro=factory())
-    task.result()(1)
+    task.result()(1, 2)
 ",
     );
     assert!(
@@ -8141,7 +8141,7 @@ async def factory() -> Callable[[int], None]:
 async def main() -> None:
     async with asyncio.TaskGroup() as group:
         task = group.create_task(coro=factory())
-    task.result()(1)
+    task.result()(1, 2)
 ",
     );
     assert!(
@@ -8253,7 +8253,7 @@ from collections.abc import Callable
 def factory() -> Callable[[int], None]:
     return lambda value: None
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-    executor.submit(factory).result()(1)
+    executor.submit(factory).result()(1, 2)
 ",
     );
     assert!(
@@ -8344,7 +8344,7 @@ def factory() -> Callable[[int], None]:
     return lambda value: None
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     future = executor.submit(factory)
-    next(concurrent.futures.as_completed(fs=[future])).result()(1)
+    next(concurrent.futures.as_completed(fs=[future])).result()(1, 2)
 ",
     );
     assert!(
@@ -8366,7 +8366,7 @@ def factory() -> Callable[[int], None]:
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     future = executor.submit(factory)
     done, _ = concurrent.futures.wait(fs=[future])
-    done.pop().result()(1)
+    done.pop().result()(1, 2)
 ",
     );
     assert!(
@@ -8388,7 +8388,7 @@ def factory() -> Callable[[int], None]:
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     future = executor.submit(factory)
     [done, _] = concurrent.futures.wait(fs=[future])
-    done.pop().result()(1)
+    done.pop().result()(1, 2)
 ",
     );
     assert!(
@@ -8964,7 +8964,7 @@ fn task_result_preserves_callable_signatures() {
 import asyncio
 from collections.abc import Callable
 task: asyncio.Task[Callable[[int], None]]
-task.result()(1)
+task.result()(1, 2)
 ",
     );
     assert!(
@@ -8985,10 +8985,10 @@ def f(value: int) -> None: ...
 async def factory() -> Callable[[int], None]:
     return f
 async def caller() -> None:
-    (await asyncio.wait_for(factory(), timeout=1))(1)
-    (await asyncio.shield(factory()))(1)
-    (await asyncio.to_thread(lambda: f))(1)
-    (await asyncio.gather(factory()))[0](1)
+    (await asyncio.wait_for(factory(), timeout=1))(1, 2)
+    (await asyncio.shield(factory()))(1, 2)
+    (await asyncio.to_thread(lambda: f))(1, 2)
+    (await asyncio.gather(factory()))[0](1, 2)
 ",
     );
     for line in 8..=11 {
@@ -9009,7 +9009,7 @@ from collections.abc import Callable
 async def factory() -> Callable[[int], None]:
     def target(value: int) -> None: ...
     return target
-asyncio.run(main=factory())(1)
+asyncio.run(main=factory())(1, 2)
 ",
     );
     assert!(
@@ -9028,7 +9028,7 @@ from collections.abc import Callable
 async def factory() -> Callable[[int], None]:
     def target(value: int) -> None: ...
     return target
-asyncio.Runner().run(coro=factory())(1)
+asyncio.Runner().run(coro=factory())(1, 2)
 ",
     );
     assert!(
