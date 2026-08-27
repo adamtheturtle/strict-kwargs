@@ -64,11 +64,17 @@ title_format = "{version}"
 # pre-towncrier entry in CHANGELOG.rst.
 underlines = [ "-", "~", "^" ]
 issue_format = "#{issue}"
+# Supplying ``type`` *replaces* towncrier's built-in types rather than
+# adding to them, so every recognised suffix has to be listed here.
+# ``bugfix`` is what contributors have always written and what every
+# existing fragment uses; omitting it silently dropped all of them and
+# assembled releases as "No significant changes" (issue #1259).
 type = [
-    # A single, unnamed fragment type keeps the assembled output as one
+    # Both entries use an empty name so the assembled output stays one
     # flat bullet list, matching the historical changelog (which never
     # grouped entries under "Features"/"Bugfixes"/... sub-headings).
     { directory = "change", name = "", showcontent = true },
+    { directory = "bugfix", name = "", showcontent = true },
 ]
 
 [tool.strict_kwargs]
