@@ -4054,6 +4054,16 @@ impl DefinitionIndex {
         }
     }
 
+    /// Register `fullname` as a class, as indexing a real `class` statement
+    /// would. Unit tests that drive the unbound-call guard need this: in
+    /// production the guard is only consulted once a signature was found for
+    /// the callee, which implies its owning class is indexed.
+    /// `pub(crate)` so `check`'s unit tests can build a bare `CallChecker`.
+    pub(crate) fn insert_class_for_test(&mut self, fullname: &str) {
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.store.classes.insert(fullname.to_string());
+    }
+
     /// Replace the re-export edges (test convenience), applying the same
     /// no-op/empty filtering as the construction path.
     fn set_edges(&mut self, edges: Vec<(String, String)>) {

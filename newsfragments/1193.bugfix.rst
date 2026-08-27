@@ -1,0 +1,1 @@
+Stop treating a module-level function whose first parameter is ``self`` as an unbound method call, which under-counted its arguments and left one unnamed by ``--fix``.

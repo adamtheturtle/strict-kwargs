@@ -2047,6 +2047,56 @@ class Child(Base):
     );
 }
 
+#[test]
+fn module_level_function_named_self_is_not_an_unbound_call() {
+    // `pkg.utils.process` is a plain function whose first parameter happens
+    // to be named `self`. Treating the dotted path as a class method dropped
+    // that argument from the count and left it unnamed by the fixer
+    // (issue #1193). All three spellings must agree.
+    for call in [
+        "import pkg.utils\n\npkg.utils.process(1, 2)\n",
+        "from pkg import utils\n\nutils.process(1, 2)\n",
+        "from pkg.utils import process\n\nprocess(1, 2)\n",
+    ] {
+        let messages = check_with_aux(
+            &[("app.py", call)],
+            &[
+                ("pkg/__init__.py", ""),
+                ("pkg/utils.py", "def process(self, data): ...\n"),
+            ],
+        );
+        assert_eq!(messages.len(), 1, "got: {messages:?}");
+        assert!(
+            messages[0].contains("(got 2, maximum 0)"),
+            "both arguments are ordinary: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn dotted_module_class_method_is_still_an_unbound_call() {
+    // The counterpart: `pkg.utils.Thing.method(obj, 1)` really is unbound, so
+    // the explicit receiver still fills `self` and is not counted.
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "import pkg.utils\n\nobj = object()\npkg.utils.Thing.method(obj, 1)\n",
+        )],
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/utils.py",
+                "class Thing:\n    def method(self, alpha): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("(got 1, maximum 0)"),
+        "the explicit receiver must not be counted: {messages:?}"
+    );
+}
+
 /// Locate the `site-packages` directory inside a freshly created venv
 /// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
 fn venv_site_packages(venv: &std::path::Path) -> Option<PathBuf> {

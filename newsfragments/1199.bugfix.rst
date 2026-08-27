@@ -1,0 +1,1 @@
+Exercise the bound-hover path in the receiver-stripping unit test, which previously passed the unbound flag.
