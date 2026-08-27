@@ -9326,3 +9326,23 @@ collections.UserList((target,)).copy()[-1](1)
         "expected UserList.copy violations, got: {messages:?}"
     );
 }
+
+
+/// An explicit `deque.__getitem__` call preserves a statically selected
+/// literal callable element (issue #819).
+#[test]
+fn explicit_deque_getitem_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import deque
+import collections
+def target(value: int) -> None: ...
+deque(iterable=[target]).__getitem__(0)(1)
+collections.deque(iterable=(target,)).__getitem__(-1)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "deque result") && has_error_at(&messages, 6, "deque result"),
+        "expected explicit deque getitem violations, got: {messages:?}"
+    );
+}
