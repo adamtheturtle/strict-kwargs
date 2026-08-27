@@ -5823,6 +5823,37 @@ impl<'a> CallChecker<'a> {
                 );
             }
         }
+        if let Expr::Call(call) = value {
+            if (self.names_stdlib_callable(&call.func, "operator.concat")
+                || self.names_stdlib_callable(&call.func, "operator.iconcat"))
+                && call.arguments.keywords.is_empty()
+            {
+                let [left, right] = &*call.arguments.args else {
+                    return None;
+                };
+                let (left, right) = match (left, right) {
+                    (Expr::List(left), Expr::List(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    (Expr::Tuple(left), Expr::Tuple(right)) => {
+                        (left.elts.as_slice(), right.elts.as_slice())
+                    }
+                    _ => return None,
+                };
+                let left_len = left.iter().try_fold(0usize, |len, element| {
+                    len.checked_add(Self::expanded_literal_element_len(element)?)
+                })?;
+                let right_len = right.iter().try_fold(0usize, |len, element| {
+                    len.checked_add(Self::expanded_literal_element_len(element)?)
+                })?;
+                let index = Self::literal_sequence_index(slice, left_len.checked_add(right_len)?)?;
+                return if index < left_len {
+                    self.resolve_expanded_literal_sequence_index(left, index)
+                } else {
+                    self.resolve_expanded_literal_sequence_index(right, index - left_len)
+                };
+            }
+        }
         if let Some(map_call) = self.pool_map_call_from_value(value) {
             Self::literal_signed_integer(slice)?;
             return self.pool_map_callable_fullname(map_call);

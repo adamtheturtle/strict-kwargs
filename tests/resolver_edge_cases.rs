@@ -9398,3 +9398,47 @@ collections.deque(iterable=(target,)).__getitem__(-1)(1)
         "expected explicit deque getitem violations, got: {messages:?}"
     );
 }
+
+
+/// `operator.concat` and `iconcat` preserve callable elements selected from
+/// their literal sequence results (issue #825).
+#[test]
+fn operator_concat_results_preserve_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+from operator import concat, iconcat
+def target(value: int) -> None: ...
+operator.concat([target], [])[0](1)
+operator.iconcat([target], [])[0](1)
+concat([target], [])[0](1)
+iconcat([target], [])[0](1)
+",
+    );
+    for line in 5..=8 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected operator concatenation violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+
+/// Literal starred elements contribute their expanded sequence width.
+#[test]
+fn operator_concat_expands_literal_starred_elements() {
+    let messages = check_source(
+        r"
+import operator
+def target(value: int) -> None: ...
+operator.concat([*[target]], [])[0](1)
+operator.iconcat([], [*[target]])[0](1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected starred operator concatenation violation on line {line}, got: {messages:?}"
+        );
+    }
+}
