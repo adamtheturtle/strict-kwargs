@@ -4611,6 +4611,34 @@ mod tests {
     }
 
     #[test]
+    fn is_class_through_reexports_follows_edges_and_terminates() {
+        // `classes` records only defining names, so a class reached through a
+        // re-export needs the alias walk (Bugbot on #1193).
+        let mut index = index_of(&[("core.D.method", 1)]);
+        index.insert_class_for_test("core.D");
+        let index = with_edges(index, &[("core", "lib")]);
+        assert!(index.is_class_through_reexports("lib.D"));
+        assert!(!index.is_class_through_reexports("lib.Missing"));
+
+        // A pure re-export cycle terminates rather than looping.
+        let cyclic = with_edges(index_of(&[("core.f", 1)]), &[("a", "b"), ("b", "a")]);
+        assert!(!cyclic.is_class_through_reexports("b.Missing"));
+
+        // The pathological backstop: an exhausted step budget answers `false`
+        // rather than walking further.
+        let mut visited = FxHashSet::default();
+        let mut query_budget = super::MAX_QUERY_MODULES;
+        let mut steps = 0;
+        assert!(!cyclic.is_class_resolved(
+            "core.f",
+            &mut visited,
+            0,
+            &mut query_budget,
+            &mut steps
+        ));
+    }
+
+    #[test]
     fn cyclic_edges_terminate_and_still_resolve() {
         // `a` <-> `b` form a re-export cycle; `core` is the real source.
         // Resolution must not loop, and the reachable definition still
