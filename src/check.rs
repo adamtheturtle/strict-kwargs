@@ -5389,6 +5389,31 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_union_value<'b>(value: &'b Expr, key: &Expr) -> Result<Option<&'b Expr>, ()> {
+        match value {
+            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => {
+                Ok(dict.items.iter().rev().find_map(|item| {
+                    item.key
+                        .as_ref()
+                        .is_some_and(|candidate| Self::same_literal_key(candidate, key))
+                        .then_some(&item.value)
+                }))
+            }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::BitOr,
+                right,
+                ..
+            }) => {
+                let left = Self::literal_dict_union_value(left, key)?;
+                let right = Self::literal_dict_union_value(right, key)?;
+                Ok(right.or(left))
+            }
+            _ => Err(()),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn expanded_literal_element_len(element: &Expr) -> Option<usize> {
         let nested_len = |elements: &[Expr]| {
             elements.iter().try_fold(0usize, |len, element| {
@@ -5722,6 +5747,13 @@ impl<'a> CallChecker<'a> {
         match value {
             Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
             Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
+            Expr::BinOp(ast::ExprBinOp {
+                op: ast::Operator::BitOr,
+                ..
+            }) => {
+                let selected = Self::literal_dict_union_value(value, slice).ok()??;
+                self.resolve_callee(selected)
+            }
             Expr::BinOp(ast::ExprBinOp {
                 left,
                 op: ast::Operator::Add,

@@ -781,6 +781,28 @@ tail[0](1)
     );
 }
 
+/// Literal dictionary unions preserve the selected value with right-hand-side
+/// override precedence (issue #809).
+#[test]
+fn literal_dict_unions_resolve_selected_callables() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+({"x": target} | {})["x"](1)
+({} | {"x": target})["x"](1)
+({"x": other} | {"x": target})["x"](1)
+({} | {"x": other} | {"x": target} | {})["x"](1)
+"#,
+    );
+    for line in 4..=7 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected dict-union violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// Starred literal list and tuple elements participate in static sequence
 /// indexing with their expanded lengths (issue #808).
 #[test]
