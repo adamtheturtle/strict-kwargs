@@ -2842,6 +2842,43 @@ async def main() -> None:
     );
 }
 
+/// A synchronous `for` loop reads callable items from an annotated generator
+/// factory invocation (issue #849).
+#[test]
+fn for_generator_factory_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+for item in values():
+    item(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "for-loop item"),
+        "expected generator factory loop violation, got: {messages:?}"
+    );
+}
+
+/// A comprehension reads callable items from an annotated generator factory
+/// invocation (issue #850).
+#[test]
+fn generator_factory_comprehension_preserves_callable_item_signature() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+[item(1) for item in values()]
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "comprehension item"),
+        "expected generator factory comprehension violation, got: {messages:?}"
+    );
+}
+
 /// Async comprehensions use the annotated callable item from their iterator
 /// factory (issue #842).
 #[test]
