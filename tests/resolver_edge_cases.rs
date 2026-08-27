@@ -9120,3 +9120,52 @@ def second(value: int) -> None: ...
         "differing container branches must decline: {ambiguous:?}"
     );
 }
+
+
+/// Boolean expressions preserve a selected callable when short-circuit
+/// truthiness identifies it or every possible result agrees (issue #812).
+#[test]
+fn boolean_literal_containers_resolve_callable_elements() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] or [target])[0](1)
+([] or [target])[0](1)
+([target] and [target])[0](1)
+([target] or [0])[0](1)
+([*[target]] or [0])[0](1)
+([target] + [] or [0])[0](1)
+",
+    );
+    for line in 3..=8 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected boolean-container violation on line {line}, got: {messages:?}"
+        );
+    }
+
+    let ambiguous = check_source(
+        r"
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+(unknown or [first] or [second])[0](1)
+",
+    );
+    assert!(
+        ambiguous.is_empty(),
+        "ambiguous boolean result must decline: {ambiguous:?}"
+    );
+
+    let unpacking = check_source(
+        r#"
+def target(value: int) -> None: ...
+([*values] and [target])[0](1)
+((*values,) and (target,))[0](1)
+({**mapping} and {"x": target})["x"](1)
+"#,
+    );
+    assert!(
+        unpacking.is_empty(),
+        "possibly empty unpacked containers must decline: {unpacking:?}"
+    );
+}

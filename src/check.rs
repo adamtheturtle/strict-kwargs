@@ -5414,6 +5414,37 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_container_truthiness(expr: &Expr) -> Option<bool> {
+        match expr {
+            Expr::List(list) => list
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| list.elts.is_empty().then_some(false)),
+            Expr::Tuple(tuple) => tuple
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| tuple.elts.is_empty().then_some(false)),
+            Expr::Dict(dict) => dict
+                .items
+                .iter()
+                .any(|item| item.key.is_some())
+                .then_some(true)
+                .or_else(|| dict.items.is_empty().then_some(false)),
+            Expr::Set(set) => set
+                .elts
+                .iter()
+                .any(|item| !matches!(item, Expr::Starred(_)))
+                .then_some(true)
+                .or_else(|| set.elts.is_empty().then_some(false)),
+            _ => definite_bool(expr),
+        }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_dict_is_provably_empty(dict: &ast::ExprDict) -> bool {
         dict.items.iter().all(|item| {
             item.key.is_none()
@@ -5450,6 +5481,44 @@ impl<'a> CallChecker<'a> {
             },
             _ => Some(1),
         }
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_boolean_container_item(
+        &self,
+        expression: &ast::ExprBoolOp,
+        slice: &Expr,
+    ) -> Option<String> {
+        let mut result = None;
+        for (index, value) in expression.values.iter().enumerate() {
+            let candidate = self.resolve_literal_container_item(value, slice);
+            let truthiness = Self::literal_container_truthiness(value)
+                .or_else(|| candidate.as_ref().map(|_| true));
+            let last = index + 1 == expression.values.len();
+            let can_return = last
+                || match expression.op {
+                    ast::BoolOp::Or => truthiness != Some(false),
+                    ast::BoolOp::And => truthiness != Some(true),
+                };
+            if can_return {
+                let candidate = candidate?;
+                if result
+                    .as_ref()
+                    .is_some_and(|existing| existing != &candidate)
+                {
+                    return None;
+                }
+                result = Some(candidate);
+            }
+            let can_continue = match expression.op {
+                ast::BoolOp::Or => truthiness != Some(true),
+                ast::BoolOp::And => truthiness != Some(false),
+            };
+            if !can_continue {
+                break;
+            }
+        }
+        result
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5771,6 +5840,7 @@ impl<'a> CallChecker<'a> {
                 let body = self.resolve_literal_container_item(body, slice)?;
                 (self.resolve_literal_container_item(orelse, slice)? == body).then_some(body)
             }
+            Expr::BoolOp(expression) => self.resolve_boolean_container_item(expression, slice),
             Expr::List(list) => self.resolve_starred_literal_sequence_item(&list.elts, slice),
             Expr::Tuple(tuple) => self.resolve_starred_literal_sequence_item(&tuple.elts, slice),
             Expr::BinOp(ast::ExprBinOp {
