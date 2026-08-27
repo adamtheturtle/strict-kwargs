@@ -5169,6 +5169,26 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn immediate_deque_iterable<'b>(&self, value: &'b Expr) -> Option<&'b Expr> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let constructor_name = self.resolve_callee(&constructor.func)?;
+        if !matches!(
+            constructor_name.as_str(),
+            "collections.deque" | "collections.deque.__init__" | "collections.deque.__new__"
+        ) {
+            return None;
+        }
+        constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("iterable"))
+                    .then_some(&keyword.value)
+            })
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn deque_result_signature(&self, func: &Expr) -> Option<Signature> {
         if let Expr::Subscript(subscript) = func {
             let Expr::Call(value_call) = subscript.value.as_ref() else {
@@ -7183,9 +7203,12 @@ impl<'a> CallChecker<'a> {
         };
         let fullname = self.resolve_callee(&call.func)?;
         match fullname.as_str() {
-            "builtins.iter" | "builtins.iter.__new__" if selected_index.is_none() => self
-                .immediate_userlist_iterable(call.arguments.args.first()?)
-                .and_then(|iterable| self.literal_iterable_callable_signature(iterable)),
+            "builtins.iter" | "builtins.iter.__new__" if selected_index.is_none() => {
+                let argument = call.arguments.args.first()?;
+                self.immediate_userlist_iterable(argument)
+                    .or_else(|| self.immediate_deque_iterable(argument))
+                    .and_then(|iterable| self.literal_iterable_callable_signature(iterable))
+            }
             "builtins.zip" | "builtins.zip.__new__" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)

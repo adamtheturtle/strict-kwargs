@@ -567,6 +567,25 @@ def g(first: int, second: int) -> None: ...
     }
 }
 
+/// Iterating an immediately constructed deque preserves a homogeneous literal
+/// callable element selected by `next` (issue #818).
+#[test]
+fn deque_iteration_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import deque
+import collections
+def target(value: int) -> None: ...
+next(iter(deque(iterable=[target])))(1)
+next(iter(collections.deque(iterable=(target,), maxlen=2)))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        "expected deque iteration violations, got: {messages:?}"
+    );
+}
+
 /// `next` returns its concrete callable default when the iterator is
 /// statically empty (issue #952).
 #[test]
