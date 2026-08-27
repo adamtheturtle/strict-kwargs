@@ -2814,7 +2814,16 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
             callee_tail(&decorator.expression),
-            Some("property" | "_builtins_property" | "_magic_enum_attr" | "DynamicClassAttribute")
+            // `cached_property` is a non-data descriptor: `obj.attr` yields the
+            // getter's return value exactly as `property` does, so a call
+            // through it must not be checked against the getter (issue #1254).
+            Some(
+                "property"
+                    | "cached_property"
+                    | "_builtins_property"
+                    | "_magic_enum_attr"
+                    | "DynamicClassAttribute"
+            )
         )
     })
 }
