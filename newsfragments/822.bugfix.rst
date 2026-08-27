@@ -1,0 +1,1 @@
+Preserve concrete callable items returned by ``itertools.chain.from_iterable`` over nested literals.

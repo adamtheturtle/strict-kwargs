@@ -6815,6 +6815,30 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn nested_literal_iterable_callable_signature(&self, expr: &Expr) -> Option<Signature> {
+        let iterables = match expr {
+            Expr::List(list) => list.elts.as_slice(),
+            Expr::Tuple(tuple) => tuple.elts.as_slice(),
+            _ => return None,
+        };
+        let mut result = None;
+        for iterable in iterables {
+            if definite_empty_iterable(iterable) {
+                continue;
+            }
+            let signature = self.literal_iterable_callable_signature(iterable)?;
+            if result
+                .as_ref()
+                .is_some_and(|existing| existing != &signature)
+            {
+                return None;
+            }
+            result = Some(signature);
+        }
+        result
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_mapping_key_callable_signature(&self, expr: &Expr) -> Option<Signature> {
         let Expr::Dict(dict) = expr else {
             return None;
@@ -7036,6 +7060,7 @@ impl<'a> CallChecker<'a> {
             "cycle",
             "tee",
             "chain",
+            "chain.from_iterable",
             "accumulate",
             "compress",
             "islice",
@@ -7080,6 +7105,9 @@ impl<'a> CallChecker<'a> {
                     result = Some(signature);
                 }
                 result
+            }
+            "chain.from_iterable" if selected_index.is_none() => {
+                self.nested_literal_iterable_callable_signature(call.arguments.args.first()?)
             }
             "accumulate" if selected_index.is_none() => {
                 if let Some(initial) = call
