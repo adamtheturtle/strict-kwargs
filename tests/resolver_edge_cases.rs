@@ -738,6 +738,28 @@ def target(value: int) -> None: ...
     }
 }
 
+/// `copy.copy` and `copy.deepcopy` preserve literal container elements, not
+/// only directly copied callables (issue #813).
+#[test]
+fn copied_literal_containers_resolve_selected_callables() {
+    let messages = check_source(
+        r#"
+import copy
+def target(value: int) -> None: ...
+copy.copy(x=[target])[0](1)
+copy.deepcopy(x=[target])[0](1)
+copy.copy((target,))[0](1)
+copy.deepcopy({"x": target})["x"](1)
+"#,
+    );
+    for line in 4..=7 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected copied-container violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
 /// A statically non-empty homogeneous slice captured by a starred assignment
 /// target remains a callable list (issue #801).
 #[test]

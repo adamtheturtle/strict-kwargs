@@ -5750,6 +5750,19 @@ impl<'a> CallChecker<'a> {
             }
         }
         if let Expr::Call(wrapper) = value {
+            if let Some(factory) = self.resolve_callee(&wrapper.func) {
+                if matches!(factory.as_str(), "copy.copy" | "copy.deepcopy")
+                    && wrapper.arguments.len() == 1
+                {
+                    let copied = wrapper.arguments.args.first().or_else(|| {
+                        wrapper.arguments.keywords.iter().find_map(|keyword| {
+                            (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("x"))
+                                .then_some(&keyword.value)
+                        })
+                    })?;
+                    return self.resolve_literal_container_item(copied, slice);
+                }
+            }
             let is_dict_fromkeys = match wrapper.func.as_ref() {
                 Expr::Attribute(method) if method.attr.as_str() == "fromkeys" => {
                     self.resolve_callee(&method.value).is_some_and(|resolved| {
