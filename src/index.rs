@@ -629,10 +629,32 @@ impl IndexedFile {
 struct ModuleIndexClaim<'a> {
     index: &'a DefinitionIndex,
     dotted: String,
+    /// Whether dropping the claim should record the module as indexed.
+    /// Cleared by [`ModuleIndexClaim::abandon`].
+    mark_indexed: bool,
+}
+
+impl ModuleIndexClaim<'_> {
+    /// Give the claim up without recording the module as indexed, so a
+    /// later query can still index it.
+    ///
+    /// The per-query budget is refilled for every query, so a module that
+    /// merely lost one query's race has not been decided. Marking it
+    /// indexed made `claim_module` skip it for the rest of the run, and its
+    /// definitions were never discovered (issue #1195). The global budget
+    /// only ever decreases, so exhausting that one is final and still
+    /// marks the module.
+    fn abandon(mut self) {
+        self.mark_indexed = false;
+        self.index.write().modules.remove(&self.dotted);
+    }
 }
 
 impl Drop for ModuleIndexClaim<'_> {
     fn drop(&mut self) {
+        if !self.mark_indexed {
+            return;
+        }
         self.index
             .write()
             .modules
@@ -706,6 +728,7 @@ impl DefinitionIndex {
                     return Some(ModuleIndexClaim {
                         index: self,
                         dotted: dotted.to_string(),
+                        mark_indexed: true,
                     });
                 }
             }
@@ -899,6 +922,7 @@ impl DefinitionIndex {
         // both per query and globally (cheap non-resolving candidate names —
         // the bulk of a star-import fan-out — never reach here).
         if *query_budget == 0 {
+            claim.abandon();
             return;
         }
         {
@@ -952,6 +976,7 @@ impl DefinitionIndex {
             return;
         };
         if *query_budget == 0 {
+            claim.abandon();
             return;
         }
         {
@@ -2856,7 +2881,16 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
     decorator_list.iter().any(|decorator| {
         matches!(
             callee_tail(&decorator.expression),
-            Some("property" | "_builtins_property" | "_magic_enum_attr" | "DynamicClassAttribute")
+            // `cached_property` is a non-data descriptor: `obj.attr` yields the
+            // getter's return value exactly as `property` does, so a call
+            // through it must not be checked against the getter (issue #1254).
+            Some(
+                "property"
+                    | "cached_property"
+                    | "_builtins_property"
+                    | "_magic_enum_attr"
+                    | "DynamicClassAttribute"
+            )
         )
     })
 }
@@ -4395,6 +4429,44 @@ mod tests {
             index.get("facade.hidden").map(|s| s.len())
         );
         assert!(index.get("facade.public").is_some());
+    }
+
+    #[test]
+    fn an_exhausted_query_budget_does_not_mark_a_module_indexed() {
+        // A module that resolves but loses one query's budget race has not
+        // been decided: the per-query budget is refilled for every query, so
+        // a later one must still be able to index it. Marking it `Indexed`
+        // made `claim_module` skip it for the rest of the run, and its
+        // definitions were never discovered (issue #1195).
+        //
+        // Asserted on the module state rather than through `get`, which
+        // refills the budget itself: reaching the bug through the public API
+        // needs a query that walks past `MAX_QUERY_MODULES` real modules.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("lib.py"), "def target(value: int) -> None: ...\n")
+            .expect("write");
+        let config = Config::default();
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let index = DefinitionIndex::new(resolver, PythonVersion::default());
+
+        let mut spent = 0;
+        index.ensure_module("lib", &mut spent);
+        assert_eq!(
+            index.read().modules.get("lib").copied(),
+            None,
+            "an unparsed module must stay claimable"
+        );
+
+        let mut refilled = super::MAX_QUERY_MODULES;
+        index.ensure_module("lib", &mut refilled);
+        assert_eq!(
+            index.read().modules.get("lib").copied(),
+            Some(ModuleState::Indexed),
+            "a later query with its own budget must index it"
+        );
+        assert!(index.get("lib.target").is_some());
     }
 
     #[test]
