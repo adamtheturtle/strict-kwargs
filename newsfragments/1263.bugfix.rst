@@ -1,1 +1,0 @@
-Stop reporting a ``@singledispatch`` call whose dispatch argument is passed positionally, as ``singledispatch`` requires, when the call is resolved through the type-inference fallback rather than the index.

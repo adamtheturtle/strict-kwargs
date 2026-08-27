@@ -3,6 +3,15 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.27-post.2
+----------------
+
+- Read a ty callable-type hover whose parameters are unnamed and not spellable as identifiers, such as ``(list[Value], /) -> str``, instead of discarding the signature and falling back to goto-definition, which landed on a property getter and reported the call. A ``(...)`` display still means "parameters unknown" and is still not checked.
+
+- Stop reporting a ``@singledispatch`` call whose dispatch argument is passed positionally, as ``singledispatch`` requires, when the call is resolved through the type-inference fallback rather than the index.
+
+- Cover the post-release version ordering rule with fixed versions, so the coverage gate no longer depends on whether the release in hand carries a ``-post.N`` suffix.
+
 2026.8.27-post.1
 ----------------
 

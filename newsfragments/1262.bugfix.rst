@@ -1,1 +1,0 @@
-Read a ty callable-type hover whose parameters are unnamed and not spellable as identifiers, such as ``(list[Value], /) -> str``, instead of discarding the signature and falling back to goto-definition, which landed on a property getter and reported the call. A ``(...)`` display still means "parameters unknown" and is still not checked.
