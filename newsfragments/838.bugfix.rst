@@ -1,0 +1,1 @@
+Infer concrete callable results for futures returned by ``asyncio.ensure_future``.

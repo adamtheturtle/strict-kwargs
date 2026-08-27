@@ -8100,9 +8100,13 @@ impl<'a> CallChecker<'a> {
         let Expr::Call(call) = expr else {
             return None;
         };
-        let is_module_create_task = self
-            .resolve_callee(&call.func)
-            .is_some_and(|factory| Self::is_asyncio_callable(&factory, "create_task"));
+        let factory = self.resolve_callee(&call.func);
+        let is_module_create_task = factory
+            .as_ref()
+            .is_some_and(|factory| Self::is_asyncio_callable(factory, "create_task"));
+        let is_ensure_future = factory
+            .as_ref()
+            .is_some_and(|factory| Self::is_asyncio_callable(factory, "ensure_future"));
         let is_task_group_create_task = match call.func.as_ref() {
             Expr::Attribute(method) if method.attr.as_str() == "create_task" => {
                 if let Expr::Name(receiver) = method.value.as_ref() {
@@ -8128,12 +8132,17 @@ impl<'a> CallChecker<'a> {
             }
             _ => false,
         };
-        if !is_module_create_task && !is_task_group_create_task {
+        if !is_module_create_task && !is_task_group_create_task && !is_ensure_future {
             return None;
         }
+        let argument_name = if is_ensure_future {
+            "coro_or_future"
+        } else {
+            "coro"
+        };
         let coroutine = call
             .arguments
-            .find_keyword("coro")
+            .find_keyword(argument_name)
             .map(|keyword| &keyword.value)
             .or_else(|| call.arguments.args.first())?;
         self.awaitable_callable_result_signature(coroutine)
