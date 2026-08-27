@@ -7003,21 +7003,7 @@ impl<'a> CallChecker<'a> {
             .find_keyword("dict")
             .map(|keyword| &keyword.value)
             .or_else(|| constructor.arguments.args.first())?;
-        let Expr::Dict(mapping) = mapping else {
-            return None;
-        };
-        let mut result = None;
-        for item in &mapping.items {
-            let signature = self.unnamed_callable_signature(item.key.as_ref()?)?;
-            if result
-                .as_ref()
-                .is_some_and(|existing| existing != &signature)
-            {
-                return None;
-            }
-            result = Some(signature);
-        }
-        result
+        self.literal_mapping_key_callable_signature(mapping)
     }
 
     #[cfg_attr(coverage, coverage(off))]
