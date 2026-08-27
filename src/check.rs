@@ -13021,6 +13021,11 @@ fn format_callee_display(fullname: &str) -> String {
     if method == "__init__" || method == "__new__" {
         // Constructor: report the class name (``"str"``), as mypy does.
         let class = parent.rsplit('.').next().unwrap_or(parent);
+        // `ty` is the synthetic namespace for a ty-resolved callee with no
+        // owner, not a class the reader can find in their code (issue #1248).
+        if class == "ty" {
+            return format!("\"{method}\"");
+        }
         return format!("\"{class}\"");
     }
     if parent.contains('.') {
@@ -13436,6 +13441,15 @@ fn violation_max_positional(
             .filter_map(|s| s.max_positional_at_call_site(fullname, ignored))
             .max()
             .unwrap_or(0),
+    )
+}
+
+/// Methods whose first parameter the signature model reads as the receiver.
+/// Kept in step with [`signature_mapping_fullname`].
+fn is_receiver_dunder(name: &str) -> bool {
+    matches!(
+        name,
+        "__call__" | "__get__" | "__set__" | "__init__" | "__new__"
     )
 }
 
@@ -14464,7 +14478,13 @@ fn resolve_pending_with_ty(
                     }
                     None => format!("ty.{}", sig.name),
                 };
-                let receiver_already_omitted = sig.owner.is_some();
+                // ty renders an attribute-access hover with the receiver already
+                // bound, so a `def …` line for a receiver dunder has dropped
+                // `self` even when the display carries no owner. Reading only
+                // the owner let the synthetic `ty.__init__` fullname strip a
+                // second parameter, which reported `super().__init__(data)`
+                // against a positional-only base (issue #1248).
+                let receiver_already_omitted = sig.owner.is_some() || is_receiver_dunder(&sig.name);
                 let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
                 if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                     if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
@@ -14562,7 +14582,7 @@ fn resolve_pending_with_ty(
             }
             if let Some(max_positional) = emit_if_violation_with_signature_fullname(
                 &fullname,
-                &fullname,
+                signature_mapping_fullname(&fullname, true),
                 &overloads,
                 p.positional_count,
                 ignored,
@@ -14710,15 +14730,15 @@ mod tests {
     use super::{
         apply_unused_noqa, bound_import_name, call_shape_fingerprint, collect_python_files,
         collect_python_files_with_project_inventory, decorator_tail, estimated_hover_requests,
-        has_staticmethod_or_classmethod_decorator, is_ignored_path,
+        has_staticmethod_or_classmethod_decorator, is_ignored_path, is_receiver_dunder,
         is_typing_special_form_constructor, line_starts, normalize_static_ty_fallback,
         parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
         process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
-        should_balance_grouped_ty, signature_is_fully_named, skipped_cache_miss_warnings,
-        strip_unbound_receiver, ty_hover_signature_is_safe_for_fix, without_leading_self,
-        CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection, FixOptIns,
-        IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome, TyDefCaches,
-        TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        should_balance_grouped_ty, signature_is_fully_named, signature_mapping_fullname,
+        skipped_cache_miss_warnings, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
+        without_leading_self, CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection,
+        FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome,
+        TyDefCaches, TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -15641,6 +15661,18 @@ while cond:
     }
 
     #[test]
+    fn receiver_dunders_match_the_signature_mapping() {
+        for name in ["__call__", "__get__", "__set__", "__init__", "__new__"] {
+            assert!(is_receiver_dunder(name), "{name} must be a receiver dunder");
+            assert_eq!(
+                signature_mapping_fullname(&format!("ty.{name}"), true),
+                "strict_kwargs.call_site_signature"
+            );
+        }
+        assert!(!is_receiver_dunder("__enter__"));
+    }
+
+    #[test]
     fn identifier_at_extracts_or_rejects() {
         assert_eq!(identifier_at("ab.cd", 0).as_deref(), Some("ab"));
         assert_eq!(identifier_at("ab.cd", 3).as_deref(), Some("cd"));
@@ -15664,6 +15696,11 @@ while cond:
         assert_eq!(format_callee_display("a.b.__new__"), "\"b\"");
         assert_eq!(format_callee_display("pkg.mod.func"), "\"func\" of \"mod\"");
         assert_eq!(format_callee_display("mod.func"), "\"func\"");
+        // `ty` is the synthetic namespace for an owner-less ty-resolved
+        // callee. Naming it as the class produced the unactionable
+        // `Too many positional arguments for "ty"` (issue #1248).
+        assert_eq!(format_callee_display("ty.__init__"), "\"__init__\"");
+        assert_eq!(format_callee_display("ty.__new__"), "\"__new__\"");
     }
 
     #[test]
