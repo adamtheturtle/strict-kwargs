@@ -2048,41 +2048,48 @@ class Child(Base):
 }
 
 #[test]
-fn cached_property_is_treated_as_a_property() {
-    // `functools.cached_property` is a non-data descriptor, so `self.cached`
-    // yields the getter's return value rather than the getter. Checking the
-    // call against the zero-parameter getter reported a call the plain
-    // `@property` spelling already left alone (issue #1254).
+fn narrowed_optional_bare_callable_is_not_reported() {
+    // A `Callable[...] | None` narrowed to its callable arm names no
+    // parameter, so the call has no keyword spelling (issue #1255).
     assert_ok(
         r"
-import functools
 from collections.abc import Callable
-
-class Spec:
-    @property
-    def plain(self) -> Callable[[list[int]], str]: ...
-    @functools.cached_property
-    def cached(self) -> Callable[[list[int]], str]: ...
-    def use(self, items: list[int]) -> str:
-        return self.plain(items) + self.cached(items)
+def main(transform: Callable[[str], str] | None, text: str) -> str:
+    if transform is not None:
+        return transform(text)
+    return text
 ",
     );
 }
 
 #[test]
-fn bare_cached_property_import_is_treated_as_a_property() {
-    // The `from functools import cached_property` spelling too.
-    assert_ok(
+fn bare_callable_annotation_still_checks_arity() {
+    // The annotation states an arity even though it names no parameter, so a
+    // surplus argument is still reported — this is how the resolver's
+    // signature propagation stays observable (issue #1252).
+    assert_error(
         r"
-from functools import cached_property
-from collections.abc import Callable
-
-class Spec:
-    @cached_property
-    def cached(self) -> Callable[[int], None]: ...
-    def use(self) -> None:
-        self.cached(1)
+from collections.abc import Callable, Iterator
+def iterator() -> Iterator[Callable[[int], None]]: ...
+next(iterator())(1, 2)
 ",
+        4,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn callable_with_a_concrete_target_is_still_reported() {
+    // Names erased from a *concrete* definition keep their real kinds, so a
+    // callable propagated out of a literal container is still reported and
+    // still fixable. Only annotation-derived signatures go quiet.
+    assert_error(
+        r"
+def target(value: int) -> None: ...
+next(iter([target]))(1)
+",
+        3,
+        "Too many positional",
     );
 }
 
@@ -3936,5 +3943,44 @@ fn edit_cache_benchmark_prepare_enables_errexit() {
     assert!(
         before_hyperfine.contains("'set -e; "),
         "hyperfine prepare shell must fail fast"
+    );
+}
+
+#[test]
+fn cached_property_is_treated_as_a_property() {
+    // `functools.cached_property` is a non-data descriptor, so `self.cached`
+    // yields the getter's return value rather than the getter. Checking the
+    // call against the zero-parameter getter reported a call the plain
+    // `@property` spelling already left alone (issue #1254).
+    assert_ok(
+        r"
+import functools
+from collections.abc import Callable
+
+class Spec:
+    @property
+    def plain(self) -> Callable[[list[int]], str]: ...
+    @functools.cached_property
+    def cached(self) -> Callable[[list[int]], str]: ...
+    def use(self, items: list[int]) -> str:
+        return self.plain(items) + self.cached(items)
+",
+    );
+}
+
+#[test]
+fn bare_cached_property_import_is_treated_as_a_property() {
+    // The `from functools import cached_property` spelling too.
+    assert_ok(
+        r"
+from functools import cached_property
+from collections.abc import Callable
+
+class Spec:
+    @cached_property
+    def cached(self) -> Callable[[int], None]: ...
+    def use(self) -> None:
+        self.cached(1)
+",
     );
 }
