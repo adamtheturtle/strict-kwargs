@@ -2450,6 +2450,19 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
             return false;
         };
+        // A receiver-shaped first parameter only means "unbound method"
+        // when the attribute is actually owned by a class. A module-level
+        // function whose first parameter happens to be named `self`
+        // (`mymod.utils.process(self, data)`) is an ordinary call, and
+        // stripping its first argument shifted both the reported count and
+        // the fixer's keyword mapping (issue #1193).
+        if !callee_fullname
+            .strip_suffix(attr.as_str())
+            .and_then(|owner| owner.strip_suffix('.'))
+            .is_some_and(|owner| self.index.is_class_through_reexports(owner))
+        {
+            return false;
+        }
         if let Expr::Name(base) = &**value {
             // Dunder-receiver methods called through a *single-name* base
             // are excluded: `max_positional_at_call_site` already strips
@@ -15283,8 +15296,17 @@ class C:
 
     #[test]
     fn leaves_bound_signature_untouched() {
-        // ty already dropped the receiver for a bound call (`def upper()` /
-        // `bound method T.m(...)`): no leading `self`/`cls`, nothing to strip.
+        // A `bound method T.m(...)` hover carries an owner, so production
+        // passes `is_def_hover: false`. Passing `true` here only avoided
+        // stripping because the first parameter happened not to be named
+        // `self`, so the guard itself went untested (issue #1199).
+        let (s, count, stripped) = strip_unbound_receiver(sig(&["self", "b"]), 1, false);
+        assert_eq!(s.parameters.len(), 2);
+        assert_eq!(count, 1);
+        assert!(!stripped);
+
+        // And a `def` hover with no receiver-shaped first parameter is left
+        // alone for the other reason.
         let (s, count, stripped) = strip_unbound_receiver(sig(&["a", "b"]), 1, true);
         assert_eq!(s.parameters.len(), 2);
         assert_eq!(count, 1);
@@ -17423,7 +17445,14 @@ class C:
         first_param: Option<&str>,
         setup: impl FnOnce(&mut CallChecker),
     ) -> bool {
-        let index = DefinitionIndex::for_test();
+        let mut index = DefinitionIndex::for_test();
+        // The guard requires the callee's owner to be a class; production
+        // only reaches it once a signature was found, which implies the owner
+        // is indexed (issue #1193). Mirror that here.
+        if let Some((owner, _)) = callee.rsplit_once('.') {
+            index.insert_class_for_test(owner);
+        }
+        let index = index;
         let config = Config::default();
         let checker_parsed = parse_module("").expect("parse empty");
         let mut checker = CallChecker::new(
@@ -17548,6 +17577,42 @@ class C:
             |c| {
                 c.define_module("mod", "mod".to_string());
             }
+        ));
+    }
+
+    #[test]
+    fn unbound_guard_rejects_module_level_function_named_self() {
+        // `mod.utils.process(self, 0)`: `mod.utils` is a module, not a class,
+        // so a first parameter named `self` is an ordinary argument. Treating
+        // it as a receiver dropped it from the count and from the fixer's
+        // keyword mapping (issue #1193).
+        let mut index = DefinitionIndex::for_test();
+        index.insert_class_for_test("mod.Class");
+        let config = Config::default();
+        let checker_parsed = parse_module("").expect("parse empty");
+        let mut checker = CallChecker::new(
+            PathBuf::from("test.py"),
+            "test".to_string(),
+            false,
+            "",
+            checker_parsed.tokens(),
+            &index,
+            &config,
+            FixOptIns::default(),
+            true,
+        );
+        checker.define_module("mod", "mod".to_string());
+        let call_parsed = parse_module("mod.utils.process(self, 0)\n").expect("parse call");
+        let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
+            panic!("expected an expression statement");
+        };
+        let Expr::Call(call) = stmt.value.as_ref() else {
+            panic!("expected a call expression");
+        };
+        assert!(!checker.is_unbound_class_method_call(
+            &call.func,
+            "mod.utils.process",
+            Some("self")
         ));
     }
 

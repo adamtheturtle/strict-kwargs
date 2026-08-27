@@ -1545,6 +1545,48 @@ impl DefinitionIndex {
         self.read().store.classes.contains(fullname)
     }
 
+    /// Whether `fullname` names a class, following re-export aliases the way
+    /// [`Self::get`] does.
+    ///
+    /// `classes` only records defining names, so a class reached through a
+    /// package `__init__` re-export (`lib.D` for `lib.impl.D`) is absent
+    /// under the name a call site uses. Kept separate from [`Self::is_class`]
+    /// because that one also drives name-to-class resolution, where widening
+    /// the answer changes which callee is picked (Bugbot on #1193).
+    pub fn is_class_through_reexports(&self, fullname: &str) -> bool {
+        let mut query_budget = MAX_QUERY_MODULES;
+        let mut visited = FxHashSet::default();
+        let mut steps = MAX_QUERY_STEPS;
+        self.is_class_resolved(fullname, &mut visited, 0, &mut query_budget, &mut steps)
+    }
+
+    fn is_class_resolved(
+        &self,
+        fullname: &str,
+        visited: &mut FxHashSet<String>,
+        depth: usize,
+        query_budget: &mut usize,
+        steps: &mut usize,
+    ) -> bool {
+        if Self::resolution_exhausted(*steps, depth) {
+            return false;
+        }
+        *steps -= 1;
+        self.ensure_for(fullname, query_budget);
+        self.ensure_star_import_sources(fullname, query_budget);
+        if self.read().store.classes.contains(fullname) {
+            return true;
+        }
+        // Cycle guard, mirroring `resolve_alias`.
+        if !visited.insert(fullname.to_string()) {
+            return false;
+        }
+        let (candidates, _) = self.alias_candidates(fullname);
+        candidates.into_iter().any(|candidate| {
+            self.is_class_resolved(&candidate, visited, depth + 1, query_budget, steps)
+        })
+    }
+
     /// Number of leading user arguments that must remain positional across
     /// the runtime boundaries of a class call.
     ///
@@ -4094,6 +4136,16 @@ impl DefinitionIndex {
         }
     }
 
+    /// Register `fullname` as a class, as indexing a real `class` statement
+    /// would. Unit tests that drive the unbound-call guard need this: in
+    /// production the guard is only consulted once a signature was found for
+    /// the callee, which implies its owning class is indexed.
+    /// `pub(crate)` so `check`'s unit tests can build a bare `CallChecker`.
+    pub(crate) fn insert_class_for_test(&mut self, fullname: &str) {
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.store.classes.insert(fullname.to_string());
+    }
+
     /// Replace the re-export edges (test convenience), applying the same
     /// no-op/empty filtering as the construction path.
     fn set_edges(&mut self, edges: Vec<(String, String)>) {
@@ -4556,6 +4608,34 @@ mod tests {
         assert!(index.edges_is_empty());
         assert_eq!(arity(&index, "a.f"), Some(1));
         assert!(index.get("b.f").is_none());
+    }
+
+    #[test]
+    fn is_class_through_reexports_follows_edges_and_terminates() {
+        // `classes` records only defining names, so a class reached through a
+        // re-export needs the alias walk (Bugbot on #1193).
+        let mut index = index_of(&[("core.D.method", 1)]);
+        index.insert_class_for_test("core.D");
+        let index = with_edges(index, &[("core", "lib")]);
+        assert!(index.is_class_through_reexports("lib.D"));
+        assert!(!index.is_class_through_reexports("lib.Missing"));
+
+        // A pure re-export cycle terminates rather than looping.
+        let cyclic = with_edges(index_of(&[("core.f", 1)]), &[("a", "b"), ("b", "a")]);
+        assert!(!cyclic.is_class_through_reexports("b.Missing"));
+
+        // The pathological backstop: an exhausted step budget answers `false`
+        // rather than walking further.
+        let mut visited = FxHashSet::default();
+        let mut query_budget = super::MAX_QUERY_MODULES;
+        let mut steps = 0;
+        assert!(!cyclic.is_class_resolved(
+            "core.f",
+            &mut visited,
+            0,
+            &mut query_budget,
+            &mut steps
+        ));
     }
 
     #[test]

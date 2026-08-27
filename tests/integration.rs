@@ -2048,48 +2048,81 @@ class Child(Base):
 }
 
 #[test]
-fn narrowed_optional_bare_callable_is_not_reported() {
-    // A `Callable[...] | None` narrowed to its callable arm names no
-    // parameter, so the call has no keyword spelling (issue #1255).
-    assert_ok(
-        r"
-from collections.abc import Callable
-def main(transform: Callable[[str], str] | None, text: str) -> str:
-    if transform is not None:
-        return transform(text)
-    return text
-",
+fn module_level_function_named_self_is_not_an_unbound_call() {
+    // `pkg.utils.process` is a plain function whose first parameter happens
+    // to be named `self`. Treating the dotted path as a class method dropped
+    // that argument from the count and left it unnamed by the fixer
+    // (issue #1193). All three spellings must agree.
+    for call in [
+        "import pkg.utils\n\npkg.utils.process(1, 2)\n",
+        "from pkg import utils\n\nutils.process(1, 2)\n",
+        "from pkg.utils import process\n\nprocess(1, 2)\n",
+    ] {
+        let messages = check_with_aux(
+            &[("app.py", call)],
+            &[
+                ("pkg/__init__.py", ""),
+                ("pkg/utils.py", "def process(self, data): ...\n"),
+            ],
+        );
+        assert_eq!(messages.len(), 1, "got: {messages:?}");
+        assert!(
+            messages[0].contains("(got 2, maximum 0)"),
+            "both arguments are ordinary: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn dotted_module_class_method_is_still_an_unbound_call() {
+    // The counterpart: `pkg.utils.Thing.method(obj, 1)` really is unbound, so
+    // the explicit receiver still fills `self` and is not counted.
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "import pkg.utils\n\nobj = object()\npkg.utils.Thing.method(obj, 1)\n",
+        )],
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/utils.py",
+                "class Thing:\n    def method(self, alpha): ...\n",
+            ),
+        ],
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("(got 1, maximum 0)"),
+        "the explicit receiver must not be counted: {messages:?}"
     );
 }
 
 #[test]
-fn bare_callable_annotation_still_checks_arity() {
-    // The annotation states an arity even though it names no parameter, so a
-    // surplus argument is still reported — this is how the resolver's
-    // signature propagation stays observable (issue #1252).
-    assert_error(
-        r"
-from collections.abc import Callable, Iterator
-def iterator() -> Iterator[Callable[[int], None]]: ...
-next(iterator())(1, 2)
-",
-        4,
-        "maximum 1",
+fn reexported_class_is_still_an_unbound_call() {
+    // `classes` only records defining names, so a class reached through a
+    // package `__init__` re-export is not there under the name the call
+    // site uses. Without following the alias the owner check failed and the
+    // explicit receiver was counted (Bugbot on #1193).
+    let messages = check_with_aux(
+        &[(
+            "app.py",
+            "import lib\n\nobj = object()\nlib.D.method(obj, 1)\n",
+        )],
+        &[
+            (
+                "lib/__init__.py",
+                "from .impl import D\n\n__all__ = [\"D\"]\n",
+            ),
+            (
+                "lib/impl.py",
+                "class D:\n    def method(self, alpha): ...\n",
+            ),
+        ],
     );
-}
-
-#[test]
-fn callable_with_a_concrete_target_is_still_reported() {
-    // Names erased from a *concrete* definition keep their real kinds, so a
-    // callable propagated out of a literal container is still reported and
-    // still fixable. Only annotation-derived signatures go quiet.
-    assert_error(
-        r"
-def target(value: int) -> None: ...
-next(iter([target]))(1)
-",
-        3,
-        "Too many positional",
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains("(got 1, maximum 0)"),
+        "the explicit receiver must not be counted: {messages:?}"
     );
 }
 
@@ -3982,5 +4015,51 @@ class Spec:
     def use(self) -> None:
         self.cached(1)
 ",
+    );
+}
+
+#[test]
+fn narrowed_optional_bare_callable_is_not_reported() {
+    // A `Callable[...] | None` narrowed to its callable arm names no
+    // parameter, so the call has no keyword spelling (issue #1255).
+    assert_ok(
+        r"
+from collections.abc import Callable
+def main(transform: Callable[[str], str] | None, text: str) -> str:
+    if transform is not None:
+        return transform(text)
+    return text
+",
+    );
+}
+
+#[test]
+fn bare_callable_annotation_still_checks_arity() {
+    // The annotation states an arity even though it names no parameter, so a
+    // surplus argument is still reported — this is how the resolver's
+    // signature propagation stays observable (issue #1252).
+    assert_error(
+        r"
+from collections.abc import Callable, Iterator
+def iterator() -> Iterator[Callable[[int], None]]: ...
+next(iterator())(1, 2)
+",
+        4,
+        "maximum 1",
+    );
+}
+
+#[test]
+fn callable_with_a_concrete_target_is_still_reported() {
+    // Names erased from a *concrete* definition keep their real kinds, so a
+    // callable propagated out of a literal container is still reported and
+    // still fixable. Only annotation-derived signatures go quiet.
+    assert_error(
+        r"
+def target(value: int) -> None: ...
+next(iter([target]))(1)
+",
+        3,
+        "Too many positional",
     );
 }
