@@ -3945,3 +3945,42 @@ fn edit_cache_benchmark_prepare_enables_errexit() {
         "hyperfine prepare shell must fail fast"
     );
 }
+
+#[test]
+fn cached_property_is_treated_as_a_property() {
+    // `functools.cached_property` is a non-data descriptor, so `self.cached`
+    // yields the getter's return value rather than the getter. Checking the
+    // call against the zero-parameter getter reported a call the plain
+    // `@property` spelling already left alone (issue #1254).
+    assert_ok(
+        r"
+import functools
+from collections.abc import Callable
+
+class Spec:
+    @property
+    def plain(self) -> Callable[[list[int]], str]: ...
+    @functools.cached_property
+    def cached(self) -> Callable[[list[int]], str]: ...
+    def use(self, items: list[int]) -> str:
+        return self.plain(items) + self.cached(items)
+",
+    );
+}
+
+#[test]
+fn bare_cached_property_import_is_treated_as_a_property() {
+    // The `from functools import cached_property` spelling too.
+    assert_ok(
+        r"
+from functools import cached_property
+from collections.abc import Callable
+
+class Spec:
+    @cached_property
+    def cached(self) -> Callable[[int], None]: ...
+    def use(self) -> None:
+        self.cached(1)
+",
+    );
+}

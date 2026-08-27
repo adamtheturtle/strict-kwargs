@@ -2821,7 +2821,7 @@ fn has_property_decorator(decorator_list: &[ast::Decorator]) -> bool {
         matches!(
             callee_tail(&decorator.expression),
             // `cached_property` is a non-data descriptor: `obj.attr` yields the
-            // getter's return value, exactly as `property` does, so a call
+            // getter's return value exactly as `property` does, so a call
             // through it must not be checked against the getter (issue #1254).
             Some(
                 "property"
