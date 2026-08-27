@@ -99,6 +99,14 @@ fn rewrites_plain_function_call() {
 }
 
 #[test]
+fn fixes_classmethod_descriptor_result_call() {
+    assert_fixed(
+        "class Owner: pass\ndef target(cls: object, value: int) -> None: ...\nclassmethod(target).__get__(None, Owner)(1)\n",
+        "class Owner: pass\ndef target(cls: object, value: int) -> None: ...\nclassmethod(target).__get__(None, Owner)(value=1)\n",
+    );
+}
+
+#[test]
 fn rewrites_itemgetter_result_without_rewriting_operand() {
     assert_fixed(
         "from operator import itemgetter\ndef f(value): ...\nitemgetter(0)([f])(1)\n",
