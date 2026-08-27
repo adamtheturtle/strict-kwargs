@@ -2011,6 +2011,42 @@ sys.stderr.write("oops\n")
     );
 }
 
+#[test]
+fn super_init_into_a_positional_only_base_is_not_flagged() {
+    // Issue #1248: ty hovers `super().__init__` in a `list` subclass as
+    // `def __init__(iterable: Iterable[int], /) -> None` — the receiver is
+    // already bound away, and `iterable` is positional-only. `list.__init__`
+    // takes no keyword arguments, so the rewrite the diagnostic asked for
+    // raises `TypeError`.
+    assert_ok(
+        r"
+class Payload(list[int]):
+    def __init__(self, data: list[int], *, tag: str) -> None:
+        super().__init__(data)
+        self.tag = tag
+",
+    );
+}
+
+#[test]
+fn super_init_into_a_named_base_is_still_flagged() {
+    // The counterpart: the base's `__init__` names its parameter, so
+    // `super().__init__(value=value)` is a valid rewrite and the call is
+    // still reported.
+    assert_error(
+        r"
+class Base:
+    def __init__(self, value: int) -> None: ...
+
+class Child(Base):
+    def __init__(self, value: int) -> None:
+        super().__init__(value)
+",
+        7,
+        "Too many positional",
+    );
+}
+
 /// Locate the `site-packages` directory inside a freshly created venv
 /// (Unix `lib/pythonX.Y/site-packages` or Windows `Lib/site-packages`).
 fn venv_site_packages(venv: &std::path::Path) -> Option<PathBuf> {

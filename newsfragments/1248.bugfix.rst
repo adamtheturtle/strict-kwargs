@@ -1,0 +1,1 @@
+Stop reporting ``super().__init__`` calls into a positional-only base such as ``list`` or ``dict``, and never name the type-inference namespace ``ty`` as the callee.
