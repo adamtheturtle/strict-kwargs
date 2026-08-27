@@ -6554,6 +6554,60 @@ next(reversed({target}))(1)
     );
 }
 
+/// Without a key function, `itertools.groupby` uses each input element as
+/// tuple position zero and preserves its callable signature (issue #791).
+#[test]
+fn itertools_groupby_default_key_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(itertools.groupby(iterable=[target]))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected groupby key violation, got: {messages:?}"
+    );
+}
+
+/// The group iterator in tuple position one of a `groupby` result preserves
+/// the original input element's callable signature (issue #792).
+#[test]
+fn itertools_groupby_group_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(next(itertools.groupby(iterable=[target]))[1])(1)
+next(next(itertools.groupby([target], key=lambda _: 0))[1])(1)
+",
+    );
+    for line in 4..=5 {
+        assert!(
+            has_error_at(&messages, line, "next() result"),
+            "expected groupby group-item violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// A directly imported `groupby` preserves the group iterator's callable
+/// signature too.
+#[test]
+fn imported_groupby_group_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+from itertools import groupby as grouped
+def target(value: int) -> None: ...
+next(next(grouped([target]))[1])(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "next() result"),
+        "expected imported groupby group-item violation, got: {messages:?}"
+    );
+}
+
 /// `itertools.filterfalse` preserves concrete callable elements from its
 /// input iterable through `next()` (issue #784).
 #[test]
