@@ -2850,6 +2850,52 @@ with manager() as call:
     );
 }
 
+/// A function-local `with ... as` target invalidates an enclosing callable
+/// of the same name, as it already did at module level (issue #1125).
+#[test]
+fn function_local_with_binding_invalidates_an_enclosing_callable() {
+    let source = r"
+import contextlib
+def target(alpha, beta): ...
+@contextlib.contextmanager
+def provide():
+    yield lambda only: None
+def caller():
+    with provide() as target:
+        target(1, 2)
+";
+    // The enclosing `def target` no longer binds here, so its parameter names
+    // must not reach the call: rewriting to `target(alpha=1, beta=2)` raised
+    // `TypeError` against the yielded one-parameter callable.
+    assert!(
+        !check_source(source)
+            .iter()
+            .any(|message| message.contains("target")),
+        "stale enclosing signature used: {:?}",
+        check_source(source)
+    );
+}
+
+/// The module-level counterpart, which already behaved this way and must
+/// keep doing so.
+#[test]
+fn module_level_with_binding_invalidates_a_prior_callable() {
+    let source = r"
+import contextlib
+def target(alpha, beta): ...
+@contextlib.contextmanager
+def provide():
+    yield lambda only: None
+with provide() as target:
+    target(1, 2)
+";
+    assert!(
+        check_source(source).is_empty(),
+        "got: {:?}",
+        check_source(source)
+    );
+}
+
 /// Class-body context-manager targets remain visible to statements in the
 /// suite (issue #1139).
 #[test]
