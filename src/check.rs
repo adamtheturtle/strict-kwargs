@@ -6093,18 +6093,6 @@ impl<'a> CallChecker<'a> {
                     })?;
                     return self.resolve_literal_container_item(copied, slice);
                 }
-                if matches!(
-                    Self::normalize_factory_fullname(&factory),
-                    "collections.OrderedDict"
-                        | "collections.UserDict"
-                        | "weakref.WeakValueDictionary"
-                ) && wrapper.arguments.keywords.is_empty()
-                {
-                    let [mapping] = &*wrapper.arguments.args else {
-                        return None;
-                    };
-                    return self.resolve_literal_container_item(mapping, slice);
-                }
             }
             if let Some(receiver) = self.immediate_userlist_copy_receiver(wrapper) {
                 return self.resolve_literal_container_item(receiver, slice);
@@ -6171,6 +6159,7 @@ impl<'a> CallChecker<'a> {
                     | "collections.OrderedDict"
                     | "collections.UserDict"
                     | "types.MappingProxyType"
+                    | "weakref.WeakValueDictionary"
             ) {
                 let mapping = match &*wrapper.arguments.args {
                     [mapping] if wrapper.arguments.keywords.is_empty() => mapping,
@@ -6184,8 +6173,12 @@ impl<'a> CallChecker<'a> {
                 // Copying wrappers do not preserve ``defaultdict``'s missing-key
                 // factory behavior. They may copy existing entries, but a lookup
                 // cannot invoke the wrapped factory.
-                if matches!(factory, "collections.OrderedDict" | "collections.UserDict")
-                    && matches!(mapping, Expr::Call(call)
+                if matches!(
+                    factory,
+                    "collections.OrderedDict"
+                        | "collections.UserDict"
+                        | "weakref.WeakValueDictionary"
+                ) && matches!(mapping, Expr::Call(call)
                         if self.resolve_callee(&call.func).is_some_and(|callee| {
                             Self::normalize_factory_fullname(&callee)
                                 == "collections.defaultdict"
