@@ -5456,6 +5456,44 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn immediate_userlist_copy_receiver<'b>(&self, call: &'b ast::ExprCall) -> Option<&'b Expr> {
+        if !call.arguments.is_empty() {
+            return None;
+        }
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "copy" {
+            return None;
+        }
+        let Expr::Call(receiver) = method.value.as_ref() else {
+            return None;
+        };
+        let factory = self.resolve_callee(&receiver.func)?;
+        (Self::normalize_factory_fullname(&factory) == "collections.UserList")
+            .then_some(method.value.as_ref())
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn immediate_userlist_iterable<'b>(&self, value: &'b Expr) -> Option<&'b Expr> {
+        let Expr::Call(constructor) = value else {
+            return None;
+        };
+        let factory = self.resolve_callee(&constructor.func)?;
+        if Self::normalize_factory_fullname(&factory) != "collections.UserList"
+            || constructor.arguments.len() != 1
+        {
+            return None;
+        }
+        constructor.arguments.args.first().or_else(|| {
+            constructor.arguments.keywords.iter().find_map(|keyword| {
+                (keyword.arg.as_ref().map(ast::Identifier::as_str) == Some("initlist"))
+                    .then_some(&keyword.value)
+            })
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_dict_has_only_static_items(dict: &ast::ExprDict) -> bool {
         dict.items.iter().all(|item| {
             item.key.is_some()
@@ -5464,6 +5502,28 @@ impl<'a> CallChecker<'a> {
                     Expr::Dict(unpacked) if Self::literal_dict_is_provably_empty(unpacked)
                 )
         })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn resolve_userlist_item(&self, iterable: &Expr, slice: &Expr) -> Option<String> {
+        let Expr::Dict(dict) = iterable else {
+            return self.resolve_literal_container_item(iterable, slice);
+        };
+        let mut keys: Vec<&Expr> = Vec::new();
+        for item in &dict.items {
+            let key = item.key.as_ref()?;
+            let resolved_key = self.resolve_callee(key);
+            if !keys.iter().any(|existing| {
+                Self::same_literal_key(existing, key)
+                    || resolved_key.as_ref().is_some_and(|resolved| {
+                        self.resolve_callee(existing).as_ref() == Some(resolved)
+                    })
+            }) {
+                keys.push(key);
+            }
+        }
+        let index = Self::literal_sequence_index(slice, keys.len())?;
+        self.resolve_callee(keys[index])
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -5762,6 +5822,12 @@ impl<'a> CallChecker<'a> {
                     })?;
                     return self.resolve_literal_container_item(copied, slice);
                 }
+            }
+            if let Some(receiver) = self.immediate_userlist_copy_receiver(wrapper) {
+                return self.resolve_literal_container_item(receiver, slice);
+            }
+            if let Some(iterable) = self.immediate_userlist_iterable(value) {
+                return self.resolve_userlist_item(iterable, slice);
             }
             let is_dict_fromkeys = match wrapper.func.as_ref() {
                 Expr::Attribute(method) if method.attr.as_str() == "fromkeys" => {
@@ -7117,6 +7183,9 @@ impl<'a> CallChecker<'a> {
         };
         let fullname = self.resolve_callee(&call.func)?;
         match fullname.as_str() {
+            "builtins.iter" | "builtins.iter.__new__" if selected_index.is_none() => self
+                .immediate_userlist_iterable(call.arguments.args.first()?)
+                .and_then(|iterable| self.literal_iterable_callable_signature(iterable)),
             "builtins.zip" | "builtins.zip.__new__" => {
                 let index = selected_index?;
                 self.literal_iterable_callable_signature(call.arguments.args.get(index)?)
@@ -9424,7 +9493,12 @@ impl<'a> CallChecker<'a> {
         }
         match method.value.as_ref() {
             literal @ Expr::List(_) => self.homogeneous_callable_sequence(literal),
-            Expr::Call(sorted) => self.preserving_builtin_result(sorted, &["builtins.sorted"]),
+            Expr::Call(sorted) => self
+                .preserving_builtin_result(sorted, &["builtins.sorted"])
+                .or_else(|| {
+                    self.immediate_userlist_iterable(&method.value)
+                        .and_then(|iterable| self.homogeneous_callable_sequence(iterable))
+                }),
             _ => None,
         }
     }

@@ -9191,3 +9191,119 @@ def target(value: int) -> None: ...
         "possibly empty unpacked containers must decline: {unpacking:?}"
     );
 }
+
+
+/// `collections.UserList` preserves concrete callable elements from its
+/// positional or `initlist=` literal input (issue #814).
+#[test]
+fn userlist_subscript_resolves_selected_callable() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target])[0](1)
+collections.UserList((target,))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList violations, got: {messages:?}"
+    );
+}
+
+
+/// A mapping passed to `UserList` is iterated into its keys, not its values.
+#[test]
+fn userlist_mapping_subscript_resolves_callable_key() {
+    let messages = check_source(
+        r"
+from collections import UserList
+def key(value: int) -> None: ...
+def value(first: int, second: int) -> None: ...
+UserList({key: value})[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "key") && !has_error_at(&messages, 5, "value"),
+        "expected the UserList mapping key, got: {messages:?}"
+    );
+}
+
+
+/// Repeated callable keys in a mapping occupy one insertion-order slot.
+#[test]
+fn userlist_mapping_subscript_deduplicates_callable_keys() {
+    let messages = check_source(
+        r"
+from collections import UserList
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+UserList({first: 1, first: 2, second: 3})[1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "second"),
+        "expected the second unique callable key, got: {messages:?}"
+    );
+}
+
+
+/// Iterating an immediately constructed `UserList` preserves the homogeneous
+/// literal callable element selected by `next` (issue #817).
+#[test]
+fn userlist_iteration_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+next(iter(UserList(initlist=[target])))(1)
+next(iter(collections.UserList(initlist=(target,))))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        "expected UserList iteration violations, got: {messages:?}"
+    );
+}
+
+
+/// `UserList.pop()` preserves the homogeneous callable element from an
+/// immediately constructed literal-backed list (issue #816).
+#[test]
+fn userlist_pop_resolves_callable_element() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target]).pop()(1)
+collections.UserList(initlist=(target,)).pop()(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList.pop violations, got: {messages:?}"
+    );
+}
+
+
+/// A zero-argument `UserList.copy()` preserves the immediately constructed
+/// list's concrete callable elements (issue #815).
+#[test]
+fn userlist_copy_subscript_resolves_selected_callable() {
+    let messages = check_source(
+        r"
+from collections import UserList
+import collections
+def target(value: int) -> None: ...
+UserList(initlist=[target]).copy()[0](1)
+collections.UserList((target,)).copy()[-1](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
+        "expected UserList.copy violations, got: {messages:?}"
+    );
+}
