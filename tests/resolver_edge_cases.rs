@@ -9949,3 +9949,22 @@ OrderedDict({"x": target}).pop(key="x")(1)
         "expected OrderedDict.pop violation, got: {messages:?}"
     );
 }
+
+
+/// Registering on a freshly constructed inline singledispatch wrapper returns
+/// the concrete implementation supplied to the two-argument form (issue
+/// #965).
+#[test]
+fn inline_singledispatch_register_preserves_implementation() {
+    let messages = check_source(
+        r"
+import functools
+def target(value: int) -> None: ...
+functools.singledispatch(func=target).register(cls=int, func=target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "inline singledispatch.register must preserve its implementation: {messages:?}"
+    );
+}

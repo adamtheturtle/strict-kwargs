@@ -4234,7 +4234,29 @@ impl<'a> CallChecker<'a> {
         let Expr::Attribute(method) = call.func.as_ref() else {
             return None;
         };
-        if method.attr.as_str() != "register" || !call.arguments.keywords.is_empty() {
+        if method.attr.as_str() != "register" {
+            return None;
+        }
+        if let Expr::Call(dispatcher) = method.value.as_ref() {
+            if self.names_stdlib_callable(&dispatcher.func, "functools.singledispatch")
+                && dispatcher.arguments.len() == 1
+                && call.arguments.len() == 2
+                && call.arguments.keywords.iter().all(|keyword| {
+                    matches!(
+                        keyword.arg.as_ref().map(ast::Identifier::as_str),
+                        Some("cls" | "func")
+                    )
+                })
+            {
+                let implementation = call.arguments.args.get(1).or_else(|| {
+                    call.arguments
+                        .find_keyword("func")
+                        .map(|keyword| &keyword.value)
+                })?;
+                return self.resolve_callee(implementation);
+            }
+        }
+        if !call.arguments.keywords.is_empty() {
             return None;
         }
         let generic_fullname = self.resolve_callee(method.value.as_ref())?;
