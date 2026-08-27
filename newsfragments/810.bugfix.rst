@@ -1,0 +1,1 @@
+Ignore provably empty literal dictionary unpacking when resolving concrete callable values.

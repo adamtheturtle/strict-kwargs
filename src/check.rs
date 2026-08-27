@@ -5414,6 +5414,28 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_is_provably_empty(dict: &ast::ExprDict) -> bool {
+        dict.items.iter().all(|item| {
+            item.key.is_none()
+                && matches!(
+                    &item.value,
+                    Expr::Dict(nested) if Self::literal_dict_is_provably_empty(nested)
+                )
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn literal_dict_has_only_static_items(dict: &ast::ExprDict) -> bool {
+        dict.items.iter().all(|item| {
+            item.key.is_some()
+                || matches!(
+                    &item.value,
+                    Expr::Dict(unpacked) if Self::literal_dict_is_provably_empty(unpacked)
+                )
+        })
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn expanded_literal_element_len(element: &Expr) -> Option<usize> {
         let nested_len = |elements: &[Expr]| {
             elements.iter().try_fold(0usize, |len, element| {
@@ -5820,7 +5842,7 @@ impl<'a> CallChecker<'a> {
                 let index = Self::literal_slice_original_index(inner_slice, elements.len(), slice)?;
                 self.resolve_callee(&elements[index])
             }
-            Expr::Dict(dict) if dict.items.iter().all(|item| item.key.is_some()) => dict
+            Expr::Dict(dict) if Self::literal_dict_has_only_static_items(dict) => dict
                 .items
                 .iter()
                 .rev()
