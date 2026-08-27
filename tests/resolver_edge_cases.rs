@@ -6522,6 +6522,38 @@ defaultdict(lambda: factory_result).setdefault("missing", explicit_default)(1, 2
     );
 }
 
+/// `next(reversed(...))` preserves callable elements from a homogeneous
+/// literal iterable (issue #782).
+#[test]
+fn next_reversed_literal_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(reversed([target]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "next() result"),
+        "expected next(reversed(...)) violation, got: {messages:?}"
+    );
+}
+
+/// Sets are iterable but not reversible, so an invalid `reversed(set)` call
+/// must not synthesize a callable result (Bugbot on #875).
+#[test]
+fn next_reversed_set_does_not_resolve_callable_signature() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+next(reversed({target}))(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "invalid reversed(set) must remain unresolved: {messages:?}"
+    );
+}
+
 /// `itertools.filterfalse` preserves concrete callable elements from its
 /// input iterable through `next()` (issue #784).
 #[test]
