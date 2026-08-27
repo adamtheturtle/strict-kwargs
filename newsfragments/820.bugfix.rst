@@ -1,1 +1,0 @@
-Preserve concrete callable values from a ``ChainMap`` parent when subscripting an empty ``new_child()`` result.

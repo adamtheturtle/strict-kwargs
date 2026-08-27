@@ -1,1 +1,0 @@
-Preserve default implementations returned by inline ``singledispatch.dispatch`` calls.

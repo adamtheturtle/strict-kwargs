@@ -1,1 +1,0 @@
-Preserve concrete module-level functions retrieved through literal ``locals()`` and ``globals()`` lookups.

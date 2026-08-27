@@ -1,1 +1,0 @@
-Preserve concrete callable values selected from literal dictionaries by ``operator.itemgetter``.

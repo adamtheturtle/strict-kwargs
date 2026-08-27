@@ -1,1 +1,0 @@
-Honor the PEP 484 convention that a parameter whose name has a leading but no trailing double underscore is positional-only, so calls to functions such as ``tomli.load`` are no longer reported.

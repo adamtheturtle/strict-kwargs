@@ -1,1 +1,0 @@
-Clear callable contextmanager-item metadata when a decorated factory is redefined.

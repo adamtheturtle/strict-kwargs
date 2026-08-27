@@ -1,1 +1,0 @@
-Preserve concrete callable elements selected from statically expanded starred sequence literals.

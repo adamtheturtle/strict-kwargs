@@ -1,2 +1,0 @@
-Preserve concrete callable values returned by a mapping lambda through
-``next(itertools.starmap(...))``.

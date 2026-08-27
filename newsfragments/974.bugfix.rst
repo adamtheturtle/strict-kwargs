@@ -1,1 +1,0 @@
-Preserve concrete callables returned by explicit ``__enter__`` calls on simple ``@contextmanager`` results.

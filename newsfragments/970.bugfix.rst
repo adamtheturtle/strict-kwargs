@@ -1,1 +1,0 @@
-Preserve concrete callable elements indexed from statically known ``NamedTuple._make`` results.

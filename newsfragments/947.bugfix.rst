@@ -1,1 +1,0 @@
-Preserve positive-count concrete callable keys when iterating unions of immediate ``Counter`` values.

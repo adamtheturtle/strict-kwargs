@@ -1,2 +1,0 @@
-Preserve existing concrete callable values returned by ``defaultdict.get``
-when initialized from a literal mapping.

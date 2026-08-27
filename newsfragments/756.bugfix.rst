@@ -1,1 +1,0 @@
-Clear stale receiver annotations when an ordinary assignment records a concrete new instance class.

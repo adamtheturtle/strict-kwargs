@@ -1,2 +1,0 @@
-Preserve wrapped callables returned through directly imported aliases of
-``inspect.unwrap``.

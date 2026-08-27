@@ -1,2 +1,0 @@
-Preserve concrete callable values returned by explicit ``dict.__getitem__``
-calls on literal dictionaries.

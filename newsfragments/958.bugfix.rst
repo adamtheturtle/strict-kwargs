@@ -1,1 +1,0 @@
-Preserve bound callable signatures returned by direct ``classmethod.__get__`` calls.

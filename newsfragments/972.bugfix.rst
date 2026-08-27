@@ -1,1 +1,0 @@
-Preserve concrete callables yielded by zero-argument lambda factories in callable-sentinel ``iter`` values.

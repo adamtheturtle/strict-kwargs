@@ -1,1 +1,0 @@
-Preserve concrete callable keys returned by ``Counter.most_common()`` after immediate mapping initialization.

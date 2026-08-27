@@ -1,1 +1,0 @@
-Resolve callable type aliases used as ``TypeIs`` or ``TypeGuard`` targets.

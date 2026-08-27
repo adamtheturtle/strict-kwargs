@@ -1,1 +1,0 @@
-Preserve lambda wrapper signatures returned by positional ``functools.update_wrapper`` calls.

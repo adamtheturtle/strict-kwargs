@@ -1,1 +1,0 @@
-Propagate a concrete callable when every branch of a local function returns the same target.

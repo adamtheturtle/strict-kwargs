@@ -1,2 +1,0 @@
-Preserve registered callables returned through directly imported aliases of
-``atexit.register``.

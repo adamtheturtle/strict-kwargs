@@ -1,2 +1,0 @@
-Preserve concrete callable values when subscripting a ``MappingProxyType``
-created from a literal dictionary.

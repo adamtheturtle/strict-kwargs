@@ -1,1 +1,0 @@
-Preserve concrete callable values returned by ``WeakKeyDictionary.get`` on immediate mappings with a known object key.

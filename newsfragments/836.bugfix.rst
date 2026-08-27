@@ -1,1 +1,0 @@
-Preserve concrete callable results when awaiting items yielded by ``asyncio.as_completed``.

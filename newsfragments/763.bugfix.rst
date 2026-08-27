@@ -1,1 +1,0 @@
-Resolve named callable aliases when narrowing optional parameters after a non-``None`` guard.

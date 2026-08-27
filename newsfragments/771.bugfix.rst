@@ -1,1 +1,0 @@
-Preserve concrete callable elements through a literal list's ``copy`` method.

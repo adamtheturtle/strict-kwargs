@@ -1,2 +1,0 @@
-Preserve concrete callable values when subscripting a ``UserDict`` constructed
-from a literal dictionary.

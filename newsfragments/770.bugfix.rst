@@ -1,2 +1,0 @@
-Preserve homogeneous callable elements returned by popping a literal or sorted
-list.

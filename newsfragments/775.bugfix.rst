@@ -1,2 +1,0 @@
-Preserve concrete callable values through a literal dictionary's ``copy``
-method.

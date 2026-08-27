@@ -1,1 +1,0 @@
-Preserve concrete callable values while iterating ``weakref.WeakValueDictionary.values()`` initialized from a literal mapping.

@@ -1,2 +1,0 @@
-Preserve concrete callable elements through subscripting
-``random.choices`` results.

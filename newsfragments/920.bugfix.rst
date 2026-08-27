@@ -1,2 +1,0 @@
-Preserve concrete callable values from ``dict.fromkeys`` through literal-key
-subscripts.

@@ -1,1 +1,0 @@
-Assemble news fragments into the changelog again. Every release since the towncrier switch rendered an empty changelog because the configured fragment types omitted the suffix every fragment uses.

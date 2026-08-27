@@ -1,1 +1,0 @@
-Preserve callable aliases returned by ``athrow`` on annotated asynchronous generators.

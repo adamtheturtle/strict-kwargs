@@ -1,2 +1,0 @@
-Preserve concrete callable values when subscripting a single-mapping
-``ChainMap`` constructed from a literal dictionary.

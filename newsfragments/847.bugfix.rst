@@ -1,1 +1,0 @@
-Preserve Pool callable-result inference for context-manager target bindings.

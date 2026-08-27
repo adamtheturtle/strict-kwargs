@@ -1,1 +1,0 @@
-Preserve concrete callable elements returned by ``collections.UserList.pop`` on immediate literal-backed instances.

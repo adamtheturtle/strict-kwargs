@@ -1,1 +1,0 @@
-Preserve concrete callable elements returned by ``operator.concat`` and ``operator.iconcat`` over literal sequences.

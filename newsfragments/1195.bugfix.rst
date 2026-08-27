@@ -1,1 +1,0 @@
-Index a module that resolved but ran out of one query's module budget, instead of marking it indexed without parsing it and skipping it for the rest of the run.

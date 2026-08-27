@@ -1,1 +1,0 @@
-Preserve concrete callable elements when iterating a copied immediate ``WeakSet``.

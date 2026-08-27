@@ -1,1 +1,0 @@
-Preserve concrete callable values returned by ``get`` on literal-backed ``ChainMap``, ``UserDict``, and ``OrderedDict`` instances.

@@ -1,2 +1,0 @@
-Preserve concrete callable values returned by a zero-argument ``defaultdict``
-factory when subscripting an initially empty mapping.

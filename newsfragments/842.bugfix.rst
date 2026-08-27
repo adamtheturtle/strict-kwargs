@@ -1,1 +1,0 @@
-Preserve callable item signatures in async comprehensions over annotated iterator factories.

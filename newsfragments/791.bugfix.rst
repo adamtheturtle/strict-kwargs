@@ -1,2 +1,0 @@
-Preserve concrete callable keys from ``itertools.groupby`` calls without a
-key function.

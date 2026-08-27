@@ -1,1 +1,0 @@
-Preserve wrapped callable signatures recursively through nested ``functools.partial`` values.

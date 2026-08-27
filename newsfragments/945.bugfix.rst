@@ -1,1 +1,0 @@
-Preserve positive-count concrete callable keys when iterating subtraction of immediate ``Counter`` values.

@@ -1,1 +1,0 @@
-Preserve callable return signatures through ``Executor.submit(...).result()``.

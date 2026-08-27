@@ -1,1 +1,0 @@
-Preserve concrete callables returned by single-return property method bodies.

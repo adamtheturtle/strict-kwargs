@@ -1,2 +1,0 @@
-Preserve concrete callable item signatures through :func:`map` and
-:func:`filter` results.

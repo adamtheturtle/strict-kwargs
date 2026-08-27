@@ -1,1 +1,0 @@
-Stop reporting calls made through an attribute whose only declared type is a bare ``Callable[...]``, which names no parameter and so has no keyword form. Fields whose value traces to a concrete named function are still reported.

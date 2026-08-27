@@ -1,1 +1,0 @@
-Infer callable item signatures added to unannotated ``queue.Queue`` instances with ``put``.

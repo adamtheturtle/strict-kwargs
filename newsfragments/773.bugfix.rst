@@ -1,2 +1,0 @@
-Preserve a concrete callable value returned by ``dict.get`` for an existing
-literal key.

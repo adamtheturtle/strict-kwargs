@@ -1,1 +1,0 @@
-Preserve concrete callable values when iterating an immediate ``MappingProxyType.values()`` view.

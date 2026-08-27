@@ -1,1 +1,0 @@
-Treat ``functools.cached_property`` as a property, so a call through one is no longer checked against the getter as the plain ``property`` spelling already was.

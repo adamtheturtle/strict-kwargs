@@ -3,6 +3,400 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.27-post.1
+----------------
+
+- Clear callable-class return metadata when a function is redefined.
+
+- Clear callable iterator-item metadata when a factory function is redefined.
+
+- Clear callable contextmanager-item metadata when a decorated factory is redefined.
+
+- Ensure rebinding or deleting a specialized ``ContextVar`` clears its callable-value metadata.
+
+- Clear stale receiver annotations when an ordinary assignment records a concrete new instance class.
+
+- Clear generic parameter-to-result metadata when a function is redefined.
+
+- Preserve concrete callable signatures returned by ``pop`` on literal sets and dictionaries.
+
+- Preserve concrete callable item signatures through :func:`map` and
+  :func:`filter` results.
+
+- Preserve callable results from ``enterAsyncContext`` when an
+  ``IsolatedAsyncioTestCase`` is stored in a local variable.
+
+- Preserve callable results from a stored property's ``fget`` method.
+
+- Resolve callable type aliases used as ``TypeIs`` or ``TypeGuard`` targets.
+
+- Resolve named callable aliases when narrowing optional parameters after a non-``None`` guard.
+
+- Preserve named callable aliases when an assertion narrows an optional parameter.
+
+- Resolve named callable aliases used as the yield type of annotated generators.
+
+- Resolve named callable aliases used as the yield type of annotated asynchronous generators.
+
+- Preserve callable aliases returned by ``athrow`` on annotated asynchronous generators.
+
+- Resolve named callable aliases used as the value type of annotated ``ContextVar`` instances.
+
+- Resolve named callable aliases used as values in annotated ``MappingProxyType`` instances.
+
+- Preserve homogeneous callable elements returned by popping a literal or sorted
+  list.
+
+- Preserve concrete callable elements through a literal list's ``copy`` method.
+
+- Preserve concrete callable elements returned by an explicit
+  ``list.__getitem__`` call.
+
+- Preserve a concrete callable value returned by ``dict.get`` for an existing
+  literal key.
+
+- Preserve the concrete callable value returned by ``popitem`` on a literal
+  dictionary.
+
+- Preserve concrete callable values through a literal dictionary's ``copy``
+  method.
+
+- Preserve concrete callable values when subscripting a ``MappingProxyType``
+  created from a literal dictionary.
+
+- Preserve concrete callable values when subscripting a single-mapping
+  ``ChainMap`` constructed from a literal dictionary.
+
+- Preserve concrete callable values when subscripting a ``UserDict`` constructed
+  from a literal dictionary.
+
+- Preserve concrete callable values when subscripting an ``OrderedDict``
+  constructed from a literal dictionary.
+
+- Preserve concrete callable values returned by a zero-argument ``defaultdict``
+  factory when subscripting an initially empty mapping.
+
+- Preserve concrete callable elements through ``next(iter(...))`` for literal
+  lists, tuples, sets, and dictionaries.
+
+- Preserve concrete callable elements through ``next(reversed(...))`` for
+  homogeneous literal iterables.
+
+- Preserve concrete callable values returned by a mapping lambda through
+  ``next(itertools.starmap(...))``.
+
+- Preserve concrete callable elements through
+  ``next(itertools.filterfalse(...))``.
+
+- Preserve concrete callable elements when ``random.choice`` and
+  ``secrets.choice`` receive their sequence through the ``seq`` keyword.
+
+- Preserve concrete callable elements when subscripting a ``deque`` constructed
+  from a literal list or tuple.
+
+- Preserve concrete callable elements through subscripting after copying an
+  immediately constructed ``deque``.
+
+- Preserve concrete callable elements returned by ``next(reversed(deque(...)))``.
+
+- Preserve concrete callable values selected from literal ``dict.items()``
+  iterators.
+
+- Preserve concrete callable keys from literal ``dict.keys()`` iterators.
+
+- Preserve concrete callable keys from ``itertools.groupby`` calls without a
+  key function.
+
+- Preserve concrete callable elements through the group iterators returned by
+  ``itertools.groupby``.
+
+- Preserve concrete callable elements through subscripting the results of
+  ``heapq.nsmallest`` and ``heapq.nlargest``.
+
+- Preserve concrete callable elements through subscripting
+  ``random.choices`` results.
+
+- Preserve concrete callable elements returned by bound ``choice`` methods on
+  immediate ``Random`` and ``SystemRandom`` instances.
+
+- Preserve concrete callable elements returned by ``statistics.median_low`` and
+  ``statistics.median_high`` for singleton literal data.
+
+- Preserve concrete callable keys through ``next(Counter(...).elements())``.
+
+- Preserve concrete callable keys selected from ``Counter.popitem()`` results.
+
+- Preserve concrete callable values returned by ``get`` on literal-backed ``ChainMap``, ``UserDict``, and ``OrderedDict`` instances.
+
+- Preserve existing concrete callable values returned by ``defaultdict.get``
+  when initialized from a literal mapping.
+
+- Preserve concrete callable elements captured by statically determined starred
+  destructuring targets.
+
+- Preserve concrete callable elements through ``next()`` for simple identity
+  generator expressions over homogeneous literal iterables.
+
+- Propagate a concrete callable through a local function whose body is a single unconditional return.
+
+- Propagate a concrete callable when every branch of a local function returns the same target.
+
+- Preserve concrete callable elements selected from statically bounded literal sequence slices.
+
+- Preserve concrete callable elements selected from concatenated literal lists and tuples.
+
+- Preserve concrete callable elements selected from repeated literal lists and tuples.
+
+- Preserve concrete callable elements selected from statically expanded starred sequence literals.
+
+- Preserve concrete callable values selected from literal dictionary unions.
+
+- Ignore provably empty literal dictionary unpacking when resolving concrete callable values.
+
+- Preserve identical concrete callable elements selected from both branches of a conditional container.
+
+- Preserve concrete callable elements selected from statically determined boolean container expressions.
+
+- Preserve concrete callable elements selected from literal containers passed through ``copy.copy`` or ``copy.deepcopy``.
+
+- Preserve concrete callable elements selected from immediately constructed ``collections.UserList`` instances.
+
+- Preserve concrete callable elements selected from copied ``collections.UserList`` instances.
+
+- Preserve concrete callable elements returned by ``collections.UserList.pop`` on immediate literal-backed instances.
+
+- Preserve concrete callable elements yielded by iterating immediate literal-backed ``collections.UserList`` instances.
+
+- Preserve concrete callable elements yielded by iterating immediate literal-backed ``collections.deque`` instances.
+
+- Preserve concrete callable elements returned by explicit ``collections.deque.__getitem__`` calls.
+
+- Preserve concrete callable values from a ``ChainMap`` parent when subscripting an empty ``new_child()`` result.
+
+- Preserve concrete callable items returned by ``itertools.chain.from_iterable`` over nested literals.
+
+- Preserve concrete callable values selected from literal dictionaries by ``operator.itemgetter``.
+
+- Preserve concrete callable elements when subscripting literal slices returned by ``operator.itemgetter``.
+
+- Preserve concrete callable elements returned by ``operator.concat`` and ``operator.iconcat`` over literal sequences.
+
+- Preserve concrete callable values when subscripting ``weakref.WeakValueDictionary`` instances initialized from literal mappings.
+
+- Preserve concrete callable values while iterating ``weakref.WeakValueDictionary.values()`` initialized from a literal mapping.
+
+- Preserve concrete callable keys while iterating ``weakref.WeakKeyDictionary`` instances initialized from literal mappings.
+
+- Preserve concrete callable elements while iterating ``weakref.WeakSet`` instances initialized from literal iterables.
+
+- Preserve concrete callable dataclass fields when subscripting ``dataclasses.astuple`` results.
+
+- Preserve concrete callable dataclass fields when subscripting ``dataclasses.asdict`` results.
+
+- Preserve concrete callable fields when subscripting ``NamedTuple._asdict()`` results.
+
+- Preserve concrete callable fields when indexing ``NamedTuple._replace()`` results.
+
+- Preserve concrete callable attributes when subscripting ``vars(SimpleNamespace(...))`` results.
+
+- Preserve concrete callable attributes returned by ``getattr`` on inline ``SimpleNamespace`` instances.
+
+- Preserve concrete callable results when awaiting items yielded by ``asyncio.as_completed``.
+
+- Infer concrete callable results for tasks returned by ``asyncio.create_task``.
+
+- Infer concrete callable results for futures returned by ``asyncio.ensure_future``.
+
+- Preserve callable coroutine result signatures for tasks created by ``asyncio.TaskGroup.create_task``.
+
+- Infer callable item signatures added to unannotated ``asyncio.Queue`` instances with ``put_nowait``.
+
+- Preserve callable item signatures when iterating over annotated async iterator factory calls.
+
+- Preserve callable item signatures in async comprehensions over annotated iterator factories.
+
+- Preserve callable return signatures through ``Executor.submit(...).result()``.
+
+- Preserve concrete callable results yielded by ``Executor.map``.
+
+- Preserve callable future results through singleton ``concurrent.futures.as_completed`` iterators.
+
+- Preserve callable future results through singleton ``concurrent.futures.wait`` done sets.
+
+- Preserve Pool callable-result inference for context-manager target bindings.
+
+- Infer callable item signatures added to unannotated ``queue.Queue`` instances with ``put``.
+
+- Preserve callable item signatures in ``for`` loops over annotated generator factories.
+
+- Preserve callable item signatures in comprehensions over annotated generator factories.
+
+- Infer callable value signatures from unannotated ``ContextVar`` defaults.
+
+- Preserve callable signatures selected through directly imported aliases of
+  ``random.choice`` and ``secrets.choice``.
+
+- Preserve callable signatures returned through directly imported aliases of
+  ``heapq.heappop``.
+
+- Preserve callable signatures returned through directly imported aliases of
+  ``statistics.mode``.
+
+- Preserve concrete callable items from directly imported aliases of
+  ``itertools.chain``.
+
+- Preserve concrete callable referents through directly imported aliases of
+  ``weakref.ref``.
+
+- Preserve registered callables returned through directly imported aliases of
+  ``atexit.register``.
+
+- Preserve wrapped callables returned through directly imported aliases of
+  ``inspect.unwrap``.
+
+- Preserve concrete callable defaults returned by ``dict.get`` when a literal
+  key is known to be missing.
+
+- Preserve concrete callable defaults returned by ``dict.pop`` when a literal
+  key is known to be missing.
+
+- Preserve concrete callable values from ``dict.fromkeys`` through literal-key
+  subscripts.
+
+- Preserve concrete callable values returned by explicit ``dict.__getitem__``
+  calls on literal dictionaries.
+
+- Preserve concrete callable values while iterating the values view of an
+  immediately constructed ``OrderedDict``.
+
+- Preserve concrete callable values selected from an immediately constructed
+  ``OrderedDict`` items iterator.
+
+- Preserve concrete callable values returned by ``OrderedDict.pop`` for a
+  present literal key.
+
+- Preserve concrete callable defaults returned by ``OrderedDict.setdefault``
+  when an immediate mapping is known to be empty.
+
+- Preserve concrete callable values while iterating the values view of an
+  immediately constructed ``UserDict``.
+
+- Preserve concrete callable values selected from an immediately constructed
+  ``UserDict.popitem`` result.
+
+- Preserve concrete callable values while iterating the values view of an
+  immediately constructed single-mapping ``ChainMap``.
+
+- Preserve concrete callable values selected from an immediately constructed
+  single-mapping ``ChainMap`` items iterator.
+
+- Preserve concrete callable values returned by ``get`` on an inline
+  ``MappingProxyType`` around a literal dictionary.
+
+- Preserve concrete callable values when iterating an immediate ``MappingProxyType.values()`` view.
+
+- Preserve concrete callable values when subscripting an immediate ``MappingProxyType.copy()`` result.
+
+- Preserve concrete callable values returned by ``WeakValueDictionary.get`` on immediate literal mappings.
+
+- Preserve concrete callable values returned by ``WeakValueDictionary.pop`` on immediate literal mappings.
+
+- Preserve concrete callable values selected from immediate ``WeakValueDictionary.popitem()`` results.
+
+- Preserve concrete callable values returned by ``WeakKeyDictionary.get`` on immediate mappings with a known object key.
+
+- Preserve concrete callable values selected from immediate ``WeakKeyDictionary.popitem()`` results.
+
+- Preserve concrete callable elements when iterating a copied immediate ``WeakSet``.
+
+- Preserve concrete callable keys yielded by ``Counter.elements()`` after immediate mapping initialization.
+
+- Preserve concrete callable keys returned by ``Counter.most_common()`` after immediate mapping initialization.
+
+- Preserve positive-count concrete callable keys when iterating unary plus on an immediate ``Counter``.
+
+- Preserve positive-count concrete callable keys when iterating addition of immediate ``Counter`` values.
+
+- Preserve positive-count concrete callable keys when iterating subtraction of immediate ``Counter`` values.
+
+- Preserve positive-count concrete callable keys when iterating intersections of immediate ``Counter`` values.
+
+- Preserve positive-count concrete callable keys when iterating unions of immediate ``Counter`` values.
+
+- Preserve concrete callable elements through explicit ``__iter__().__next__()`` calls on literal sequences and sets.
+
+- Preserve concrete callable elements through explicit ``__next__()`` calls on built-in iterators over literal containers.
+
+- Preserve concrete callable values through explicit iterator protocol calls on literal dictionary values views.
+
+- Preserve concrete callable values through explicit iterator protocol calls on literal dictionary items views.
+
+- Preserve concrete callable defaults returned by ``next`` for statically empty iterators.
+
+- Preserve concrete callable defaults returned by ``min`` and ``max`` for statically empty iterables.
+
+- Preserve concrete callable defaults returned by ``getattr`` for missing attributes on inline ``types.SimpleNamespace`` values.
+
+- Preserve concrete callable elements when ``sum`` concatenates statically known list literals.
+
+- Preserve concrete module-level functions retrieved through literal ``locals()`` and ``globals()`` lookups.
+
+- Preserve wrapped callable signatures returned by direct ``staticmethod.__get__`` calls.
+
+- Preserve bound callable signatures returned by direct ``classmethod.__get__`` calls.
+
+- Preserve concrete callables returned by single-return property method bodies.
+
+- Attribute callable-valued ``cached_property`` results to their returned callable and safely rewrite their positional calls.
+
+- Preserve concrete callables returned by inline ``cached_property.__get__`` expressions.
+
+- Preserve wrapped callable signatures recursively through nested ``functools.partial`` values.
+
+- Preserve lambda wrapper signatures returned by positional ``functools.update_wrapper`` calls.
+
+- Preserve default implementations returned by inline ``singledispatch.dispatch`` calls.
+
+- Preserve implementations returned by inline two-argument ``singledispatch.register`` calls.
+
+- Preserve concrete ``SimpleNamespace`` callables returned by ``inspect.getattr_static``.
+
+- Preserve target function signatures enforced by callable ``unittest.mock.create_autospec`` results.
+
+- Preserve concrete wrapped function signatures through callable ``unittest.mock.Mock`` values.
+
+- Preserve concrete callable fields read from statically known ``NamedTuple._make`` results.
+
+- Preserve concrete callable elements indexed from statically known ``NamedTuple._make`` results.
+
+- Preserve concrete callable attributes supplied through literal dictionary unpacking to ``SimpleNamespace``.
+
+- Preserve concrete callables yielded by zero-argument lambda factories in callable-sentinel ``iter`` values.
+
+- Preserve concrete callable elements selected from statically known ``itertools.batched`` results.
+
+- Preserve concrete callables returned by explicit ``__enter__`` calls on simple ``@contextmanager`` results.
+
+- Stop treating a module-level function whose first parameter is ``self`` as an unbound method call, which under-counted its arguments and left one unnamed by ``--fix``.
+
+- Index a module that resolved but ran out of one query's module budget, instead of marking it indexed without parsing it and skipping it for the rest of the run.
+
+- Exercise the bound-hover path in the receiver-stripping unit test, which previously passed the unbound flag.
+
+- Stop reporting calls made through an attribute whose only declared type is a bare ``Callable[...]``, which names no parameter and so has no keyword form. Fields whose value traces to a concrete named function are still reported.
+
+- Honor the PEP 484 convention that a parameter whose name has a leading but no trailing double underscore is positional-only, so calls to functions such as ``tomli.load`` are no longer reported.
+
+- Stop reporting ``super().__init__`` calls into a positional-only base such as ``list`` or ``dict``, and never name the type-inference namespace ``ty`` as the callee.
+
+- Treat the parameters of a bare ``Callable[...]`` annotation as positional-only, as the typing spec requires, so calls through a value typed only that way are no longer reported. Their arity is still checked, and callables traced to a concrete function are unaffected.
+
+- Treat ``functools.cached_property`` as a property, so a call through one is no longer checked against the getter as the plain ``property`` spelling already was.
+
+- Stop reporting calls through a ``Callable[...] | None`` value that has been narrowed to its callable arm.
+
+- Assemble news fragments into the changelog again. Every release since the towncrier switch rendered an empty changelog because the configured fragment types omitted the suffix every fragment uses.
+
 2026.8.27
 ---------
 

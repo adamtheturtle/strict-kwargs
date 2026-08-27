@@ -1,1 +1,0 @@
-Preserve concrete callable keys while iterating ``weakref.WeakKeyDictionary`` instances initialized from literal mappings.

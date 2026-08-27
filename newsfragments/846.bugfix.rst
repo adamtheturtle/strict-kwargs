@@ -1,1 +1,0 @@
-Preserve callable future results through singleton ``concurrent.futures.wait`` done sets.

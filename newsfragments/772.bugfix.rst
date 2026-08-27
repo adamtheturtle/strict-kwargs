@@ -1,2 +1,0 @@
-Preserve concrete callable elements returned by an explicit
-``list.__getitem__`` call.

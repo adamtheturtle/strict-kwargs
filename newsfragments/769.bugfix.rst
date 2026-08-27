@@ -1,1 +1,0 @@
-Resolve named callable aliases used as values in annotated ``MappingProxyType`` instances.
