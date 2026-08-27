@@ -12,7 +12,12 @@ pub fn signature_from_parameters(parameters: &Parameters) -> Signature {
         push_param(&mut params, arg, ParameterKind::PositionalOnly);
     }
     for arg in &parameters.args {
-        push_param(&mut params, arg, ParameterKind::PositionalOrKeyword);
+        let kind = if is_pep484_positional_only(arg.parameter.name.as_str()) {
+            ParameterKind::PositionalOnly
+        } else {
+            ParameterKind::PositionalOrKeyword
+        };
+        push_param(&mut params, arg, kind);
     }
     if let Some(vararg) = &parameters.vararg {
         params.push(Parameter {
@@ -31,6 +36,20 @@ pub fn signature_from_parameters(parameters: &Parameters) -> Signature {
     }
 
     Signature { parameters: params }
+}
+
+/// Whether `name` marks a parameter positional-only by the PEP 484 convention:
+/// a leading double underscore without a trailing one. The typing spec still
+/// requires checkers to honor this spelling, which libraries predating PEP 570
+/// (`tomli.load(__fp, *, parse_float=float)`) rely on. A call has no keyword
+/// form for such a parameter, so reporting one would ask for a rewrite that
+/// fails at runtime (issue #1247).
+///
+/// Only applied to positional-or-keyword parameters. A keyword-only `__a`
+/// cannot be passed positionally whatever its name, and reclassifying it would
+/// wrongly raise the positional budget.
+fn is_pep484_positional_only(name: &str) -> bool {
+    name.starts_with("__") && !name.ends_with("__")
 }
 
 fn push_param(params: &mut Vec<Parameter>, arg: &ParameterWithDefault, kind: ParameterKind) {
@@ -104,8 +123,18 @@ pub fn line_column(source: &str, offset: ruff_text_size::TextSize) -> (usize, us
 
 #[cfg(test)]
 mod tests {
-    use super::{line_column, line_column_from_starts, line_starts};
+    use super::{is_pep484_positional_only, line_column, line_column_from_starts, line_starts};
     use ruff_text_size::TextSize;
+
+    #[test]
+    fn pep484_convention_needs_a_leading_but_no_trailing_double_underscore() {
+        // The spelling libraries predating PEP 570 use (issue #1247).
+        assert!(is_pep484_positional_only("__value"));
+        // Dunders name the protocol slot, not a positional-only parameter.
+        assert!(!is_pep484_positional_only("__value__"));
+        assert!(!is_pep484_positional_only("_value"));
+        assert!(!is_pep484_positional_only("value"));
+    }
 
     #[test]
     fn line_starts_splits_lf_cr_and_crlf() {
