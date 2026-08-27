@@ -678,6 +678,45 @@ def target(value: int) -> None: ...
     }
 }
 
+/// Repeated literal sequences retain the concrete callable selected from any
+/// repetition, including reversed multiplication operands (issue #807).
+#[test]
+fn repeated_literal_sequences_resolve_selected_callables() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+([target] * 2)[1](1)
+((target,) * 2)[1](1)
+(2 * [target])[-1](1)
+(+2 * (target,))[0](1)
+",
+    );
+    for line in 3..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected repeated-literal violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Repeated literals with starred elements do not have a statically known
+/// element-to-index mapping.
+#[test]
+fn repeated_starred_literal_sequences_decline() {
+    let messages = check_source(
+        r"
+def target(value: int) -> None: ...
+def other(first: int, second: int) -> None: ...
+([*[other, target]] * 2)[0](1)
+((*[other, target],) * 2)[0](1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "repeated starred literals must decline: {messages:?}"
+    );
+}
+
 /// Literal slices retain the concrete callable at a statically selected result
 /// index, including negative and stepped slices (issue #805).
 #[test]

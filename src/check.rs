@@ -5320,6 +5320,11 @@ impl<'a> CallChecker<'a> {
     }
 
     #[cfg_attr(coverage, coverage(off))]
+    fn nonnegative_literal_integer(expr: &Expr) -> Option<usize> {
+        usize::try_from(Self::literal_signed_integer(expr)?).ok()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
     fn literal_slice_original_index(
         slice: &ast::ExprSlice,
         len: usize,
@@ -5743,6 +5748,30 @@ impl<'a> CallChecker<'a> {
                     &right[index - left.len()]
                 };
                 self.resolve_callee(element)
+            }
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op: ast::Operator::Mult,
+                right,
+                ..
+            }) => {
+                let (elements, repetitions) = match (left.as_ref(), right.as_ref()) {
+                    (Expr::List(list), repetitions) | (repetitions, Expr::List(list)) => (
+                        list.elts.as_slice(),
+                        Self::nonnegative_literal_integer(repetitions)?,
+                    ),
+                    (Expr::Tuple(tuple), repetitions) | (repetitions, Expr::Tuple(tuple)) => (
+                        tuple.elts.as_slice(),
+                        Self::nonnegative_literal_integer(repetitions)?,
+                    ),
+                    _ => return None,
+                };
+                if elements.iter().any(Expr::is_starred_expr) {
+                    return None;
+                }
+                let len = elements.len().checked_mul(repetitions)?;
+                let index = Self::literal_sequence_index(slice, len)?;
+                self.resolve_callee(&elements[index % elements.len()])
             }
             Expr::Subscript(subscript) => {
                 let Expr::Slice(inner_slice) = subscript.slice.as_ref() else {
