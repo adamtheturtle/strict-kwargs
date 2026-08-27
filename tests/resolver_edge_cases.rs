@@ -10022,3 +10022,43 @@ Pair._make(iterable=[target])[0](1)
         "NamedTuple._make index must preserve its callable: {messages:?}"
     );
 }
+
+
+/// `get` on literal-backed standard-library mapping wrappers preserves the
+/// concrete value callable (issue #799).
+#[test]
+fn collections_mapping_get_preserves_callable_signatures() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict, UserDict
+def target(value: int) -> None: ...
+ChainMap({"x": target}).get(key="x")(1)
+UserDict({"x": target}).get(key="x")(1)
+OrderedDict({"x": target}).get("x")(1)
+"#,
+    );
+    for line in 4..=6 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected mapping get violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+
+/// `OrderedDict.get` inherits the positional-only `dict.get` parameters, so an
+/// invalid keyword call must not synthesize a callable result.
+#[test]
+fn ordered_dict_get_rejects_keyword_key_resolution() {
+    let messages = check_source(
+        r#"
+from collections import OrderedDict
+def target(value: int) -> None: ...
+OrderedDict({"x": target}).get(key="x")(1)
+"#,
+    );
+    assert!(
+        !has_error_at(&messages, 4, "target"),
+        "invalid keyword call resolved a concrete value: {messages:?}"
+    );
+}
