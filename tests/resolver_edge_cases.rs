@@ -2213,9 +2213,11 @@ itemgetter(1)([*values, strict])(1)
 itemgetter(-2)((strict, *values))(1)
 itemgetter(0)([*values, strict][1:])(1)
 itemgetter(0)((*values, strict)[1:])(1)
+itemgetter(slice(1, None))([*values, strict])[0](1)
+itemgetter(slice(1, None))((*values, strict))[0](1)
 ",
     );
-    for line in [6, 7, 8, 9] {
+    for line in [6, 7, 8, 9, 10, 11] {
         assert!(
             !messages
                 .iter()
@@ -2239,6 +2241,23 @@ operator.itemgetter("x")({"x": target})(1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected itemgetter dictionary result violation, got: {messages:?}"
+    );
+}
+
+/// Subscripting a literal slice returned by `itemgetter` preserves the
+/// selected callable element (issue #824).
+#[test]
+fn itemgetter_slice_result_preserves_callable_signature() {
+    let messages = check_source(
+        r"
+import operator
+def target(value: int) -> None: ...
+operator.itemgetter(slice(0, 1))([target])[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected itemgetter slice result violation, got: {messages:?}"
     );
 }
 

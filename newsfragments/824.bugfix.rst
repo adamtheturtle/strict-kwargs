@@ -1,0 +1,1 @@
+Preserve concrete callable elements when subscripting literal slices returned by ``operator.itemgetter``.
