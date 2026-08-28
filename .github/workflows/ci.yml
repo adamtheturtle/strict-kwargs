@@ -68,6 +68,38 @@ jobs:
       - name: Run tests
         run: cargo test --locked --verbose
 
+  hook:
+    # Exercises `.pre-commit-hooks.yaml`, which nothing else here does: this
+    # repo's own pre-commit config invokes the binary directly, so a broken
+    # `entry:` stays invisible until it reaches a consumer (#1291).
+    name: Published pre-commit hook
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hook-e2e
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install pre-commit
+        run: uv tool install pre-commit
+
+      # No ty on PATH here on purpose: the hook builds this repo's maturin
+      # wheel into an isolated environment, so ty must arrive as a dependency
+      # of the built package -- exactly as it does for a consumer.
+      - name: Run the hook against a throwaway consumer project
+        run: ./scripts/hook-e2e.sh
+
   benchmarks:
     # Continuous benchmarking (issue #30). Pull requests compile the benchmark
     # target as a smoke test; CodSpeed uploads run only on non-PR events so an
