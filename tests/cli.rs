@@ -43,6 +43,10 @@ impl Project {
         std::fs::read_to_string(self.root.join(rel)).expect("read")
     }
 
+    fn path(&self, rel: &str) -> std::path::PathBuf {
+        self.root.join(rel)
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         Command::new(BIN)
             .args(args)
@@ -1231,6 +1235,64 @@ fn fix_diff_prints_patch_without_writing() {
     );
     // `--diff` must not modify the file.
     assert_eq!(project.read("main.py"), source);
+}
+
+/// `--diff` never writes the planned fixes, so it must not resolve a fix
+/// journal either: the rollback would be the only change it made to the working
+/// tree. `--fix` still resolves it (issues #1117, #1279).
+#[test]
+fn fix_diff_leaves_a_pending_fix_journal_alone() {
+    let fixed = "FIXED_MARKER = 2\n";
+    let project = Project::new()
+        .write("a.py", fixed)
+        .write("b.py", "def f(value: int) -> None: ...\nf(1)\n")
+        .write(".strict-kwargs-fix-999-0.old", "ORIGINAL_MARKER = 1\n");
+    let digest = fnv1a(fixed.as_bytes());
+    let journal = serde_json::json!({
+        "committed": false,
+        "entries": [{
+            "destination": project.path("a.py"),
+            "staged": project.path(".strict-kwargs-fix-999-0.new"),
+            "backup": project.path(".strict-kwargs-fix-999-0.old"),
+            "fixed_digest": digest,
+        }],
+    });
+    let project = project.write(
+        ".strict-kwargs-fix-journal-999.json",
+        &serde_json::to_string(&journal).expect("serialize journal"),
+    );
+
+    let output = project.run(&["check", "--diff", "."]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("a.py"),
+        fixed,
+        "--diff must not roll the journal back"
+    );
+
+    let output = project.run(&["check", "--fix", "."]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        project.read("a.py"),
+        "ORIGINAL_MARKER = 1\n",
+        "--fix still resolves the journal"
+    );
+}
+
+/// FNV-1a over a length prefix then the bytes, matching `fix::content_digest`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut state: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |byte: u8| {
+        state ^= u64::from(byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for byte in (bytes.len() as u64).to_le_bytes() {
+        mix(byte);
+    }
+    for &byte in bytes {
+        mix(byte);
+    }
+    state
 }
 
 #[test]

@@ -186,6 +186,29 @@ pub fn fix_paths(
     )
 }
 
+/// Resolve any fix journal a crashed run left in the directories this fix would
+/// read, before it reads them.
+///
+/// Callers that go on to write the planned fixes must run this first: a journal
+/// resolved late can roll back over content the file has gained since
+/// (issue #1117). Analysis-only callers such as `--diff` must *not*, because a
+/// rollback would be the only change they make to the working tree
+/// (issue #1279).
+///
+/// # Errors
+///
+/// Returns an error when the project files cannot be listed, or a journal
+/// cannot be read, rolled back, or removed.
+pub fn recover_fix_journals_for(
+    project_root: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+) -> Result<(), CheckError> {
+    let python_files = collect_python_files_for_fix(project_root, paths, config)?;
+    crate::fix::recover_fix_journals(&python_files)?;
+    Ok(())
+}
+
 /// Like [`fix_paths`], but includes the requested non-default fix categories.
 ///
 /// # Errors
@@ -223,10 +246,6 @@ fn fix_paths_impl(
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
     let python_files = collect_python_files_for_fix(project_root, paths, config)?;
-    // Resolve any journal a crashed run left behind *before* reading these
-    // files, so the rerun analyzes the recovered content and the journal
-    // cannot survive to reach a later edit (issue #1117).
-    crate::fix::recover_fix_journals(&python_files)?;
     let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
     let (index, indexed_files) = build_index_with_sources(

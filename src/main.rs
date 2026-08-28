@@ -480,6 +480,13 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
             || args_fix_opt_ins.synthesized_constructors,
     };
     let python_env = resolve_python_env(args.python)?;
+    if !args.diff {
+        // Resolve a crashed run's journal before this run reads the files, so
+        // it cannot survive to roll back over a later edit (issue #1117).
+        // `--diff` is excluded: it never writes, so a rollback would be the
+        // only change it made to the working tree (issue #1279).
+        strict_kwargs::recover_fix_journals_for(&project_root, &args.paths, &config)?;
+    }
     let outcome = fix_paths_with_opt_ins(
         &project_root,
         &args.paths,

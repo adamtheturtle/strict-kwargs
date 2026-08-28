@@ -48,7 +48,7 @@ use file_selection::{
 };
 #[cfg(test)]
 use file_selection::{is_ignored_path, FileSelection};
-pub use fix_runner::{fix_paths, fix_paths_with_opt_ins};
+pub use fix_runner::{fix_paths, fix_paths_with_opt_ins, recover_fix_journals_for};
 
 /// Maximum fallback requests in flight at once. This must stay at 1: `ty
 /// server` handles concurrent requests on a thread pool, and its answers for
@@ -4475,8 +4475,17 @@ impl<'a> CallChecker<'a> {
                 let mut arm = arm.clone();
                 (!arm.parameters.is_empty()).then_some(())?;
                 arm.parameters.remove(0);
-                let max = arm.max_positional_at_call_site(&bound_fullname, false);
-                Some((max.is_none(), max.unwrap_or(0), arm))
+                // `max_positional_at_call_site` returns `None` only for an
+                // ignored callee, never for `*args`, so unboundedness has to be
+                // read off the parameters themselves (issue #1277).
+                let unbounded = arm
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.kind == ParameterKind::VarPositional);
+                let max = arm
+                    .max_positional_at_call_site(&bound_fullname, false)
+                    .unwrap_or(0);
+                Some((unbounded, max, arm))
             })
             .max_by_key(|(unbounded, max, _)| (*unbounded, *max))
             .map(|(_, _, arm)| arm)?;
@@ -4901,12 +4910,22 @@ impl<'a> CallChecker<'a> {
         let Expr::Name(receiver) = method.value.as_ref() else {
             return None;
         };
-        if !self
-            .scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.executor_instances.contains(receiver.id.as_str()))
-        {
+        // Stop at the nearest scope that binds the name at all: a parameter or
+        // local that shadows a tracked executor is an opaque object, not that
+        // executor (issue #1278). The executor's own `with ... as` target is
+        // marked opaque too, so the innermost *binding* has to decide rather
+        // than opacity alone.
+        let name = receiver.id.as_str();
+        let is_executor = self.scopes.iter().rev().find_map(|scope| {
+            if scope.executor_instances.contains(name) {
+                return Some(true);
+            }
+            // `names` already covers a nested `def`, which registers there
+            // as well as in `functions`.
+            let shadows = scope.opaque_locals.contains(name) || scope.names.contains_key(name);
+            shadows.then_some(false)
+        });
+        if is_executor != Some(true) {
             return None;
         }
         let Some(Expr::Lambda(mapper)) = call.arguments.args.first() else {
@@ -14186,6 +14205,19 @@ fn ty_hover_signature_is_safe_for_fix(
         || (!name.contains('@') && !owner.is_some_and(|owner| owner.contains('@')))
 }
 
+/// Whether a ty hover owner names a class the reader can find in their source.
+///
+/// `Self@__init__` is ty's binder display, not a name in the reader's source,
+/// and it is not the callee's class either: `super().__init__` dispatches to a
+/// base. Reporting the method alone is the honest subset (issue #1253).
+///
+/// Only the part before any generic arguments is the class name, so the test
+/// runs on that part: a type *argument* may carry a binder suffix while the
+/// owner itself is a perfectly real class (issue #1280).
+fn hover_owner_is_a_real_class(owner: &str) -> bool {
+    !owner.split('[').next().unwrap_or(owner).contains('@')
+}
+
 fn parameter_name_is_safe_keyword_target(name: &str) -> bool {
     !name.starts_with("__") || name.ends_with("__")
 }
@@ -14937,13 +14969,10 @@ fn resolve_pending_with_ty(
                         p.positional_count,
                         sig.owner.is_none(),
                     );
-                let owner = sig.owner.as_deref().filter(|owner| {
-                    // `Self@__init__` is ty's binder display, not a name in the
-                    // reader's source, and it is not the callee's class either:
-                    // `super().__init__` dispatches to a base. Reporting the
-                    // method alone is the honest subset (issue #1253).
-                    !owner.contains('@')
-                });
+                let owner = sig
+                    .owner
+                    .as_deref()
+                    .filter(|owner| hover_owner_is_a_real_class(owner));
                 let fullname = match owner {
                     Some(owner) => {
                         let owner = owner.split('[').next().unwrap_or(owner);
@@ -16350,7 +16379,7 @@ while cond:
     // each early-`return false` guard directly, so every branch is
     // visible to the coverage gate (issue #43).
 
-    use super::CallChecker;
+    use super::{hover_owner_is_a_real_class, CallChecker};
     use crate::index::DefinitionIndex;
     use ruff_python_ast::visitor::Visitor;
     use ruff_python_ast::{Expr, Stmt};
@@ -16694,6 +16723,17 @@ class C:
 ",
         );
         assert_eq!(groups, vec![None]);
+    }
+
+    /// A binder display is not a class, but a real class keeps its name even
+    /// when a type argument carries one (issues #1253, #1280).
+    #[test]
+    fn hover_owner_generic_arguments_do_not_hide_a_real_class() {
+        assert!(!hover_owner_is_a_real_class("Self@__init__"));
+        assert!(hover_owner_is_a_real_class("Wrapper"));
+        assert!(hover_owner_is_a_real_class("pkg.Wrapper"));
+        assert!(hover_owner_is_a_real_class("Wrapper[T@method]"));
+        assert!(!hover_owner_is_a_real_class("Self@method[int]"));
     }
 
     #[test]
