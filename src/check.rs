@@ -4164,13 +4164,16 @@ impl<'a> CallChecker<'a> {
         if !self.index.is_excluded(fullname) {
             return false;
         }
-        let Some(shadow) = self.index.shadow_offset(fullname) else {
+        let Some((shadow_module, shadow_offset)) = self.index.shadow_site(fullname) else {
             return true;
         };
-        if !fullname.starts_with(&format!("{}.", self.module_name)) {
+        // Offsets only mean anything inside one file. `pkg` is a prefix of
+        // `pkg.sub`, so a prefix test let a parent package compare its own
+        // offsets against a submodule's rebinding (issue #1288).
+        if shadow_module != self.module_name {
             return true;
         }
-        offset >= shadow
+        offset >= shadow_offset
     }
 
     /// Map a base name to the signature-bearing fullname to check: the name
@@ -14287,8 +14290,20 @@ fn ty_call_fix_insertions(
         Some((class_fullname, method)),
     ) = (index, &*call.func, callee_fullname.rsplit_once('.'))
     {
+        // The attribute names the method for `obj.render(...)`, but for an
+        // implicit `obj.attr(...)` it names the *instance* and the method is
+        // `__call__`. Requiring the two to match skipped the override check for
+        // exactly that shape, so a subclass `__call__` with renamed parameters
+        // was rewritten against the base signature — code that raises
+        // `TypeError` at runtime (issue #1289).
+        //
+        // Only `__call__`: `__init__`/`__new__` reached through an attribute
+        // are a *qualified constructor* (`mod.Class(...)`), which always builds
+        // the named class, so a subclass override never runs and declining
+        // there would only lose fixes — and would disagree with the built-in
+        // fixer, which still requires the attribute to name the method.
         if !receiver_is_class_object(value, class_fullname)
-            && method == attr.as_str()
+            && (method == attr.as_str() || method == "__call__")
             && index.has_overriding_method_matching_class_name(class_fullname, method)
         {
             return Err(DeclinedFixReason::UnsupportedSignatureShape);

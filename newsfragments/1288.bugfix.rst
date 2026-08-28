@@ -1,0 +1,1 @@
+Stop comparing a ``for`` or ``with`` rebinding offset recorded in one file against call sites in another, which let a parent package be checked against a submodule's superseded signature.

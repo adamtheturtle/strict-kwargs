@@ -120,7 +120,7 @@ struct Store {
     /// anywhere in a module hid the definition from calls *earlier* in that
     /// same module — including the call inside the very expression the target
     /// is bound from (issues #1098, #1107).
-    shadowed_after: FxHashMap<String, usize>,
+    shadowed_after: FxHashMap<String, (String, usize)>,
     /// Methods decorated as properties / enum magic attributes. Calling
     /// through the attribute reads the property; the call targets the
     /// returned value, not the getter signature (issues #668, #669).
@@ -155,8 +155,9 @@ impl Store {
     /// module that defines it (issues #1098, #1107).
     /// Callers gate on `signatures` still holding `fullname`, and `exclude`
     /// removes it, so at most one rebinding records an offset for a name.
-    fn exclude_after(&mut self, fullname: String, offset: usize) {
-        self.shadowed_after.insert(fullname.clone(), offset);
+    fn exclude_after(&mut self, fullname: String, module_name: &str, offset: usize) {
+        self.shadowed_after
+            .insert(fullname.clone(), (module_name.to_owned(), offset));
         self.exclude(fullname);
     }
 
@@ -1513,8 +1514,8 @@ impl DefinitionIndex {
     /// The source offset from which a `for` or `with ... as` target rebinding
     /// excludes `fullname`, if that is why it is excluded. Calls earlier in the
     /// defining module still see the definition (issues #1098, #1107).
-    pub fn shadow_offset(&self, fullname: &str) -> Option<usize> {
-        self.read().store.shadowed_after.get(fullname).copied()
+    pub fn shadow_site(&self, fullname: &str) -> Option<(String, usize)> {
+        self.read().store.shadowed_after.get(fullname).cloned()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -3395,7 +3396,7 @@ fn index_stmt(
                         // Python evaluates the iterable first, so a call
                         // inside it still uses the previous binding
                         // (issue #1098).
-                        store.exclude_after(fullname, iter.range().end().to_usize());
+                        store.exclude_after(fullname, module_name, iter.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
@@ -3422,7 +3423,11 @@ fn index_stmt(
                         // Python evaluates the context expression first, so a
                         // call inside it still uses the previous binding
                         // (issue #1107).
-                        store.exclude_after(fullname, item.context_expr.range().end().to_usize());
+                        store.exclude_after(
+                            fullname,
+                            module_name,
+                            item.context_expr.range().end().to_usize(),
+                        );
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
@@ -3644,7 +3649,7 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                         // Python evaluates the iterable first, so a call
                         // inside it still uses the previous binding
                         // (issue #1098).
-                        store.exclude_after(fullname, iter.range().end().to_usize());
+                        store.exclude_after(fullname, module_name, iter.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
@@ -3664,7 +3669,11 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                         // Python evaluates the context expression first, so a
                         // call inside it still uses the previous binding
                         // (issue #1107).
-                        store.exclude_after(fullname, item.context_expr.range().end().to_usize());
+                        store.exclude_after(
+                            fullname,
+                            module_name,
+                            item.context_expr.range().end().to_usize(),
+                        );
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
