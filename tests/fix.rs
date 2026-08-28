@@ -156,6 +156,33 @@ fn declines_an_implicit_call_rewrite_when_a_subclass_overrides_it() {
     assert_fixed(source, source);
 }
 
+/// An f-string debug specifier embeds the expression's *source text* in the
+/// output, so rewriting a call inside one changes what the program prints
+/// (issue #1294).
+#[test]
+fn declines_a_call_inside_an_fstring_debug_specifier() {
+    let source = "def square(value): ...\nprint(f\"{square(5)=}\")\n";
+    assert_fixed(source, source);
+}
+
+/// Every t-string interpolation exposes its source text as
+/// `Interpolation.expression`, so none of them may be rewritten (issue #1294).
+#[test]
+fn declines_a_call_inside_a_tstring_interpolation() {
+    let source = "def square(value): ...\ntemplate = t\"Square: {square(5)}\"\n";
+    assert_fixed(source, source);
+}
+
+/// A plain replacement field uses only the *value*, so it stays fixable --
+/// the guard must not swallow every f-string (issue #1294).
+#[test]
+fn rewrites_a_call_inside_a_plain_fstring_field() {
+    assert_fixed(
+        "def square(value): ...\nprint(f\"{square(5)}\")\n",
+        "def square(value): ...\nprint(f\"{square(value=5)}\")\n",
+    );
+}
+
 /// The shapes the removed guard was written for: an unbound dunder call passes
 /// its receiver positionally, and `receiver_is_explicit` already keeps it there
 /// (issue #1281).
