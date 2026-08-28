@@ -1,0 +1,1 @@
+Pin that a comprehension over an annotated generator factory checks its callable items.

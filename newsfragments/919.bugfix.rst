@@ -1,0 +1,1 @@
+Pin that the callable default of a ``pop`` on an empty literal mapping stays concrete.

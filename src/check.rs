@@ -4825,6 +4825,212 @@ impl<'a> CallChecker<'a> {
             .then_some(resolved)
     }
 
+    /// The literal mapping a read-only or ordered wrapper forwards to. Each of
+    /// these wrappers presents the values of the mapping it was built from, so
+    /// a literal behind one still names concrete callables (issues #827, #923,
+    /// #928, #929, #931).
+    fn literal_mapping_behind_wrapper<'b>(&self, expr: &'b Expr) -> Option<&'b Expr> {
+        if matches!(expr, Expr::Dict(_)) {
+            return Some(expr);
+        }
+        let Expr::Call(constructor) = expr else {
+            return None;
+        };
+        let class = self.resolve_callee(&constructor.func)?;
+        let mapping = match Self::normalize_factory_fullname(&class) {
+            "types.MappingProxyType" => match (
+                &*constructor.arguments.args,
+                constructor.arguments.find_keyword("mapping"),
+            ) {
+                ([mapping], None) => mapping,
+                ([], Some(keyword)) => &keyword.value,
+                _ => return None,
+            },
+            "collections.ChainMap"
+            | "collections.OrderedDict"
+            | "collections.UserDict"
+            | "weakref.WeakValueDictionary"
+                if constructor.arguments.keywords.is_empty() =>
+            {
+                let [mapping] = &*constructor.arguments.args else {
+                    return None;
+                };
+                mapping
+            }
+            _ => return None,
+        };
+        matches!(mapping, Expr::Dict(_)).then_some(mapping)
+    }
+
+    /// The callable every item of `executor.map(lambda ...: target, ...)` is.
+    /// The mapper's result is the same for every input when its body names a
+    /// callable, so the iterator's items are concrete (issue #844).
+    fn executor_map_lambda_result_callable(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let Expr::Attribute(method) = call.func.as_ref() else {
+            return None;
+        };
+        if method.attr.as_str() != "map" {
+            return None;
+        }
+        let Expr::Name(receiver) = method.value.as_ref() else {
+            return None;
+        };
+        if !self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.executor_instances.contains(receiver.id.as_str()))
+        {
+            return None;
+        }
+        let Some(Expr::Lambda(mapper)) = call.arguments.args.first() else {
+            return None;
+        };
+        self.resolve_callee(&mapper.body)
+    }
+
+    /// The iterable behind an `itertools.groupby` group, reached as
+    /// `next(groupby(...))[1]`. Every group is a subsequence of that iterable,
+    /// so when all of its elements name one callable, so does any group
+    /// (issue #792).
+    fn groupby_group_iterable<'b>(&self, expr: &'b Expr) -> Option<&'b Expr> {
+        let Expr::Subscript(subscript) = expr else {
+            return None;
+        };
+        if Self::nonnegative_literal_index(&subscript.slice)? != 1 {
+            return None;
+        }
+        let Expr::Call(next_call) = subscript.value.as_ref() else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)? != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [grouped] = &*next_call.arguments.args else {
+            return None;
+        };
+        let Expr::Call(groupby) = grouped else {
+            return None;
+        };
+        if Self::normalize_factory_fullname(&self.resolve_callee(&groupby.func)?)
+            != "itertools.groupby"
+        {
+            return None;
+        }
+        groupby.arguments.args.first().or_else(|| {
+            groupby
+                .arguments
+                .find_keyword("iterable")
+                .map(|keyword| &keyword.value)
+        })
+    }
+
+    /// The concrete callable `next(iter(...))` yields, when every element of
+    /// the literal container behind the iterator resolves to the same callee.
+    /// Without this the call is checked against an annotation-derived
+    /// signature, whose parameters have no names, so it cannot be fixed
+    /// (issues #790, #827, #923, #928, #929, #931).
+    fn next_iter_literal_callable(&self, func: &Expr) -> Option<String> {
+        let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
+            (
+                subscript.value.as_ref(),
+                Some(Self::nonnegative_literal_index(&subscript.slice)?),
+            )
+        } else {
+            (func, None)
+        };
+        let Expr::Call(next_call) = next_expr else {
+            return None;
+        };
+        if self.resolve_callee(&next_call.func)? != "builtins.next"
+            || !next_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterator] = &*next_call.arguments.args else {
+            return None;
+        };
+        if selected_index.is_none() {
+            if let Some(callable) = self.executor_map_lambda_result_callable(iterator) {
+                return Some(callable);
+            }
+        }
+        let Expr::Call(iter_call) = iterator else {
+            return None;
+        };
+        if !matches!(
+            self.resolve_callee(&iter_call.func)?.as_str(),
+            "builtins.iter" | "builtins.iter.__new__"
+        ) || !iter_call.arguments.keywords.is_empty()
+        {
+            return None;
+        }
+        let [iterable] = &*iter_call.arguments.args else {
+            return None;
+        };
+        if selected_index.is_none() {
+            // A `UserList` or `deque` presents the sequence it was built from,
+            // so a literal behind one still names a concrete element
+            // (issue #817).
+            let sequence = self
+                .immediate_userlist_iterable(iterable)
+                .or_else(|| self.immediate_deque_iterable(iterable))
+                .or_else(|| self.groupby_group_iterable(iterable))
+                .unwrap_or(iterable);
+            if let Some(callable) = self.homogeneous_literal_callable(sequence) {
+                return Some(callable);
+            }
+        }
+        // Iterating a mapping directly yields its keys; a view call selects
+        // keys, values, or the pair an index picks out of `items`.
+        let (dict, want_key) = match iterable {
+            Expr::Call(view_call) => {
+                let Expr::Attribute(view) = view_call.func.as_ref() else {
+                    return None;
+                };
+                if !view_call.arguments.args.is_empty() || !view_call.arguments.keywords.is_empty()
+                {
+                    return None;
+                }
+                let Some(Expr::Dict(dict)) = self.literal_mapping_behind_wrapper(&view.value)
+                else {
+                    return None;
+                };
+                let want_key = match (view.attr.as_str(), selected_index) {
+                    ("keys", None) | ("items", Some(0)) => true,
+                    ("values", None) | ("items", Some(1)) => false,
+                    _ => return None,
+                };
+                (dict, want_key)
+            }
+            _ if selected_index.is_none() => {
+                let Some(Expr::Dict(dict)) = self.literal_mapping_behind_wrapper(iterable) else {
+                    return None;
+                };
+                (dict, true)
+            }
+            _ => return None,
+        };
+        let mut resolved: Option<String> = None;
+        for item in &dict.items {
+            let element = if want_key {
+                item.key.as_ref()?
+            } else {
+                &item.value
+            };
+            let callee = self.resolve_callee(element)?;
+            if resolved.get_or_insert_with(|| callee.clone()) != &callee {
+                return None;
+            }
+        }
+        resolved
+    }
+
     #[cfg_attr(coverage, coverage(off))]
     fn preserving_builtin_result(&self, call: &ast::ExprCall, names: &[&str]) -> Option<String> {
         let fullname = self.resolve_callee(&call.func)?;
@@ -8135,6 +8341,12 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn mapping_proxy_get_signature(&self, func: &Expr) -> Option<Signature> {
+        // A concrete value behind the proxy carries its own parameter names,
+        // which this annotation-derived signature does not. Yield to
+        // `literal_dict_get_callable` so the call is fixable (issue #930).
+        if self.literal_dict_get_callable(func).is_some() {
+            return None;
+        }
         let Expr::Call(get_call) = func else {
             return None;
         };
@@ -8898,6 +9110,12 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn next_result_signature(&self, func: &Expr) -> Option<Signature> {
+        // A concrete element carries its own parameter names, which this
+        // annotation-derived signature does not. Yield to
+        // `next_iter_literal_callable` so the call is fixable (issue #790).
+        if self.next_iter_literal_callable(func).is_some() {
+            return None;
+        }
         let (next_expr, selected_index) = if let Expr::Subscript(subscript) = func {
             (
                 subscript.value.as_ref(),
@@ -10014,6 +10232,20 @@ impl<'a> CallChecker<'a> {
                         };
                         (mapping, call.arguments.args.first()?)
                     }
+                    // A read-only proxy forwards `get` to the mapping it wraps,
+                    // so a literal mapping behind one still resolves to a
+                    // concrete callable (issue #930).
+                    "types.MappingProxyType" => {
+                        let mapping = match (
+                            &*constructor.arguments.args,
+                            constructor.arguments.find_keyword("mapping"),
+                        ) {
+                            ([mapping], None) => mapping,
+                            ([], Some(keyword)) => &keyword.value,
+                            _ => return None,
+                        };
+                        (mapping, Self::generic_argument(call, Some(0), "key")?)
+                    }
                     "weakref.WeakValueDictionary" if constructor.arguments.keywords.is_empty() => {
                         let [mapping] = &*constructor.arguments.args else {
                             return None;
@@ -11113,6 +11345,9 @@ impl<'a> CallChecker<'a> {
                     .then_some(resolved)
             }
             Expr::Subscript(subscript) => {
+                if let Some(callable) = self.next_iter_literal_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(returned) = self
                     .class_from_constructor(&subscript.value)
                     .or_else(|| {
@@ -11293,6 +11528,9 @@ impl<'a> CallChecker<'a> {
                 self.resolve_dotted_module_attr(value, attr_name)
             }
             Expr::Call(constructor) => {
+                if let Some(callable) = self.next_iter_literal_callable(func) {
+                    return Some(callable);
+                }
                 if let Some(callable) = self.singledispatch_dispatch_callable(func) {
                     return Some(callable);
                 }

@@ -1,0 +1,1 @@
+Pin that subscripting a ``UserList.copy`` result keeps the concrete element.

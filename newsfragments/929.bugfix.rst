@@ -1,0 +1,1 @@
+Resolve the concrete callable behind a ``ChainMap`` items view built from a literal mapping.
