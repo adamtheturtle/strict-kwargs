@@ -1426,6 +1426,160 @@ def use(value: object) -> None:
     );
 }
 
+/// A `for` target rebinding excludes the name only from the point the loop
+/// binds it, so calls earlier in the module still reach the definition
+/// (issue #1098). The companion case — a call *inside* the iterable — also
+/// needs the checker-side shadow ordering of issue #1105.
+#[test]
+fn a_loop_target_rebinding_does_not_hide_earlier_calls() {
+    let messages = check_source(
+        r"
+def factory(first: int, second: int) -> None: ...
+factory(1, 2)
+for factory in [1]:
+    pass
+",
+    );
+    assert!(
+        has_error_at(&messages, 3, "factory"),
+        "the call before the loop still sees the definition: {messages:?}"
+    );
+}
+
+/// The same holds for a `with ... as` target: the context expression is
+/// evaluated against the previous binding (issue #1107).
+#[test]
+fn a_with_target_rebinding_does_not_hide_its_context_expression() {
+    let messages = check_source(
+        r"
+class Ctx:
+    def __enter__(self) -> object: ...
+    def __exit__(self, *args: object) -> None: ...
+def factory(first: int, second: int) -> Ctx:
+    return Ctx()
+with factory(1, 2) as factory:
+    pass
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "factory"),
+        "the context expression still sees the definition: {messages:?}"
+    );
+
+    let local = check_source(
+        r"
+class Ctx:
+    def __enter__(self) -> object: ...
+    def __exit__(self, *args: object) -> None: ...
+def use() -> None:
+    def factory(first: int, second: int) -> Ctx:
+        return Ctx()
+    with factory(1, 2) as factory:
+        pass
+",
+    );
+    assert!(
+        has_error_at(&local, 8, "factory"),
+        "a function-local rebinding behaves the same: {local:?}"
+    );
+}
+
+/// A call *after* the rebinding still gets the conservative exclusion: the
+/// name no longer refers to the definition (issues #1098, #1107).
+#[test]
+fn a_call_after_a_target_rebinding_stays_excluded() {
+    let looped = check_source(
+        r"
+def factory(first: int, second: int) -> None: ...
+for factory in [1]:
+    pass
+factory(1, 2)
+",
+    );
+    assert!(
+        looped.is_empty(),
+        "the loop target is opaque afterwards: {looped:?}"
+    );
+
+    // Two rebindings of one name: the exclusion starts at the earlier of them.
+    let twice = check_source(
+        r"
+def factory(first: int, second: int) -> None: ...
+factory(1, 2)
+for factory in [1]:
+    pass
+for factory in [2]:
+    pass
+factory(1, 2)
+",
+    );
+    assert_eq!(
+        twice.len(),
+        1,
+        "only the call before the first rebinding is checked: {twice:?}"
+    );
+    assert!(
+        has_error_at(&twice, 3, "factory"),
+        "the call before the first rebinding is checked: {twice:?}"
+    );
+
+    let managed = check_source(
+        r"
+class Ctx:
+    def __enter__(self) -> object: ...
+    def __exit__(self, *args: object) -> None: ...
+def factory(first: int, second: int) -> Ctx:
+    return Ctx()
+with Ctx() as factory:
+    pass
+factory(1, 2)
+",
+    );
+    assert!(
+        managed.is_empty(),
+        "the with target is opaque afterwards: {managed:?}"
+    );
+
+    // A target that shadows an imported module is recognised as replacing a
+    // known binding, so it is marked opaque and invalidated here. Module
+    // *resolution* additionally has to stop at that opaque entry before the
+    // attribute call goes unchecked, which is issue #1124.
+    let module_target = check_source(
+        r"
+import os
+class Ctx:
+    def __enter__(self) -> object: ...
+    def __exit__(self, *args: object) -> None: ...
+with Ctx() as os:
+    pass
+os.getcwd(1)
+",
+    );
+    assert_eq!(
+        module_target.len(),
+        1,
+        "the module target is handled without extra diagnostics: {module_target:?}"
+    );
+
+    let unpacked = check_source(
+        r"
+class Ctx:
+    def __enter__(self) -> object: ...
+    def __exit__(self, *args: object) -> None: ...
+def factory(first: int, second: int) -> None: ...
+def pair() -> Ctx:
+    return Ctx()
+with pair() as (factory, other):
+    pass
+factory(1, 2)
+",
+    );
+    assert!(
+        unpacked.is_empty(),
+        "an unpacked with target is opaque too: {unpacked:?}"
+    );
+}
+
 /// `TypeIs` resolves a callable type alias before narrowing (regression #762).
 #[test]
 fn typeis_narrowing_resolves_callable_alias() {

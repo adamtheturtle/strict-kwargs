@@ -2914,7 +2914,7 @@ impl<'a> CallChecker<'a> {
         // The encoded call is still a call to `fullname`, so it takes the same
         // exemptions a written-out call would: a `@singledispatch` callee whose
         // first argument must stay positional, and a configured ignore name.
-        if self.index.is_excluded(&fullname) {
+        if self.callee_is_excluded_at(&fullname, constructor.start().to_usize()) {
             return true;
         }
         let Some(signatures) = self.index.get(&fullname) else {
@@ -3144,7 +3144,7 @@ impl<'a> CallChecker<'a> {
         // Functions whose first argument must stay positional at runtime
         // (e.g. @singledispatch dispatches on args[0].__class__): skip
         // without deferring to ty.
-        if self.index.is_excluded(&callee_fullname) {
+        if self.callee_is_excluded_at(&callee_fullname, call.start().to_usize()) {
             return;
         }
         // `@property` / enum magic attributes are descriptors: `obj.prop(...)`
@@ -4143,11 +4143,34 @@ impl<'a> CallChecker<'a> {
         callee_fullname: &str,
         call: &ast::ExprCall,
     ) {
-        if !self.index.is_excluded(callee_fullname)
+        if !self.callee_is_excluded_at(callee_fullname, call.start().to_usize())
             && !self.index.is_star_import_blocked(callee_fullname)
         {
             self.record_ty_pending(call);
         }
+    }
+
+    /// Whether `fullname` is excluded for a call at `offset` in this file.
+    ///
+    /// Most exclusions hold for the whole program. A `for` or `with ... as`
+    /// target rebinding is different: it takes effect at one point in one
+    /// module, and calls before that point still reach the definition. The
+    /// index is flow-insensitive, so treating that exclusion as global hid the
+    /// definition from earlier calls — including the call inside the very
+    /// expression the target is bound from (issues #1098, #1107). Calls from
+    /// another module keep the conservative whole-program exclusion, since
+    /// offsets are not comparable across files.
+    fn callee_is_excluded_at(&self, fullname: &str, offset: usize) -> bool {
+        if !self.index.is_excluded(fullname) {
+            return false;
+        }
+        let Some(shadow) = self.index.shadow_offset(fullname) else {
+            return true;
+        };
+        if !fullname.starts_with(&format!("{}.", self.module_name)) {
+            return true;
+        }
+        offset >= shadow
     }
 
     /// Map a base name to the signature-bearing fullname to check: the name
@@ -6919,6 +6942,32 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn shadow_loop_target(&mut self, target: &Expr) {
         self.invalidate_bound_callable_targets(target);
+    }
+
+    /// Retire any callable binding a `with ... as` target replaces. The target
+    /// is opaque afterwards even when it did not previously name a callable,
+    /// because the context manager decides what it holds.
+    fn shadow_with_target(&mut self, target: &Expr) {
+        let Expr::Name(name) = target else {
+            self.invalidate_bound_callable_targets(target);
+            return;
+        };
+        let was_callable_alias = self.has_visible_callable_type_alias(name.id.as_str());
+        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+            scope.functions.contains_key(name.id.as_str())
+                || scope.names.contains_key(name.id.as_str())
+                || scope.modules.contains_key(name.id.as_str())
+                || matches!(
+                    scope.callable_type_aliases.get(name.id.as_str()),
+                    Some(Some(_))
+                )
+        }) || was_callable_alias;
+        self.mark_opaque_local(name.id.as_str());
+        if was_known_callable {
+            self.current_scope()
+                .invalidated_callables
+                .insert(name.id.to_string());
+        }
     }
 
     /// Drop a prior function/import binding when an assignment target rebinds
@@ -12024,6 +12073,10 @@ impl<'a> CallChecker<'a> {
                 continue;
             };
             self.visit_expr(target);
+            // Python evaluates the context expression against the *previous*
+            // binding, so `with f(...) as f` still calls the original `f`.
+            // Shadowing before that visit skipped the call (issue #1107).
+            self.shadow_with_target(target);
             let Expr::Name(name) = target else {
                 continue;
             };
@@ -12816,31 +12869,6 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
             }
             Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::With(with_stmt) => {
-                for target in with_stmt
-                    .items
-                    .iter()
-                    .filter_map(|item| item.optional_vars.as_deref())
-                {
-                    if let Expr::Name(name) = target {
-                        let was_callable_alias =
-                            self.has_visible_callable_type_alias(name.id.as_str());
-                        let was_known_callable = self.scopes.last().is_some_and(|scope| {
-                            scope.functions.contains_key(name.id.as_str())
-                                || scope.names.contains_key(name.id.as_str())
-                                || scope.modules.contains_key(name.id.as_str())
-                                || matches!(
-                                    scope.callable_type_aliases.get(name.id.as_str()),
-                                    Some(Some(_))
-                                )
-                        }) || was_callable_alias;
-                        self.mark_opaque_local(name.id.as_str());
-                        if was_known_callable {
-                            self.current_scope()
-                                .invalidated_callables
-                                .insert(name.id.to_string());
-                        }
-                    }
-                }
                 self.visit_with_stmt(with_stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {

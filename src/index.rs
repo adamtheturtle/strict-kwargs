@@ -114,6 +114,13 @@ struct Store {
     /// ``args[0].__class__``; a keyword first argument would raise
     /// ``TypeError`` at runtime.
     excluded: FxHashSet<String>,
+    /// Names in [`Store::excluded`] that a `for` or `with ... as` target
+    /// rebinds, mapped to the source offset at which the rebinding takes
+    /// effect. The exclusion is flow-insensitive, so without this a rebinding
+    /// anywhere in a module hid the definition from calls *earlier* in that
+    /// same module — including the call inside the very expression the target
+    /// is bound from (issues #1098, #1107).
+    shadowed_after: FxHashMap<String, usize>,
     /// Methods decorated as properties / enum magic attributes. Calling
     /// through the attribute reads the property; the call targets the
     /// returned value, not the getter signature (issues #668, #669).
@@ -144,6 +151,15 @@ impl Store {
         self.excluded.insert(fullname);
     }
 
+    /// Exclude `fullname`, but only for calls at or after `offset` in the
+    /// module that defines it (issues #1098, #1107).
+    /// Callers gate on `signatures` still holding `fullname`, and `exclude`
+    /// removes it, so at most one rebinding records an offset for a name.
+    fn exclude_after(&mut self, fullname: String, offset: usize) {
+        self.shadowed_after.insert(fullname.clone(), offset);
+        self.exclude(fullname);
+    }
+
     /// Drop an indexed signature after an unconditional rebinding. Branch
     /// bodies are deliberately ignored: a sibling branch may retain the
     /// original function binding.
@@ -153,6 +169,7 @@ impl Store {
         }
         self.signatures.remove(fullname);
         self.excluded.remove(fullname);
+        self.shadowed_after.remove(fullname);
         self.properties.remove(fullname);
         self.pending_overloads.remove(fullname);
     }
@@ -1491,6 +1508,13 @@ impl DefinitionIndex {
     /// (see [`Store::excluded`]).
     pub fn is_excluded(&self, fullname: &str) -> bool {
         self.read().store.excluded.contains(fullname)
+    }
+
+    /// The source offset from which a `for` or `with ... as` target rebinding
+    /// excludes `fullname`, if that is why it is excluded. Calls earlier in the
+    /// defining module still see the definition (issues #1098, #1107).
+    pub fn shadow_offset(&self, fullname: &str) -> Option<usize> {
+        self.read().store.shadowed_after.get(fullname).copied()
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -3368,7 +3392,10 @@ fn index_stmt(
                 if let Expr::Name(name) = target.as_ref() {
                     let fullname = format!("{scope_name}.{}", name.id);
                     if store.signatures.contains_key(&fullname) {
-                        store.exclude(fullname);
+                        // Python evaluates the iterable first, so a call
+                        // inside it still uses the previous binding
+                        // (issue #1098).
+                        store.exclude_after(fullname, iter.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
@@ -3385,14 +3412,17 @@ fn index_stmt(
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
-            for target in items
-                .iter()
-                .filter_map(|item| item.optional_vars.as_deref())
-            {
+            for item in items {
+                let Some(target) = item.optional_vars.as_deref() else {
+                    continue;
+                };
                 if let Expr::Name(name) = target {
                     let fullname = format!("{scope_name}.{}", name.id);
                     if store.signatures.contains_key(&fullname) {
-                        store.exclude(fullname);
+                        // Python evaluates the context expression first, so a
+                        // call inside it still uses the previous binding
+                        // (issue #1107).
+                        store.exclude_after(fullname, item.context_expr.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, Some(bindings));
@@ -3611,7 +3641,10 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
                 if let Expr::Name(name) = target.as_ref() {
                     let fullname = format!("{scope_name}.{}", name.id);
                     if store.signatures.contains_key(&fullname) {
-                        store.exclude(fullname);
+                        // Python evaluates the iterable first, so a call
+                        // inside it still uses the previous binding
+                        // (issue #1098).
+                        store.exclude_after(fullname, iter.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);
@@ -3621,14 +3654,17 @@ fn index_stmt_fast(store: &mut Store, module_name: &str, scope_name: &str, stmt:
             }
         }
         Stmt::With(ast::StmtWith { items, body, .. }) => {
-            for target in items
-                .iter()
-                .filter_map(|item| item.optional_vars.as_deref())
-            {
+            for item in items {
+                let Some(target) = item.optional_vars.as_deref() else {
+                    continue;
+                };
                 if let Expr::Name(name) = target {
                     let fullname = format!("{scope_name}.{}", name.id);
                     if store.signatures.contains_key(&fullname) {
-                        store.exclude(fullname);
+                        // Python evaluates the context expression first, so a
+                        // call inside it still uses the previous binding
+                        // (issue #1107).
+                        store.exclude_after(fullname, item.context_expr.range().end().to_usize());
                     }
                 }
                 exclude_assigned_attribute(store, scope_name, target, None);

@@ -863,3 +863,23 @@ Child(base=1)
         "keyword construction should remain accepted; got: {messages:?}"
     );
 }
+
+/// A `for` target rebinding in another module keeps the conservative
+/// whole-program exclusion: source offsets are not comparable across files,
+/// so the importing module cannot tell whether its call precedes the
+/// rebinding (issues #1098, #1107).
+#[test]
+fn a_rebinding_in_another_module_excludes_the_name_everywhere() {
+    let project = TestProject::new()
+        .dep("pkg/__init__.py", "")
+        .dep(
+            "pkg/service.py",
+            "def factory(first: int, second: int) -> None: ...\nfor factory in [1]:\n    pass\n",
+        )
+        .main("from pkg.service import factory\nfactory(1, 2)\n");
+    assert!(
+        project.check().is_empty(),
+        "a cross-module rebinding stays excluded: {:?}",
+        project.check()
+    );
+}
