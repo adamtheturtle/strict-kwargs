@@ -1,0 +1,1 @@
+Pin that an instance-bound receiver reaches ``__aenter__`` when binding an ``async with`` target.

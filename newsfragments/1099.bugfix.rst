@@ -1,0 +1,1 @@
+Invoke the result of an awaited ``asyncio.to_thread`` call, so a callable the callback returns is checked at its call site.

@@ -419,6 +419,48 @@ mod tests {
         assert!(resolver.resolve("this_module_does_not_exist_xyz").is_none());
     }
 
+    /// Configured `src` roots are searched before the repository root, which
+    /// is the fallback. Putting the root first resolved a module present in
+    /// both places from the root (issue #1086).
+    #[test]
+    fn configured_src_roots_are_searched_before_the_repository_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src").join("shared.py"), "FROM_SRC = True\n").expect("write src");
+        std::fs::write(root.join("shared.py"), "FROM_SRC = False\n").expect("write root");
+        let config = crate::config::Config {
+            src: vec![std::path::PathBuf::from("src")],
+            ..crate::config::Config::default()
+        };
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let module = resolver.resolve("shared").expect("module");
+        assert!(
+            module.source.contains("FROM_SRC = True"),
+            "the configured src root must win, got: {}",
+            module.source
+        );
+    }
+
+    /// The repository root still resolves modules that no configured root
+    /// provides (issue #1086).
+    #[test]
+    fn the_repository_root_remains_a_fallback_behind_configured_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("only_at_root.py"), "AT_ROOT = True\n").expect("write root");
+        let config = crate::config::Config {
+            src: vec![std::path::PathBuf::from("src")],
+            ..crate::config::Config::default()
+        };
+        let source_roots = SourceRoots::from_config(root, &config);
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let module = resolver.resolve("only_at_root").expect("module");
+        assert!(module.source.contains("AT_ROOT = True"));
+    }
+
     #[test]
     fn resolves_first_party_package_and_pyi() {
         let dir = tempfile::tempdir().expect("tempdir");

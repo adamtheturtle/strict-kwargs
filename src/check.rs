@@ -2047,6 +2047,13 @@ impl<'a> CallChecker<'a> {
                 param.parameter.annotation.as_deref(),
             );
         }
+        self.bind_star_parameters(parameters);
+    }
+
+    /// Bind `*args` / `**kwargs`, which are opaque whichever path reaches
+    /// them. Shared so a new parameter kind is handled in one place
+    /// (issue #1191).
+    fn bind_star_parameters(&mut self, parameters: &ast::Parameters) {
         if let Some(vararg) = &parameters.vararg {
             self.mark_param_opaque_and_annotation(
                 vararg.name.as_str(),
@@ -2095,15 +2102,7 @@ impl<'a> CallChecker<'a> {
                 self.mark_param_opaque_and_annotation(name, param.parameter.annotation.as_deref());
             }
         }
-        if let Some(vararg) = &parameters.vararg {
-            self.mark_param_opaque_and_annotation(
-                vararg.name.as_str(),
-                vararg.annotation.as_deref(),
-            );
-        }
-        if let Some(kwarg) = &parameters.kwarg {
-            self.mark_param_opaque_and_annotation(kwarg.name.as_str(), kwarg.annotation.as_deref());
-        }
+        self.bind_star_parameters(parameters);
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -2230,9 +2229,26 @@ impl<'a> CallChecker<'a> {
     /// calls go unchecked.
     #[cfg_attr(coverage, coverage(off))]
     fn is_invalidated_callable_name(&self, name: &str) -> bool {
-        self.scopes.iter().rev().any(|scope| {
-            scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name)
-        })
+        for scope in self.scopes.iter().rev() {
+            // Within one scope the invalidation wins: a lambda replacing an
+            // earlier `def` marks the name both invalidated *and* opaque, and
+            // that pair must stay blocked (issue #412).
+            if scope.deleted_names.contains(name) || scope.invalidated_callables.contains(name) {
+                return true;
+            }
+            // A nearer binding replaces whatever an enclosing scope deleted or
+            // invalidated, so the fresh value must still be resolvable. A
+            // lambda or bound-method alias binds by marking the name opaque,
+            // which is what defers it to ty. Treating an enclosing entry as
+            // decisive suppressed those calls entirely (issue #1087).
+            if scope.functions.contains_key(name)
+                || scope.names.contains_key(name)
+                || scope.opaque_locals.contains(name)
+            {
+                return false;
+            }
+        }
+        false
     }
 
     fn define_module(&mut self, local_name: &str, module_path: String) {
@@ -2263,6 +2279,12 @@ impl<'a> CallChecker<'a> {
 
     fn resolve_module(&self, name: &str) -> Option<String> {
         for scope in self.scopes.iter().rev() {
+            // A nearer local binding shadows an enclosing `import`. Walking
+            // past it let a rebound name keep resolving through the module
+            // (issue #1124).
+            if scope.opaque_locals.contains(name) {
+                return None;
+            }
             if let Some(path) = scope.modules.get(name) {
                 return Some(path.clone());
             }
@@ -2753,7 +2775,7 @@ impl<'a> CallChecker<'a> {
         };
         if let Expr::Attribute(method) = call.func.as_ref() {
             if method.attr.as_str() == "_replace" {
-                return self.class_from_constructor(&method.value);
+                return self.class_from_record_expr(&method.value);
             }
             // `dataclasses.replace(obj, field=...)` — avoid resolve_callee here so
             // attribute resolution for unrelated constructor calls like `C().method`
@@ -2765,7 +2787,7 @@ impl<'a> CallChecker<'a> {
                 if self.resolve_module(module.id.as_str()).as_deref() != Some("dataclasses") {
                     return None;
                 }
-                return self.class_from_constructor(call.arguments.args.first()?);
+                return self.class_from_record_expr(call.arguments.args.first()?);
             }
             return None;
         }
@@ -2775,7 +2797,17 @@ impl<'a> CallChecker<'a> {
         if self.resolve_local(name.id.as_str()).as_deref() != Some("dataclasses.replace") {
             return None;
         }
-        self.class_from_constructor(call.arguments.args.first()?)
+        self.class_from_record_expr(call.arguments.args.first()?)
+    }
+
+    /// The record class an expression evaluates to, following a chain of
+    /// replacements. `N()._replace()._replace()` and `replace(replace(D()))`
+    /// each yield an instance of the original class, so the inner expression
+    /// of a replacement is itself a replacement rather than a constructor
+    /// (issue #1100).
+    fn class_from_record_expr(&self, expr: &Expr) -> Option<String> {
+        self.class_from_constructor(expr)
+            .or_else(|| self.class_from_record_replacement(expr))
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -2795,6 +2827,10 @@ impl<'a> CallChecker<'a> {
         self.dataclass_constructor_field_callable(instance, attr)
             .or_else(|| self.namedtuple_constructor_field_callable(instance, attr))
             .or_else(|| self.namedtuple_keyword_field_callable(instance, attr))
+            // The receiver of a chained replacement is another replacement
+            // rather than a constructor, so recurse to reach the original
+            // record (issue #1100).
+            .or_else(|| self.record_replacement_field_callable(instance, attr))
     }
 
     const fn class_from_literal_expr(expr: &Expr) -> Option<&'static str> {
@@ -4181,6 +4217,14 @@ impl<'a> CallChecker<'a> {
         if !self.functional_namedtuple_names.contains(class.id.as_str()) {
             return None;
         }
+        // The set is file-wide, so a parameter, an exited local, or a
+        // reassignment that shadows the factory name would still take the
+        // keyword-field path and resolve to the wrong callee (issue #1111).
+        if self.is_opaque_local(class.id.as_str())
+            || self.is_invalidated_callable_name(class.id.as_str())
+        {
+            return None;
+        }
         constructor
             .arguments
             .keywords
@@ -4394,11 +4438,27 @@ impl<'a> CallChecker<'a> {
             return None;
         };
         let fullname = self.resolve_callee(method)?;
-        let mut signature = self.index.get(&fullname)?.first()?.clone();
-        (!signature.parameters.is_empty()).then_some(())?;
-        signature.parameters.remove(0);
+        let bound_fullname = format!("{fullname} bound by MethodType");
+        // Call checking flags a call only when *every* overload arm exceeds
+        // the positional limit. `LocalFunction` carries one signature, so keep
+        // the most permissive arm: a call within it is within some arm, and a
+        // call beyond it is beyond all of them. Keeping the first arm reported
+        // calls that a later `*args` arm accepts (issue #1094).
+        let signature = self
+            .index
+            .get(&fullname)?
+            .iter()
+            .filter_map(|arm| {
+                let mut arm = arm.clone();
+                (!arm.parameters.is_empty()).then_some(())?;
+                arm.parameters.remove(0);
+                let max = arm.max_positional_at_call_site(&bound_fullname, false);
+                Some((max.is_none(), max.unwrap_or(0), arm))
+            })
+            .max_by_key(|(unbounded, max, _)| (*unbounded, *max))
+            .map(|(_, _, arm)| arm)?;
         Some(LocalFunction {
-            fullname: format!("{fullname} bound by MethodType"),
+            fullname: bound_fullname,
             signature,
         })
     }
@@ -6661,7 +6721,7 @@ impl<'a> CallChecker<'a> {
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_local_name_if_callable(&mut self, name: &str) {
         let was_callable_alias = self.has_visible_callable_type_alias(name);
-        let was_known_callable = self.scopes.last().is_some_and(|scope| {
+        let was_known_callable = self.scopes.iter().rev().any(|scope| {
             scope.functions.contains_key(name)
                 || scope.names.contains_key(name)
                 || scope.modules.contains_key(name)
@@ -9497,9 +9557,20 @@ impl<'a> CallChecker<'a> {
                         .then_some(&keyword.value)
                 })
             })?;
+            // `to_thread` *calls* `func`, so awaiting it yields what `func`
+            // returns, not `func` itself. Reading the function's own
+            // signature wrongly flagged the outer call and fed the fixer that
+            // function's parameter names (issue #1113). Mirrors the
+            // pool-map mapper resolution.
             return match callback {
                 Expr::Lambda(lambda) => self.unnamed_callable_signature(&lambda.body),
-                _ => self.unnamed_callable_signature(callback),
+                _ => self.resolve_callee(callback).and_then(|func| {
+                    self.callable_returns.get(&func).cloned().or_else(|| {
+                        self.concrete_callable_returns
+                            .get(&func)
+                            .and_then(|returned| self.callable_fullname_signature(returned))
+                    })
+                }),
             };
         }
         None
@@ -11780,6 +11851,11 @@ impl<'a> CallChecker<'a> {
             }
             return;
         }
+        // Python evaluates the iterable, *then* binds the target, so the
+        // shadowing has to follow the visit above. Doing it first skipped
+        // calls in the iterable that still refer to the previous callable
+        // (issue #1105).
+        self.shadow_loop_target(for_stmt.target.as_ref());
         self.visit_expr(&for_stmt.target);
         let item_label = if for_stmt.is_async {
             "async-for item"
@@ -11832,7 +11908,12 @@ impl<'a> CallChecker<'a> {
             | Stmt::AnnAssign(_)
             | Stmt::FunctionDef(_)
             | Stmt::ClassDef(_)
-            | Stmt::With(_) => {
+            | Stmt::With(_)
+            // `For` is delegated for the loop target's shadowing, which lives
+            // in `visit_stmt`'s arm: calling `visit_for_stmt` from here
+            // skipped it, so a function-local loop target never shadowed an
+            // enclosing binding of the same name (issue #1124).
+            | Stmt::For(_) => {
                 self.visit_stmt(stmt);
             }
             Stmt::If(if_stmt) => {
@@ -11919,10 +12000,6 @@ impl<'a> CallChecker<'a> {
                 self.scan_stmt_for_hover_poison(stmt);
                 self.record_nonlocal_names(&nonlocal_stmt.names);
             }
-            Stmt::For(for_stmt) => {
-                self.scan_stmt_for_hover_poison(stmt);
-                self.visit_for_stmt(for_stmt);
-            }
             _ => {
                 self.scan_stmt_for_hover_poison(stmt);
                 walk_stmt(self, stmt);
@@ -11954,7 +12031,12 @@ impl<'a> CallChecker<'a> {
         // hover-binding scan itself (see `visit_body_stmt`).
         if !matches!(
             stmt,
-            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_)
+            Stmt::Assign(_)
+                | Stmt::AnnAssign(_)
+                | Stmt::FunctionDef(_)
+                | Stmt::ClassDef(_)
+                | Stmt::With(_)
+                | Stmt::For(_)
         ) {
             self.scan_stmt_for_hover_poison(stmt);
         }
@@ -12019,8 +12101,17 @@ impl<'a> CallChecker<'a> {
                     }
                 }
             }
-            Stmt::With(with_stmt) => self.visit_with_stmt(with_stmt),
-            Stmt::Assign(_) | Stmt::AnnAssign(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+            // `With` and `For` are delegated for their target invalidation,
+            // which lives in `visit_stmt`'s arms: reaching `visit_with_stmt`
+            // or `walk_stmt` from here skipped it, so a class-body rebinding
+            // kept an earlier callable of the same name
+            // (issues #1104, #1106).
+            Stmt::Assign(_)
+            | Stmt::AnnAssign(_)
+            | Stmt::FunctionDef(_)
+            | Stmt::ClassDef(_)
+            | Stmt::With(_)
+            | Stmt::For(_) => {
                 self.visit_stmt(stmt);
             }
             _ => walk_stmt(self, stmt),
@@ -12485,12 +12576,7 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
                 self.visit_expr(value);
                 self.visit_expr(target);
             }
-            Stmt::For(for_stmt) => {
-                if !definite_empty_iterable(for_stmt.iter.as_ref()) {
-                    self.shadow_loop_target(for_stmt.target.as_ref());
-                }
-                self.visit_for_stmt(for_stmt);
-            }
+            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::With(with_stmt) => {
                 for target in with_stmt
                     .items

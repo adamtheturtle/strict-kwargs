@@ -1,0 +1,1 @@
+Pin that a class field annotated ``Callable`` with a default is indexed on the fast class-body path.

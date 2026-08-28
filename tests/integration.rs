@@ -2048,6 +2048,146 @@ class Child(Base):
 }
 
 #[test]
+fn a_local_rebinding_shadows_an_enclosing_callable() {
+    // Python makes a name local to the whole function once it is bound
+    // there, whatever an enclosing scope bound it to. The invalidation only
+    // consulted the innermost scope, so the enclosing `def` stayed visible
+    // and its parameter names reached the call
+    // (issues #1121, #1123, #1124).
+    for body in [
+        "    target, _ = items\n    target(1, 2)\n", // destructuring
+        "    if (target := items[0]) is not None:\n        target(1, 2)\n", // walrus
+        "    for target in items:\n        target(1, 2)\n", // loop target
+    ] {
+        let messages = check_source(&format!(
+            "def target(alpha, beta): ...\ndef caller(items):\n{body}"
+        ));
+        assert!(messages.is_empty(), "{body}: got: {messages:?}");
+    }
+}
+
+#[test]
+fn functional_dataclass_omits_init_false_fields() {
+    // `field(init=False)` keeps the attribute but drops it from `__init__`,
+    // as the class form already models. Putting it on the constructor made
+    // the opt-in fix emit `Point(x=1, y=2)`, which raises `TypeError` at
+    // runtime (issue #1089).
+    let messages = check_source(
+        "from dataclasses import field, make_dataclass\nPoint = make_dataclass(\"Point\", [(\"x\", int), (\"y\", int, field(init=False))])\nPoint(1)\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("(got 1, maximum 0)")),
+        "the sole init field is still a constructor parameter: {messages:?}"
+    );
+}
+
+#[test]
+fn functional_dataclass_keeps_ordinary_fields() {
+    // The counterpart: a field with no spec, or one that does not disable
+    // `init`, stays on the constructor.
+    let messages = check_source(
+        "from dataclasses import field, make_dataclass\nPoint = make_dataclass(\"Point\", [(\"x\", int), (\"y\", int, field(default=0))])\nPoint(1, 2)\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("(got 2, maximum 0)")),
+        "both fields should remain constructor parameters: {messages:?}"
+    );
+}
+
+#[test]
+fn class_body_destructuring_replaces_a_method() {
+    // `method, _ = (lambda ...), None` rebinds the method exactly as the
+    // plain assignment does, but only the plain form dropped the indexed
+    // `def` (issue #1122).
+    let messages = check_source(
+        "class C:\n    def method(self, alpha, beta): ...\n    method, _ = (lambda only: None), None\nC().method(1, 2)\n",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn class_body_destructuring_keeps_an_unreplaced_method() {
+    // The counterpart: a destructuring that does not replace the method
+    // leaves it resolvable.
+    let messages = check_source(
+        "class C:\n    def method(self, alpha, beta): ...\n    other, _ = (lambda only: None), None\nC().method(1, 2)\n",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+}
+
+#[test]
+fn an_inner_rebinding_survives_an_enclosing_invalidation() {
+    // A `del` at module scope must not suppress a fresh inner binding of the
+    // same name; the lambda's own signature applies (issue #1087).
+    let messages = check_source(
+        "def target(alpha, beta): ...\ndel target\ndef caller():\n    target = lambda only: None\n    target(1, 2)\n",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+}
+
+#[test]
+fn a_lambda_replacing_a_def_in_one_scope_stays_blocked() {
+    // The counterpart the invalidation exists for: a lambda replacing an
+    // earlier `def` in the same scope must not be checked against either
+    // signature (issue #412).
+    let messages =
+        check_source("def target(alpha, beta): ...\ntarget = lambda only: None\ntarget(1, 2)\n");
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn a_loop_iterable_is_checked_before_the_target_binds() {
+    // Python evaluates the iterable first, so a call there still refers to
+    // the previous callable and must be checked against it (issue #1105).
+    let messages = check_source(
+        "def target(alpha, beta): ...\ndef caller():\n    for target in [target(1, 2)]:\n        pass\n",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(messages[0].contains(r#"for "target""#), "got: {messages:?}");
+}
+
+#[test]
+fn a_destructured_loop_target_shadows_an_enclosing_callable() {
+    // Tuple targets rebind too, so the enclosing `def` must not be used
+    // after them (issue #1097).
+    let messages = check_source(
+        "def target(alpha, beta): ...\ndef caller(items):\n    for target, _ in items:\n        target(1, 2)\n",
+    );
+    assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+#[test]
+fn class_body_rebindings_invalidate_an_earlier_callable() {
+    // A class body routes its statements separately, and `With`/`For` were
+    // not delegated there, so a rebinding kept the earlier callable
+    // (issues #1104, #1106).
+    let with_body = "import contextlib\ndef target(alpha, beta): ...\n@contextlib.contextmanager\ndef provide():\n    yield lambda only: None\nclass C:\n    with provide() as target:\n        target(1, 2)\n";
+    assert!(
+        check_source(with_body).is_empty(),
+        "with: got: {:?}",
+        check_source(with_body)
+    );
+    let for_body =
+        "def target(alpha, beta): ...\nclass C:\n    for target in []:\n        target(1, 2)\n";
+    assert!(
+        check_source(for_body).is_empty(),
+        "for: got: {:?}",
+        check_source(for_body)
+    );
+}
+
+#[test]
+fn an_enclosing_callable_still_resolves_without_a_rebinding() {
+    // The counterpart: with no local rebinding the enclosing `def` is used.
+    let messages = check_source("def target(alpha, beta): ...\ndef caller():\n    target(1, 2)\n");
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+}
+
+#[test]
 fn module_level_function_named_self_is_not_an_unbound_call() {
     // `pkg.utils.process` is a plain function whose first parameter happens
     // to be named `self`. Treating the dotted path as a class method dropped

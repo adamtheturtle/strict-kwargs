@@ -1,0 +1,1 @@
+Classes built by ``make_dataclass`` with ``init=False`` are no longer reported for positional construction, and are no longer rewritten into keywords the class does not accept.
