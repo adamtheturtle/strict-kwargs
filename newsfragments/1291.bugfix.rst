@@ -1,0 +1,1 @@
+Run ``strict-kwargs check`` from the pre-commit hook, so the hook checks the files pre-commit passes it instead of failing every run with ``error: unrecognized subcommand``.
