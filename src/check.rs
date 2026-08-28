@@ -224,6 +224,20 @@ fn pipeline_phases(
     diagnostics: &mut Vec<Diagnostic>,
     skip_warnings: &mut Vec<SkipWarning>,
 ) -> Result<(), CheckError> {
+    // Phase 0: complete the rebinding-exclusion set before any call is judged,
+    // so the parallel scan below cannot see a half-populated one (issue #1293).
+    // Every project file participates, not just the ones this run scans: on a
+    // warm cache a rebinding in a cache-hit file still has to be recorded, or
+    // an incremental run diverges from a full one.
+    discover_rebinding_exclusions(
+        all_project_files,
+        explicit_files,
+        source_roots,
+        config,
+        index,
+        indexed_files,
+    );
+
     let (tx, rx) = std::sync::mpsc::channel();
     let mut consumer_err: Option<CheckError> = None;
     let mut released_pending_files = 0usize;
@@ -425,6 +439,18 @@ fn pipeline_phases(
 /// expose more parallelism in its serial request stream without paying the
 /// startup and project-indexing overhead observed at twelve shards.
 const TY_SHARD_COUNT: usize = 8;
+
+/// What a file walk is for.
+///
+/// The discovery pre-pass wants only the walk's index side effects, so it
+/// judges no calls (issue #1293).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanPurpose {
+    /// Emit diagnostics, defer to `ty`, plan fixes.
+    Judge,
+    /// Record rebinding exclusions and nothing else.
+    DiscoverExclusions,
+}
 
 /// Minimum scanned-file count for balancing shards by requests remaining
 /// after hover-group reuse. On smaller projects, startup and project-indexing
@@ -793,6 +819,7 @@ fn scan_file(
     fix_opt_ins: FixOptIns,
     plan_fixes: bool,
     skip_parse_errors: bool,
+    purpose: ScanPurpose,
 ) -> Result<ScanOutcome, CheckError> {
     let source_owned;
     let parsed_owned;
@@ -837,6 +864,7 @@ fn scan_file(
             config,
             fix_opt_ins,
             plan_fixes,
+            purpose,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -1057,6 +1085,7 @@ fn stream_scan_files(
                     FixOptIns::default(),
                     false,
                     !explicit_files.contains(path),
+                    ScanPurpose::Judge,
                 );
                 // Ignore send errors: the consumer has exited early (e.g. a
                 // ty error was already recorded).
@@ -1064,6 +1093,47 @@ fn stream_scan_files(
             });
         Ok(())
     })
+}
+
+/// Record every rebinding exclusion the checking pass would discover, before
+/// any call is judged.
+///
+/// `CallChecker` calls [`DefinitionIndex::exclude_rebinding`] when it sees a
+/// rebinding (`C.method = …`, `setattr(C, "m", …)`), and every *other* file
+/// consults `is_excluded` before judging its own calls. With files scanned in
+/// parallel, whether a call saw an exclusion depended on thread interleaving,
+/// so identical input produced different diagnostics run to run (issue #1293).
+///
+/// Discovering them all first makes the exclusion set complete — and therefore
+/// the same — before the first judgement. The pass reuses each file's already
+/// parsed AST where the index kept one, plans no fixes, and its outputs are
+/// discarded: only the index mutations it performs are wanted.
+fn discover_rebinding_exclusions(
+    python_files: &[PathBuf],
+    explicit_files: &FxHashSet<PathBuf>,
+    source_roots: &SourceRoots,
+    config: &Config,
+    index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
+) {
+    // A failure here is not reported: the real scan re-reads the same file and
+    // surfaces the error with its proper context.
+    let _ = with_large_stack_pool(|| {
+        python_files.par_iter().for_each(|path| {
+            let _ = scan_file(
+                source_roots,
+                path,
+                config,
+                index,
+                indexed_files.get(path),
+                FixOptIns::default(),
+                false,
+                !explicit_files.contains(path),
+                ScanPurpose::DiscoverExclusions,
+            );
+        });
+        Ok(())
+    });
 }
 
 /// Like [`stream_scan_files`], but collects the completed scans for the fixer.
@@ -1093,6 +1163,7 @@ fn scan_files_for_fix(
                     fix_opt_ins,
                     true,
                     !explicit_files.contains(path),
+                    ScanPurpose::Judge,
                 )?;
                 Ok((path.clone(), outcome))
             })
@@ -1193,6 +1264,8 @@ struct CallChecker<'a> {
     /// need diagnostics and ty fallback offsets, so they skip fixer-only
     /// safety gates on the hot path.
     plan_fixes: bool,
+    /// What this walk is for; a discovery walk judges no calls (issue #1293).
+    purpose: ScanPurpose,
     /// Number of call sites the fixer rewrote in this file.
     fixed_calls: usize,
     /// Reasons for diagnostics emitted by the built-in pass but not rewritten.
@@ -1560,6 +1633,7 @@ impl<'a> CallChecker<'a> {
         config: &'a Config,
         fix_opt_ins: FixOptIns,
         plan_fixes: bool,
+        purpose: ScanPurpose,
     ) -> Self {
         Self {
             path,
@@ -1601,6 +1675,7 @@ impl<'a> CallChecker<'a> {
             ty_overload_fix_pending: Vec::new(),
             fixes: Vec::new(),
             plan_fixes,
+            purpose,
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
             text_as_data_ranges: Vec::new(),
@@ -2969,6 +3044,9 @@ impl<'a> CallChecker<'a> {
 
     #[cfg_attr(coverage, coverage(off))]
     fn check_call(&mut self, call: &ast::ExprCall) {
+        if self.purpose == ScanPurpose::DiscoverExclusions {
+            return;
+        }
         self.record_singledispatch_registration(call);
         // A `# noqa` on the call's line suppresses the diagnostic and any
         // auto-fix — and lets us skip the ty fallback for that call entirely
@@ -16518,7 +16596,7 @@ while cond:
     // each early-`return false` guard directly, so every branch is
     // visible to the coverage gate (issue #43).
 
-    use super::{hover_owner_is_a_real_class, CallChecker};
+    use super::{hover_owner_is_a_real_class, CallChecker, ScanPurpose};
     use crate::index::DefinitionIndex;
     use ruff_python_ast::visitor::Visitor;
     use ruff_python_ast::{Expr, Stmt};
@@ -16537,6 +16615,7 @@ while cond:
             &config,
             FixOptIns::default(),
             false,
+            ScanPurpose::Judge,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -16563,6 +16642,7 @@ while cond:
             &config,
             FixOptIns::default(),
             false,
+            ScanPurpose::Judge,
         );
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
@@ -17304,6 +17384,7 @@ match subj.value:
             &config,
             FixOptIns::default(),
             plan_fixes,
+            ScanPurpose::Judge,
         );
         check(&mut checker);
     }
@@ -17483,6 +17564,7 @@ registry['k'](1, 2)
             &config,
             FixOptIns::default(),
             false,
+            ScanPurpose::Judge,
         );
 
         checker.visit_if_branch_stmt(stmt, IfBranchTraversal::Module);
@@ -17959,6 +18041,7 @@ class C:
             &config,
             FixOptIns::default(),
             false,
+            ScanPurpose::Judge,
         );
         setup(&mut checker);
 
@@ -18110,6 +18193,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         checker.define("Child", "pkg.Child".to_string());
         checker.define("Unrelated", "pkg.Unrelated".to_string());
@@ -18165,6 +18249,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         setup(&mut checker);
 
@@ -18197,6 +18282,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         setup(&mut checker);
 
@@ -18300,6 +18386,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         checker.define_module("mod", "mod".to_string());
         let call_parsed = parse_module("mod.utils.process(self, 0)\n").expect("parse call");
@@ -18414,6 +18501,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         assert!(!checker.binding_is_instance("never_bound"));
     }
@@ -18433,6 +18521,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
 
         assert_eq!(checker.callable_fullname("plain"), None);
@@ -18454,6 +18543,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         checker.record_instance("self", "pkg.K".to_string());
 
@@ -18527,6 +18617,7 @@ class C:
             &config,
             FixOptIns::default(),
             true,
+            ScanPurpose::Judge,
         );
         let call_parsed = parse_module("(lambda: object)()\n").expect("parse call");
         let Some(super::Stmt::Expr(stmt)) = call_parsed.suite().first() else {
