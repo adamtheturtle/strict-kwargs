@@ -14268,15 +14268,6 @@ fn ty_call_fix_insertions(
             return Err(DeclinedFixReason::UnsupportedSignatureShape);
         }
     }
-    if !receiver_is_explicit
-        && !receiver_already_omitted
-        && matches!(&*call.func, Expr::Attribute(_))
-        && (callee_fullname.ends_with(".__init__")
-            || callee_fullname.ends_with(".__new__")
-            || callee_fullname.ends_with(".__call__"))
-    {
-        return Err(DeclinedFixReason::UnsupportedSignatureShape);
-    }
     // Ty hovers are already call-site oriented for bound methods, so avoid
     // the built-in resolver's attribute-name receiver heuristic here. The one
     // exception is an unbound `def` hover with leading `self`/`cls`, where
