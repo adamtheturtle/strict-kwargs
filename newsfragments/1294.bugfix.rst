@@ -1,1 +1,0 @@
-Stop rewriting calls inside an f-string debug specifier (``f"{expr=}"``) or a t-string interpolation, where the expression's source text is part of the program's output.

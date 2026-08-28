@@ -3,6 +3,11 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.28-post.1
+----------------
+
+- Stop rewriting calls inside an f-string debug specifier (``f"{expr=}"``) or a t-string interpolation, where the expression's source text is part of the program's output.
+
 2026.8.28
 ---------
 
