@@ -1,0 +1,1 @@
+Choose the most permissive ``MethodType`` overload arm by inspecting its parameters, so an arm with ``*args`` wins regardless of the order the arms are written in.

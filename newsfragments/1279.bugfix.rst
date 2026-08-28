@@ -1,0 +1,1 @@
+``--diff`` no longer resolves a pending fix journal, so it leaves the working tree untouched as documented.

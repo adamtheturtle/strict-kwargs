@@ -6680,6 +6680,83 @@ MethodType(C.method, C())(1, 2, 3)
     );
 }
 
+/// Arm order must not decide which overload wins. `max_positional_at_call_site`
+/// returns `None` only for an ignored callee, so an arm's `*args` has to be
+/// read off its parameters (issue #1277).
+#[test]
+fn method_type_overload_choice_does_not_depend_on_arm_order() {
+    let varargs_last = check_source(
+        r"
+from types import MethodType
+from typing import overload
+class C:
+    @overload
+    def method(self, first: int) -> None: ...
+    @overload
+    def method(self, *args: int) -> None: ...
+    def method(self, *args: int) -> None: ...
+MethodType(C.method, C())(1, 2, 3)
+",
+    );
+    assert!(
+        varargs_last.is_empty(),
+        "the varargs arm accepts this call: {varargs_last:?}"
+    );
+
+    let varargs_first = check_source(
+        r"
+from types import MethodType
+from typing import overload
+class C:
+    @overload
+    def method(self, *args: int) -> None: ...
+    @overload
+    def method(self, first: int) -> None: ...
+    def method(self, *args: int) -> None: ...
+MethodType(C.method, C())(1, 2, 3)
+",
+    );
+    assert!(
+        varargs_first.is_empty(),
+        "arm order must not change the outcome: {varargs_first:?}"
+    );
+}
+
+/// A parameter that shadows a tracked executor is an opaque object, so its
+/// `map` must not resolve to the outer executor's mapper (issue #1278).
+#[test]
+fn shadowed_executor_name_does_not_resolve_its_mapper() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+def target(value: int) -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    def inner(executor: object) -> None:
+        next(executor.map(lambda _: target, [0]))(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "a shadowed executor name is opaque: {messages:?}"
+    );
+
+    // A nested `def` shadows the name just as a parameter does.
+    let shadowing_def = check_source(
+        r"
+import concurrent.futures
+def target(value: int) -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    def inner() -> None:
+        def executor() -> None: ...
+        next(executor.map(lambda _: target, [0]))(1)
+",
+    );
+    assert!(
+        shadowing_def.is_empty(),
+        "a nested def shadows the executor: {shadowing_def:?}"
+    );
+}
+
 /// When no arm accepts the call it is still reported (issue #1094).
 #[test]
 fn method_type_result_reports_a_call_no_overload_arm_accepts() {

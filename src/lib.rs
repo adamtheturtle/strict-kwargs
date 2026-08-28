@@ -42,7 +42,7 @@ mod source;
 #[cfg_attr(coverage, coverage(off))]
 mod ty_resolver;
 
-pub use check::{check_paths, fix_paths, fix_paths_with_opt_ins};
+pub use check::{check_paths, fix_paths, fix_paths_with_opt_ins, recover_fix_journals_for};
 pub use config::{find_project_root, Config, OutputFormat};
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::CheckError;
