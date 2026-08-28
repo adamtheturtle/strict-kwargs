@@ -11,10 +11,10 @@ use strict_kwargs::{fix_paths, Config, DeclinedFixReason, FixOptIns};
 
 mod common;
 
-use common::{TestProject, DEFAULT_PYPROJECT};
+use common::TestProject;
 
 fn project(source: &str) -> TestProject {
-    TestProject::new().pyproject(DEFAULT_PYPROJECT).main(source)
+    TestProject::new().main(source)
 }
 
 fn assert_fixed(source: &str, expected: &str) {
@@ -260,7 +260,6 @@ fn stale_method_signature_after_attribute_rebinding_is_not_used() {
 fn stale_imported_method_signature_after_rebinding_is_not_used() {
     let source = "from pkg import C\n\nC.method = lambda self, value, /: value\n\nassert C().method(1) == 1\n";
     let proj = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("pkg.py", "class C:\n    def method(self, value): ...\n")
         .main(source);
 
@@ -416,7 +415,6 @@ fn explicit_dunder_constructor_keeps_receiver_positional() {
 #[test]
 fn explicit_dunder_constructor_via_module_keeps_receiver_positional() {
     let proj = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("pkg/__init__.py", "")
         .file(
             "pkg/base.py",
@@ -484,7 +482,6 @@ fn does_not_fix_imported_callable_boundary() {
     // Directly imported callables are also commonly monkeypatched at the
     // importing module boundary.
     let proj = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("other.py", "def build_main(argv): ...\n")
         .main("from other import build_main\n\nbuild_main(['x'])\n");
     assert_eq!(

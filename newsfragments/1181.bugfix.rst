@@ -1,0 +1,1 @@
+Read the hyphenated ``include-cpython-benchmark`` workflow input with bracket access, so the opt-in CPython benchmark actually runs when requested.
