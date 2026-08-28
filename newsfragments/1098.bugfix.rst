@@ -1,0 +1,1 @@
+A ``for`` target that rebinds a module-level callable no longer hides that callable from calls earlier in the same file.
