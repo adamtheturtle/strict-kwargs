@@ -1,0 +1,1 @@
+Pin that ``MappingProxyType.get`` resolves a ``Callable`` type alias value type.

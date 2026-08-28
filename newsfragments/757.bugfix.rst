@@ -1,0 +1,1 @@
+Pin that redefining a generic function as non-generic drops its identity-return relationship.

@@ -47,7 +47,7 @@ pub use config::{find_project_root, Config, OutputFormat};
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::CheckError;
 pub use fix::{
-    unified_diff, write_all_preserving_encoding, DeclinedFixReason, DeclinedFixReasonCount,
-    FileFix, FixOptIns, FixOutcome,
+    recover_fix_journals, unified_diff, write_all_preserving_encoding, DeclinedFixReason,
+    DeclinedFixReasonCount, FileFix, FixOptIns, FixOutcome,
 };
 pub use resolve::is_python_environment;
