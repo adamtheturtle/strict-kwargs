@@ -883,3 +883,28 @@ fn a_rebinding_in_another_module_excludes_the_name_everywhere() {
         project.check()
     );
 }
+
+/// Source offsets only mean anything inside one file. `pkg` is a prefix of
+/// `pkg.sub`, so a prefix test let a *parent package* compare its own offsets
+/// against a submodule's rebinding and treat a cross-file call as
+/// pre-rebinding. The call has to live in `pkg/__init__.py` for that: from any
+/// other module the prefix never matched, so the case was already excluded
+/// (issue #1288).
+#[test]
+fn a_submodule_rebinding_offset_is_not_compared_against_a_parent_package() {
+    let project = TestProject::new()
+        .dep(
+            "pkg/__init__.py",
+            "from pkg.sub import factory\n\nfactory(1, 2)\n",
+        )
+        .dep(
+            "pkg/sub.py",
+            "def factory(first: int, second: int) -> None: ...\nPADDING = 'x' * 10\nfor factory in [1]:\n    pass\n",
+        )
+        .main("");
+    let messages = project.check_dir();
+    assert!(
+        !messages.iter().any(|message| message.contains("factory")),
+        "a cross-file rebinding stays excluded: {messages:?}"
+    );
+}

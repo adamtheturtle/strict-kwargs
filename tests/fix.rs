@@ -142,6 +142,20 @@ fn rewrites_implicit_call_through_an_attribute() {
     );
 }
 
+/// An implicit `__call__` reached through an attribute gets the same override
+/// protection an explicit method call does. The attribute names the instance
+/// rather than the method, so requiring the two to match skipped the check and
+/// rewrote a subclass `__call__` against the base signature -- code that raises
+/// `TypeError` at runtime (issue #1289).
+#[test]
+fn declines_an_implicit_call_rewrite_when_a_subclass_overrides_it() {
+    let source = "class Base:\n    def __call__(self, document): ...\n\
+                  class Child(Base):\n    def __call__(self, text): ...\n\
+                  class Holder:\n    def __init__(self):\n        self.lexer: Base = Child()\n\
+                  \x20   def run(self, value):\n        return self.lexer(value)\n";
+    assert_fixed(source, source);
+}
+
 /// The shapes the removed guard was written for: an unbound dunder call passes
 /// its receiver positionally, and `receiver_is_explicit` already keeps it there
 /// (issue #1281).
