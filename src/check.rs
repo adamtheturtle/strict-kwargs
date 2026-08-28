@@ -14909,7 +14909,14 @@ fn resolve_pending_with_ty(
                         p.positional_count,
                         sig.owner.is_none(),
                     );
-                let fullname = match &sig.owner {
+                let owner = sig.owner.as_deref().filter(|owner| {
+                    // `Self@__init__` is ty's binder display, not a name in the
+                    // reader's source, and it is not the callee's class either:
+                    // `super().__init__` dispatches to a base. Reporting the
+                    // method alone is the honest subset (issue #1253).
+                    !owner.contains('@')
+                });
+                let fullname = match owner {
                     Some(owner) => {
                         let owner = owner.split('[').next().unwrap_or(owner);
                         let owner = owner.rsplit('.').next().unwrap_or(owner);
