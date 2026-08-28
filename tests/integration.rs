@@ -2029,6 +2029,30 @@ class Payload(list[int]):
 }
 
 #[test]
+fn super_init_diagnostic_does_not_name_tys_binder_display() {
+    // ty hovers this as `bound method Self@__init__.__init__(value: int)`.
+    // `Self@__init__` is ty's internal binder display, and it is not the
+    // callee's class either — `super().__init__` dispatches to a base — so
+    // the method alone is reported (issue #1253).
+    let messages = check_source(
+        r"
+class Base:
+    def __init__(self, value: int) -> None: ...
+
+class Child(Base):
+    def __init__(self, value: int) -> None:
+        super().__init__(value)
+",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    assert!(
+        messages[0].contains(r#"for "__init__""#),
+        "got: {messages:?}"
+    );
+    assert!(!messages[0].contains('@'), "got: {messages:?}");
+}
+
+#[test]
 fn super_init_into_a_named_base_is_still_flagged() {
     // The counterpart: the base's `__init__` names its parameter, so
     // `super().__init__(value=value)` is a valid rewrite and the call is

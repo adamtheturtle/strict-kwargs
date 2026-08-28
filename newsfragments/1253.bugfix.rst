@@ -1,0 +1,1 @@
+Report the method rather than the type-inference binder display, such as ``Self@__init__``, when naming the callee of a ``super().__init__`` diagnostic.
