@@ -9,9 +9,10 @@ use crate::index::build_index_with_sources;
 use crate::ty_resolver::TyResolver;
 
 use super::{
-    collect_python_files_for_fix, explicit_python_files, plan_rewrite_insertions,
-    require_ty_present, resolve_file_with_ty, resolve_overload_fixes_with_ty, run_with_large_stack,
-    scan_files_for_fix, ScanOutcome, TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
+    collect_python_files_for_fix, discover_rebinding_exclusions, explicit_python_files,
+    plan_rewrite_insertions, require_ty_present, resolve_file_with_ty,
+    resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix, ScanOutcome,
+    TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
 };
 
 /// Minimum deferred-call count that justifies starting multiple ty servers.
@@ -256,6 +257,18 @@ fn fix_paths_impl(
         crate::index::PythonVersion::parse(config.target_version.as_deref().unwrap_or(""))
             .or_else(|| python_env.and_then(crate::index::PythonVersion::from_interpreter_path))
             .unwrap_or_default(),
+    );
+
+    // Phase 0 (see `check_paths`): complete the rebinding-exclusion set before
+    // any call is judged, so the parallel pass below cannot see a
+    // half-populated one and plan a different set of rewrites (issue #1293).
+    discover_rebinding_exclusions(
+        &python_files,
+        &explicit_files,
+        &source_roots,
+        config,
+        &index,
+        &indexed_files,
     );
 
     // Phase 1 (parallel, see `check_paths`): run the built-in pass for each

@@ -1,0 +1,1 @@
+Complete the rebinding-exclusion set before judging any call, so a whole-project run reports the same diagnostics every time. Files were previously checked in parallel while the same pass was still discovering exclusions, so identical input could produce different diagnostics run to run.
