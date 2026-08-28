@@ -130,6 +130,42 @@ fn rewrites_typed_factory_callable_instance_result() {
     );
 }
 
+/// An implicit `__call__` reached through an attribute is rewritten. The
+/// attribute names the *instance*, so the receiver is never passed and ty's
+/// unbound signature lines its remaining parameters up with the arguments
+/// (issue #1281).
+#[test]
+fn rewrites_implicit_call_through_an_attribute() {
+    assert_fixed(
+        "class Lexer:\n    def __call__(self, document): ...\nclass Holder:\n    def __init__(self):\n        self.lexer = Lexer()\n    def run(self, text):\n        return self.lexer(text)\n",
+        "class Lexer:\n    def __call__(self, document): ...\nclass Holder:\n    def __init__(self):\n        self.lexer = Lexer()\n    def run(self, text):\n        return self.lexer(document=text)\n",
+    );
+}
+
+/// The shapes the removed guard was written for: an unbound dunder call passes
+/// its receiver positionally, and `receiver_is_explicit` already keeps it there
+/// (issue #1281).
+#[test]
+fn rewrites_unbound_dunder_calls_without_moving_the_receiver() {
+    assert_fixed(
+        "class Lexer:\n    def __call__(self, document): ...\nLexer.__call__(Lexer(), 1)\n",
+        "class Lexer:\n    def __call__(self, document): ...\nLexer.__call__(Lexer(), document=1)\n",
+    );
+    assert_fixed(
+        "class Ctor:\n    def __init__(self, value): ...\ndef use(target):\n    Ctor.__init__(target, 1)\n",
+        "class Ctor:\n    def __init__(self, value): ...\ndef use(target):\n    Ctor.__init__(target, value=1)\n",
+    );
+}
+
+/// The explicit spelling of the same call keeps working (issue #1281).
+#[test]
+fn rewrites_explicit_dunder_call_through_an_attribute() {
+    assert_fixed(
+        "class Lexer:\n    def __call__(self, document): ...\nclass Holder:\n    def __init__(self):\n        self.lexer = Lexer()\n    def run(self, text):\n        return self.lexer.__call__(text)\n",
+        "class Lexer:\n    def __call__(self, document): ...\nclass Holder:\n    def __init__(self):\n        self.lexer = Lexer()\n    def run(self, text):\n        return self.lexer.__call__(document=text)\n",
+    );
+}
+
 #[test]
 fn rewrites_direct_lambda_invocation() {
     assert_fixed(
