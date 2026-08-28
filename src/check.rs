@@ -1197,6 +1197,9 @@ struct CallChecker<'a> {
     fixed_calls: usize,
     /// Reasons for diagnostics emitted by the built-in pass but not rewritten.
     declined_fix_reasons: Vec<DeclinedFixReason>,
+    /// Ranges an f-string debug specifier or a t-string interpolation captures
+    /// as text; calls inside them must not be rewritten (issue #1294).
+    text_as_data_ranges: Vec<ruff_text_size::TextRange>,
     /// Line-level `# noqa` directives parsed from this file's comments. A
     /// `# noqa`/`# noqa: KW001` on a violating call's line suppresses both the
     /// diagnostic and any auto-fix for that call (issue #185).
@@ -1600,6 +1603,7 @@ impl<'a> CallChecker<'a> {
             plan_fixes,
             fixed_calls: 0,
             declined_fix_reasons: Vec::new(),
+            text_as_data_ranges: Vec::new(),
             noqa: NoqaDirectives::from_source(source, tokens),
             suppress_noqa: plan_fixes || !config.error_on_unused_noqa,
             hover_group_frames: Vec::new(),
@@ -3318,6 +3322,11 @@ impl<'a> CallChecker<'a> {
         {
             self.declined_fix_reasons
                 .push(DeclinedFixReason::SynthesizedConstructor);
+            return;
+        }
+        if offset_is_text_as_data(&self.text_as_data_ranges, call.start()) {
+            self.declined_fix_reasons
+                .push(DeclinedFixReason::UnsupportedSignatureShape);
             return;
         }
         let callable_expr = Self::unwrap_named_callee(&call.func);
@@ -13158,6 +13167,9 @@ impl<'a> Visitor<'a> for CallChecker<'a> {
     // regressions; excluded so LLVM partial regions do not tip the line gate.
     #[cfg_attr(coverage, coverage(off))]
     fn visit_expr(&mut self, expr: &'a Expr) {
+        // Recorded before the walk descends into the interpolation, so a call
+        // inside one already sees its own range (issue #1294).
+        append_text_as_data_ranges(expr, &mut self.text_as_data_ranges);
         match expr {
             Expr::Call(call) => {
                 self.invalidate_setattr_call(call);
@@ -13948,6 +13960,60 @@ fn violation_max_positional(
 
 /// Methods whose first parameter the signature model reads as the receiver.
 /// Kept in step with [`signature_mapping_fullname`].
+/// Ranges whose *source text* an f-string or t-string captures as data.
+///
+/// An f-string debug specifier (`f"{expr=}"`) embeds the expression's text in
+/// the output, and every t-string interpolation exposes it as
+/// `Interpolation.expression`. Rewriting a call inside one changes what the
+/// program prints or stores, so those calls must not be fixed (issue #1294).
+///
+/// A plain f-string replacement field (`f"{expr}"`) uses only the *value* and
+/// is left fixable.
+fn append_text_as_data_ranges(expr: &Expr, out: &mut Vec<ruff_text_size::TextRange>) {
+    match expr {
+        Expr::FString(fstring) => {
+            for element in fstring.value.elements() {
+                if let Some(interpolation) = element.as_interpolation() {
+                    if interpolation.debug_text.is_some() {
+                        out.push(interpolation.expression.range());
+                    }
+                }
+            }
+        }
+        Expr::TString(tstring) => {
+            for element in tstring.value.elements() {
+                if let Some(interpolation) = element.as_interpolation() {
+                    out.push(interpolation.expression.range());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect [`append_text_as_data_ranges`] over a whole module, for the ty fix
+/// path which does not share the checker's walk (issue #1294).
+fn module_text_as_data_ranges(suite: &[Stmt]) -> Vec<ruff_text_size::TextRange> {
+    struct Collect(Vec<ruff_text_size::TextRange>);
+    impl<'a> ruff_python_ast::visitor::Visitor<'a> for Collect {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            append_text_as_data_ranges(expr, &mut self.0);
+            ruff_python_ast::visitor::walk_expr(self, expr);
+        }
+    }
+    let mut collect = Collect(Vec::new());
+    for stmt in suite {
+        ruff_python_ast::visitor::walk_stmt(&mut collect, stmt);
+    }
+    collect.0
+}
+
+/// Whether `offset` falls inside a range whose text a string interpolation
+/// captures as data (issue #1294).
+fn offset_is_text_as_data(ranges: &[ruff_text_size::TextRange], offset: TextSize) -> bool {
+    ranges.iter().any(|range| range.contains(offset))
+}
+
 fn is_receiver_dunder(name: &str) -> bool {
     matches!(
         name,
@@ -14284,6 +14350,9 @@ fn ty_call_fix_insertions(
     let Some(call) = call_at_start(fix_ast.suite, pending.call_start, pending.callee_offset) else {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     };
+    if offset_is_text_as_data(fix_ast.text_as_data, call.start()) {
+        return Err(DeclinedFixReason::UnsupportedSignatureShape);
+    }
     if let (
         Some(index),
         Expr::Attribute(ast::ExprAttribute { value, attr, .. }),
@@ -14555,6 +14624,7 @@ struct TyFixes<'a> {
 struct TyFixAst<'a> {
     suite: &'a [Stmt],
     tokens: &'a Tokens,
+    text_as_data: &'a [ruff_text_size::TextRange],
 }
 
 /// Normalize a dynamic ``instance.__class__`` call to its indexed constructor
@@ -14659,9 +14729,14 @@ fn resolve_overload_fixes_with_ty(
         return;
     }
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let fix_text_as_data = parsed_for_fixes
+        .as_ref()
+        .map(|parsed| module_text_as_data_ranges(parsed.suite()))
+        .unwrap_or_default();
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
         tokens: parsed.tokens(),
+        text_as_data: &fix_text_as_data,
     });
     let lsp_index = LspLineIndex::new(source);
 
@@ -14925,9 +15000,14 @@ fn resolve_pending_with_ty(
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
     let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let fix_text_as_data = parsed_for_fixes
+        .as_ref()
+        .map(|parsed| module_text_as_data_ranges(parsed.suite()))
+        .unwrap_or_default();
     let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
         suite: parsed.suite(),
         tokens: parsed.tokens(),
+        text_as_data: &fix_text_as_data,
     });
     // Calls in the same hover group (same receiver binding, same attribute;
     // see `CallChecker::hover_group_for_call`) are proven to hover
@@ -15274,14 +15354,14 @@ mod tests {
         collect_python_files_with_project_inventory, decorator_tail, estimated_hover_requests,
         has_staticmethod_or_classmethod_decorator, hover_names_single_dispatch, is_ignored_path,
         is_receiver_dunder, is_typing_special_form_constructor, line_starts,
-        normalize_static_ty_fallback, parameter_name_is_safe_keyword_target,
-        plan_rewrite_insertions, process_scan_outcome_for_ty, receiver_is_class_object,
-        record_ty_fix, should_balance_grouped_ty, signature_is_fully_named,
-        signature_mapping_fullname, skipped_cache_miss_warnings, strip_unbound_receiver,
-        ty_hover_signature_is_safe_for_fix, without_leading_self, CallAtStart, DeclinedFixReason,
-        FileNoqa, FileScan, FileSelection, FixOptIns, IfBranchTraversal, InOrderReleaser,
-        PendingTy, PendingTyWork, ScanOutcome, TyDefCaches, TyFixAst, TyFixes, TyShardAssigner,
-        REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
+        module_text_as_data_ranges, normalize_static_ty_fallback,
+        parameter_name_is_safe_keyword_target, plan_rewrite_insertions,
+        process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
+        should_balance_grouped_ty, signature_is_fully_named, signature_mapping_fullname,
+        skipped_cache_miss_warnings, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
+        without_leading_self, CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection,
+        FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome,
+        TyDefCaches, TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
     use crate::config::Config;
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -15999,6 +16079,31 @@ class C:
         ));
     }
 
+    /// An f-string debug specifier and every t-string interpolation capture
+    /// the expression's source text; a plain replacement field does not
+    /// (issue #1294).
+    #[test]
+    fn text_as_data_ranges_cover_debug_and_template_interpolations() {
+        let cases = [
+            ("print(f\"{square(5)}\")\n", 0),
+            // A literal element beside the interpolation exercises the
+            // non-interpolation arm of the walk.
+            ("print(f\"value {square(5)=} end\")\n", 1),
+            ("print(f\"value {square(5)} end\")\n", 0),
+            ("print(f\"{square(5)=}\")\n", 1),
+            ("template = t\"Square: {square(5)}\"\n", 1),
+            ("template = t\"{a(1)} {b(2)}\"\n", 2),
+        ];
+        for (source, expected) in cases {
+            let parsed = ruff_python_parser::parse_module(source).expect("parse");
+            assert_eq!(
+                module_text_as_data_ranges(parsed.suite()).len(),
+                expected,
+                "unexpected protected ranges for {source:?}"
+            );
+        }
+    }
+
     #[test]
     fn ty_fix_recording_decline_branches_are_explicit() {
         let pending = PendingTy {
@@ -16044,9 +16149,11 @@ class C:
             declined_fix_reasons: &mut declined_fix_reasons,
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
+        let text_as_data = module_text_as_data_ranges(parsed.suite());
         let fix_ast = TyFixAst {
             suite: parsed.suite(),
             tokens: parsed.tokens(),
+            text_as_data: &text_as_data,
         };
         record_ty_fix(
             &mut fixes,
