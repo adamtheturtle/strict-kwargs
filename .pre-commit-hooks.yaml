@@ -8,12 +8,17 @@
 # The hook is `language: python`: pre-commit builds and installs this repo's
 # maturin wheel into an isolated environment, exposing the `strict-kwargs`
 # binary. Building the wheel needs a Rust toolchain on the machine running
-# the hook. A future zero-toolchain path (a thin mirror repo depending on the
-# published PyPI wheel) is tracked separately.
+# the hook. Consumers who would rather install the prebuilt PyPI wheel and
+# skip the toolchain should use the mirror instead, which is what the README
+# recommends:
+# https://github.com/adamtheturtle/strict-kwargs-pre-commit
 - id: strict-kwargs
   name: strict-kwargs
   description: Enforce keyword arguments at call sites.
-  entry: strict-kwargs
+  # `check` is required: the CLI sets `subcommand_required`, so without it
+  # pre-commit's appended filenames are parsed as a subcommand name and every
+  # run fails with `error: unrecognized subcommand` (exit 2).
+  entry: strict-kwargs check
   language: python
   types: [python]
   # strict-kwargs does one-time import-closure indexing per invocation, so a
