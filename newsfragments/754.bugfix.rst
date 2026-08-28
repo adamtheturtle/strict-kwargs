@@ -1,0 +1,1 @@
+Pin that redefining a decorated contextmanager replaces the callable yield recorded for the first definition.

@@ -1,0 +1,1 @@
+Resolve a fix journal left by a crashed run before the next run reads the files, and never roll one back over content the transaction did not write, so an interrupted ``--fix`` can no longer discard later edits.

@@ -1217,6 +1217,219 @@ def caller(value: object) -> None:
     );
 }
 
+/// A named `Callable` alias narrows the same way an inline shape does, both
+/// through an `is not None` guard and through `assert` (regressions #763,
+/// #764).
+#[test]
+fn optional_callable_alias_narrows_like_an_inline_shape() {
+    let guarded = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    if value is not None:
+        value(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&guarded, 6, "narrowed callable"),
+        "expected the guarded alias violation, got: {guarded:?}"
+    );
+
+    let asserted = check_source(
+        r"
+import typing
+Callback = typing.Callable[[int], int]
+def caller(value: Callback | None) -> None:
+    assert value is not None
+    value(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&asserted, 6, "narrowed callable"),
+        "expected the asserted alias violation, got: {asserted:?}"
+    );
+}
+
+/// Generator and async-generator resumption methods resolve a named
+/// `Callable` alias in their yield type (regressions #765, #766, #767).
+#[test]
+fn generator_resumption_resolves_a_callable_alias_yield() {
+    let thrown = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+generator: collections.abc.Generator[Callback, None, None]
+generator.throw(typ=RuntimeError)(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&thrown, 6, "throw() result"),
+        "expected the generator throw violation, got: {thrown:?}"
+    );
+
+    let sent = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+agen: collections.abc.AsyncGenerator[Callback, None]
+async def main() -> None:
+    (await agen.asend(value=None))(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&sent, 7, "asend() result"),
+        "expected the asend violation, got: {sent:?}"
+    );
+
+    let athrown = check_source(
+        r"
+import collections.abc
+import typing
+Callback = typing.Callable[[int], int]
+agen: collections.abc.AsyncGenerator[Callback, None]
+async def main() -> None:
+    (await agen.athrow(typ=RuntimeError))(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&athrown, 7, "athrow() result"),
+        "expected the athrow violation, got: {athrown:?}"
+    );
+}
+
+/// A `ContextVar` token's old value and a `MappingProxyType` lookup both
+/// resolve a named `Callable` alias (regressions #768, #769).
+#[test]
+fn container_lookups_resolve_a_callable_alias_value() {
+    let token = check_source(
+        r"
+import contextvars
+import typing
+Callback = typing.Callable[[int], int]
+var: contextvars.ContextVar[Callback]
+token = var.set(lambda value: value)
+old = token.old_value
+if old is not contextvars.Token.MISSING:
+    old(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&token, 9, "old_value"),
+        "expected the token old-value violation, got: {token:?}"
+    );
+
+    let proxy = check_source(
+        r#"
+import types
+import typing
+Callback = typing.Callable[[int], int]
+mapping: types.MappingProxyType[str, Callback]
+value = mapping.get("key")
+if value is not None:
+    value(1, 2)
+"#,
+    );
+    assert!(
+        has_error_at(&proxy, 8, "get() result"),
+        "expected the proxy lookup violation, got: {proxy:?}"
+    );
+}
+
+/// Redefining a decorated contextmanager replaces its recorded callable yield
+/// rather than leaving the first one live (issue #754).
+#[test]
+fn redefining_a_contextmanager_replaces_its_callable_yield() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+@contextmanager
+def managed() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+@contextmanager
+def managed() -> Iterator[int]:
+    yield 0
+with managed() as value:
+    value(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "the live definition yields an int: {messages:?}"
+    );
+}
+
+/// Redefining a generic function as non-generic drops its identity-return
+/// relationship, so the result is not treated as the argument (issue #757).
+#[test]
+fn redefining_a_generic_function_drops_its_identity_return() {
+    let messages = check_source(
+        r"
+from typing import TypeVar
+T = TypeVar('T')
+def identity(value: T) -> T:
+    return value
+def identity(value: int) -> int:
+    return value
+def target(value: int) -> None:
+    pass
+identity(target)(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "identity"),
+        "the live definition is still checked: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("generic result")),
+        "the obsolete generic return must not survive: {messages:?}"
+    );
+}
+
+/// `TypeGuard` narrowing performed by an `assert` stops at the branch that ran
+/// the assert. The `is not None` path does not, which is issue #1080; this
+/// pins the behaviour that path should be brought in line with.
+#[test]
+fn assert_typeguard_narrowing_stops_at_its_branch() {
+    let guarded = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeGuard
+def is_cb(value: object) -> TypeGuard[Callable[[int], None]]:
+    return callable(value)
+def use(flag: bool, value: object) -> None:
+    if flag:
+        assert is_cb(value=value)
+    value(1, 2)
+",
+    );
+    assert!(
+        guarded.is_empty(),
+        "narrowing must not outlive the branch that ran the assert: {guarded:?}"
+    );
+
+    let unguarded = check_source(
+        r"
+from collections.abc import Callable
+from typing import TypeGuard
+def is_cb(value: object) -> TypeGuard[Callable[[int], None]]:
+    return callable(value)
+def use(value: object) -> None:
+    assert is_cb(value=value)
+    value(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&unguarded, 8, "value"),
+        "the assert still narrows in its own scope: {unguarded:?}"
+    );
+}
+
 /// `TypeIs` resolves a callable type alias before narrowing (regression #762).
 #[test]
 fn typeis_narrowing_resolves_callable_alias() {

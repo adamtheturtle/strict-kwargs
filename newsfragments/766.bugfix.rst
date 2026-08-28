@@ -1,0 +1,1 @@
+Pin that ``AsyncGenerator.asend`` resolves a ``Callable`` type alias in its yield type.

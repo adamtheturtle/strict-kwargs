@@ -223,6 +223,10 @@ fn fix_paths_impl(
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
     require_ty_present()?;
     let python_files = collect_python_files_for_fix(project_root, paths, config)?;
+    // Resolve any journal a crashed run left behind *before* reading these
+    // files, so the rerun analyzes the recovered content and the journal
+    // cannot survive to reach a later edit (issue #1117).
+    crate::fix::recover_fix_journals(&python_files)?;
     let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
     let (index, indexed_files) = build_index_with_sources(

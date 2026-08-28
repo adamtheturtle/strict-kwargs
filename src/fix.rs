@@ -25,6 +25,21 @@ struct JournalEntry {
     destination: PathBuf,
     staged: PathBuf,
     backup: PathBuf,
+    /// Digest of the bytes this transaction wrote to `destination`. Recovery
+    /// rolls an entry back only while the destination still holds them, so a
+    /// journal that outlives its crash cannot discard newer content
+    /// (issue #1117). A journal written before this field existed digests to
+    /// `0`, which matches nothing, so it is cleaned up rather than applied.
+    #[serde(default)]
+    fixed_digest: u64,
+}
+
+/// Stable digest of a file's bytes, used to recognise the content a fix
+/// transaction wrote.
+fn content_digest(bytes: &[u8]) -> u64 {
+    let mut hasher = crate::cache::FnvHasher::new();
+    hasher.write_bytes(bytes);
+    hasher.finish()
 }
 
 /// Fix categories a caller may opt into explicitly.
@@ -204,6 +219,7 @@ fn commit_prepared_fixes(prepared: &[(PathBuf, Vec<u8>, Vec<u8>)]) -> std::io::R
             destination: destination.clone(),
             staged,
             backup,
+            fixed_digest: content_digest(fixed),
         });
     }
 
@@ -271,9 +287,28 @@ fn sync_parent(path: &Path) -> std::io::Result<()> {
 
 #[cfg_attr(coverage, coverage(off))]
 fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
-    let mut parents = fixes
+    let paths = fixes.iter().map(|fix| fix.path.clone()).collect::<Vec<_>>();
+    recover_fix_journals(&paths)
+}
+
+/// Resolve any fix journal left in the directories holding `paths`.
+///
+/// Call this over *every* file a run analyzes, before analysis. Recovering
+/// only over files with pending fixes let a journal outlive the crash that
+/// wrote it: the rerun reads the already-written file from disk, so it plans
+/// no fix for it, so its directory is never scanned. The journal then waited
+/// for an unrelated fix in that directory and rolled back over whatever the
+/// file had become (issue #1117).
+///
+/// # Errors
+///
+/// Returns an I/O error when a directory cannot be listed or a journal cannot
+/// be read, rolled back, or removed.
+#[cfg_attr(coverage, coverage(off))]
+pub fn recover_fix_journals(paths: &[PathBuf]) -> std::io::Result<()> {
+    let mut parents = paths
         .iter()
-        .map(|fix| fix_parent(&fix.path).to_path_buf())
+        .map(|path| fix_parent(path).to_path_buf())
         .collect::<Vec<_>>();
     parents.sort();
     parents.dedup();
@@ -295,6 +330,22 @@ fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether `entry`'s backup must be restored over its destination.
+///
+/// A missing destination means the transaction was interrupted between moving
+/// the original aside and moving the staged file into place, so the backup is
+/// the only surviving copy and restoring it is mandatory. Otherwise the backup
+/// is restored only while the destination still holds exactly what this
+/// transaction wrote.
+#[cfg_attr(coverage, coverage(off))]
+fn backup_must_be_restored(entry: &JournalEntry) -> std::io::Result<bool> {
+    match std::fs::read(&entry.destination) {
+        Ok(current) => Ok(content_digest(&current) == entry.fixed_digest),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg_attr(coverage, coverage(off))]
 fn recover_journal(path: &Path) -> std::io::Result<()> {
     let journal: FixJournal = serde_json::from_slice(&std::fs::read(path)?)
@@ -304,11 +355,20 @@ fn recover_journal(path: &Path) -> std::io::Result<()> {
     }
     for entry in journal.entries.iter().rev() {
         if entry.backup.exists() {
-            if entry.destination.exists() {
-                std::fs::remove_file(&entry.destination)?;
+            // Roll back while the destination is missing, or still holds
+            // exactly what this transaction wrote. A journal that survived its
+            // crash could otherwise reach a file the user has since edited and
+            // silently discard that work (issue #1117); in that case the file
+            // is left alone and the backup is dropped.
+            if backup_must_be_restored(entry)? {
+                if entry.destination.exists() {
+                    std::fs::remove_file(&entry.destination)?;
+                }
+                std::fs::rename(&entry.backup, &entry.destination)?;
+                sync_parent(&entry.destination)?;
+            } else {
+                std::fs::remove_file(&entry.backup)?;
             }
-            std::fs::rename(&entry.backup, &entry.destination)?;
-            sync_parent(&entry.destination)?;
         }
         if entry.staged.exists() {
             std::fs::remove_file(&entry.staged)?;
@@ -517,6 +577,128 @@ fn split_physical_lines(text: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    /// Build a crashed transaction: `a.py` holds `destination_text`, the
+    /// backup holds `backup_text`, and the journal is uncommitted.
+    fn stage_crashed_journal(
+        directory: &Path,
+        destination_text: &str,
+        backup_text: &str,
+        recorded_text: &str,
+    ) -> PathBuf {
+        let destination = directory.join("a.py");
+        let backup = directory.join(".strict-kwargs-fix-999-0.old");
+        std::fs::write(&destination, destination_text).expect("write destination");
+        std::fs::write(&backup, backup_text).expect("write backup");
+        let journal = FixJournal {
+            committed: false,
+            entries: vec![JournalEntry {
+                destination,
+                staged: directory.join(".strict-kwargs-fix-999-0.new"),
+                backup,
+                fixed_digest: content_digest(recorded_text.as_bytes()),
+            }],
+        };
+        let path = directory.join(format!("{FIX_JOURNAL_PREFIX}999.json"));
+        write_journal(&path, &journal).expect("write journal");
+        path
+    }
+
+    /// A journal that outlived its crash must not discard content the file has
+    /// gained since (issue #1117).
+    #[test]
+    fn recovery_leaves_a_destination_the_transaction_did_not_write() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let journal = stage_crashed_journal(
+            directory.path(),
+            "EDITED_LATER = 1\n",
+            "ORIGINAL = 1\n",
+            "WHAT_THE_FIX_WROTE = 1\n",
+        );
+        recover_journal(&journal).expect("recover");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("a.py")).expect("read destination"),
+            "EDITED_LATER = 1\n"
+        );
+        assert!(!journal.exists(), "the journal must be cleaned up");
+        assert!(
+            !directory
+                .path()
+                .join(".strict-kwargs-fix-999-0.old")
+                .exists(),
+            "the superseded backup must be dropped"
+        );
+    }
+
+    /// A destination still holding exactly what the transaction wrote is rolled
+    /// back (issue #1117).
+    #[test]
+    fn recovery_restores_a_destination_the_transaction_wrote() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let journal = stage_crashed_journal(
+            directory.path(),
+            "WHAT_THE_FIX_WROTE = 1\n",
+            "ORIGINAL = 1\n",
+            "WHAT_THE_FIX_WROTE = 1\n",
+        );
+        recover_journal(&journal).expect("recover");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("a.py")).expect("read destination"),
+            "ORIGINAL = 1\n"
+        );
+        assert!(!journal.exists(), "the journal must be cleaned up");
+    }
+
+    /// A crash between the two renames leaves no destination, so the backup is
+    /// the only copy and must be restored (issue #1117).
+    #[test]
+    fn recovery_restores_a_missing_destination_from_its_backup() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let journal = stage_crashed_journal(
+            directory.path(),
+            "PLACEHOLDER = 1\n",
+            "ORIGINAL = 1\n",
+            "WHAT_THE_FIX_WROTE = 1\n",
+        );
+        std::fs::remove_file(directory.path().join("a.py")).expect("remove destination");
+        recover_journal(&journal).expect("recover");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("a.py")).expect("read destination"),
+            "ORIGINAL = 1\n"
+        );
+    }
+
+    /// A journal written before `fixed_digest` existed digests to zero, which
+    /// matches nothing, so it is cleaned up rather than applied (issue #1117).
+    #[test]
+    fn recovery_declines_a_journal_without_a_recorded_digest() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let destination = directory.path().join("a.py");
+        let backup = directory.path().join(".strict-kwargs-fix-999-0.old");
+        std::fs::write(&destination, "EDITED_LATER = 1\n").expect("write destination");
+        std::fs::write(&backup, "ORIGINAL = 1\n").expect("write backup");
+        let journal_path = directory
+            .path()
+            .join(format!("{FIX_JOURNAL_PREFIX}999.json"));
+        std::fs::write(
+            &journal_path,
+            serde_json::to_vec(&serde_json::json!({
+                "committed": false,
+                "entries": [{
+                    "destination": destination,
+                    "staged": directory.path().join(".strict-kwargs-fix-999-0.new"),
+                    "backup": backup,
+                }],
+            }))
+            .expect("serialize legacy journal"),
+        )
+        .expect("write legacy journal");
+        recover_journal(&journal_path).expect("recover");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read destination"),
+            "EDITED_LATER = 1\n"
+        );
+    }
+
     #[test]
     fn apply_insertions_splices_high_to_low() {
         let out = apply_insertions(
@@ -699,6 +881,7 @@ mod tests {
                 destination: destination.clone(),
                 staged,
                 backup: backup.clone(),
+                fixed_digest: content_digest(b"fixed\n"),
             }],
         };
         write_journal(&journal_path, &journal).expect("write journal");

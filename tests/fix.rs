@@ -1321,3 +1321,52 @@ Owner().callback(value=1)
 ",
     );
 }
+
+/// A journal a crashed run left behind is resolved before the rerun reads the
+/// files, so it cannot survive to roll back over a later edit. Recovering only
+/// over files with pending fixes let it linger: the rerun sees the already
+/// written file, plans no fix for it, and never scans its directory
+/// (issue #1117).
+#[test]
+fn a_stale_fix_journal_is_resolved_before_the_next_analysis() {
+    let project = TestProject::new()
+        .file("edited.py", "EDITED_LATER = 1\n")
+        .file(
+            "other.py",
+            "def target(value: int) -> None: ...\ntarget(1)\n",
+        );
+    let backup = project.root.join(".strict-kwargs-fix-999-0.old");
+    std::fs::write(&backup, "ORIGINAL = 1\n").expect("write backup");
+    let journal = project.root.join(".strict-kwargs-fix-journal-999.json");
+    std::fs::write(
+        &journal,
+        serde_json::to_vec(&serde_json::json!({
+            "committed": false,
+            "entries": [{
+                "destination": project.path("edited.py"),
+                "staged": project.root.join(".strict-kwargs-fix-999-0.new"),
+                "backup": backup,
+                "fixed_digest": 0,
+            }],
+        }))
+        .expect("serialize journal"),
+    )
+    .expect("write journal");
+
+    let outcome = fix_paths(
+        &project.root,
+        std::slice::from_ref(&project.root),
+        &project.config(),
+        None,
+    )
+    .expect("fix the project");
+    strict_kwargs::write_all_preserving_encoding(&outcome.files).expect("write fixes");
+
+    assert_eq!(
+        std::fs::read_to_string(project.path("edited.py")).expect("read edited file"),
+        "EDITED_LATER = 1\n",
+        "the later edit must survive"
+    );
+    assert!(!journal.exists(), "the stale journal must be resolved");
+    assert!(!backup.exists(), "the superseded backup must be dropped");
+}
