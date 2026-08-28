@@ -1387,6 +1387,78 @@ identity(target)(1)
     );
 }
 
+/// An `assert` that narrows a callable defines a binding that must not outlive
+/// the branch it sits in. `if` narrowing already reverts after its block; the
+/// `assert` form leaked past it, so a later call was still reported against
+/// `"narrowed callable"` rather than the parameter (issue #1080).
+#[test]
+fn assert_narrowing_stops_at_the_branch_that_ran_it() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def use(flag: bool, cb: Callable[[int], None] | None) -> None:
+    if flag:
+        assert cb is not None
+    cb(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "cb"),
+        "the call after the branch is not narrowed: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("narrowed callable")),
+        "the narrowing must not outlive the branch: {messages:?}"
+    );
+}
+
+/// The same `assert` at the top of the function *does* narrow the rest of it,
+/// exactly as Python does (issue #1080).
+#[test]
+fn assert_narrowing_still_covers_the_rest_of_its_own_block() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def use(cb: Callable[[int], None] | None) -> None:
+    assert cb is not None
+    cb(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "narrowed callable"),
+        "the assert narrows the rest of its block: {messages:?}"
+    );
+}
+
+/// Scoping the branch must not swallow the bindings a branch body makes:
+/// a `def`, an `import`, and an assignment all stay visible after it
+/// (issue #1080).
+#[test]
+fn a_narrowed_branch_still_lets_its_bindings_escape() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def use(flag: bool, cb: Callable[[int], None] | None) -> None:
+    if flag:
+        assert cb is not None
+        def helper(value: int) -> None: ...
+        alias = helper
+    helper(1)
+    alias(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "helper"),
+        "a def inside the branch stays visible: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 9, "helper"),
+        "an alias made inside the branch stays visible: {messages:?}"
+    );
+}
+
 /// `TypeGuard` narrowing performed by an `assert` stops at the branch that ran
 /// the assert. The `is not None` path does not, which is issue #1080; this
 /// pins the behaviour that path should be brought in line with.
