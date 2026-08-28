@@ -1,0 +1,1 @@
+Resolve the concrete callable behind ``next(iter(...))`` over a literal container or mapping view, so the reported callee is named and the call can be fixed.

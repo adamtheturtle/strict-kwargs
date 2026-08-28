@@ -1,0 +1,1 @@
+Pin that indexing a ``NamedTuple._replace`` result keeps the concrete field value.

@@ -581,7 +581,7 @@ next(iter(collections.deque(iterable=(target,), maxlen=2)))(1)
 ",
     );
     assert!(
-        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
         "expected deque iteration violations, got: {messages:?}"
     );
 }
@@ -3880,7 +3880,7 @@ next(iter({"call": f}.values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 3, "next() result"),
+        has_error_at(&messages, 3, "f"),
         "expected dictionary-values violation, got: {messages:?}"
     );
 }
@@ -3896,7 +3896,7 @@ next(iter({"key": target}.items()))[1](1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 3, "next() result"),
+        has_error_at(&messages, 3, "target"),
         "expected dict.items value violation, got: {messages:?}"
     );
 }
@@ -3912,7 +3912,7 @@ next(iter({target: "value"}.keys()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 3, "next() result"),
+        has_error_at(&messages, 3, "target"),
         "expected dict.keys violation, got: {messages:?}"
     );
 }
@@ -3946,7 +3946,7 @@ MappingProxyType(mapping={"x": target}).get("x")(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "get() result"),
+        has_error_at(&messages, 4, "target"),
         "expected inline MappingProxyType.get violation, got: {messages:?}"
     );
 }
@@ -4014,7 +4014,7 @@ next(iter(OrderedDict({"x": target}).values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected OrderedDict values violation, got: {messages:?}"
     );
 }
@@ -4031,7 +4031,7 @@ next(iter(OrderedDict({"x": target}).items()))[1](1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected OrderedDict items value violation, got: {messages:?}"
     );
 }
@@ -4048,7 +4048,7 @@ next(iter(UserDict({"x": target}).values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected UserDict values violation, got: {messages:?}"
     );
 }
@@ -4065,7 +4065,7 @@ next(iter(ChainMap({"x": target}).values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected ChainMap values violation, got: {messages:?}"
     );
 }
@@ -4082,7 +4082,7 @@ next(iter(MappingProxyType(mapping={"x": target}).values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected MappingProxyType values violation, got: {messages:?}"
     );
 }
@@ -4099,7 +4099,7 @@ next(iter(ChainMap({"x": target}).items()))[1](1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected ChainMap items value violation, got: {messages:?}"
     );
 }
@@ -7103,6 +7103,329 @@ next(itertools.starmap(lambda target: target, [(object(),)]))(1)
     );
 }
 
+/// Iterating the keys of a literal mapping resolves the concrete key callable,
+/// so the call carries that callable's parameter names (issue #790).
+#[test]
+fn dict_keys_iteration_resolves_the_concrete_key() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+next(iter({target: "value"}.keys()))(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected the concrete key callable, got: {messages:?}"
+    );
+}
+
+/// A mapping behind a read-only or ordered wrapper still yields concrete
+/// callables through its views (issues #827, #923, #928, #929, #931).
+#[test]
+fn wrapped_mapping_views_resolve_concrete_callables() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict
+from types import MappingProxyType
+from weakref import WeakValueDictionary
+def target(value: int) -> None: ...
+next(iter(MappingProxyType(mapping={"x": target}).values()))(1)
+next(iter(ChainMap({"x": target}).values()))(1)
+next(iter(ChainMap({"x": target}).items()))[1](1)
+next(iter(OrderedDict({"x": target}).items()))[1](1)
+next(iter(WeakValueDictionary({"x": target}).values()))(1)
+"#,
+    );
+    for line in 6..=10 {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected the concrete wrapped value on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// A read-only proxy forwards `get` to the mapping it wraps, so the value is
+/// concrete rather than an annotation-derived signature (issue #930).
+#[test]
+fn mapping_proxy_get_resolves_the_concrete_value() {
+    let messages = check_source(
+        r#"
+from types import MappingProxyType
+def target(value: int) -> None: ...
+MappingProxyType(mapping={"x": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected the concrete proxy value, got: {messages:?}"
+    );
+}
+
+/// Shapes the concrete resolver deliberately declines: a wrapper built from
+/// more than one mapping, an `items()` view with no index to pick a side, and
+/// an indexed element of a plain sequence (issues #790, #930).
+#[test]
+fn concrete_container_resolution_declines_ambiguous_shapes() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap
+from types import MappingProxyType
+def target(value: int) -> None: ...
+next(iter(MappingProxyType({"x": target}).values()))(1)
+next(iter(MappingProxyType({"x": target}, {"y": target}).values()))(1)
+next(iter(ChainMap({"a": target}, {"b": target}).values()))(1)
+next(iter({"x": target}.items()))(1)
+next(iter([target]))[0](1)
+MappingProxyType({"x": target}).get("x")(1)
+MappingProxyType({"x": target}, {"y": target}).get("x")(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "a positional proxy mapping still resolves concretely: {messages:?}"
+    );
+    for line in [6, 7, 8] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.starts_with(&format!("main:{line}: "))
+                    && message.contains("\"target\"")),
+            "line {line} must not resolve concretely: {messages:?}"
+        );
+    }
+    assert!(
+        has_error_at(&messages, 9, "next() result"),
+        "an indexed sequence element keeps the generic signature: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 10, "target"),
+        "a positional proxy resolves `get` concretely: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("main:11: ") && message.contains("\"target\"")),
+        "a two-mapping proxy has no single value: {messages:?}"
+    );
+}
+
+/// Keyword arguments on `next`, `iter`, a mapping wrapper, or a view call put
+/// the expression outside the shapes the concrete resolver models, so it
+/// declines rather than guessing (issues #790, #930).
+#[test]
+fn concrete_container_resolution_declines_keyword_forms() {
+    let messages = check_source(
+        r#"
+from collections import ChainMap, OrderedDict, UserDict
+from weakref import WeakValueDictionary
+def target(value: int) -> None: ...
+next(iter([target]), default=None)(1)
+next(iter([target], sentinel=None))(1)
+next(iter(ChainMap(maps={"x": target}).values()))(1)
+next(iter(OrderedDict(x=target).values()))(1)
+next(iter(UserDict(dict={"x": target}).values()))(1)
+next(iter(WeakValueDictionary(other={"x": target}).values()))(1)
+next(iter({"x": target}.values(1)))(1)
+"#,
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"target\"")),
+        "no keyword form may resolve concretely: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 5, "next() result"),
+        "the generic iterator signature still applies: {messages:?}"
+    );
+}
+
+/// A `UserList` or `deque` presents the sequence it was built from, so
+/// iterating one resolves the concrete element (issue #817).
+#[test]
+fn sequence_wrapper_iteration_resolves_the_concrete_element() {
+    let messages = check_source(
+        r"
+from collections import UserList, deque
+def target(value: int) -> None: ...
+next(iter(UserList(initlist=[target])))(1)
+next(iter(deque(iterable=[target])))(1)
+",
+    );
+    for line in [4, 5] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected the concrete wrapped element on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Every `itertools.groupby` group is a subsequence of the iterable it was
+/// built from, so a literal of one callable makes each group item concrete
+/// (issue #792).
+#[test]
+fn groupby_group_items_resolve_the_concrete_element() {
+    let messages = check_source(
+        r"
+import itertools
+def target(value: int) -> None: ...
+next(iter(next(itertools.groupby(iterable=[target]))[1]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 4, "target"),
+        "expected the concrete group item, got: {messages:?}"
+    );
+}
+
+/// An executor mapper whose body names a callable returns that callable for
+/// every input, so the mapped items are concrete (issue #844).
+#[test]
+fn executor_map_lambda_result_resolves_the_concrete_callable() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+def target(value: int) -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    next(executor.map(lambda _: target, [0]))(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "target"),
+        "expected the concrete mapped item, got: {messages:?}"
+    );
+}
+
+/// A `UserList` element survives `copy` subscripting and `pop`, and a
+/// `NamedTuple` replacement survives tuple indexing (issues #815, #816, #833).
+#[test]
+fn sequence_and_record_results_keep_concrete_elements() {
+    let messages = check_source(
+        r"
+from collections import UserList
+from typing import NamedTuple
+class Pair(NamedTuple):
+    callback: object
+def target(value: int) -> None: ...
+UserList(initlist=[target]).copy()[0](1)
+UserList(initlist=[target]).pop()(1)
+Pair(callback=target)._replace()[0](1)
+",
+    );
+    for line in [7, 8, 9] {
+        assert!(
+            has_error_at(&messages, line, "target"),
+            "expected the concrete element on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Annotated callable items reached through a comprehension, `as_completed`,
+/// or a `wait` result are checked against their declared signature
+/// (issues #845, #846, #850).
+#[test]
+fn annotated_callable_items_are_checked_through_futures_and_comprehensions() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+from collections.abc import Callable, Iterator
+def values() -> Iterator[Callable[[int], None]]:
+    yield lambda value: None
+def factory() -> Callable[[int], None]:
+    return lambda value: None
+[item(1, 2) for item in values()]
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(factory)
+    next(concurrent.futures.as_completed(fs=[future])).result()(1, 2)
+    done, _ = concurrent.futures.wait(fs=[future])
+    done.pop().result()(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "comprehension item"),
+        "expected the comprehension item violation, got: {messages:?}"
+    );
+    for line in [11, 13] {
+        assert!(
+            has_error_at(&messages, line, "result() result"),
+            "expected the future result violation on line {line}, got: {messages:?}"
+        );
+    }
+}
+
+/// Shapes that resemble an executor `map` or a `groupby` group but are not
+/// one: the resolver declines each rather than guessing (issues #792, #844).
+#[test]
+fn mapper_and_group_resolution_declines_lookalike_shapes() {
+    let messages = check_source(
+        r"
+import concurrent.futures
+import itertools
+def target(value: int) -> None: ...
+class Holder:
+    executors = None
+def other() -> None: ...
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    next(Holder.executors.map(lambda _: target, [0]))(1)
+    next(other.map(lambda _: target, [0]))(1)
+    next(executor.map(target, [0]))(1)
+pairs = [(1, [target])]
+next(iter(next(itertools.groupby(iterable=[target]))[0]))(1)
+next(iter(pairs[1]))(1)
+next(iter(sorted([(1, 2)])[1]))(1)
+next(iter(next(iter(pairs), None)[1]))(1)
+next(iter(next(pairs, default=None)[1]))(1)
+next(iter(next(pairs)[1]))(1)
+next(iter(next(enumerate([target]))[1]))(1)
+",
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("\"target\"")),
+        "no lookalike shape may resolve concretely: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 19, "enumerate"),
+        "the enumerate call itself is still checked: {messages:?}"
+    );
+}
+
+/// An empty literal mapping deterministically returns the default `pop` was
+/// given, so a callable default is concrete (issue #919).
+#[test]
+fn literal_dict_pop_default_resolves_the_concrete_callable() {
+    let messages = check_source(
+        r#"
+def target(value: int) -> None: ...
+{}.pop("missing", target)(1)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 3, "target"),
+        "expected the concrete pop default, got: {messages:?}"
+    );
+}
+
+/// A mapping whose values disagree has no single concrete callable, so the
+/// annotation-derived signature still applies (issues #790, #931).
+#[test]
+fn mapping_view_with_differing_values_keeps_the_generic_signature() {
+    let messages = check_source(
+        r#"
+from collections.abc import Callable
+def first(value: int) -> None: ...
+def second(value: int) -> None: ...
+mapping: dict[str, Callable[[int], None]] = {"a": first, "b": second}
+next(iter({"a": first, "b": second}.values()))(1, 2)
+"#,
+    );
+    assert!(
+        has_error_at(&messages, 6, "next() result"),
+        "expected the generic iterator signature, got: {messages:?}"
+    );
+}
+
 /// `next(iter(...))` preserves callable elements from one-element literal
 /// iterables, including dictionary keys (issue #781).
 #[test]
@@ -7118,7 +7441,7 @@ next(iter({target: 1}))(1)
     );
     for line in 3..=6 {
         assert!(
-            has_error_at(&messages, line, "next() result"),
+            has_error_at(&messages, line, "target"),
             "expected next(iter(...)) violation on line {line}, got: {messages:?}"
         );
     }
@@ -7277,7 +7600,7 @@ next(iter(weakref.WeakValueDictionary({"x": target}).values()))(1)
 "#,
     );
     assert!(
-        has_error_at(&messages, 4, "next() result"),
+        has_error_at(&messages, 4, "target"),
         "expected WeakValueDictionary values violation, got: {messages:?}"
     );
 }
@@ -8479,7 +8802,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
 ",
     );
     assert!(
-        has_error_at(&messages, 5, "next() result"),
+        has_error_at(&messages, 5, "target"),
         "expected Executor.map result violation, got: {messages:?}"
     );
 }
@@ -9810,7 +10133,7 @@ next(iter(collections.UserList(initlist=(target,))))(1)
 ",
     );
     assert!(
-        has_error_at(&messages, 5, "next() result") && has_error_at(&messages, 6, "next() result"),
+        has_error_at(&messages, 5, "target") && has_error_at(&messages, 6, "target"),
         "expected UserList iteration violations, got: {messages:?}"
     );
 }

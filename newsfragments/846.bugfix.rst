@@ -1,0 +1,1 @@
+Pin that a ``concurrent.futures.wait`` done-set future result is checked against its declared callable signature.

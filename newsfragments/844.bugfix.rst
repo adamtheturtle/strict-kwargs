@@ -1,0 +1,1 @@
+Resolve the concrete callable an executor ``map`` mapper returns, so the mapped items carry its parameter names.

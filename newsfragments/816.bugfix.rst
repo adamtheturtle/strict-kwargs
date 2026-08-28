@@ -1,0 +1,1 @@
+Pin that ``UserList.pop`` keeps the concrete element.
