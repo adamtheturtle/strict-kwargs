@@ -12075,11 +12075,37 @@ impl<'a> CallChecker<'a> {
                 self.visit_if_branch_stmt(inner, traversal);
             }
             self.pop_scope();
+        } else if body
+            .iter()
+            .any(|stmt| self.stmt_narrows_a_callable_by_assert(stmt))
+        {
+            // An `assert x is not None` defines into the current scope, which
+            // outside a scope of its own is the *function* scope — so the
+            // narrowing outlived the branch that ran it (issue #1080). Scope
+            // the body only when it actually contains such an assert: scoping
+            // every branch body loses bindings the checker needs from them,
+            // worth 20 entries of the Sphinx completeness floor.
+            self.push_scope();
+            for inner in body {
+                self.visit_if_branch_stmt(inner, traversal);
+            }
+            self.pop_scope();
         } else {
             for inner in body {
                 self.visit_if_branch_stmt(inner, traversal);
             }
         }
+    }
+
+    /// Whether `stmt` is an `assert` that narrows a callable, and so defines a
+    /// binding that must not outlive the branch it sits in (issue #1080).
+    fn stmt_narrows_a_callable_by_assert(&self, stmt: &Stmt) -> bool {
+        let Stmt::Assert(assert_stmt) = stmt else {
+            return false;
+        };
+        self.optional_callable_narrowing(&assert_stmt.test)
+            .is_some()
+            || self.callable_builtin_narrowing(&assert_stmt.test).is_some()
     }
 
     // Covered end-to-end by the context-manager binding regression. Other
