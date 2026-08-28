@@ -1,0 +1,1 @@
+Publish wheels for Linux ``aarch64`` and macOS ``x86_64``, so ``pip install`` and the pre-commit hook work on arm64 Linux and Intel Macs without a Rust toolchain.
