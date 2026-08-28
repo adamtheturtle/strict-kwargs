@@ -25,7 +25,7 @@ pub(super) fn callee_tail(expr: &Expr) -> Option<&str> {
 // `dataclass_decorator`; excluded for the same reason (the
 // non-`False`-literal arm is exercised only via those).
 #[cfg_attr(coverage, coverage(off))]
-fn keyword_is_false(call: &ast::ExprCall, keyword: &str) -> bool {
+pub(super) fn keyword_is_false(call: &ast::ExprCall, keyword: &str) -> bool {
     call.arguments.keywords.iter().any(|kw| {
         kw.arg.as_ref().map(ast::Identifier::as_str) == Some(keyword)
             && matches!(&kw.value, Expr::BooleanLiteral(b) if !b.value)
@@ -56,7 +56,7 @@ fn is_kw_only(annotation: &Expr) -> bool {
 
 /// Whether a ``@dataclass`` field assignment opts out of ``__init__`` via
 /// ``= field(init=False)``.
-fn dataclass_field_excluded(value: &Expr) -> bool {
+pub(super) fn dataclass_field_excluded(value: &Expr) -> bool {
     let Expr::Call(call) = value else {
         return false;
     };

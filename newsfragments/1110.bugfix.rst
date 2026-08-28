@@ -1,0 +1,1 @@
+Pin that an ``__aenter__`` inherited from a base class binds the ``async with`` target.

@@ -1,0 +1,1 @@
+Pin that an annotated lambda rebinding retires the earlier ``def``.

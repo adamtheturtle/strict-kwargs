@@ -513,6 +513,41 @@ fn run_check_fix(args: CheckArgs) -> Result<ExitCode, CheckError> {
     Ok(fix_exit_code(remaining))
 }
 
+/// Restores the process-global working directory even if a test panics, and
+/// serialises the tests that change it against each other.
+///
+/// Leaving the change in place on a failed assertion let other tests in this
+/// binary resolve relative paths against the temporary directory, which made
+/// the diff-header tests flake when run together (issue #1091).
+#[cfg(test)]
+struct CurrentDirGuard {
+    previous: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl CurrentDirGuard {
+    fn set(path: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(path).expect("chdir");
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.previous).expect("restore cwd");
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -679,14 +714,12 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create project dir");
         let file = root.join("main.py");
         std::fs::write(&file, "").expect("write file");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("chdir");
+        let _cwd = super::CurrentDirGuard::set(dir.path());
         let absolute = file.canonicalize().expect("canonicalize file");
         assert_eq!(
             diff_header_path(Path::new("proj"), &absolute),
             PathBuf::from("main.py")
         );
-        std::env::set_current_dir(previous).expect("restore cwd");
     }
 
     #[test]
@@ -788,13 +821,11 @@ mod diff_header_path_coverage {
         std::fs::create_dir_all(&root).expect("create project dir");
         let file = root.join("main.py");
         std::fs::write(&file, "").expect("write file");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir.path()).expect("chdir");
+        let _cwd = super::CurrentDirGuard::set(dir.path());
         let absolute = file.canonicalize().expect("canonicalize file");
         assert_eq!(
             diff_header_path(Path::new("proj"), &absolute),
             PathBuf::from("main.py")
         );
-        std::env::set_current_dir(previous).expect("restore cwd");
     }
 }

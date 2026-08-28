@@ -221,13 +221,19 @@ impl<'a> SourceRoots<'a> {
         // Preserve configured `src` order: import resolution walks roots like
         // ``sys.path``. Do not sort by path; that would prefer ``zsrc`` over
         // ``asrc`` and discard the user's search order (issue #633).
+        // Configured roots come first and the repository root is the final
+        // fallback. Putting the root first resolved a module that exists in
+        // both places from the root, shadowing the earlier `src` entry
+        // (issue #1086).
         let mut first_party = Vec::with_capacity(config.src.len() + 1);
-        first_party.push(project_root.to_path_buf());
         for path in &config.src {
             let resolved = resolve_configured_path(project_root, path);
             if !first_party.iter().any(|root| root == &resolved) {
                 first_party.push(resolved);
             }
+        }
+        if !first_party.iter().any(|root| root == project_root) {
+            first_party.push(project_root.to_path_buf());
         }
 
         let mut namespace_packages: Vec<PathBuf> = Vec::new();
@@ -625,9 +631,9 @@ mod tests {
         assert_eq!(
             roots.first_party(),
             &[
-                dir.path().to_path_buf(),
                 dir.path().join("lib"),
                 dir.path().join("src"),
+                dir.path().to_path_buf(),
             ]
         );
         assert_eq!(
@@ -648,6 +654,8 @@ mod tests {
         );
     }
 
+    /// Configured roots keep their order and precede the repository root,
+    /// which is the fallback (issues #633 and #1086).
     #[test]
     fn source_roots_preserve_configured_src_search_order() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -659,10 +667,27 @@ mod tests {
         assert_eq!(
             roots.first_party(),
             &[
-                dir.path().to_path_buf(),
                 dir.path().join("asrc"),
                 dir.path().join("zsrc"),
+                dir.path().to_path_buf(),
             ]
+        );
+    }
+
+    /// A configured root that *is* the repository root keeps its configured
+    /// position instead of being appended a second time as the fallback
+    /// (issue #1086).
+    #[test]
+    fn source_roots_do_not_repeat_a_configured_repository_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            src: vec![PathBuf::from("."), PathBuf::from("src")],
+            ..Config::default()
+        };
+        let roots = SourceRoots::from_config(dir.path(), &config);
+        assert_eq!(
+            roots.first_party(),
+            &[dir.path().to_path_buf(), dir.path().join("src")]
         );
     }
 
@@ -682,9 +707,9 @@ mod tests {
         assert_eq!(
             roots.first_party(),
             &[
-                dir.path().to_path_buf(),
                 dir.path().join("asrc"),
                 dir.path().join("zsrc"),
+                dir.path().to_path_buf(),
             ]
         );
         assert_eq!(roots.namespace_packages(), &[dir.path().join("ns")]);

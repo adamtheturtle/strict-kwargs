@@ -1,0 +1,1 @@
+Restore the working directory even when a test that changes it fails, and serialise those tests, so they no longer make unrelated tests in the same binary flake.

@@ -1,0 +1,1 @@
+Check calls in a ``for`` loop's iterable against the binding they actually use, rather than shadowing the loop target before the iterable is evaluated.

@@ -1,0 +1,1 @@
+Retire an earlier ``def`` when a walrus expression rebinds its name.

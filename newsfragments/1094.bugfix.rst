@@ -1,0 +1,1 @@
+Keep every overload arm when a method is bound through ``types.MethodType``, so a call a later arm accepts is no longer reported.

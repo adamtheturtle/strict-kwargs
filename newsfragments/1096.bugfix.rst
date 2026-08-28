@@ -1,0 +1,1 @@
+Pin that an annotated rebinding replaces the generator yield an earlier assignment recorded.

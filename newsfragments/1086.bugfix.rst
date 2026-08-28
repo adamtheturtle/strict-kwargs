@@ -1,0 +1,1 @@
+Search configured ``src`` roots before the repository root, which is now the fallback, so a module present in both resolves from the configured root.

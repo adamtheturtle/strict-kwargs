@@ -1,0 +1,1 @@
+Resolve callable fields through a chain of record replacements, such as ``N()._replace()._replace()`` or ``replace(replace(D()))``.

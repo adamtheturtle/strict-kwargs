@@ -1,0 +1,1 @@
+Invalidate tuple and starred ``for`` targets that rebind a callable, as bare-name targets already were.

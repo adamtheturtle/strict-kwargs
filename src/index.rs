@@ -24,7 +24,8 @@ mod data_model;
 #[cfg(test)]
 use data_model::extend_unique;
 use data_model::{
-    callee_tail, dataclass_decorator, is_init_var, is_namedtuple_class, synthesize_data_constructor,
+    callee_tail, dataclass_decorator, dataclass_field_excluded, is_init_var, is_namedtuple_class,
+    keyword_is_false, synthesize_data_constructor,
 };
 
 /// Safety bound on re-export alias chain length during lazy resolution. Real
@@ -296,6 +297,18 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     if store.conditional_depth > 0 {
         return;
     }
+    // Destructuring binds each element, so `method, _ = (lambda ...), None`
+    // replaces the method exactly as the plain form does. Pair the sides
+    // elementwise and apply the same rule to each; an unpaired shape is left
+    // alone rather than guessed at (issue #1122).
+    if let Some((targets, values)) = sequence_elements(target).zip(sequence_elements(value)) {
+        if targets.len() == values.len() {
+            for (target, value) in targets.iter().zip(values) {
+                exclude_assigned_name(store, scope_name, target, value);
+            }
+        }
+        return;
+    }
     if !matches!(value, Expr::Lambda(_)) {
         return;
     }
@@ -305,6 +318,17 @@ fn exclude_assigned_name(store: &mut Store, scope_name: &str, target: &Expr, val
     let fullname = format!("{scope_name}.{}", name.id);
     if store.signatures.contains_key(&fullname) {
         store.exclude(fullname);
+    }
+}
+
+/// The elements of a literal tuple or list, for pairing the two sides of a
+/// destructuring assignment.
+fn sequence_elements(expr: &Expr) -> Option<&[Expr]> {
+    match expr {
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            Some(elts)
+        }
+        _ => None,
     }
 }
 
@@ -3083,6 +3107,13 @@ fn synthesize_make_dataclass(
     {
         return false;
     }
+    // `make_dataclass(..., init=False)` generates no `__init__`, exactly as
+    // `@dataclass(init=False)` does not. Synthesizing one flagged valid
+    // construction and rewrote it into keywords the class does not accept
+    // (issue #1102).
+    if keyword_is_false(call, "init") {
+        return false;
+    }
     let fields = call
         .arguments
         .keywords
@@ -3095,13 +3126,25 @@ fn synthesize_make_dataclass(
     };
     let mut fields = Vec::with_capacity(field_entries.elts.len());
     for entry in &field_entries.elts {
+        // `make_dataclass` accepts a bare name alongside typed tuples, giving
+        // that field type `Any`. Rejecting the whole list on one left the
+        // documented mixed form with no synthesized `__init__` (issue #1103).
+        if let Expr::StringLiteral(name) = entry {
+            fields.push((name.value.to_str().to_owned(), None, true));
+            continue;
+        }
         let Expr::Tuple(pair) = entry else {
             return false;
         };
-        let [Expr::StringLiteral(name), annotation, ..] = &*pair.elts else {
+        let [Expr::StringLiteral(name), annotation, spec @ ..] = &*pair.elts else {
             return false;
         };
-        fields.push((name.value.to_str().to_owned(), annotation));
+        // The third tuple element is the field spec. `field(init=False)` keeps
+        // the attribute but drops it from `__init__`, exactly as the class
+        // form already models; ignoring it put an unusable keyword on the
+        // synthesized constructor (issue #1089).
+        let on_init = !spec.first().is_some_and(dataclass_field_excluded);
+        fields.push((name.value.to_str().to_owned(), Some(annotation), on_init));
     }
 
     let class_name = format!("{scope_name}.{}", target.id);
@@ -3110,11 +3153,15 @@ fn synthesize_make_dataclass(
         class_name.clone(),
         ClassDataModel {
             kind: ClassDataKind::Dataclass,
-            init_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+            init_fields: fields
+                .iter()
+                .filter(|(_, _, on_init)| *on_init)
+                .map(|(name, _, _)| name.clone())
+                .collect(),
             runtime_fields: fields
                 .iter()
-                .filter(|(_, annotation)| !is_init_var(annotation))
-                .map(|(name, _)| name.clone())
+                .filter(|(_, annotation, _)| !annotation.is_some_and(is_init_var))
+                .map(|(name, _, _)| name.clone())
                 .collect(),
         },
     );
@@ -3122,15 +3169,20 @@ fn synthesize_make_dataclass(
         name: Some("self".to_string()),
         kind: ParameterKind::PositionalOrKeyword,
     }];
-    parameters.extend(fields.iter().map(|(name, _)| Parameter {
-        name: Some(name.clone()),
-        kind: ParameterKind::PositionalOrKeyword,
-    }));
+    parameters.extend(
+        fields
+            .iter()
+            .filter(|(_, _, on_init)| *on_init)
+            .map(|(name, _, _)| Parameter {
+                name: Some(name.clone()),
+                kind: ParameterKind::PositionalOrKeyword,
+            }),
+    );
     let constructor = format!("{class_name}.__init__");
     store.insert(constructor.clone(), Signature { parameters });
     store.synthesized.insert(constructor);
-    for (name, annotation) in fields {
-        if let Some(signature) = callable_attribute_signature(annotation) {
+    for (name, annotation, _) in fields {
+        if let Some(signature) = annotation.and_then(callable_attribute_signature) {
             store.insert(format!("{class_name}.{name}"), signature);
         }
     }

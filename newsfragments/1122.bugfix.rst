@@ -1,0 +1,1 @@
+Drop a class attribute's indexed signature when a destructuring assignment in the class body replaces it, as a plain assignment already did.

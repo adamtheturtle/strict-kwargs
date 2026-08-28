@@ -1,0 +1,1 @@
+Resolve a call through a name rebound inside a function even when an enclosing scope deleted or replaced a callable of the same name.

@@ -1,0 +1,1 @@
+A ``make_dataclass`` field list that mixes bare names with typed tuples now produces a constructor signature.

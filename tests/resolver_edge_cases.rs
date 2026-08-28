@@ -2148,6 +2148,170 @@ Point(f).call(1)
     );
 }
 
+/// ``make_dataclass(init=False)`` leaves the class without a generated
+/// ``__init__``, so positional construction reaches ``object`` and must not be
+/// flagged or rewritten into keywords (issue #1102).
+#[test]
+fn make_dataclass_without_init_is_not_given_a_constructor() {
+    let messages = check_source(
+        r"
+from dataclasses import make_dataclass
+
+Point = make_dataclass(cls_name='Point', fields=[('x', int), ('y', int)], init=False)
+Point(1, 2)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "init=False generates no constructor: {messages:?}"
+    );
+}
+
+/// ``make_dataclass`` accepts a bare field name beside typed tuples, typing that
+/// field as ``Any``; the mixed form still yields a constructor (issue #1103).
+#[test]
+fn make_dataclass_accepts_bare_field_names_beside_typed_ones() {
+    let messages = check_source(
+        r"
+from dataclasses import make_dataclass
+
+Point = make_dataclass(cls_name='Point', fields=['x', ('y', int)])
+Point(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "Point"),
+        "expected a constructor for the mixed field list, got: {messages:?}"
+    );
+}
+
+/// A bare ``make_dataclass`` field is neither an ``InitVar`` nor a callable
+/// annotation, so it occupies an ``astuple`` position like any other field
+/// (issue #1103).
+#[test]
+fn make_dataclass_bare_field_occupies_an_astuple_position() {
+    let messages = check_source(
+        r"
+import dataclasses
+from collections.abc import Callable
+def target(value: int) -> None: ...
+Record = dataclasses.make_dataclass(cls_name='Record', fields=['first', ('call', Callable[[int], None])])
+dataclasses.astuple(obj=Record(first=target, call=target))[0](1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "target"),
+        "a bare field must occupy its astuple position: {messages:?}"
+    );
+}
+
+/// A chain of replacements still yields an instance of the original record, so
+/// its callable fields keep resolving (issue #1100).
+#[test]
+fn chained_namedtuple_replacements_keep_the_record_class() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from typing import NamedTuple
+def target(first: int, second: int) -> None: ...
+class Rec(NamedTuple):
+    call: Callable[[int, int], None]
+Rec(call=target)._replace(call=target)._replace(call=target).call(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 7, "target"),
+        "expected the chained record field to resolve, got: {messages:?}"
+    );
+}
+
+/// ``dataclasses.replace`` nests the same way ``_replace`` chains do
+/// (issue #1100).
+#[test]
+fn nested_dataclass_replacements_keep_the_record_class() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+def target(first: int, second: int) -> None: ...
+@dataclass
+class Rec:
+    call: Callable[[int, int], None]
+replace(replace(Rec(call=target))).call(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 8, "target"),
+        "expected the nested record field to resolve, got: {messages:?}"
+    );
+}
+
+/// A parameter that shadows a functional ``namedtuple`` name is an opaque
+/// object, not the factory, so its keyword fields must not be resolved
+/// (issue #1111).
+#[test]
+fn shadowed_namedtuple_name_does_not_resolve_keyword_fields() {
+    let messages = check_source(
+        r"
+from collections import namedtuple
+Rec = namedtuple(typename='Rec', field_names=['call'])
+def use(Rec: object) -> None:
+    def local(value: int) -> None: ...
+    Rec(call=local).call(1)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "a shadowed factory name is opaque: {messages:?}"
+    );
+}
+
+/// The unshadowed factory name still takes the keyword-field path
+/// (issue #1111).
+#[test]
+fn unshadowed_namedtuple_name_resolves_keyword_fields() {
+    let messages = check_source(
+        r"
+from collections import namedtuple
+Rec = namedtuple(typename='Rec', field_names=['call'])
+def local(value: int) -> None: ...
+Rec(call=local).call(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 5, "local"),
+        "expected the keyword field to resolve, got: {messages:?}"
+    );
+}
+
+/// An annotated rebinding replaces the generator yield recorded by an earlier
+/// plain assignment rather than leaving the first one live (issue #1096).
+#[test]
+fn annotated_rebinding_replaces_a_recorded_generator_yield() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable, Generator
+def make() -> Generator[Callable[[int, int], None], None, None]:
+    def inner(first: int, second: int) -> None: ...
+    yield inner
+def other() -> Generator[Callable[[int], None], None, None]:
+    def only(value: int) -> None: ...
+    yield only
+gen = make()
+gen: Generator[Callable[[int], None], None, None] = other()
+gen.send(None)(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 11, "send() result"),
+        "expected the rebound generator's yield, got: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("maximum 1")),
+        "expected the second generator's arity, got: {messages:?}"
+    );
+}
+
 /// A `NamedTuple` constructor keyword directly supplies the corresponding
 /// callable field value (issue #374).
 #[test]
@@ -2850,6 +3014,30 @@ with manager() as call:
     );
 }
 
+/// `asyncio.to_thread` calls its function, so awaiting it yields what that
+/// function returns rather than the function itself (issue #1113).
+#[test]
+fn to_thread_resolves_the_functions_callable_return() {
+    let messages = check_source(
+        r"
+import asyncio
+from collections.abc import Callable
+def produces(alpha: int) -> Callable[[int], None]: ...
+async def caller() -> None:
+    (await asyncio.to_thread(produces, 1))(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "awaited result"),
+        "expected a to_thread result violation, got: {messages:?}"
+    );
+    // `maximum 1` is the return's arity; `produces` itself would give 0.
+    assert!(
+        messages[0].contains("maximum 1"),
+        "the function's own signature was used: {messages:?}"
+    );
+}
+
 /// A function-local `with ... as` target invalidates an enclosing callable
 /// of the same name, as it already did at module level (issue #1125).
 #[test]
@@ -3067,6 +3255,83 @@ async def caller(manager: Manager) -> None:
     assert!(
         has_error_at(&messages, 10, "async-with context result"),
         "expected async-with binding violation, got: {messages:?}"
+    );
+}
+
+/// An ``async with`` nested under `try` or `for` reaches the walker through a
+/// different route than a top-level one, and must still bind its target from
+/// ``__aenter__`` (issue #1108).
+#[test]
+fn nested_async_with_still_binds_its_aenter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Manager:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args: object) -> None: ...
+async def guarded(manager: Manager) -> None:
+    try:
+        async with manager as call:
+            call(1, 2)
+    finally:
+        pass
+async def looped(manager: Manager) -> None:
+    for _ in range(1):
+        async with manager as call:
+            call(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "async-with context result"),
+        "expected the try-nested binding, got: {messages:?}"
+    );
+    assert!(
+        has_error_at(&messages, 15, "async-with context result"),
+        "expected the loop-nested binding, got: {messages:?}"
+    );
+}
+
+/// A receiver bound as an instance records its class in `names` rather than in
+/// `annotations`, and must still reach ``__aenter__`` (issue #1109).
+#[test]
+fn instance_bound_receiver_binds_its_aenter_result() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Manager:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args: object) -> None: ...
+async def use() -> None:
+    manager = Manager()
+    async with manager as call:
+        call(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "async-with context result"),
+        "expected the instance receiver to resolve, got: {messages:?}"
+    );
+}
+
+/// ``__aenter__`` inherited from a base class binds the target just as one
+/// declared on the receiver's own class does (issue #1110).
+#[test]
+fn inherited_aenter_binds_the_async_with_target() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+class Base:
+    async def __aenter__(self) -> Callable[[int], None]: ...
+    async def __aexit__(self, *args: object) -> None: ...
+class Child(Base): ...
+async def use(manager: Child) -> None:
+    async with manager as call:
+        call(1, 2)
+",
+    );
+    assert!(
+        has_error_at(&messages, 9, "call"),
+        "expected the inherited enter result, got: {messages:?}"
     );
 }
 
@@ -6034,6 +6299,88 @@ register_exit(target)(1)
     assert!(
         has_error_at(&messages, 4, "target"),
         "expected direct atexit.register violation, got: {messages:?}"
+    );
+}
+
+/// A `MethodType`-bound overload keeps every arm, so a call a later arm
+/// accepts is not reported (issue #1094).
+#[test]
+fn method_type_result_keeps_the_most_permissive_overload_arm() {
+    let messages = check_source(
+        r"
+from types import MethodType
+from typing import overload
+class C:
+    @overload
+    def method(self, first: int) -> None: ...
+    @overload
+    def method(self, *args: int) -> None: ...
+    def method(self, *args: int) -> None: ...
+MethodType(C.method, C())(1, 2, 3)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "the varargs arm accepts this call: {messages:?}"
+    );
+}
+
+/// When no arm accepts the call it is still reported (issue #1094).
+#[test]
+fn method_type_result_reports_a_call_no_overload_arm_accepts() {
+    let messages = check_source(
+        r"
+from types import MethodType
+from typing import overload
+class C:
+    @overload
+    def method(self, first: int) -> None: ...
+    @overload
+    def method(self, *, second: int) -> None: ...
+    def method(self, *args: int, **kwargs: int) -> None: ...
+MethodType(C.method, C())(1)
+",
+    );
+    assert!(
+        has_error_at(&messages, 10, "method bound by MethodType"),
+        "expected the bound-method violation, got: {messages:?}"
+    );
+}
+
+/// An annotated lambda rebinding retires the earlier `def`, exactly as the
+/// plain-assignment form does (issue #1088).
+#[test]
+fn annotated_lambda_rebinding_retires_the_earlier_def() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def handler(first: int, second: int) -> None: ...
+handler: Callable[..., None] = lambda *args: None
+handler(1, 2)
+",
+    );
+    assert!(
+        messages.is_empty(),
+        "the annotated rebinding replaced the def: {messages:?}"
+    );
+}
+
+/// A class field annotated `Callable` *with* a default is indexed on the fast
+/// class-body path, just as an undefaulted one is (issues #1090 and #1101).
+#[test]
+fn defaulted_callable_class_field_is_indexed() {
+    let messages = check_source(
+        r"
+from collections.abc import Callable
+def fallback(first: int, second: int) -> None: ...
+class Service:
+    call: Callable[[int, int], None] = fallback
+Service().call(1, 2, 3)
+",
+    );
+    assert!(
+        has_error_at(&messages, 6, "call"),
+        "expected the defaulted field to be indexed, got: {messages:?}"
     );
 }
 
