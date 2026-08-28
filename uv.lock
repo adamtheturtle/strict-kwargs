@@ -271,7 +271,7 @@ wheels = [
 
 [[package]]
 name = "strict-kwargs"
-version = "2026.8.27.post2"
+version = "2026.8.28"
 source = { editable = "." }
 dependencies = [
     { name = "ty" },

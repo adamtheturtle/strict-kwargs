@@ -1,1 +1,0 @@
-Resolve an awaited ``asyncio.to_thread`` result from the function's callable return annotation rather than from the function's own signature.

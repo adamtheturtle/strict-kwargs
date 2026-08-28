@@ -1,1 +1,0 @@
-Decline to rewrite an implicit ``__call__`` reached through an attribute when a subclass overrides it, which could otherwise produce a keyword the runtime class does not accept.

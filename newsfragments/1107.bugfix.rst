@@ -1,1 +1,0 @@
-A ``with ... as`` target that rebinds a callable no longer hides it from the context expression the target is bound from.

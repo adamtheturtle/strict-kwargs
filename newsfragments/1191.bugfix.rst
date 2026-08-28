@@ -1,1 +1,0 @@
-Share one helper for binding ``*args`` and ``**kwargs`` between the function and class-method paths, so a new parameter kind is handled in one place.

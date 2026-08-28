@@ -1,1 +1,0 @@
-Pin that an ``async with`` nested under ``try`` or ``for`` binds its target from ``__aenter__``.

@@ -1,1 +1,0 @@
-Require ``ty`` 0.0.75 or newer. This is the version the LSP and hover integration is verified against; the pinned completeness oracle keeps its own ``ty`` version so the golden snapshots do not drift.

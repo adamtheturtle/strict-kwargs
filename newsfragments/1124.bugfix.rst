@@ -1,1 +1,0 @@
-Stop module resolution at a nearer ``opaque_locals`` entry, so a local rebinding is not resolved as the imported module.

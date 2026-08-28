@@ -1,1 +1,0 @@
-Stop resolving keyword fields of a functional ``namedtuple`` through a name that a parameter or reassignment has since shadowed.

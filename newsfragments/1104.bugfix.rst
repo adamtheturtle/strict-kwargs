@@ -1,1 +1,0 @@
-Invalidate a callable rebound by a ``for`` or ``with ... as`` target in a class body, as already happened at module scope and in functions.

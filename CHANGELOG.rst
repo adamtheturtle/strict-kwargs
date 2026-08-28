@@ -3,6 +3,151 @@ Changelog
 
 .. towncrier release notes start
 
+2026.8.28
+---------
+
+- Pin that redefining a decorated contextmanager replaces the callable yield recorded for the first definition.
+
+- Pin that redefining a generic function as non-generic drops its identity-return relationship.
+
+- Pin that a ``Callable`` type alias narrows through an ``is not None`` guard.
+
+- Pin that a ``Callable`` type alias narrows through an ``assert``.
+
+- Pin that ``Generator.throw`` resolves a ``Callable`` type alias in its yield type.
+
+- Pin that ``AsyncGenerator.asend`` resolves a ``Callable`` type alias in its yield type.
+
+- Pin that ``AsyncGenerator.athrow`` resolves a ``Callable`` type alias in its yield type.
+
+- Pin that a ``contextvars`` token's old value resolves a ``Callable`` type alias.
+
+- Pin that ``MappingProxyType.get`` resolves a ``Callable`` type alias value type.
+
+- Resolve the concrete callable behind ``next(iter(...))`` over a literal container or mapping view, so the reported callee is named and the call can be fixed.
+
+- Resolve the concrete callable behind an ``itertools.groupby`` group built from a literal sequence.
+
+- Pin that subscripting a ``UserList.copy`` result keeps the concrete element.
+
+- Pin that ``UserList.pop`` keeps the concrete element.
+
+- Resolve the concrete callable behind iteration of a ``UserList`` or ``deque`` built from a literal sequence.
+
+- Resolve the concrete callable behind a ``WeakValueDictionary`` values view built from a literal mapping.
+
+- Pin that indexing a ``NamedTuple._replace`` result keeps the concrete field value.
+
+- Resolve the concrete callable an executor ``map`` mapper returns, so the mapped items carry its parameter names.
+
+- Pin that a ``concurrent.futures.as_completed`` future result is checked against its declared callable signature.
+
+- Pin that a ``concurrent.futures.wait`` done-set future result is checked against its declared callable signature.
+
+- Pin that a comprehension over an annotated generator factory checks its callable items.
+
+- Pin that the callable default of a ``pop`` on an empty literal mapping stays concrete.
+
+- Resolve the concrete callable behind an ``OrderedDict`` items view built from a literal mapping.
+
+- Resolve the concrete callable behind a ``ChainMap`` values view built from a literal mapping.
+
+- Resolve the concrete callable behind a ``ChainMap`` items view built from a literal mapping.
+
+- Resolve ``MappingProxyType(...).get(...)`` to the concrete value of the literal mapping the proxy wraps.
+
+- Resolve the concrete callable behind a ``MappingProxyType`` values view built from a literal mapping.
+
+- An ``assert`` that narrows a callable no longer keeps that narrowing past the branch it sits in, so a later call is reported against the name the reader wrote.
+
+- Search configured ``src`` roots before the repository root, which is now the fallback, so a module present in both resolves from the configured root.
+
+- Resolve a call through a name rebound inside a function even when an enclosing scope deleted or replaced a callable of the same name.
+
+- Pin that an annotated lambda rebinding retires the earlier ``def``.
+
+- Omit ``field(init=False)`` entries from the constructor synthesized for a functional dataclass, so an opt-in constructor fix no longer rewrites calls to keywords the constructor rejects.
+
+- Pin that a class field annotated ``Callable`` with a default is indexed on the fast class-body path.
+
+- Restore the working directory even when a test that changes it fails, and serialise those tests, so they no longer make unrelated tests in the same binary flake.
+
+- Keep every overload arm when a method is bound through ``types.MethodType``, so a call a later arm accepts is no longer reported.
+
+- Pin that an annotated rebinding replaces the generator yield an earlier assignment recorded.
+
+- Invalidate tuple and starred ``for`` targets that rebind a callable, as bare-name targets already were.
+
+- A ``for`` target that rebinds a module-level callable no longer hides that callable from calls earlier in the same file.
+
+- Invoke the result of an awaited ``asyncio.to_thread`` call, so a callable the callback returns is checked at its call site.
+
+- Resolve callable fields through a chain of record replacements, such as ``N()._replace()._replace()`` or ``replace(replace(D()))``.
+
+- Classes built by ``make_dataclass`` with ``init=False`` are no longer reported for positional construction, and are no longer rewritten into keywords the class does not accept.
+
+- A ``make_dataclass`` field list that mixes bare names with typed tuples now produces a constructor signature.
+
+- Invalidate a callable rebound by a ``for`` or ``with ... as`` target in a class body, as already happened at module scope and in functions.
+
+- Check calls in a ``for`` loop's iterable against the binding they actually use, rather than shadowing the loop target before the iterable is evaluated.
+
+- Retire an enclosing callable when a function-local ``with ... as`` target rebinds its name.
+
+- A ``with ... as`` target that rebinds a callable no longer hides it from the context expression the target is bound from.
+
+- Pin that an ``async with`` nested under ``try`` or ``for`` binds its target from ``__aenter__``.
+
+- Pin that an instance-bound receiver reaches ``__aenter__`` when binding an ``async with`` target.
+
+- Pin that an ``__aenter__`` inherited from a base class binds the ``async with`` target.
+
+- Stop resolving keyword fields of a functional ``namedtuple`` through a name that a parameter or reassignment has since shadowed.
+
+- Resolve an awaited ``asyncio.to_thread`` result from the function's callable return annotation rather than from the function's own signature.
+
+- Resolve a fix journal left by a crashed run before the next run reads the files, and never roll one back over content the transaction did not write, so an interrupted ``--fix`` can no longer discard later edits.
+
+- Let a local rebinding shadow an enclosing callable of the same name, whether it comes from destructuring, a walrus, or a loop target, instead of continuing to check calls against the enclosing definition.
+
+- Drop a class attribute's indexed signature when a destructuring assignment in the class body replaces it, as a plain assignment already did.
+
+- Retire an earlier ``def`` when a walrus expression rebinds its name.
+
+- Stop module resolution at a nearer ``opaque_locals`` entry, so a local rebinding is not resolved as the imported module.
+
+- Invalidate an enclosing callable of the same name when a ``with ... as`` target rebinds it inside a function body, as already happened at module level.
+
+- Stop rewriting the default ``pyproject.toml`` in test helpers that already inherit it.
+
+- Read the hyphenated ``include-cpython-benchmark`` workflow input with bracket access, so the opt-in CPython benchmark actually runs when requested.
+
+- Decline an overload rewrite whose selected arm renames a positional argument that was never checked for a precise type, which happened when that arm's positional limit was lower than the maximum across candidate arms.
+
+- Share one helper for binding ``*args`` and ``**kwargs`` between the function and class-method paths, so a new parameter kind is handled in one place.
+
+- Report the method rather than the type-inference binder display, such as ``Self@__init__``, when naming the callee of a ``super().__init__`` diagnostic.
+
+- Choose the most permissive ``MethodType`` overload arm by inspecting its parameters, so an arm with ``*args`` wins regardless of the order the arms are written in.
+
+- Stop resolving an executor ``map`` mapper through a name that a parameter or local has since shadowed.
+
+- ``--diff`` no longer resolves a pending fix journal, so it leaves the working tree untouched as documented.
+
+- Test a ty hover owner for a binder suffix after stripping its generic arguments, so a real class name survives a type argument that carries one.
+
+- Rewrite an implicit ``__call__`` reached through an attribute, so ``--fix`` no longer reports those calls as remaining on every run.
+
+- Stop comparing a ``for`` or ``with`` rebinding offset recorded in one file against call sites in another, which let a parent package be checked against a submodule's superseded signature.
+
+- Decline to rewrite an implicit ``__call__`` reached through an attribute when a subclass overrides it, which could otherwise produce a keyword the runtime class does not accept.
+
+- Run ``strict-kwargs check`` from the pre-commit hook, so the hook checks the files pre-commit passes it instead of failing every run with ``error: unrecognized subcommand``.
+
+- Require ``ty`` 0.0.75 or newer. This is the version the LSP and hover integration is verified against; the pinned completeness oracle keeps its own ``ty`` version so the golden snapshots do not drift.
+
+- Publish wheels for Linux ``aarch64`` and macOS ``x86_64``, so ``pip install`` and the pre-commit hook work on arm64 Linux and Intel Macs without a Rust toolchain.
+
 2026.8.27-post.2
 ----------------
 

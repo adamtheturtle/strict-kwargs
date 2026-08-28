@@ -1,1 +1,0 @@
-Resolve ``MappingProxyType(...).get(...)`` to the concrete value of the literal mapping the proxy wraps.

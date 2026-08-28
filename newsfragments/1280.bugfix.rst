@@ -1,1 +1,0 @@
-Test a ty hover owner for a binder suffix after stripping its generic arguments, so a real class name survives a type argument that carries one.

@@ -1,1 +1,0 @@
-Omit ``field(init=False)`` entries from the constructor synthesized for a functional dataclass, so an opt-in constructor fix no longer rewrites calls to keywords the constructor rejects.

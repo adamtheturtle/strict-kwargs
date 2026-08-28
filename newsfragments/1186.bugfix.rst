@@ -1,1 +1,0 @@
-Decline an overload rewrite whose selected arm renames a positional argument that was never checked for a precise type, which happened when that arm's positional limit was lower than the maximum across candidate arms.

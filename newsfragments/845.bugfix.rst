@@ -1,1 +1,0 @@
-Pin that a ``concurrent.futures.as_completed`` future result is checked against its declared callable signature.

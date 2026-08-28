@@ -1,1 +1,0 @@
-An ``assert`` that narrows a callable no longer keeps that narrowing past the branch it sits in, so a later call is reported against the name the reader wrote.

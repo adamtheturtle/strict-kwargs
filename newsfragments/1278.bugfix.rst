@@ -1,1 +1,0 @@
-Stop resolving an executor ``map`` mapper through a name that a parameter or local has since shadowed.

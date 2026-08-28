@@ -1,1 +1,0 @@
-Resolve the concrete callable behind an ``OrderedDict`` items view built from a literal mapping.

@@ -1,1 +1,0 @@
-Rewrite an implicit ``__call__`` reached through an attribute, so ``--fix`` no longer reports those calls as remaining on every run.

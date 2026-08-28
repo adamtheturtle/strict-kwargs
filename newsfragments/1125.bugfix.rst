@@ -1,1 +1,0 @@
-Invalidate an enclosing callable of the same name when a ``with ... as`` target rebinds it inside a function body, as already happened at module level.

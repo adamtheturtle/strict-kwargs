@@ -1,1 +1,0 @@
-Stop rewriting the default ``pyproject.toml`` in test helpers that already inherit it.

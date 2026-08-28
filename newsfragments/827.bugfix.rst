@@ -1,1 +1,0 @@
-Resolve the concrete callable behind a ``WeakValueDictionary`` values view built from a literal mapping.

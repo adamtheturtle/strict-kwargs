@@ -1,1 +1,0 @@
-Resolve the concrete callable behind a ``MappingProxyType`` values view built from a literal mapping.

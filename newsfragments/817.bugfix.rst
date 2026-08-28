@@ -1,1 +1,0 @@
-Resolve the concrete callable behind iteration of a ``UserList`` or ``deque`` built from a literal sequence.

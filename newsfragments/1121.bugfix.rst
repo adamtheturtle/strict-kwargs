@@ -1,1 +1,0 @@
-Let a local rebinding shadow an enclosing callable of the same name, whether it comes from destructuring, a walrus, or a loop target, instead of continuing to check calls against the enclosing definition.

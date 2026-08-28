@@ -1,1 +1,0 @@
-Retire an enclosing callable when a function-local ``with ... as`` target rebinds its name.
