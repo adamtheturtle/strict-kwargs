@@ -15,10 +15,10 @@ use strict_kwargs::{check_paths, Config, Diagnostic};
 
 mod common;
 
-use common::{TestProject, DEFAULT_PYPROJECT};
+use common::TestProject;
 
 fn plain_project(source: &str) -> TestProject {
-    TestProject::new().pyproject(DEFAULT_PYPROJECT).main(source)
+    TestProject::new().main(source)
 }
 
 fn check_source(source: &str) -> Vec<String> {
@@ -38,7 +38,7 @@ fn has_error_at(messages: &[String], line: usize, contains: &str) -> bool {
 /// (issue #55).
 #[test]
 fn nonexistent_path_is_a_hard_error() {
-    let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
+    let project = TestProject::new();
     let missing = project.root.join("does_not_exist.py");
     let config = Config::load(&project.root).expect("valid config");
     let error = check_paths(&project.root, &[missing], &config, None, None)
@@ -56,7 +56,7 @@ fn nonexistent_path_is_a_hard_error() {
 /// keeps the issue #55 hardening scoped to genuinely missing paths.
 #[test]
 fn non_python_file_passed_directly_is_skipped() {
-    let project = TestProject::new().pyproject("[project]\nname = \"t\"\nversion = \"0\"\n");
+    let project = TestProject::new();
     let not_py = project.root.join("notes.txt");
     std::fs::write(&not_py, "plain text\n").expect("write");
     let config = Config::load(&project.root).expect("valid config");
@@ -69,7 +69,6 @@ fn non_python_file_passed_directly_is_skipped() {
 #[test]
 fn directory_walk_filters_non_python_files() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("README.txt", "not python\n")
         .file("pkg/mod.py", "def func(a: int) -> None: ...\nfunc(1)\n");
     let messages = project.check_dir();
@@ -84,7 +83,6 @@ fn directory_walk_filters_non_python_files() {
 #[test]
 fn directory_walk_collects_pyi_and_skips_ignored_dirs() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("typed.pyi", "def func(a: int) -> None: ...\n")
         .file("app.py", "import typed\n\ntyped.func(1)\n")
         .file("__pycache__/cached.py", "def x(a): ...\nx(1)\n")
@@ -125,9 +123,8 @@ fn relative_import_empty_base_binds_bare_name() {
 /// to nothing without panicking.
 #[test]
 fn over_deep_relative_import_returns_none() {
-    let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
-        .file("pkg/mod.py", "from ... import something\n\nsomething()\n");
+    let project =
+        TestProject::new().file("pkg/mod.py", "from ... import something\n\nsomething()\n");
     let config = Config::load(&project.root).expect("valid config");
     let modp = project.root.join("pkg/mod.py");
     let diagnostics = check_paths(&project.root, &[modp], &config, None, None).expect("check");
@@ -454,7 +451,6 @@ outer()
 #[test]
 fn try_except_import_fallback_lambda_still_checks_import() {
     let project = TestProject::new()
-        .pyproject(DEFAULT_PYPROJECT)
         .file(
             "collections_helper.py",
             "def _tuplegetter(index: int, doc: str) -> object: ...\n",
@@ -2587,7 +2583,6 @@ object.__str__.__get__(Owner(), Owner)()
 #[test]
 fn multi_level_descriptor_get_positional_binding_args_are_allowed() {
     let messages = TestProject::new()
-        .pyproject(DEFAULT_PYPROJECT)
         .file(
             "desc.py",
             "class Desc:\n\
@@ -5445,7 +5440,6 @@ h.attr2: C = C()
 #[test]
 fn call_of_imported_callable_class_resolves_dunder_call() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("app.py", "from lib import Factory\n\nFactory()(1, 2, 3)\n")
         .file(
             "lib.py",
@@ -5492,7 +5486,6 @@ def b(): ...
 #[test]
 fn deep_dotted_attribute_chain_resolves() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("app.py", "import pkg.sub\n\npkg.sub.run(1, 2)\n")
         .file("pkg/__init__.py", "")
         .file("pkg/sub.py", "def run(a, b): ...\n");
@@ -5529,7 +5522,6 @@ x.method(1, 2)
 #[test]
 fn assignment_from_attribute_constructor_is_not_recorded() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "app.py",
             "import lib\n\nobj = lib.Factory()\nobj.run(1, 2)\n",
@@ -5579,7 +5571,6 @@ fn free_function_named_self_first_param_is_flagged() {
 #[test]
 fn call_to_non_callable_module_attribute_is_ignored() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file("app.py", "import lib\n\nlib.thing(1, 2)\n")
         .file("lib.py", "thing = 5\n");
     let config = Config::load(&project.root).expect("valid config");
@@ -5819,7 +5810,6 @@ fn ty_hover_honors_ignore_names_for_bound_builtin_method() {
 #[test]
 fn ty_goto_definition_resolves_cross_file_class_constructor() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "app.py",
             "import lib\n\nfactory = lib.get_thing_cls()\nfactory(1, 2, 3)\n",
@@ -5876,7 +5866,6 @@ fn ty_resolves_union_of_class_objects_from_tuple_loop() {
 #[test]
 fn ty_resolves_cross_file_method_on_inferred_instance() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "app.py",
             "from lib import make\n\nobj = make()\nobj.greet(1, 2, 3)\n",
@@ -5904,7 +5893,6 @@ fn ty_resolves_cross_file_method_on_inferred_instance() {
 #[test]
 fn ty_goto_definition_recurses_control_flow_blocks() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "app.py",
             "from lib import build\n\nobj = build()\nobj.run(1, 2, 3)\n",

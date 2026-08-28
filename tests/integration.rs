@@ -12,13 +12,10 @@ use strict_kwargs::{check_paths, Config};
 
 mod common;
 
-use common::{TestProject, DEFAULT_PYPROJECT};
+use common::TestProject;
 
 fn check_source(source: &str) -> Vec<String> {
-    TestProject::new()
-        .pyproject(DEFAULT_PYPROJECT)
-        .main(source)
-        .check()
+    TestProject::new().main(source).check()
 }
 
 fn assert_error(source: &str, line: usize, contains: &str) {
@@ -51,9 +48,7 @@ fn assert_error_at(project: &TestProject, line: usize, contains: &str) {
 fn unreadable_python_file_reports_io_error() {
     use std::os::unix::fs::PermissionsExt;
 
-    let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
-        .main("def f():\n    pass\n");
+    let project = TestProject::new().main("def f():\n    pass\n");
     let main = project.root.join("main.py");
     std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let config = Config::load(&project.root).expect("valid config");
@@ -291,7 +286,6 @@ K.n(K())
 #[test]
 fn unbound_imported_module_method_receiver_not_flagged() {
     let messages = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "lib.py",
             r"
@@ -1679,7 +1673,6 @@ Child.method(Child(), 1)
 #[test]
 fn builtin_resolves_imported_inherited_method() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "base.py",
             "class A:\n    def method(self, a: int) -> None: ...\n",
@@ -1752,7 +1745,6 @@ class Child(Base):
 #[test]
 fn builtin_resolves_module_attribute_constructor_receiver() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "pkg/models.py",
             "class Base:\n    def method(self, a: int) -> None: ...\n\nclass Child(Base):\n    pass\n",
@@ -1771,7 +1763,6 @@ pkg.models.Child().method(1)
 #[test]
 fn builtin_resolves_imported_module_constructor_receiver() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "models.py",
             "class Base:\n    def method(self, a: int) -> None: ...\n\nclass Child(Base):\n    pass\n",
@@ -2664,7 +2655,6 @@ consume(1)
 #[test]
 fn imported_arbitrary_decorator_definition_signature_is_not_trusted() {
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "decorated.py",
             r"
@@ -2913,7 +2903,6 @@ fn singledispatch_imported_multi_arg_call_not_flagged() {
     // is resolved lazily (not eagerly indexed). The re-check after `get`
     // returns None is required to catch this case (issue #81).
     let project = TestProject::new()
-        .pyproject("[project]\nname = \"t\"\nversion = \"0\"\n")
         .file(
             "dispatch.py",
             r"

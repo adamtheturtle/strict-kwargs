@@ -4,7 +4,10 @@ use strict_kwargs::{
     check_paths, fix_paths, fix_paths_with_opt_ins, Config, Diagnostic, FixOptIns,
 };
 
-pub const DEFAULT_PYPROJECT: &str = "[project]\nname = \"t\"\nversion = \"0\"\n";
+/// Written by [`TestProject::new`], so a test only calls
+/// [`TestProject::pyproject`] to *override* it — passing this content again
+/// just rewrote the same file (issue #1179).
+const DEFAULT_PYPROJECT: &str = "[project]\nname = \"t\"\nversion = \"0\"\n";
 
 pub struct TestProject {
     _temp: tempfile::TempDir,
@@ -46,6 +49,8 @@ impl TestProject {
         self.file("main.py", content)
     }
 
+    /// Replace the default `pyproject.toml`. Only needed when the test wants
+    /// content other than [`DEFAULT_PYPROJECT`], which `new` already wrote.
     pub fn pyproject(self, content: &str) -> Self {
         self.write_file("pyproject.toml", content);
         self
