@@ -41,7 +41,7 @@ urls.Source = "https://github.com/adamtheturtle/strict-kwargs"
 urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANGELOG.rst"
 
 [project.optional-dependencies]
-release = [ "check-wheel-contents==0.6.3", "towncrier==25.8.0" ]
+release = [ "check-wheel-contents==0.6.3", "towncrier==26.9.0" ]
 
 [tool.maturin]
 bindings = "bin"
