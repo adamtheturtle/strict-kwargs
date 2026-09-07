@@ -27,8 +27,11 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust nightly (branch coverage + `#[coverage(off)]` need an unstable rustc)
+        # Pin the compiler because nightly coverage instrumentation can change
+        # without any repository changes and make the 100% gate non-reproducible.
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-09-05
           components: llvm-tools-preview
 
       - name: Cache Rust build artifacts
