@@ -69,7 +69,7 @@ jobs:
       - name: Generate the GitHub release notes
         env:
           RELEASE: ${{ steps.version.outputs.release }}
-        run: uv run --extra=release towncrier build --draft --version "$RELEASE" >
+        run: uv run --group=release towncrier build --draft --version "$RELEASE" >
           release-notes.md
 
       # Assemble the same fragments into CHANGELOG.rst under a new
@@ -77,7 +77,7 @@ jobs:
       - name: Update the changelog
         env:
           RELEASE: ${{ steps.version.outputs.release }}
-        run: uv run --extra=release towncrier build --yes --version "$RELEASE"
+        run: uv run --group=release towncrier build --yes --version "$RELEASE"
 
       - name: Set package and README versions
         env:
@@ -274,7 +274,7 @@ jobs:
       - name: Check wheels
         run: |
           ls -la dist/
-          uv run --locked --extra release check-wheel-contents --ignore W007 dist/*.whl
+          uv run --locked --group release check-wheel-contents --ignore W007 dist/*.whl
 
       # We use PyPI trusted publishing rather than a PyPI API token.
       # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1/?tab=readme-ov-file#trusted-publishing.
@@ -319,7 +319,7 @@ jobs:
       - name: Check wheels
         run: |
           ls -la dist/
-          uv run --locked --extra release check-wheel-contents --ignore W007 dist/*.whl
+          uv run --locked --group release check-wheel-contents --ignore W007 dist/*.whl
 
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

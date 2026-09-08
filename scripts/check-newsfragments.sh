@@ -13,7 +13,7 @@ if [ "$fragments" -eq 0 ]; then
     exit 0
 fi
 
-# `uvx` runs towncrier standalone. `uv run --extra=release` would install
+# `uvx` runs towncrier standalone. `uv run --group=release` would install
 # this project first, compiling the Rust binary just to read a TOML table,
 # and an unrelated compile error would surface here as a changelog failure.
 # towncrier reads its configuration from the working directory either way.
