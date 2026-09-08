@@ -291,23 +291,23 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+dev = [
+    { name = "snapper-fmt" },
+]
 release = [
     { name = "check-wheel-contents" },
     { name = "towncrier" },
-]
-snapper = [
-    { name = "snapper-fmt" },
 ]
 
 [package.metadata]
 requires-dist = [{ name = "ty", specifier = ">=0.0.75" }]
 
 [package.metadata.requires-dev]
+dev = [{ name = "snapper-fmt", specifier = "==0.11.0" }]
 release = [
     { name = "check-wheel-contents", specifier = "==0.6.3" },
     { name = "towncrier", specifier = "==26.9.0" },
 ]
-snapper = [{ name = "snapper-fmt", specifier = "==0.11.0" }]
 
 [[package]]
 name = "towncrier"
