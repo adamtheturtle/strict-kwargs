@@ -2,8 +2,7 @@
 
 ## Completeness
 
-The ignored completeness test in `tests/completeness.rs` stores its expected
-diagnostics as platform-specific `insta` snapshots:
+The ignored completeness test in `tests/completeness.rs` stores its expected diagnostics as platform-specific `insta` snapshots:
 
 ```text
 tests/snapshots/completeness__pinned_repository_diagnostics.snap        # Linux
@@ -12,18 +11,15 @@ tests/snapshots/completeness__cpython_repository_diagnostics.snap       # Linux
 tests/snapshots/completeness__cpython_repository_diagnostics_macos.snap # macOS
 ```
 
-Each snapshot is a canonicalized TSV-style required diagnostic list. Every
-diagnostic in the current platform's snapshot must be observed on every run;
-there is no allowed-extra baseline. Extra diagnostics are not documented
-separately because the pinned-repository oracle still has platform- and
-environment-specific resolver drift.
+Each snapshot is a canonicalized TSV-style required diagnostic list.
+Every diagnostic in the current platform's snapshot must be observed on every run; there is no allowed-extra baseline.
+Extra diagnostics are not documented separately because the pinned-repository oracle still has platform- and environment-specific resolver drift.
 
 The current pinned repositories are:
 
 - Sphinx repository: `https://github.com/sphinx-doc/sphinx.git`
 - Sphinx ref: `cc7c6f435ad37bb12264f8118c8461b230e6830c`
-- Sphinx Python dependencies:
-  `tests/golden/completeness-requirements-constraints.txt`
+- Sphinx Python dependencies: `tests/golden/completeness-requirements-constraints.txt`
 - CPython repository: `https://github.com/python/cpython.git`
 - CPython ref: `8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a`
 - `ty`: `0.0.64`
@@ -35,50 +31,29 @@ scripts/regenerate-completeness-golden.sh sphinx
 scripts/regenerate-completeness-golden.sh cpython
 ```
 
-By default the script runs strict-kwargs over the pinned checkout three times,
-with Sphinx installed editable into a temporary virtual environment. CPython is
-checked directly from its checkout because it does not need an editable install
-for first-party resolution. The script runs the checker through a temporary
-`ty==0.0.64` wrapper so the oracle does not drift when a newer `ty` release
-changes hover display details. The script sets
-`STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to
-refresh the committed snapshot for the current platform directly. The Sphinx
-virtual environment is installed with
-`tests/golden/completeness-requirements-constraints.txt` so the oracle does not
-drift when transitive dependencies change their public type surface.
+By default the script runs strict-kwargs over the pinned checkout three times, with Sphinx installed editable into a temporary virtual environment.
+CPython is checked directly from its checkout because it does not need an editable install for first-party resolution.
+The script runs the checker through a temporary `ty==0.0.64` wrapper so the oracle does not drift when a newer `ty` release changes hover display details.
+The script sets `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to refresh the committed snapshot for the current platform directly.
+The Sphinx virtual environment is installed with `tests/golden/completeness-requirements-constraints.txt` so the oracle does not drift when transitive dependencies change their public type surface.
 
-To reuse an existing checkout, set
-`STRICT_KWARGS_COMPLETENESS_SPHINX_CHECKOUT=/path/to/sphinx` or
-`STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT=/path/to/cpython`; it must be at
-the pinned ref above. A reused CPython checkout is locally cloned into a
-system temporary directory before analysis. This prevents `ty` from
-discovering unrelated project metadata above the supplied path, so a nested
-worktree and a standalone clone produce the same oracle. To reuse an existing
-Sphinx Python environment, set
-`STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV=/path/to/venv`. Otherwise the
-script creates a venv with Python `3.13`, matching scheduled CI; set
-`STRICT_KWARGS_COMPLETENESS_PYTHON` to override the interpreter. To
-intentionally refresh the Sphinx third-party dependency surface, update
-`tests/golden/completeness-requirements-constraints.txt` and regenerate the
-oracle in the same change. To intentionally re-admit or remove
-platform-sensitive diagnostics, regenerate the affected platform snapshot in
-the same change. To change the number of runs, set
-`STRICT_KWARGS_COMPLETENESS_RUNS`. To intentionally update the pinned `ty`
-version, set `STRICT_KWARGS_COMPLETENESS_TY_VERSION` while regenerating and
-update the version documented here and in `tests/completeness.rs`.
+To reuse an existing checkout, set `STRICT_KWARGS_COMPLETENESS_SPHINX_CHECKOUT=/path/to/sphinx` or `STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT=/path/to/cpython`; it must be at the pinned ref above.
+A reused CPython checkout is locally cloned into a system temporary directory before analysis.
+This prevents `ty` from discovering unrelated project metadata above the supplied path, so a nested worktree and a standalone clone produce the same oracle.
+To reuse an existing Sphinx Python environment, set `STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV=/path/to/venv`.
+Otherwise the script creates a venv with Python `3.13`, matching scheduled CI; set `STRICT_KWARGS_COMPLETENESS_PYTHON` to override the interpreter.
+To intentionally refresh the Sphinx third-party dependency surface, update `tests/golden/completeness-requirements-constraints.txt` and regenerate the oracle in the same change.
+To intentionally re-admit or remove platform-sensitive diagnostics, regenerate the affected platform snapshot in the same change.
+To change the number of runs, set `STRICT_KWARGS_COMPLETENESS_RUNS`.
+To intentionally update the pinned `ty` version, set `STRICT_KWARGS_COMPLETENESS_TY_VERSION` while regenerating and update the version documented here and in `tests/completeness.rs`.
 
-To intentionally swap or repin a repository, update the repository defaults in
-`tests/completeness.rs`, CI, this README, any dependency constraints, and the
-platform snapshots together.
+To intentionally swap or repin a repository, update the repository defaults in `tests/completeness.rs`, CI, this README, any dependency constraints, and the platform snapshots together.
 
 Review regenerated diffs as an oracle change, not as a blind snapshot update:
 
-- additions are newly reported diagnostics and should be checked for false
-  positives before committing
-- removals are expected resolver improvements or lost coverage and should be
-  explained in the change that updates the snapshot
-- local-only or platform-specific diagnostics should not be added unless they
-  are stable in CI too
+- additions are newly reported diagnostics and should be checked for false positives before committing
+- removals are expected resolver improvements or lost coverage and should be explained in the change that updates the snapshot
+- local-only or platform-specific diagnostics should not be added unless they are stable in CI too
 
 Run the opt-in test locally with:
 
@@ -91,17 +66,11 @@ cargo test --locked --test completeness \
 
 ## Snapshot tooling decision
 
-`insta` is the best fit now that the oracle no longer carries an allowed-extra
-set. The test still keeps the pinned-repository setup in Rust and shell code:
-pinned checkout setup, pinned `ty`, Python environment control, multi-run
-stable-diagnostic filtering, required-baseline checking, and canonicalized
-diagnostic keys. `insta` handles the large golden file, regeneration,
-review-oriented diffs, and optional `cargo insta review` workflow.
+`insta` is the best fit now that the oracle no longer carries an allowed-extra set.
+The test still keeps the pinned-repository setup in Rust and shell code: pinned checkout setup, pinned `ty`, Python environment control, multi-run stable-diagnostic filtering, required-baseline checking, and canonicalized diagnostic keys.
+`insta` handles the large golden file, regeneration, review-oriented diffs, and optional `cargo insta review` workflow.
 
 Other options considered were weaker for this shape:
 
-- `expect-test` can store inline or file-based expectations, but the snapshot is
-  large enough that `insta`'s `.snap.new` and `cargo insta` review workflow is
-  more useful.
-- `pretty_assertions` improves direct assertion diffs, but it does not provide
-  snapshot storage or regeneration.
+- `expect-test` can store inline or file-based expectations, but the snapshot is large enough that `insta`'s `.snap.new` and `cargo insta` review workflow is more useful.
+- `pretty_assertions` improves direct assertion diffs, but it does not provide snapshot storage or regeneration.

@@ -1,5 +1,4 @@
-[![Build Status](https://github.com/adamtheturtle/strict-kwargs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adamtheturtle/strict-kwargs/actions)
-[![PyPI](https://badge.fury.io/py/strict-kwargs.svg)](https://badge.fury.io/py/strict-kwargs)
+[![Build Status](https://github.com/adamtheturtle/strict-kwargs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adamtheturtle/strict-kwargs/actions) [![PyPI](https://badge.fury.io/py/strict-kwargs.svg)](https://badge.fury.io/py/strict-kwargs)
 
 # strict-kwargs
 
@@ -142,7 +141,8 @@ Add a Ruff-style `# noqa` comment to the line a diagnostic is reported on (the f
 func(1, 2, 3)  # noqa: KW001
 ```
 
-- `# noqa: KW001` suppresses only `KW001`. A directive naming other codes (for example `# noqa: E501`) leaves the call reported.
+- `# noqa: KW001` suppresses only `KW001`.
+  A directive naming other codes (for example `# noqa: E501`) leaves the call reported.
 - A bare `# noqa` suppresses every finding on the line, matching Ruff.
 - Suppressed calls are skipped by `--fix` too, so a `# noqa` call is never rewritten.
 
@@ -173,7 +173,8 @@ Enabling the rule makes suppressed calls cost a full check (including the `ty` f
 
 #### Using `# noqa` alongside Ruff
 
-If you also run Ruff with `RUF100` (unused `noqa`) enabled, prefer the coded form `# noqa: KW001`: Ruff leaves a directive whose only codes it does not recognise untouched, but it will remove a bare `# noqa` it considers unused. To keep `KW001` from being stripped when it shares a directive with a Ruff code (for example `# noqa: E501, KW001`), declare it as an external code:
+If you also run Ruff with `RUF100` (unused `noqa`) enabled, prefer the coded form `# noqa: KW001`: Ruff leaves a directive whose only codes it does not recognise untouched, but it will remove a bare `# noqa` it considers unused.
+To keep `KW001` from being stripped when it shares a directive with a Ruff code (for example `# noqa: E501, KW001`), declare it as an external code:
 
 ```toml
 [tool.ruff.lint]
