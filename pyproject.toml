@@ -41,6 +41,9 @@ urls.Source = "https://github.com/adamtheturtle/strict-kwargs"
 urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANGELOG.rst"
 
 [dependency-groups]
+dev = [
+    "snapper-fmt @ git+https://github.com/TurtleTech-ehf/snapper.git@bcd3458e27e4156ce4e0a0b55a227400328fb3b1",
+]
 release = [ "check-wheel-contents==0.6.3", "towncrier==26.9.0" ]
 
 [tool.maturin]

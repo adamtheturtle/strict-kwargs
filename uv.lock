@@ -270,6 +270,11 @@ wheels = [
 ]
 
 [[package]]
+name = "snapper-fmt"
+version = "0.11.0"
+source = { git = "https://github.com/TurtleTech-ehf/snapper.git?rev=bcd3458e27e4156ce4e0a0b55a227400328fb3b1#bcd3458e27e4156ce4e0a0b55a227400328fb3b1" }
+
+[[package]]
 name = "strict-kwargs"
 version = "2026.8.28.post2"
 source = { editable = "." }
@@ -278,6 +283,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+dev = [
+    { name = "snapper-fmt" },
+]
 release = [
     { name = "check-wheel-contents" },
     { name = "towncrier" },
@@ -287,6 +295,7 @@ release = [
 requires-dist = [{ name = "ty", specifier = ">=0.0.75" }]
 
 [package.metadata.requires-dev]
+dev = [{ name = "snapper-fmt", git = "https://github.com/TurtleTech-ehf/snapper.git?rev=bcd3458e27e4156ce4e0a0b55a227400328fb3b1" }]
 release = [
     { name = "check-wheel-contents", specifier = "==0.6.3" },
     { name = "towncrier", specifier = "==26.9.0" },
