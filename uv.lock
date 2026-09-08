@@ -283,23 +283,23 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-dev = [
-    { name = "snapper-fmt" },
-]
 release = [
     { name = "check-wheel-contents" },
     { name = "towncrier" },
+]
+snapper = [
+    { name = "snapper-fmt" },
 ]
 
 [package.metadata]
 requires-dist = [{ name = "ty", specifier = ">=0.0.75" }]
 
 [package.metadata.requires-dev]
-dev = [{ name = "snapper-fmt", git = "https://github.com/TurtleTech-ehf/snapper.git?rev=bcd3458e27e4156ce4e0a0b55a227400328fb3b1" }]
 release = [
     { name = "check-wheel-contents", specifier = "==0.6.3" },
     { name = "towncrier", specifier = "==26.9.0" },
 ]
+snapper = [{ name = "snapper-fmt", git = "https://github.com/TurtleTech-ehf/snapper.git?rev=bcd3458e27e4156ce4e0a0b55a227400328fb3b1" }]
 
 [[package]]
 name = "towncrier"
