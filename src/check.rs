@@ -3267,7 +3267,10 @@ impl<'a> CallChecker<'a> {
                 constructed_class.as_ref().map_or(0, |class| {
                     self.index.constructor_positional_allowance(class)
                 })
-            };
+            }
+            .max(usize::from(
+                callee_fullname == "contextvars.ContextVar.__new__",
+            ));
         if self.config.debug {
             eprintln!("DEBUG: strict_kwargs: {callee_fullname}");
         }

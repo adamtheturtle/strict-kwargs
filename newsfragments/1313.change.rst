@@ -1,0 +1,1 @@
+Update the vendored typeshed snapshot and preserve the positional-only runtime contract of ``ContextVar`` constructors.
