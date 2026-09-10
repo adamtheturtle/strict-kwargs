@@ -42,7 +42,7 @@ urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANG
 
 [dependency-groups]
 dev = [
-    "snapper-fmt==0.11.0",
+    "snapper-fmt==0.11.1",
 ]
 release = [ "check-wheel-contents==0.6.3", "towncrier==26.9.0" ]
 
