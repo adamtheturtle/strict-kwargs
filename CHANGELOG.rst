@@ -187,8 +187,7 @@ Changelog
 
 - Preserve concrete callable signatures returned by ``pop`` on literal sets and dictionaries.
 
-- Preserve concrete callable item signatures through :func:`map` and
-  :func:`filter` results.
+- Preserve concrete callable item signatures through :func:`map` and :func:`filter` results.
 
 - Preserve callable results from ``enterAsyncContext`` when an ``IsolatedAsyncioTestCase`` is stored in a local variable.
 
@@ -592,7 +591,8 @@ No significant changes.
 - Avoid false constructor diagnostics and unsafe fixes when a class call crosses multiple locally modeled runtime boundaries.
   Calls now remain unchanged when a local ``__new__`` competes with ``__init__`` or a custom metaclass ``__call__`` can impose a different positional-only contract.
 
-- Extend ``ty`` hover-answer reuse from ``self``/``cls`` attribute calls to every call on a stable name binding: any parameter, a module-level ``import``/``def``/``class``, a single assignment (``f = open(...)``, ``with open(...) as f``), and bare-name calls on such bindings (``Decimal(...)``, ``check(...)``). Deferred calls that share a binding, an attribute, and a call-shape fingerprint now resolve from one hover/definition round trip instead of one per call site, cutting the CPython completeness run's ``ty`` request volume by about 17% (138k to 114k requests).
+- Extend ``ty`` hover-answer reuse from ``self``/``cls`` attribute calls to every call on a stable name binding: any parameter, a module-level ``import``/``def``/``class``, a single assignment (``f = open(...)``, ``with open(...) as f``), and bare-name calls on such bindings (``Decimal(...)``, ``check(...)``).
+  Deferred calls that share a binding, an attribute, and a call-shape fingerprint now resolve from one hover/definition round trip instead of one per call site, cutting the CPython completeness run's ``ty`` request volume by about 17% (138k to 114k requests).
   Bindings stay grouped only while they are provably stable: any rebinding, ``del``, augmented assignment, ``global``/``nonlocal``, ``match`` subject or capture, narrowing test, or escape into a call poisons the group, a binding that shadows an enclosing name retroactively un-groups call sites recorded before it in the same scope (Python makes the name scope-local throughout), and class-body bindings never shadow names inside methods.
   The wider reuse also recovers nine CPython diagnostics that per-site queries had been losing to ``ty``'s answer instability (``LibraryLoader.LoadLibrary``, ``IdleConf.GetOption``, ``ExitStack.enter_context``, ...), with no entries lost on either completeness oracle.
 
@@ -613,14 +613,17 @@ No significant changes.
   Legacy Latin-1 source is now written back as Latin-1 instead of silently changing non-ASCII bytes to UTF-8 while leaving the original encoding declaration in place.
   UTF-8 byte-order marks are preserved as well.
 
-- Raise the required ``ty`` floor from ``0.0.46`` to ``0.0.52``, the release the LSP/hover integration is now verified against. The full test suite (including the hover and goto-definition goldens) passes unchanged on ``0.0.52``, so the hover/LSP surface this project parses is unaffected.
+- Raise the required ``ty`` floor from ``0.0.46`` to ``0.0.52``, the release the LSP/hover integration is now verified against.
+  The full test suite (including the hover and goto-definition goldens) passes unchanged on ``0.0.52``, so the hover/LSP surface this project parses is unaffected.
   On the completeness oracles the new ``ty`` produces roughly the same result as ``0.0.46``.
   A handful of diagnostics churn either way, with the only systematic change coming from ty's ``dict.pop`` overload fix, which drops three ``pop`` call sites that are no longer flagged.
 
 - Reject an explicit ``--project-root`` that is missing or is not a directory instead of silently ignoring project configuration.
 
 - Reuse one ``ty`` hover/definition answer for repeated same-shape ``self.method(...)``/``cls.method(...)`` calls, cutting the ty fallback roughly 40% on method-call-heavy projects (CPython completeness benchmark: ~24s to ~14.5s ty phase, ~29s to ~18s end to end; Sphinx: ~4s to ~2.1s).
-  The built-in scan groups deferred calls that are proven to hover identically: the same un-rebound ``self``/``cls`` parameter binding, the same attribute, and the same call shape (argument arity, coarse argument kinds, keyword names; ty's hover is call-site sensitive for overloads and generics, so shape is part of the key). The ty fallback asks once per group. Grouping is dropped conservatively whenever the receiver could be rebound or narrowed (assignment to the name, the bare name escaping into a call such as ``isinstance(self, T)``, a comparison/truthiness test, a ``match`` statement, an assignment to or non-call mention of the attribute), so every reused answer is exactly what ``ty`` would have returned at that site.
+  The built-in scan groups deferred calls that are proven to hover identically: the same un-rebound ``self``/``cls`` parameter binding, the same attribute, and the same call shape (argument arity, coarse argument kinds, keyword names; ty's hover is call-site sensitive for overloads and generics, so shape is part of the key).
+  The ty fallback asks once per group.
+  Grouping is dropped conservatively whenever the receiver could be rebound or narrowed (assignment to the name, the bare name escaping into a call such as ``isinstance(self, T)``, a comparison/truthiness test, a ``match`` statement, an assignment to or non-call mention of the attribute), so every reused answer is exactly what ``ty`` would have returned at that site.
   Each server's request stream remains a pure function of the sorted work list, so diagnostics stay deterministic across runs and machines; the only observed output change on the pinned completeness repositories is four additional true positives on CPython where ty previously answered the same call sites inconsistently (``skipTest``/``fail``/``fspath``), with no entries lost.
 
 - Run the ``ty`` inference fallback on four parallel ``ty server`` shards when more than one file needs it, making whole-project runs ~3.5x faster on large repositories (CPython: ~45s to ~13s; Sphinx: ~6.6s to ~1.9s).
@@ -741,7 +744,8 @@ No significant changes.
 
 - A single non-UTF-8 file no longer aborts the whole run or masks violations in every other file (issue #53).
   Previously one stray byte (a binary fixture, vendored data, a legacy-encoded module) failed the run with exit 2 *and* suppressed real violations everywhere else.
-  Now an undecodable file is reported as a warning and skipped while the rest of the run proceeds and still reports genuine violations, mirroring ruff/pyright. A UTF-8 BOM and a `PEP 263 <https://peps.python.org/pep-0263/>`_ ``# -*- coding: <enc> -*-`` declaration in the first two lines are now honored, so legacy-encoded but valid Python (``latin-1``/``iso-8859-1``, ``ascii``, explicit ``utf-8``) is decoded and checked rather than rejected.
+  Now an undecodable file is reported as a warning and skipped while the rest of the run proceeds and still reports genuine violations, mirroring ruff/pyright.
+  A UTF-8 BOM and a `PEP 263 <https://peps.python.org/pep-0263/>`_ ``# -*- coding: <enc> -*-`` declaration in the first two lines are now honored, so legacy-encoded but valid Python (``latin-1``/``iso-8859-1``, ``ascii``, explicit ``utf-8``) is decoded and checked rather than rejected.
   Any other *declared* encoding receives the same graceful skip: the file is left unanalyzed while the rest of the run proceeds, without adding a third-party codec dependency.
   A genuine filesystem error (missing file or permission denied) is still fatal because the input itself is inaccessible.
 
@@ -786,16 +790,19 @@ No significant changes.
 - Continuous benchmarking via `CodSpeed <https://codspeed.io>`_: a divan benchmark suite (``benches/resolver.rs``) covering a leaf file, a large stdlib import closure, an overload/special-form heavy file, and a generated first-party closure, plus the auto-fixer.
   A non-gating CI job reports an instruction-count delta against ``main`` on every PR.
 - ``strict-kwargs fix``: auto-rewrite surplus positional call arguments to keyword arguments (``--diff`` to preview).
-  Conservative: only calls that resolve to a single known signature are rewritten (project code and the embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs`` unpacking, and ty-only resolutions are left untouched. The implicit receiver is skipped only for constructor/callable dunders and bound ``receiver.method(...)`` calls, so a standalone function whose first parameter is named ``self``/``cls`` is rewritten correctly.
+  Conservative: only calls that resolve to a single known signature are rewritten (project code and the embedded typeshed builtins); overloaded callees, ``*args``/``**kwargs`` unpacking, and ty-only resolutions are left untouched.
+  The implicit receiver is skipped only for constructor/callable dunders and bound ``receiver.method(...)`` calls, so a standalone function whose first parameter is named ``self``/``cls`` is rewritten correctly.
 - Flag positional construction of ``@dataclass`` and ``NamedTuple`` classes (issue #29): their compiler-synthesized ``__init__`` / ``__new__`` is now modeled from the annotated fields, so ``D(1, 2)`` is reported while ``D(x=1, y=2)`` is accepted.
   ``ClassVar`` and ``field(init=False)`` fields are excluded, ``@dataclass(init=False)`` synthesizes nothing, and a hand-written constructor still wins.
   The auto-fixer conservatively declines these.
   The functional ``NamedTuple("N", [...])``/``namedtuple`` forms, ``attrs``, and ``TypedDict`` remain out of scope.
-- Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_. A `strict-kwargs-pre-commit <https://github.com/adamtheturtle/strict-kwargs-pre-commit>`_ mirror installs the prebuilt PyPI wheel (no Rust toolchain required); the in-repo hook builds from source.
+- Ship a consumer-facing pre-commit hook (``id: strict-kwargs``) so projects can run strict-kwargs via `pre-commit <https://pre-commit.com/>`_.
+  A `strict-kwargs-pre-commit <https://github.com/adamtheturtle/strict-kwargs-pre-commit>`_ mirror installs the prebuilt PyPI wheel (no Rust toolchain required); the in-repo hook builds from source.
   See the README "pre-commit" section.
 - Resolve calls into builtins, the standard library, and third-party packages: a pinned typeshed copy is vendored and embedded in the binary; third-party resolves from ``site-packages`` (PEP 561).
 - Follow imports and re-exports (relative imports, ``from x import *``, package-root re-export chains, and module-level assignment aliases such as ``helper = _impl.real``); overload-safe (permissive) signature model.
-- Optional ``ty`` type-inference fallback (drives a ``ty server`` over LSP): resolves inheritance/MRO, return-typed and annotation-typed receivers, locals bound from calls, and precise overloads. Fails closed; pipelined; robust to ty being absent/slow/changing.
+- Optional ``ty`` type-inference fallback (drives a ``ty server`` over LSP): resolves inheritance/MRO, return-typed and annotation-typed receivers, locals bound from calls, and precise overloads.
+  Fails closed; pipelined; robust to ty being absent/slow/changing.
 - Cross-platform ``file://`` URI handling; CI runs the ty-backed suite on Linux and Windows.
 
 2026.5.16-post.1
