@@ -46,7 +46,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.1.0
 
       - name: Build release binary
         run: cargo build --release --locked --bin strict-kwargs
