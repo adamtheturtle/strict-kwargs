@@ -1627,10 +1627,9 @@ with Ctx() as os:
 os.getcwd(1)
 ",
     );
-    assert_eq!(
-        module_target.len(),
-        1,
-        "the module target is handled without extra diagnostics: {module_target:?}"
+    assert!(
+        module_target.is_empty(),
+        "the module target is opaque afterwards: {module_target:?}"
     );
 
     let unpacked = check_source(
