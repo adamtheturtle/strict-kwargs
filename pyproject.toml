@@ -6,7 +6,9 @@ requires = [ "maturin>=1.8,<2" ]
 name = "strict-kwargs"
 version = "2026.8.28-post.2"
 description = "Enforce using keyword arguments where possible."
-readme = "README.md"
+# Avoid Pyroma treating parameterized Markdown as reStructuredText.
+# https://github.com/regebro/pyroma/issues/135
+readme = { file = "README.md", content-type = "text/markdown" }
 license = { text = "MIT" }
 authors = [
     { name = "Adam Dangoor", email = "adamdangoor@gmail.com" },
@@ -42,6 +44,7 @@ urls.Changelog = "https://github.com/adamtheturtle/strict-kwargs/blob/main/CHANG
 
 [dependency-groups]
 dev = [
+    "pyroma==5.0.1",
     "snapper-fmt==0.11.6",
 ]
 release = [ "check-wheel-contents==0.6.3", "towncrier==26.9.0" ]

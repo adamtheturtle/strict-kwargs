@@ -123,6 +123,15 @@ hooks = [
     pass_filenames = false
   },
   {
+    id = "pyroma",
+    name = "pyroma",
+    stages = ["pre-commit"],
+    entry = "uv run --locked --only-group=dev -m pyroma --min 10 .",
+    language = "system",
+    pass_filenames = false,
+    always_run = true
+  },
+  {
     id = "cargo-fmt",
     name = "cargo fmt",
     stages = ["pre-push"],
