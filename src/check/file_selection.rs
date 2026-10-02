@@ -530,14 +530,15 @@ mod file_selection_coverage {
         };
         let paths = [root.path().to_path_buf()];
 
-        assert!(collect_python_files(root.path(), &paths, &config)
-            .expect("collect ordinary files")
-            .is_empty());
-        assert!(
+        assert_eq!(
+            collect_python_files(root.path(), &paths, &config).expect("collect ordinary files"),
+            [] as [std::path::PathBuf; 0]
+        );
+        assert_eq!(
             collect_python_files_with_project_inventory(root.path(), &paths, &config)
                 .expect("collect project inventory")
-                .0
-                .is_empty()
+                .0,
+            [] as [std::path::PathBuf; 0]
         );
     }
 
