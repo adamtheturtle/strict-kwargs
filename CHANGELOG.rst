@@ -654,7 +654,7 @@ No significant changes.
 
 - Add an ignored completeness regression test that checks a pinned external repository against a committed conservative golden diagnostic subset, plus scheduled CI coverage and a documented baseline regeneration script (issue #192).
 
-- Parse ty's ``class Name(...)`` constructor hover directly when resolving a call through the ``ty`` fallback, instead of falling back to goto-definition. ty's goto-definition for a re-exported standard-library class resolves into the runtime ``.py`` shim and lands on the ``from ... import ...`` statement rather than the class, so depending on which Python environment ty discovered the old path could silently drop the violation.
+- Parse ty's ``class Name(...)`` constructor hover directly when resolving a call through the ``ty`` fallback, instead of falling back to goto-definition. ty's goto-definition for a re-exported standard-library class resolves into the runtime ``.py`` shim and identifies the ``from ... import ...`` statement rather than the class, so depending on which Python environment ty discovered the old path could silently drop the violation.
   The hover carries the constructor signature consistently, so these calls are now reported regardless of the environment (issue #195).
 
 - Make the ``ty`` inference fallback deterministic.
