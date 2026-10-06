@@ -47,7 +47,7 @@ pub struct ModuleResolver {
 }
 
 impl ModuleResolver {
-    pub(crate) fn new(
+    pub(super) fn new(
         project_root: &Path,
         source_roots: &SourceRoots,
         python_env: Option<&Path>,

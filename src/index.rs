@@ -643,7 +643,7 @@ impl IndexedFile {
     /// width changes compare equal while names and literals do not. Comments
     /// remain value-bearing because type comments and checker directives can
     /// affect analysis.
-    pub(crate) fn semantic_fingerprint(&self) -> u64 {
+    pub(super) fn semantic_fingerprint(&self) -> u64 {
         let mut h = FnvHasher::new();
         for token in self.parsed.tokens() {
             let kind = token.kind();
@@ -4225,8 +4225,8 @@ fn index_class_body_fast(store: &mut Store, module_name: &str, class_name: &str,
 impl DefinitionIndex {
     /// A resolver-less index for unit tests that drive the edge/signature
     /// logic directly (no module resolution: `ensure_module` is inert).
-    /// `pub(crate)` so `check`'s unit tests can build a bare `CallChecker`.
-    pub(crate) fn for_test() -> Self {
+    /// `pub(super)` so `check`'s unit tests can build a bare `CallChecker`.
+    pub(super) fn for_test() -> Self {
         Self {
             resolver: None,
             inner: RwLock::new(Inner::default()),
@@ -4237,8 +4237,8 @@ impl DefinitionIndex {
     /// would. Unit tests that drive the unbound-call guard need this: in
     /// production the guard is only consulted once a signature was found for
     /// the callee, which implies its owning class is indexed.
-    /// `pub(crate)` so `check`'s unit tests can build a bare `CallChecker`.
-    pub(crate) fn insert_class_for_test(&mut self, fullname: &str) {
+    /// `pub(super)` so `check`'s unit tests can build a bare `CallChecker`.
+    pub(super) fn insert_class_for_test(&mut self, fullname: &str) {
         let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
         inner.store.classes.insert(fullname.to_string());
     }
@@ -4267,7 +4267,7 @@ impl DefinitionIndex {
         );
     }
 
-    pub(crate) fn insert(&mut self, fullname: String, signature: Signature) {
+    pub(super) fn insert(&mut self, fullname: String, signature: Signature) {
         self.inner
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
@@ -4275,7 +4275,7 @@ impl DefinitionIndex {
             .insert(fullname, signature);
     }
 
-    pub(crate) fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
+    pub(super) fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
         self.inner
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)

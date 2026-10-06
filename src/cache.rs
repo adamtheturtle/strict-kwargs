@@ -40,7 +40,7 @@ impl FnvHasher {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
     /// Create a new hasher seeded with the FNV-1a 64-bit offset basis.
-    pub(crate) const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self { state: Self::BASIS }
     }
 
@@ -52,7 +52,7 @@ impl FnvHasher {
 
     /// Mix a byte slice into the hash, length-prefixed to prevent
     /// `("ab","c")` colliding with `("a","bc")`.
-    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
+    pub(super) fn write_bytes(&mut self, bytes: &[u8]) {
         // 8-byte LE length prefix disambiguates differently-split inputs.
         for b in (bytes.len() as u64).to_le_bytes() {
             self.write_byte(b);
@@ -63,7 +63,7 @@ impl FnvHasher {
     }
 
     /// Return the current hash value.
-    pub(crate) const fn finish(self) -> u64 {
+    pub(super) const fn finish(self) -> u64 {
         self.state
     }
 }
@@ -316,7 +316,11 @@ fn fingerprint_walk_roots(project_root: &Path, first_party_roots: &[PathBuf]) ->
 /// ([`is_prunable_dir`]), so the fingerprint is stable between runs that do
 /// not change any relevant file.
 #[cfg(test)]
-pub fn compute_global_fingerprint(
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "Hawk requires explicit visibility even inside private modules"
+)]
+pub(super) fn compute_global_fingerprint(
     project_root: &Path,
     config_json: &str,
     python_env: Option<&Path>,
@@ -334,7 +338,11 @@ pub fn compute_global_fingerprint(
 /// Compute the global fingerprint, reusing an already sorted and complete
 /// inventory of the project root when file selection captured one.
 #[cfg(test)]
-pub fn compute_global_fingerprint_with_project_files(
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "Hawk requires explicit visibility even inside private modules"
+)]
+pub(super) fn compute_global_fingerprint_with_project_files(
     project_root: &Path,
     config_json: &str,
     python_env: Option<&Path>,
@@ -759,7 +767,7 @@ impl DiagnosticCache {
     /// recomputation on the next run.
     #[cfg_attr(coverage, coverage(off))]
     #[cfg(test)]
-    pub fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>, Option<u64>)>) {
+    fn put_all(&mut self, entries: Vec<(PathBuf, Vec<Diagnostic>, Option<u64>)>) {
         if entries.is_empty() {
             self.flush();
             return;
