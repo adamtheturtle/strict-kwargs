@@ -816,7 +816,7 @@ fn percent_decode(s: &str) -> String {
 /// Convert a byte offset in `source` to an LSP `(line, character)` position
 /// (0-based line, 0-based UTF-16 code units), as the LSP spec requires.
 #[cfg(test)]
-pub fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
+fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
     LspLineIndex::new(source).position(source, offset)
 }
 

@@ -41,27 +41,27 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct Config {
     /// Required `strict-kwargs` version specifier for this project.
     #[serde(default)]
-    pub required_version: Option<String>,
+    pub(super) required_version: Option<String>,
     /// Fully-qualified callee names to skip (e.g. `package.module.func`).
     #[serde(default)]
-    pub ignore_names: Vec<String>,
+    pub(super) ignore_names: Vec<String>,
     /// Source roots used for first-party import resolution and module-name
     /// derivation, relative to the project root when not absolute.
     #[serde(default)]
-    pub src: Vec<PathBuf>,
+    pub(super) src: Vec<PathBuf>,
     /// Directories that should be treated as namespace packages even when
     /// they do not contain `__init__.py`, relative to the project root when
     /// not absolute.
     #[serde(default)]
-    pub namespace_packages: Vec<PathBuf>,
+    pub(super) namespace_packages: Vec<PathBuf>,
     /// Additional path patterns to exclude from project walks, relative to
     /// the project root.
     #[serde(default)]
-    pub extend_exclude: Vec<String>,
+    pub(super) extend_exclude: Vec<String>,
     /// Apply configured and built-in path exclusions even to explicitly
     /// passed file paths.
     #[serde(default)]
-    pub force_exclude: bool,
+    pub(super) force_exclude: bool,
     /// Directory for the persistent on-disk diagnostic cache.
     ///
     /// This affects where diagnostics are stored, not the diagnostics
@@ -70,7 +70,7 @@ pub struct Config {
     pub cache_dir: Option<PathBuf>,
     /// Emit verbose resolution diagnostics to stderr.
     #[serde(default)]
-    pub debug: bool,
+    pub(super) debug: bool,
     /// Rewrite dataclass and `NamedTuple` constructor calls whose signatures
     /// were synthesized from class fields.
     #[serde(default)]
@@ -147,7 +147,7 @@ impl Config {
     /// e.g. `"is not valid TOML: …"`) if `contents` is not valid TOML, if
     /// `[tool.strict_kwargs]` is present but not a table, or if its value
     /// types do not match the schema (e.g. `ignore_names` not a list).
-    pub fn from_pyproject_str(contents: &str) -> Result<Self, String> {
+    fn from_pyproject_str(contents: &str) -> Result<Self, String> {
         let document = contents
             .parse::<toml::Table>()
             .map_err(|error| format!("is not valid TOML: {error}"))?;
@@ -177,7 +177,7 @@ impl Config {
 
     /// Whether `fullname` is in the configured ignore list.
     #[must_use]
-    pub fn is_ignored(&self, fullname: &str) -> bool {
+    pub(super) fn is_ignored(&self, fullname: &str) -> bool {
         self.ignore_names.iter().any(|name| name == fullname)
     }
 
@@ -251,7 +251,7 @@ impl<'a> SourceRoots<'a> {
         }
     }
 
-    pub(crate) fn first_party_for_resolution(&self) -> Vec<PathBuf> {
+    pub(super) fn first_party_for_resolution(&self) -> Vec<PathBuf> {
         if let Some(root) = self.default_root {
             vec![root.to_path_buf()]
         } else {

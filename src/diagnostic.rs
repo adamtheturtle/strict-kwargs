@@ -28,15 +28,15 @@ pub struct Diagnostic {
     /// 1-based column of the finding.
     pub column: usize,
     /// Which rule fired, with its rule-specific detail.
-    pub kind: DiagnosticKind,
+    pub(super) kind: DiagnosticKind,
 }
 
 impl Diagnostic {
     /// Rule code for too many positional arguments.
-    pub const CODE: &'static str = "KW001";
+    pub(super) const CODE: &'static str = "KW001";
 
     /// Rule code for an unused `# noqa: KW001` directive.
-    pub const UNUSED_NOQA_CODE: &'static str = "KW002";
+    const UNUSED_NOQA_CODE: &'static str = "KW002";
 
     /// A `KW001` diagnostic for a call that passes too many positionals.
     #[must_use]
@@ -62,7 +62,7 @@ impl Diagnostic {
 
     /// A `KW002` diagnostic for a `# noqa: KW001` that suppressed nothing.
     #[must_use]
-    pub const fn unused_noqa(path: PathBuf, line: usize, column: usize) -> Self {
+    pub(super) const fn unused_noqa(path: PathBuf, line: usize, column: usize) -> Self {
         Self {
             path,
             line,

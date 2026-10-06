@@ -73,7 +73,7 @@ pub enum DeclinedFixReason {
 }
 
 impl DeclinedFixReason {
-    pub(crate) const ORDERED: [Self; 6] = [
+    const ORDERED: [Self; 6] = [
         Self::SynthesizedConstructor,
         Self::UnresolvedOverload,
         Self::AmbiguousTyHover,
@@ -84,7 +84,8 @@ impl DeclinedFixReason {
 
     /// Practical label shown in CLI output.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    #[cfg(test)]
+    const fn label(self) -> &'static str {
         match self {
             Self::SynthesizedConstructor => "synthesized constructor",
             Self::UnresolvedOverload => "unresolved overload",
@@ -146,7 +147,8 @@ impl FileFix {
     /// Returns an I/O error if the original file cannot be read, the fixed
     /// text cannot be represented in its original encoding, the file changed
     /// after this fix was planned, or the rewritten bytes cannot be written.
-    pub fn write_preserving_encoding(&self) -> std::io::Result<()> {
+    #[cfg(test)]
+    fn write_preserving_encoding(&self) -> std::io::Result<()> {
         let original_bytes = std::fs::read(&self.path)?;
         ensure_source_is_current(self, &original_bytes)?;
         let fixed_bytes = crate::source::encode_python_source(&original_bytes, &self.fixed)
@@ -305,7 +307,11 @@ fn recover_fix_transactions(fixes: &[FileFix]) -> std::io::Result<()> {
 /// Returns an I/O error when a directory cannot be listed or a journal cannot
 /// be read, rolled back, or removed.
 #[cfg_attr(coverage, coverage(off))]
-pub fn recover_fix_journals(paths: &[PathBuf]) -> std::io::Result<()> {
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "Hawk requires explicit visibility even inside private modules"
+)]
+pub(super) fn recover_fix_journals(paths: &[PathBuf]) -> std::io::Result<()> {
     let mut parents = paths
         .iter()
         .map(|path| fix_parent(path).to_path_buf())
