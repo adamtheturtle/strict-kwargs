@@ -2,7 +2,7 @@
 name = "strict-kwargs"
 version = "2026.8.28-post.2"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.92"
 description = "Enforce using keyword arguments where possible (fast, ty/mypy-independent)"
 license = "MIT"
 readme = "README.md"
