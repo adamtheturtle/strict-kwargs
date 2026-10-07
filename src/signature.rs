@@ -313,3 +313,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod property_tests;
