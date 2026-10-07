@@ -5,7 +5,7 @@
 
 # Minimum supported Rust version (kept in sync with `rust-version` in
 # `Cargo.toml`) so Clippy does not suggest newer-than-MSRV APIs.
-msrv = "1.83"
+msrv = "1.92"
 
 # `unwrap`/`expect`/`panic` are idiomatic in test code; only enforce the
 # `restriction` lints against production code.

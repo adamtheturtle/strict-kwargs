@@ -46,3 +46,15 @@ The scope and test command are defined in `.cargo/mutants.toml`.
 Review surviving mutations before broadening the pilot.
 The tool is pinned to 26.2.0 because 27.1.0 ignores regex filters for struct-field mutations.
 Update the pin after the fix for [cargo-mutants #632](https://github.com/sourcefrog/cargo-mutants/issues/632) is released.
+
+## Minimum Rust version
+
+The supported minimum Rust version is 1.92, matching the parser dependency.
+CI verifies the `Cargo.toml` requirement on Linux, macOS, and Windows with [cargo-msrv](https://github.com/foresterre/cargo-msrv) 0.19.3.
+
+```console
+cargo install --locked cargo-msrv --version 0.19.3
+cargo msrv verify --no-log -- cargo check --locked --all-targets --all-features
+```
+
+When dependencies require a newer compiler, update the declared minimum and verify it with this command.
