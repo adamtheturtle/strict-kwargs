@@ -8,3 +8,5 @@ dist/
 
 # Vale styles downloaded by ``vale sync``
 styles/
+/mutants.out/
+/mutants.out.old/
