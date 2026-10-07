@@ -1,0 +1,1 @@
+Correct the declared minimum Rust version to 1.92, matching the parser dependency.
