@@ -46,6 +46,7 @@ pip install strict-kwargs
 ```
 
 This is tested on Python 3.11+.
+Building the Rust binary from source requires Rust 1.92 or newer.
 
 ## Usage
 
