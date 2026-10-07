@@ -1,0 +1,27 @@
+[graph]
+all-features = true
+exclude-dev = false
+exclude-unpublished = false
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Unicode-DFS-2016", "NCSA"]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+skip = [
+    { crate = "getrandom@0.2.17", reason = "Parser build dependencies use rand 0.8 while the fuzzing runtime build uses getrandom 0.4" },
+    { crate = "hashbrown@0.16.1", reason = "get-size2 uses 0.16 while indexmap uses 0.17" },
+    { crate = "syn@2.0.119", reason = "get-size2 macros use syn 2 while clap and serde use syn 3" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

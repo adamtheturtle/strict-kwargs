@@ -64,15 +64,18 @@ hooks = [
   },
   {
     id = "end-of-file-fixer",
+    exclude = "^fuzz/seeds/",
     stages = ["pre-commit"]
   },
   {
     id = "mixed-line-ending",
+    exclude = "^fuzz/seeds/",
     stages = ["pre-commit"],
     args = ["--fix=lf"]
   },
   {
     id = "trailing-whitespace",
+    exclude = "^fuzz/seeds/",
     stages = ["pre-commit"]
   }
 ]
@@ -86,7 +89,7 @@ hooks = [
     stages = ["pre-commit"],
     args = [
     ],
-    exclude = '^(vendored/|Cargo\.lock$|uv\.lock$)'
+    exclude = '^(fuzz/seeds/|vendored/|Cargo\.lock$|uv\.lock$)'
   }
 ]
 

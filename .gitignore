@@ -8,3 +8,7 @@ dist/
 
 # Vale styles downloaded by ``vale sync``
 styles/
+
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
