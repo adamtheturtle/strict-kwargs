@@ -120,8 +120,20 @@ jobs:
       - name: Check Rust visibility
         run: cargo hawk check --target-dir target/hawk -D warnings -D hawk::unnecessary_crate_visibility
 
+  machete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-machete@0.9.2
+      - name: Check for unused Rust dependencies
+        run: cargo machete
+
   completion-lint:
-    needs: [build, audit, pre-commit, hawk]
+    needs: [build, audit, pre-commit, hawk, machete]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
@@ -130,13 +142,15 @@ jobs:
           UV_NO_CACHE: '1'
           BUILD_RESULT: ${{ needs.build.result }}
           AUDIT_RESULT: ${{ needs.audit.result }}
+          MACHETE_RESULT: ${{ needs.machete.result }}
           HAWK_RESULT: ${{ needs.hawk.result }}
           PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
         run: |-
           if [ "$BUILD_RESULT" != "success" ] \
             || [ "$AUDIT_RESULT" != "success" ] \
             || [ "$PRE_COMMIT_RESULT" != "success" ] \
-            || [ "$HAWK_RESULT" != "success" ]; then
+            || [ "$HAWK_RESULT" != "success" ] \
+            || [ "$MACHETE_RESULT" != "success" ]; then
             echo "One or more lint jobs failed"
             exit 1
           fi
