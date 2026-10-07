@@ -1,0 +1,37 @@
+[package]
+name = "strict-kwargs-fuzz"
+version = "0.0.0"
+publish = false
+license = "MIT"
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+strict-kwargs = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "signatures"
+path = "fuzz_targets/signatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source-encoding"
+path = "fuzz_targets/source-encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source-insertions"
+path = "fuzz_targets/source-insertions.rs"
+test = false
+doc = false
+bench = false

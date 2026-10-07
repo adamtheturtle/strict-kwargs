@@ -66,3 +66,38 @@ cargo msrv verify --no-log -- cargo check --locked --all-targets --all-features
 ```
 
 When dependencies require a newer compiler, update the declared minimum and verify it with this command.
+
+## Fuzz testing
+
+The [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) targets exercise our core routines with generated inputs.
+CI runs each target for 60 seconds on pull requests and pushes, and for 10 minutes in the weekly run.
+Each input has a 10-second timeout and the input size is capped at 4096 bytes.
+Crashes and timeouts fail the job, which uploads failure artifacts.
+Fuzz-only entry points are compiled with `cfg(fuzzing)` and do not add APIs to normal builds.
+
+Use Cargo from rustup for the toolchain-qualified commands.
+Install the pinned tool and compiler:
+
+```console
+cargo install --locked cargo-fuzz --version 0.13.2
+rustup toolchain install nightly-2026-09-05 --profile minimal --component rust-src
+```
+
+The targets are `signatures`, `source-encoding`, `source-insertions`.
+Use one target name in place of `TARGET` below:
+
+```console
+mkdir -p fuzz/corpus/TARGET
+cp fuzz/seeds/TARGET/* fuzz/corpus/TARGET/
+cargo +nightly-2026-09-05 fetch --locked --manifest-path fuzz/Cargo.toml
+cargo +nightly-2026-09-05 fuzz run TARGET -- -max_total_time=60 -timeout=10 -rss_limit_mb=2048 -max_len=4096
+```
+
+The fuzz package has its own lockfile and a cargo-deny policy that also audits the fuzzing dependencies.
+The policy permits NCSA because the LLVM fuzzing runtime requires it.
+CI fetches its locked dependencies, builds offline, and checks that the lockfile stays unchanged.
+Keep minimized failures as regression tests, and add useful starting inputs to `fuzz/seeds`.
+The generated corpus and failure artifacts are ignored by Git.
+When using a prebuilt cargo-fuzz binary, pass `--target` with the host Rust target if its default differs from your compiler.
+CI explicitly uses `x86_64-unknown-linux-gnu`.
+Update the tool and nightly compiler pins together after validating every target.

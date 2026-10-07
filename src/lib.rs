@@ -51,3 +51,7 @@ pub use fix::{
     FileFix, FixOptIns, FixOutcome,
 };
 pub use resolve::is_python_environment;
+
+/// Assertions for the separate cargo-fuzz targets.
+#[cfg(fuzzing)]
+pub mod fuzzing;

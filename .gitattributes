@@ -3,3 +3,4 @@
 # against `rustfmt.toml`'s `newline_style = "Unix"` (and the pre-commit
 # `mixed-line-ending --fix=lf` hook).
 * text=auto eol=lf
+fuzz/seeds/** binary
