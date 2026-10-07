@@ -519,15 +519,15 @@ wheels = [
 
 [[package]]
 name = "snapper-fmt"
-version = "0.11.7"
+version = "0.11.8"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/dd/45/115579847ac616c96c276051a3f0a852517a4615607134741022012138f0/snapper_fmt-0.11.7.tar.gz", hash = "sha256:5a3182fc3100460b9335a6af6894372d66348739c3e732cf9457d5df71f5d098", size = 493931, upload-time = "2026-09-23T14:24:00.505Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/e0/1e7b22c88a8be7fcc1a3fcf2a977a55f806de2b73813f335b57394f79973/snapper_fmt-0.11.8.tar.gz", hash = "sha256:ea020ed7fda0ef706f00bdf0b885f0461a11de7b1b109208539b1e16d0b18a6b", size = 510256, upload-time = "2026-10-04T08:19:42.589Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/7a/a4f09185e0c9d91af8318820d29693a2cb062f1638615366b12e2426bbd7/snapper_fmt-0.11.7-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:4b1c600fdf8325036cb26a8a909ab0e3e29ca4007a6f74e22f9894fb0c0ae253", size = 16592872, upload-time = "2026-09-23T14:23:42.835Z" },
-    { url = "https://files.pythonhosted.org/packages/e6/20/76c14ef2a59a90786cfbd7cb0b5cd2fce50ebfc8ce8555ecd666661f711e/snapper_fmt-0.11.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:e8ebdf3020f509d3e5ea769c2b7f53a0c650654e9aa2ed1d529ae2f4974775d5", size = 15507040, upload-time = "2026-09-23T14:23:46.81Z" },
-    { url = "https://files.pythonhosted.org/packages/59/5f/432ae8d6816f4bcceefdfb80ee25a8f01f038426bf4a0967931b73c15cd6/snapper_fmt-0.11.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9ef76c198c353933f3d069b2b282c6e12bd847eb483b45ac845ddaf86085c9f2", size = 17253105, upload-time = "2026-09-23T14:23:50.653Z" },
-    { url = "https://files.pythonhosted.org/packages/65/41/0a17779019a88121eb8743cedf31cee0a364c224102dd731fe570863d15b/snapper_fmt-0.11.7-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:2496747fdcdc54d54827b9e15a08175b86fbffffde74940580ecba2074e9b29e", size = 15853054, upload-time = "2026-09-23T14:23:54.415Z" },
-    { url = "https://files.pythonhosted.org/packages/d3/a4/89f6be47e5f4ab34e675aa7f23516424e9f4c8064f4d8385d3a6323eb8a0/snapper_fmt-0.11.7-py3-none-win_amd64.whl", hash = "sha256:d5e8fdd683e4d352c37c7ba86ffd3d33ff695af762484070ace1f09b9571cf30", size = 18035512, upload-time = "2026-09-23T14:23:58.302Z" },
+    { url = "https://files.pythonhosted.org/packages/74/66/c7ed7cf47e07c737307562d2c407c0b9fbecb46803fd0b0a541863458273/snapper_fmt-0.11.8-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:8e682c6c8df6388e18a5df3d3ae51062fc01a7ccd91420007853ab2ef00ac0f4", size = 16966203, upload-time = "2026-10-04T08:19:30.196Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/a2/1884de15acd769cf559766cd1bf4e0f32e3d811b99887d1afe6403828e09/snapper_fmt-0.11.8-py3-none-macosx_11_0_arm64.whl", hash = "sha256:07db00b7016d43c660810ba34ece75a665171c4a4076943a27576998856c02f9", size = 15887014, upload-time = "2026-10-04T08:19:32.81Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/53/6322004ce1773bd0e214853f68439dda2ae725ea1ceae5dcf1ae3848000e/snapper_fmt-0.11.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:00d20dbfdcbe4f2eb6fa6953276a86203f6cbc88e7185b45d616785b1dc87b06", size = 17703292, upload-time = "2026-10-04T08:19:35.195Z" },
+    { url = "https://files.pythonhosted.org/packages/66/3b/7f6d02c941d6c6e0d46beebd943af8420a69aa0cc81033fef860f21ef6b9/snapper_fmt-0.11.8-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:cd010ff82afb7009a08e8d5241d1f65cd40d4954cf2ef218c56e9673a0bb0e1f", size = 16196598, upload-time = "2026-10-04T08:19:37.392Z" },
+    { url = "https://files.pythonhosted.org/packages/37/20/af5c37900c68c342e763afe8734e2855cf02ebb31733f54fbd16a2e644a9/snapper_fmt-0.11.8-py3-none-win_amd64.whl", hash = "sha256:90a6ecf3c7ba99a905366d6767f3cb41232beac9493ecd96bf9858a2164a5f22", size = 18058134, upload-time = "2026-10-04T08:19:39.873Z" },
 ]
 
 [[package]]
@@ -554,7 +554,7 @@ requires-dist = [{ name = "ty", specifier = ">=0.0.80" }]
 [package.metadata.requires-dev]
 dev = [
     { name = "pyroma", specifier = "==5.0.1" },
-    { name = "snapper-fmt", specifier = "==0.11.7" },
+    { name = "snapper-fmt", specifier = "==0.11.8" },
 ]
 release = [
     { name = "check-wheel-contents", specifier = "==0.6.3" },
