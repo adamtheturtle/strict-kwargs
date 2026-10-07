@@ -16,7 +16,17 @@ cargo +1.99.0 hawk check -D warnings -D hawk::unnecessary_crate_visibility
 Update the Hawk version, archive checksum, and matching Rust toolchain together in CI.
 The pinned compiler applies to this check only.
 
+## Unused dependencies
 
+CI checks for unused Rust dependencies with [cargo-machete](https://github.com/bnjbvr/cargo-machete) 0.9.2.
+Run the same check locally:
+
+```console
+cargo install --locked cargo-machete --version 0.9.2
+cargo machete
+```
+
+Review each finding before removing a dependency, including dependencies used by macros or generated code.
 
 ## Property testing
 
