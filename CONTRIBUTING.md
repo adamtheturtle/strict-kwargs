@@ -28,6 +28,25 @@ cargo machete
 
 Review each finding before removing a dependency, including dependencies used by macros or generated code.
 
+## Mutation testing
+
+CI uses [cargo-mutants](https://mutants.rs/) to check the positional-argument signature rules in `src/signature.rs`.
+The pilot runs the signature unit tests for each mutation, with a 30-second test timeout and a 180-second build timeout.
+Missed mutations and timeouts fail the job, and CI uploads the results for review.
+The same check also runs weekly and can be started manually.
+
+Install the pinned tool and run the check locally:
+
+```console
+cargo install --locked cargo-mutants --version 26.2.0
+cargo mutants --in-place --timeout 30 --build-timeout 180
+```
+
+The scope and test command are defined in `.cargo/mutants.toml`.
+Review surviving mutations before broadening the pilot.
+The tool is pinned to 26.2.0 because 27.1.0 ignores regex filters for struct-field mutations.
+Update the pin after the fix for [cargo-mutants #632](https://github.com/sourcefrog/cargo-mutants/issues/632) is released.
+
 ## Minimum Rust version
 
 The supported minimum Rust version is 1.92, matching the parser dependency.

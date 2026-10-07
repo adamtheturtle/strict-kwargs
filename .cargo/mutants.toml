@@ -1,0 +1,3 @@
+examine_globs = ["src/signature.rs"]
+additional_cargo_args = ["--locked", "--lib"]
+additional_cargo_test_args = ["signature::tests"]

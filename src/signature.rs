@@ -173,6 +173,33 @@ mod tests {
     }
 
     #[test]
+    fn implicit_receivers_do_not_count_even_when_positional_only() {
+        let signature = sig(&[
+            ("self", ParameterKind::PositionalOnly),
+            ("argument", ParameterKind::PositionalOrKeyword),
+        ]);
+        for fullname in ["C.__call__", "C.__init__", "C.__new__"] {
+            assert_eq!(
+                signature.max_positional_at_call_site(fullname, false),
+                Some(0),
+                "{fullname}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_instance_is_counted_without_a_third_parameter() {
+        let signature = sig(&[
+            ("self", ParameterKind::PositionalOrKeyword),
+            ("instance", ParameterKind::PositionalOrKeyword),
+        ]);
+        assert_eq!(
+            signature.max_positional_at_call_site("C.__get__", false),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn ignored_callable_has_no_limit() {
         let s = sig(&[("a", ParameterKind::PositionalOrKeyword)]);
         assert_eq!(s.max_positional_at_call_site("main.func", true), None);
