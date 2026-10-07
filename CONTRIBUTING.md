@@ -27,3 +27,15 @@ cargo machete
 ```
 
 Review each finding before removing a dependency, including dependencies used by macros or generated code.
+
+## Minimum Rust version
+
+The supported minimum Rust version is 1.92, matching the parser dependency.
+CI verifies the `Cargo.toml` requirement on Linux, macOS, and Windows with [cargo-msrv](https://github.com/foresterre/cargo-msrv) 0.19.3.
+
+```console
+cargo install --locked cargo-msrv --version 0.19.3
+cargo msrv verify --no-log -- cargo check --locked --all-targets --all-features
+```
+
+When dependencies require a newer compiler, update the declared minimum and verify it with this command.
