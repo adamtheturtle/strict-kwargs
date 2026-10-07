@@ -166,11 +166,11 @@ jobs:
           DENY_RESULT: ${{ needs.deny.result }}
         run: |-
           if [ "$BUILD_RESULT" != "success" ] \
-            || [ "$AUDIT_RESULT" != "success" ] \
             || [ "$PRE_COMMIT_RESULT" != "success" ] \
             || [ "$HAWK_RESULT" != "success" ] \
             || [ "$MSRV_RESULT" != "success" ] \
-            || [ "$MACHETE_RESULT" != "success" ]; then
+            || [ "$MACHETE_RESULT" != "success" ] \
+            || [ "$DENY_RESULT" != "success" ]; then
             echo "One or more lint jobs failed"
             exit 1
           fi
