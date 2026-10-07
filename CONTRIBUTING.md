@@ -16,14 +16,19 @@ cargo +1.99.0 hawk check -D warnings -D hawk::unnecessary_crate_visibility
 Update the Hawk version, archive checksum, and matching Rust toolchain together in CI.
 The pinned compiler applies to this check only.
 
-## Unused dependencies
 
-CI checks for unused Rust dependencies with [cargo-machete](https://github.com/bnjbvr/cargo-machete) 0.9.2.
-Run the same check locally:
+
+## Dependency policy
+
+CI checks Rust dependency advisories, licences, sources, and duplicate versions with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) 0.20.2.
+The policy in `deny.toml` includes development and platform dependencies.
+Run the check locally:
 
 ```console
-cargo install --locked cargo-machete --version 0.9.2
-cargo machete
+cargo install --locked cargo-deny --version 0.20.2
+cargo deny --locked check -D warnings
 ```
 
-Review each finding before removing a dependency, including dependencies used by macros or generated code.
+The policy rejects unknown sources, unapproved licences, wildcard requirements, new duplicate versions, and advisory warnings.
+Existing duplicate versions have exact-version exceptions with reasons in `deny.toml`.
+Review those exceptions when updating dependencies and remove them when the dependency graph permits it.

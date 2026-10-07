@@ -43,20 +43,6 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features --document-private-items
 
-  audit:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Audit Rust dependencies
-        run: cargo audit --deny warnings
-
   pre-commit:
     # Runs the explicit prek stages documented in `prek.toml`.
     # `pre-commit` owns file hygiene and workflow checks; `pre-push` owns
@@ -120,6 +106,19 @@ jobs:
       - name: Check Rust visibility
         run: cargo hawk check --target-dir target/hawk -D warnings -D hawk::unnecessary_crate_visibility
 
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Check Rust dependency policy
+        run: cargo deny --locked check -D warnings
+
   machete:
     runs-on: ubuntu-latest
     steps:
@@ -133,7 +132,7 @@ jobs:
         run: cargo machete
 
   completion-lint:
-    needs: [build, audit, pre-commit, hawk, machete]
+    needs: [build, pre-commit, hawk, deny, machete]
     runs-on: ubuntu-latest
     if: always()  # Run even if one matrix job fails
     steps:
@@ -141,16 +140,16 @@ jobs:
         env:
           UV_NO_CACHE: '1'
           BUILD_RESULT: ${{ needs.build.result }}
-          AUDIT_RESULT: ${{ needs.audit.result }}
           MACHETE_RESULT: ${{ needs.machete.result }}
+          DENY_RESULT: ${{ needs.deny.result }}
           HAWK_RESULT: ${{ needs.hawk.result }}
           PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
         run: |-
           if [ "$BUILD_RESULT" != "success" ] \
-            || [ "$AUDIT_RESULT" != "success" ] \
             || [ "$PRE_COMMIT_RESULT" != "success" ] \
             || [ "$HAWK_RESULT" != "success" ] \
-            || [ "$MACHETE_RESULT" != "success" ]; then
+            || [ "$MACHETE_RESULT" != "success" ] \
+            || [ "$DENY_RESULT" != "success" ]; then
             echo "One or more lint jobs failed"
             exit 1
           fi
