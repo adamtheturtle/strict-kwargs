@@ -49,4 +49,6 @@ The policy permits NCSA because the LLVM fuzzing runtime requires it.
 CI fetches its locked dependencies, builds offline, and checks that the lockfile stays unchanged.
 Keep minimized failures as regression tests, and add useful starting inputs to `fuzz/seeds`.
 The generated corpus and failure artifacts are ignored by Git.
+When using a prebuilt cargo-fuzz binary, pass `--target` with the host Rust target if its default differs from your compiler.
+CI explicitly uses `x86_64-unknown-linux-gnu`.
 Update the tool and nightly compiler pins together after validating every target.

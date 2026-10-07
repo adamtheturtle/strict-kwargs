@@ -56,13 +56,13 @@ jobs:
         env:
           FUZZ_TARGET: ${{ matrix.target }}
           CARGO_NET_OFFLINE: "true"
-        run: cargo +nightly-2026-09-05 fuzz build "${FUZZ_TARGET}"
+        run: cargo +nightly-2026-09-05 fuzz build --target x86_64-unknown-linux-gnu "${FUZZ_TARGET}"
       - name: Run the bounded fuzz test
         env:
           FUZZ_TARGET: ${{ matrix.target }}
           CARGO_NET_OFFLINE: "true"
         run: |
-          cargo +nightly-2026-09-05 fuzz run "${FUZZ_TARGET}" -- \
+          cargo +nightly-2026-09-05 fuzz run --target x86_64-unknown-linux-gnu "${FUZZ_TARGET}" -- \
             -max_total_time="${FUZZ_SECONDS}" -timeout=10 -rss_limit_mb=2048 -max_len=4096
       - name: Verify the fuzz lockfile
         run: git diff --exit-code -- fuzz/Cargo.lock
