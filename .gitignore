@@ -1,4 +1,7 @@
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
 /dist/
 /python/strict_kwargs/_native/
 *.egg-info/
@@ -8,7 +11,3 @@ dist/
 
 # Vale styles downloaded by ``vale sync``
 styles/
-
-/fuzz/target/
-/fuzz/artifacts/
-/fuzz/corpus/
