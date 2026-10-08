@@ -5,7 +5,6 @@ edition = "2021"
 rust-version = "1.92"
 description = "Enforce using keyword arguments where possible (fast, ty/mypy-independent)"
 license = "MIT"
-readme = "README.md"
 
 [[bin]]
 name = "strict-kwargs"
