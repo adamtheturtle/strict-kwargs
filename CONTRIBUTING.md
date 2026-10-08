@@ -116,3 +116,9 @@ The generated corpus and failure artifacts are ignored by Git.
 When using a prebuilt cargo-fuzz binary, pass `--target` with the host Rust target if its default differs from your compiler.
 CI explicitly uses `x86_64-unknown-linux-gnu`.
 Update the tool and nightly compiler pins together after validating every target.
+
+# Release notes
+
+Write user-facing changes as Markdown in `newsfragments/<issue>.change.md`.
+Towncrier writes one Markdown file per version, used directly for GitHub release notes.
+Invalid fragment names fail release assembly.
