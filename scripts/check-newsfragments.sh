@@ -8,7 +8,7 @@
 # release between the towncrier switch and issue #1259.
 set -eu
 
-fragments=$(find newsfragments -name '*.rst' | wc -l | tr -d ' ')
+fragments=$(find newsfragments -type f ! -name README.md ! -name .gitkeep | wc -l | tr -d ' ')
 if [ "$fragments" -eq 0 ]; then
     exit 0
 fi
