@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -532,7 +532,7 @@ wheels = [
 
 [[package]]
 name = "strict-kwargs"
-version = "2026.8.28.post2"
+version = "2026.10.9"
 source = { editable = "." }
 dependencies = [
     { name = "ty" },
