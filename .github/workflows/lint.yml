@@ -153,7 +153,7 @@ jobs:
   completion-lint:
     needs: [build, pre-commit, hawk, machete, msrv, deny]
     runs-on: ubuntu-latest
-    if: always()  # Run even if one matrix job fails
+    if: ${{ !cancelled() }}  # Run even if one matrix job fails
     steps:
       - name: Check job statuses
         env:

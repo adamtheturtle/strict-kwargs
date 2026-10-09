@@ -78,7 +78,7 @@ jobs:
   completion-coverage:
     needs: coverage
     runs-on: ubuntu-latest
-    if: always()  # Run even if the coverage job fails
+    if: ${{ !cancelled() }}  # Run even if the coverage job fails
     steps:
       - name: Check coverage job status
         run: |-
