@@ -68,6 +68,7 @@ jobs:
           RELEASE: ${{ steps.version.outputs.release }}
         run: |
           uv run --group=release towncrier build --yes --version "$RELEASE"
+          uv run --group=dev snapper --native --max-width 0 --in-place "changelog/$RELEASE.md"
           cp "changelog/$RELEASE.md" release-notes.md
 
       - name: Set package and README versions
@@ -84,13 +85,14 @@ jobs:
           fi
           rm -f Cargo.toml.bak pyproject.toml.bak README.md.bak
           cargo metadata --format-version 1 >/dev/null
+          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
           uv lock
 
       - uses: stefanzweifel/git-auto-commit-action@v7
         id: commit
         with:
           commit_message: Bump CHANGELOG and version for release
-          file_pattern: CHANGELOG.md changelog newsfragments Cargo.toml Cargo.lock pyproject.toml uv.lock README.md
+          file_pattern: CHANGELOG.md changelog newsfragments Cargo.toml Cargo.lock fuzz/Cargo.lock pyproject.toml uv.lock README.md
           skip_dirty_check: true
 
       - name: Bump version and push tag
