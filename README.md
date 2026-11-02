@@ -25,13 +25,13 @@ add(1, b=2)  # strict-kwargs reports this; strict-kwargs check --fix can rewrite
 
 ## Why?
 
-- Like a formatter, such as `black` or `ruff format`, this lets you stop discussing whether a particular function call should use keyword arguments.
+- Like a formatter, such as `black` or `ruff format`, this lets you stop discussing whether a function call should use keyword arguments.
 - Positional arguments can be fine at first.
   As more are added, calls can become unclear without anyone stopping to refactor them to keyword arguments.
 - Type checkers give better errors when keyword arguments are used.
   For example, with positional arguments, you may see, `Argument 5 to "add" has incompatible type "str"; expected "int"`.
   This requires that you count the arguments to see which one is wrong.
-  With named arguments, you get `Argument "e" to "add" has incompatible type "str"; expected "int"`.
+  With keyword arguments, you get `Argument "e" to "add" has incompatible type "str"; expected "int"`.
 
 ## Installation
 
