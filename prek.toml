@@ -173,9 +173,7 @@ hooks = [
   {
     id = "vale-sync",
     name = "vale sync",
-    # The Python Vale wrapper may fail transiently while downloading its binary; see
-    # https://github.com/daniperez/vale-python-package/issues/77
-    entry = "uvx --with docutils vale@3.13.0.0 sync",
+    entry = "uvx --with docutils vale@3.26.0.1 sync",
     language = "system",
     files = '(\.(rst|md)$|^\.vale\.ini$)',
     pass_filenames = false,
@@ -197,7 +195,7 @@ hooks = [
   {
     id = "vale",
     name = "vale",
-    entry = "uvx --with docutils vale@3.13.0.0",
+    entry = "uvx --with docutils vale@3.26.0.1",
     language = "system",
     types_or = [
       "rst",
