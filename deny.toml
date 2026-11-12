@@ -15,6 +15,7 @@ wildcards = "deny"
 skip = [
     { crate = "hashbrown@0.16.1", reason = "get-size2 uses 0.16 while indexmap uses 0.17" },
     { crate = "syn@2.0.117", reason = "get-size2 and benchmark macros use syn 2 while clap and serde use syn 3" },
+    { crate = "windows-sys@0.59.0", reason = "CodSpeed 4 uses colored 2, which requires windows-sys 0.59, while anstream requires 0.61" },
 ]
 
 [sources]
