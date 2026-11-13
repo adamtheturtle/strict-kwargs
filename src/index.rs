@@ -103,6 +103,9 @@ struct Store {
     /// Direct base classes for indexed classes, resolved to fully-qualified
     /// names using the imports visible at the class definition.
     class_bases: FxHashMap<String, Vec<String>>,
+    /// Reverse inheritance edges, kept in sync when a class's bases change.
+    /// Rebinding invalidation visits only descendants of the affected class.
+    direct_subclasses: FxHashMap<String, FxHashSet<String>>,
     /// Fully-qualified class names discovered while indexing.
     classes: FxHashSet<String>,
     /// Explicit metaclass for each indexed class, resolved to its
@@ -141,6 +144,24 @@ struct ClassDataModel {
 }
 
 impl Store {
+    fn set_class_bases(&mut self, class_name: String, bases: Vec<String>) {
+        if let Some(previous) = self.class_bases.remove(&class_name) {
+            for base in previous {
+                self.direct_subclasses
+                    .entry(base)
+                    .or_default()
+                    .remove(&class_name);
+            }
+        }
+        for base in &bases {
+            self.direct_subclasses
+                .entry(base.clone())
+                .or_default()
+                .insert(class_name.clone());
+        }
+        self.class_bases.insert(class_name, bases);
+    }
+
     fn insert(&mut self, fullname: String, signature: Signature) {
         self.signatures.entry(fullname).or_default().push(signature);
     }
@@ -615,6 +636,26 @@ struct Inner {
     /// name queried repeatedly across the file walk is chased through the
     /// edge graph at most once.
     cache: FxHashMap<String, Option<Arc<[Signature]>>>,
+    /// Class-query snapshots are discarded when indexing or rebinding changes
+    /// the class graph or the methods present in the signature store.
+    class_queries: ClassQueryCache,
+}
+
+#[derive(Debug, Default)]
+struct ClassQueryCache {
+    generation: u64,
+    defining_method: FxHashMap<String, Arc<[String]>>,
+    overrides: FxHashMap<String, FxHashMap<String, bool>>,
+    matching_overrides: FxHashMap<String, FxHashMap<String, bool>>,
+}
+
+impl ClassQueryCache {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.defining_method.clear();
+        self.overrides.clear();
+        self.matching_overrides.clear();
+    }
 }
 
 pub struct DefinitionIndex {
@@ -903,7 +944,7 @@ impl DefinitionIndex {
             track_bindings,
         );
         for (class_name, bases) in collected.class_bases {
-            inner.store.class_bases.insert(class_name, bases);
+            inner.store.set_class_bases(class_name, bases);
         }
         for (class_name, metaclass) in collected.class_metaclasses {
             inner.store.class_metaclasses.insert(class_name, metaclass);
@@ -930,6 +971,7 @@ impl DefinitionIndex {
         inner
             .exports
             .insert(module_name.to_string(), collected.exports);
+        inner.class_queries.invalidate();
         // Release before returning so a parallel worker's next query does not
         // wait on a guard the borrow checker would otherwise hold to scope
         // end (clippy::significant_drop_tightening).
@@ -1149,16 +1191,47 @@ impl DefinitionIndex {
 
     #[cfg_attr(coverage, coverage(off))]
     pub fn has_overriding_method(&self, class_fullname: &str, method: &str) -> bool {
+        let generation = {
+            let inner = self.read();
+            if let Some(result) = inner
+                .class_queries
+                .overrides
+                .get(class_fullname)
+                .and_then(|methods| methods.get(method))
+            {
+                return *result;
+            }
+            inner.class_queries.generation
+        };
         let subclasses = self.classes_defining_method(method);
-        subclasses.into_iter().any(|subclass| {
-            subclass != class_fullname && self.class_inherits_from(&subclass, class_fullname)
-        })
+        let result = subclasses.iter().any(|subclass| {
+            subclass != class_fullname && self.class_inherits_from(subclass, class_fullname)
+        });
+        let mut inner = self.write();
+        // An ancestry walk can lazily index another module. Do not publish
+        // an answer from a snapshot that changed while the query ran.
+        if inner.class_queries.generation == generation {
+            inner
+                .class_queries
+                .overrides
+                .entry(class_fullname.to_string())
+                .or_default()
+                .insert(method.to_string(), result);
+        }
+        drop(inner);
+        result
     }
 
     #[cfg_attr(coverage, coverage(off))]
-    fn classes_defining_method(&self, method: &str) -> Vec<String> {
-        let inner = self.read();
-        inner
+    fn classes_defining_method(&self, method: &str) -> Arc<[String]> {
+        {
+            let inner = self.read();
+            if let Some(classes) = inner.class_queries.defining_method.get(method) {
+                return Arc::clone(classes);
+            }
+        }
+        let mut inner = self.write();
+        let classes: Arc<[String]> = inner
             .store
             .classes
             .iter()
@@ -1169,7 +1242,13 @@ impl DefinitionIndex {
                     .contains_key(&format!("{class}.{method}"))
             })
             .cloned()
-            .collect()
+            .collect();
+        inner
+            .class_queries
+            .defining_method
+            .insert(method.to_string(), Arc::clone(&classes));
+        drop(inner);
+        classes
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1184,22 +1263,44 @@ impl DefinitionIndex {
             .rsplit('.')
             .next()
             .unwrap_or(class_name_or_tail);
-        let matching_classes: Vec<String> = {
+        let (generation, matching_classes) = {
             let inner = self.read();
-            inner
-                .store
-                .classes
-                .iter()
-                .filter(|class| class.rsplit('.').next() == Some(class_tail))
-                .cloned()
-                .collect()
+            if let Some(result) = inner
+                .class_queries
+                .matching_overrides
+                .get(class_tail)
+                .and_then(|methods| methods.get(method))
+            {
+                return *result;
+            }
+            (
+                inner.class_queries.generation,
+                inner
+                    .store
+                    .classes
+                    .iter()
+                    .filter(|class| class.rsplit('.').next() == Some(class_tail))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
         };
         let subclasses = self.classes_defining_method(method);
-        matching_classes.iter().any(|class| {
+        let result = matching_classes.iter().any(|class| {
             subclasses
                 .iter()
                 .any(|subclass| subclass != class && self.class_inherits_from(subclass, class))
-        })
+        });
+        let mut inner = self.write();
+        if inner.class_queries.generation == generation {
+            inner
+                .class_queries
+                .matching_overrides
+                .entry(class_tail.to_string())
+                .or_default()
+                .insert(method.to_string(), result);
+        }
+        drop(inner);
+        result
     }
 
     fn class_inherits_from_inner(
@@ -1520,7 +1621,12 @@ impl DefinitionIndex {
 
     #[cfg_attr(coverage, coverage(off))]
     fn exclude_rebinding_module(&self, fullname: &str) {
-        self.write().store.exclude(fullname.to_string());
+        let mut inner = self.write();
+        if inner.store.signatures.contains_key(fullname) {
+            inner.class_queries.invalidate();
+        }
+        inner.store.exclude(fullname.to_string());
+        drop(inner);
     }
 
     /// Drop an indexed callable after an observed rebinding (`C.method += …`,
@@ -1533,45 +1639,39 @@ impl DefinitionIndex {
             self.exclude_rebinding_module(fullname);
             return;
         };
-        let bases = self.read().store.class_bases.clone();
-        let subclasses: Vec<String> = bases
-            .keys()
-            .filter(|subclass| Self::inherits_from_bases_map(&bases, subclass, class))
-            .cloned()
-            .collect();
+        let descendants = {
+            let inner = self.read();
+            let mut pending: Vec<&str> = inner
+                .store
+                .direct_subclasses
+                .get(class)
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            let mut visited = FxHashSet::default();
+            while let Some(owner) = pending.pop() {
+                if !visited.insert(owner) {
+                    continue;
+                }
+                if let Some(children) = inner.store.direct_subclasses.get(owner) {
+                    pending.extend(children.iter().map(String::as_str));
+                }
+            }
+            visited.into_iter().map(str::to_string).collect::<Vec<_>>()
+        };
         let mut inner = self.write();
+        let mut changed = inner.store.signatures.contains_key(fullname);
         inner.store.exclude(fullname.to_string());
-        for subclass in subclasses {
-            inner.store.exclude(format!("{subclass}.{method}"));
+        for owner in descendants {
+            let name = format!("{owner}.{method}");
+            changed |= inner.store.signatures.contains_key(&name);
+            inner.store.exclude(name);
+        }
+        if changed {
+            inner.class_queries.invalidate();
         }
         drop(inner);
-    }
-
-    fn inherits_from_bases_map(
-        bases: &FxHashMap<String, Vec<String>>,
-        class_fullname: &str,
-        base_fullname: &str,
-    ) -> bool {
-        let mut visited = FxHashSet::default();
-        Self::inherits_from_bases_map_inner(bases, class_fullname, base_fullname, &mut visited)
-    }
-
-    fn inherits_from_bases_map_inner(
-        bases: &FxHashMap<String, Vec<String>>,
-        class_fullname: &str,
-        base_fullname: &str,
-        visited: &mut FxHashSet<String>,
-    ) -> bool {
-        if !visited.insert(class_fullname.to_string()) {
-            return false;
-        }
-        let Some(direct) = bases.get(class_fullname) else {
-            return false;
-        };
-        direct.iter().any(|base| {
-            base == base_fullname
-                || Self::inherits_from_bases_map_inner(bases, base, base_fullname, visited)
-        })
     }
 
     /// Whether `fullname` is a ``@property`` (or enum magic attribute) getter.
@@ -4241,6 +4341,7 @@ impl DefinitionIndex {
     pub(super) fn insert_class_for_test(&mut self, fullname: &str) {
         let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
         inner.store.classes.insert(fullname.to_string());
+        inner.class_queries.invalidate();
     }
 
     /// Replace the re-export edges (test convenience), applying the same
@@ -4268,20 +4369,15 @@ impl DefinitionIndex {
     }
 
     pub(super) fn insert(&mut self, fullname: String, signature: Signature) {
-        self.inner
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .store
-            .insert(fullname, signature);
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.store.insert(fullname, signature);
+        inner.class_queries.invalidate();
     }
 
     pub(super) fn insert_class_bases(&mut self, class_name: String, bases: Vec<String>) {
-        self.inner
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .store
-            .class_bases
-            .insert(class_name, bases);
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.store.set_class_bases(class_name, bases);
+        inner.class_queries.invalidate();
     }
 
     fn signature_count(&self) -> usize {
@@ -4775,6 +4871,89 @@ mod tests {
     }
 
     #[test]
+    fn rebinding_excludes_transitive_diamond_and_cyclic_descendants() {
+        let mut index = index_of(&[
+            ("pkg.Base.m", 2),
+            ("pkg.Left.m", 2),
+            ("pkg.Right.m", 2),
+            ("pkg.Leaf.m", 2),
+            ("pkg.Unrelated.m", 2),
+        ]);
+        index.insert_class_bases("pkg.Left".into(), vec!["pkg.Base".into()]);
+        index.insert_class_bases("pkg.Right".into(), vec!["pkg.Base".into()]);
+        index.insert_class_bases(
+            "pkg.Leaf".into(),
+            vec!["pkg.Left".into(), "pkg.Right".into()],
+        );
+        index.insert_class_bases("pkg.Base".into(), vec!["pkg.Leaf".into()]);
+        index.exclude_rebinding("pkg.Base.m");
+        for class in ["Base", "Left", "Right", "Leaf"] {
+            assert!(index.is_excluded(&format!("pkg.{class}.m")));
+        }
+        assert!(!index.is_excluded("pkg.Unrelated.m"));
+    }
+
+    #[test]
+    fn replacing_bases_removes_stale_rebinding_edges() {
+        let mut index = index_of(&[("pkg.Child.m", 2)]);
+        index.insert_class_bases("pkg.Child".into(), vec!["pkg.Old".into()]);
+        index.insert_class_bases("pkg.Child".into(), vec!["pkg.New".into()]);
+        index.exclude_rebinding("pkg.Old.m");
+        assert!(!index.is_excluded("pkg.Child.m"));
+        index.exclude_rebinding("pkg.New.m");
+        assert!(index.is_excluded("pkg.Child.m"));
+    }
+
+    #[test]
+    fn rebinding_unknown_owners_and_standalone_names_stays_local() {
+        let mut index = index_of(&[("pkg.Child.m", 2)]);
+        index.insert_class_bases("pkg.Child".into(), vec!["pkg.Base".into()]);
+        index.exclude_rebinding("pkg.other.m");
+        index.exclude_rebinding("standalone");
+        assert!(index.is_excluded("pkg.other.m"));
+        assert!(index.is_excluded("standalone"));
+        assert!(!index.is_excluded("pkg.Child.m"));
+    }
+
+    #[test]
+    fn override_queries_refresh_after_exclusion_and_new_class_indexing() {
+        let index = index_source_of(
+            "class Base:\n    def m(self, value): ...\n\nclass Child(Base):\n    def m(self, renamed): ...\n",
+        );
+        for _ in 0..2 {
+            assert!(index.has_overriding_method("main.Base", "m"));
+            assert!(index.has_overriding_method_matching_class_name("ty.Base", "m"));
+        }
+        index.exclude_rebinding("main.Child.m");
+        for _ in 0..2 {
+            assert!(!index.has_overriding_method("main.Base", "m"));
+            assert!(!index.has_overriding_method_matching_class_name("ty.Base", "m"));
+        }
+        let parsed = parse_module(
+            "from main import Base\nclass Later(Base):\n    def m(self, again): ...\n",
+        )
+        .expect("parse new subclass");
+        index.index_source("extra", false, parsed.suite());
+        assert!(index.has_overriding_method("main.Base", "m"));
+        assert!(index.has_overriding_method_matching_class_name("ty.Base", "m"));
+    }
+
+    #[test]
+    fn override_queries_refresh_after_replacing_bases() {
+        let mut index = index_source_of(
+            "class Base:\n    def m(self, value): ...\n\nclass Other: pass\n\nclass Child(Base):\n    def m(self, renamed): ...\n",
+        );
+        assert!(index.has_overriding_method("main.Base", "m"));
+        assert!(index.has_overriding_method_matching_class_name("ty.Base", "m"));
+        index.insert_class_bases("main.Child".into(), vec!["main.Other".into()]);
+        assert!(!index.has_overriding_method("main.Base", "m"));
+        assert!(!index.has_overriding_method_matching_class_name("ty.Base", "m"));
+        index.insert_class_bases("main.Child".into(), vec!["main.Base".into()]);
+        assert!(index.has_overriding_method("main.Base", "m"));
+        assert!(index.has_overriding_method_matching_class_name("ty.Base", "m"));
+    }
+
+    #[test]
     fn overriding_method_checks_load_lazy_base_chain() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -4814,6 +4993,8 @@ class Child(Mid):
         index.index_source("child", false, parsed.suite());
 
         assert!(index.is_class("base.Base"));
+        assert!(index.has_overriding_method("base.Base", "m"));
+        assert!(index.has_overriding_method_matching_class_name("base.Base", "m"));
         assert!(index.has_overriding_method("base.Base", "m"));
         assert!(index.has_overriding_method_matching_class_name("base.Base", "m"));
     }
