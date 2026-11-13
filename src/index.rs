@@ -644,7 +644,7 @@ struct Inner {
 #[derive(Debug, Default)]
 struct ClassQueryCache {
     generation: u64,
-    defining_method: FxHashMap<String, Arc<[String]>>,
+    snapshot: Option<ClassQuerySnapshot>,
     overrides: FxHashMap<String, FxHashMap<String, bool>>,
     matching_overrides: FxHashMap<String, FxHashMap<String, bool>>,
 }
@@ -652,9 +652,58 @@ struct ClassQueryCache {
 impl ClassQueryCache {
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.defining_method.clear();
+        self.snapshot = None;
         self.overrides.clear();
         self.matching_overrides.clear();
+    }
+}
+
+/// Candidate lists in the store's class iteration order. Building them together
+/// avoids scanning every class for each distinct method or class-name query.
+#[derive(Debug, Default)]
+struct ClassQuerySnapshot {
+    defining_method: FxHashMap<String, Arc<[String]>>,
+    matching_classes: FxHashMap<String, Arc<[String]>>,
+}
+
+impl ClassQuerySnapshot {
+    fn new(store: &Store) -> Self {
+        let mut matching_classes: FxHashMap<String, Vec<String>> = FxHashMap::default();
+        let mut ranks = FxHashMap::default();
+        for (rank, class) in store.classes.iter().enumerate() {
+            matching_classes
+                .entry(class.rsplit('.').next().unwrap_or(class).to_string())
+                .or_default()
+                .push(class.clone());
+            ranks.insert(class.as_str(), rank);
+        }
+        let mut methods: FxHashMap<&str, Vec<(usize, &str)>> = FxHashMap::default();
+        for fullname in store.signatures.keys() {
+            if let Some((class, method)) = fullname.rsplit_once('.') {
+                if let Some(&rank) = ranks.get(class) {
+                    methods.entry(method).or_default().push((rank, class));
+                }
+            }
+        }
+        Self {
+            defining_method: methods
+                .into_iter()
+                .map(|(method, mut classes)| {
+                    classes.sort_unstable_by_key(|&(rank, _)| rank);
+                    (
+                        method.to_string(),
+                        classes
+                            .into_iter()
+                            .map(|(_, class)| class.to_string())
+                            .collect(),
+                    )
+                })
+                .collect(),
+            matching_classes: matching_classes
+                .into_iter()
+                .map(|(tail, classes)| (tail, classes.into()))
+                .collect(),
+        }
     }
 }
 
@@ -1230,29 +1279,39 @@ impl DefinitionIndex {
 
     #[cfg_attr(coverage, coverage(off))]
     fn classes_defining_method(&self, method: &str) -> Arc<[String]> {
+        self.class_query_candidates(method, false)
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    fn class_query_candidates(&self, name: &str, matching_class: bool) -> Arc<[String]> {
         {
             let inner = self.read();
-            if let Some(classes) = inner.class_queries.defining_method.get(method) {
-                return Arc::clone(classes);
+            if let Some(snapshot) = &inner.class_queries.snapshot {
+                let candidates = if matching_class {
+                    &snapshot.matching_classes
+                } else {
+                    &snapshot.defining_method
+                };
+                return candidates.get(name).cloned().unwrap_or_default();
             }
         }
         let mut inner = self.write();
-        let classes: Arc<[String]> = inner
-            .store
-            .classes
-            .iter()
-            .filter(|class| {
-                inner
-                    .store
-                    .signatures
-                    .contains_key(&format!("{class}.{method}"))
+        if inner.class_queries.snapshot.is_none() {
+            inner.class_queries.snapshot = Some(ClassQuerySnapshot::new(&inner.store));
+        }
+        let classes = inner
+            .class_queries
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                if matching_class {
+                    snapshot.matching_classes.get(name)
+                } else {
+                    snapshot.defining_method.get(name)
+                }
             })
             .cloned()
-            .collect();
-        inner
-            .class_queries
-            .defining_method
-            .insert(method.to_string(), Arc::clone(&classes));
+            .unwrap_or_default();
         drop(inner);
         classes
     }
@@ -1269,7 +1328,7 @@ impl DefinitionIndex {
             .rsplit('.')
             .next()
             .unwrap_or(class_name_or_tail);
-        let (generation, matching_classes) = {
+        let generation = {
             let inner = self.read();
             if let Some(result) = inner
                 .class_queries
@@ -1279,17 +1338,9 @@ impl DefinitionIndex {
             {
                 return *result;
             }
-            (
-                inner.class_queries.generation,
-                inner
-                    .store
-                    .classes
-                    .iter()
-                    .filter(|class| class.rsplit('.').next() == Some(class_tail))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            )
+            inner.class_queries.generation
         };
+        let matching_classes = self.class_query_candidates(class_tail, true);
         let subclasses = self.classes_defining_method(method);
         let result = matching_classes.iter().any(|class| {
             subclasses
@@ -4958,6 +5009,49 @@ mod tests {
             assert!(!query(), "first query exhausts the module budget");
             assert!(query(), "a fresh query must retry the deferred base module");
         }
+    }
+
+    #[test]
+    fn empty_class_query_snapshot_has_no_candidates() {
+        let index = DefinitionIndex::for_test();
+        assert!(index.classes_defining_method("m").is_empty());
+        assert!(index.class_query_candidates("Base", true).is_empty());
+    }
+
+    #[test]
+    fn class_query_candidates_preserve_class_order_and_ignore_non_methods() {
+        let mut index = index_source_of(
+            "def top(value): ...\nclass Base:\n    def m(self, value): ...\n    class Nested:\n        def m(self, value): ...\nclass Child(Base):\n    def m(self, renamed): ...\nclass Empty: pass\n",
+        );
+        index.insert("main.Unknown.m".to_string(), sig(2));
+        index.insert("bare".to_string(), sig(2));
+        let expected: Vec<_> = {
+            let inner = index.read();
+            inner
+                .store
+                .classes
+                .iter()
+                .filter(|class| inner.store.signatures.contains_key(&format!("{class}.m")))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(index.classes_defining_method("m").as_ref(), expected);
+        assert!(index.classes_defining_method("top").is_empty());
+        assert!(index.classes_defining_method("missing").is_empty());
+        assert_eq!(
+            index.class_query_candidates("Empty", true).as_ref(),
+            ["main.Empty"]
+        );
+        assert_eq!(
+            index.class_query_candidates("Nested", true).as_ref(),
+            ["main.Base.Nested"]
+        );
+        assert!(index.class_query_candidates("Unknown", true).is_empty());
+        index.exclude_rebinding("main.Child.m");
+        assert!(!index
+            .classes_defining_method("m")
+            .iter()
+            .any(|class| class == "main.Child"));
     }
 
     #[test]

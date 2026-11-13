@@ -1068,3 +1068,42 @@ fn fix_repeated_method_calls() -> usize {
     assert_eq!(outcome.files[0].count, 1_000);
     outcome.files[0].count
 }
+
+/// Distinct method names share one class-index snapshot during fix planning.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn fix_distinct_method_calls() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create distinct-method fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"distinct-method-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let mut source = String::from("class Service:\n");
+            for i in 0..1_000 {
+                writeln!(source, "    def method{i}(self, value): ...").expect("format method");
+            }
+            for i in 0..300 {
+                writeln!(
+                    source,
+                    "class Unrelated{i}:\n    def method(self, value): ...\n"
+                )
+                .expect("format unrelated class");
+            }
+            source.push_str("service = Service()\n");
+            for i in 0..1_000 {
+                writeln!(source, "service.method{i}(1)").expect("format method call");
+            }
+            std::fs::write(temp.path().join("app.py"), source).expect("write method calls");
+            temp
+        })
+        .path();
+    let config = Config::load(root).expect("valid distinct-method fixture config");
+    let outcome =
+        fix_paths(root, &[root.to_path_buf()], &config, None).expect("fix distinct methods");
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].count, 1_000);
+    outcome.files[0].count
+}
