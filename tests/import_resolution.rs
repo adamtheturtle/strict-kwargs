@@ -908,3 +908,25 @@ fn a_submodule_rebinding_offset_is_not_compared_against_a_parent_package() {
         "a cross-file rebinding stays excluded: {messages:?}"
     );
 }
+
+/// An alias of setattr in a later file must invalidate the signature before
+/// an earlier file is judged, even when unrelated files skip discovery.
+#[test]
+fn aliased_setattr_keeps_cross_file_method_exclusions() {
+    let project = TestProject::new()
+        .dep(
+            "models.py",
+            "class Service:\n    @staticmethod\n    def method(value): ...\n",
+        )
+        .dep("a_use.py", "from models import Service\nService.method(1)\n")
+        .dep(
+            "z_mutate.py",
+            "from builtins import setattr as mutate\nfrom models import Service\nmutate(Service, 'method', lambda *args: None)\n",
+        )
+        .main("class Unrelated:\n    def method(self, value):\n        self.value = value\n");
+    let messages = project.check_dir();
+    assert!(
+        messages.is_empty(),
+        "rebinding remains excluded: {messages:?}"
+    );
+}
