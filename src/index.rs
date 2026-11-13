@@ -623,19 +623,9 @@ struct Inner {
     /// Names ruled out by star-import export filtering. Checked before the
     /// ty fallback so a stale third-party signature cannot leak through.
     star_blocked: FxHashSet<String>,
-    /// Modules already being resolved or fully resolved+indexed (or attempted),
-    /// so a module — and the heavy third-party closure behind it — is parsed at
-    /// most once. Misses are memoized too. An `Indexing` entry is a claim held
-    /// by one worker; other workers wait for it to become `Indexed` before they
-    /// use the store/cache state that module may populate.
-    modules: FxHashMap<String, ModuleState>,
     /// Remaining lazy-module-resolution budget: a pathological dependency
     /// graph cannot blow up time/memory even though resolution is on demand.
     budget: usize,
-    /// Memoizes [`DefinitionIndex::get`] (including resolved-to-`None`), so a
-    /// name queried repeatedly across the file walk is chased through the
-    /// edge graph at most once.
-    cache: FxHashMap<String, Option<Arc<[Signature]>>>,
     /// Class-query snapshots are discarded when indexing or rebinding changes
     /// the class graph or the methods present in the signature store.
     class_queries: ClassQueryCache,
@@ -662,6 +652,16 @@ pub struct DefinitionIndex {
     /// Resolves a dotted module name to source. `None` in unit tests that
     /// drive the edge/signature logic directly (no module resolution).
     resolver: Option<ModuleResolver>,
+    /// Modules already being resolved or fully resolved+indexed (or attempted),
+    /// so a module — and the heavy third-party closure behind it — is parsed at
+    /// most once. Misses are memoized too. An `Indexing` entry is a claim held
+    /// by one worker; other workers wait for it to become `Indexed` before they
+    /// use the store/cache state that module may populate.
+    modules: RwLock<FxHashMap<String, ModuleState>>,
+    /// Memoizes [`DefinitionIndex::get`] (including resolved-to-`None`), so a
+    /// name queried repeatedly across the file walk is chased through the
+    /// edge graph at most once.
+    cache: RwLock<FxHashMap<String, Option<Arc<[Signature]>>>>,
     inner: RwLock<Inner>,
 }
 
@@ -735,7 +735,7 @@ impl ModuleIndexClaim<'_> {
     /// marks the module.
     fn abandon(mut self) {
         self.mark_indexed = false;
-        self.index.write().modules.remove(&self.dotted);
+        self.index.write_modules().remove(&self.dotted);
     }
 }
 
@@ -745,8 +745,7 @@ impl Drop for ModuleIndexClaim<'_> {
             return;
         }
         self.index
-            .write()
-            .modules
+            .write_modules()
             .insert(self.dotted.clone(), ModuleState::Indexed);
     }
 }
@@ -761,6 +760,8 @@ impl DefinitionIndex {
         Self {
             resolver: Some(resolver),
             inner: RwLock::new(inner),
+            modules: RwLock::default(),
+            cache: RwLock::default(),
         }
     }
 
@@ -778,12 +779,22 @@ impl DefinitionIndex {
         self.inner.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Exclusive access for the rare mutations — caching a freshly resolved
-    /// name, claiming/finishing a module, indexing parsed definitions. Every
-    /// hold is short (a map lookup/insert); module parsing happens outside any
-    /// guard. See [`Self::read`].
+    /// Exclusive access for indexing parsed definitions and updating the
+    /// class graph. Module parsing happens outside the guard. Module claims
+    /// and resolved-name caching use independent locks so those frequent
+    /// operations do not block signature readers. See [`Self::read`].
     fn write(&self) -> RwLockWriteGuard<'_, Inner> {
         self.inner.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Module claims have their own lock: recording an unrelated module miss
+    /// must not block readers of already indexed signatures and aliases.
+    fn read_modules(&self) -> RwLockReadGuard<'_, FxHashMap<String, ModuleState>> {
+        self.modules.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write_modules(&self) -> RwLockWriteGuard<'_, FxHashMap<String, ModuleState>> {
+        self.modules.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Claim `dotted` for indexing, coordinating with other parallel workers.
@@ -797,23 +808,21 @@ impl DefinitionIndex {
         // Fast path: a concurrent read confirms an already-indexed module, so
         // the common case (every re-query of a loaded module) never contends
         // on the write lock.
-        if matches!(self.read().modules.get(dotted), Some(ModuleState::Indexed)) {
+        if matches!(self.read_modules().get(dotted), Some(ModuleState::Indexed)) {
             return None;
         }
         loop {
-            let mut inner = self.write();
-            match inner.modules.get(dotted).copied() {
+            let mut modules = self.write_modules();
+            match modules.get(dotted).copied() {
                 Some(ModuleState::Indexed) => return None,
                 Some(ModuleState::Indexing) => {
                     // Another worker is mid-index; release the lock and retry.
-                    drop(inner);
+                    drop(modules);
                     std::thread::yield_now();
                 }
                 None => {
-                    inner
-                        .modules
-                        .insert(dotted.to_string(), ModuleState::Indexing);
-                    drop(inner);
+                    modules.insert(dotted.to_string(), ModuleState::Indexing);
+                    drop(modules);
                     return Some(ModuleIndexClaim {
                         index: self,
                         dotted: dotted.to_string(),
@@ -1160,12 +1169,11 @@ impl DefinitionIndex {
     /// backwards on demand. A real definition always wins; aliases are only
     /// consulted when no definition is bound under the queried name. Memoized.
     pub fn get(&self, fullname: &str) -> Option<Arc<[Signature]>> {
-        // Scope the guard so it is released before `resolve_alias` (which
-        // re-locks): holding it across that call would self-deadlock the
-        // non-reentrant lock, where the old `RefCell` merely panicked.
+        // Release the cache guard before demand resolution, which may index
+        // definitions and resolve more aliases on other workers.
         {
-            let inner = self.read();
-            if let Some(hit) = inner.cache.get(fullname) {
+            let cache = self.cache.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(hit) = cache.get(fullname) {
                 return hit.clone();
             }
         }
@@ -1173,8 +1181,9 @@ impl DefinitionIndex {
         let mut query_budget = MAX_QUERY_MODULES;
         let mut steps = MAX_QUERY_STEPS;
         let resolved = self.resolve_alias(fullname, &mut visited, 0, &mut query_budget, &mut steps);
-        self.write()
-            .cache
+        self.cache
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(fullname.to_string(), resolved.clone());
         resolved
     }
@@ -4336,6 +4345,8 @@ impl DefinitionIndex {
         Self {
             resolver: None,
             inner: RwLock::new(Inner::default()),
+            modules: RwLock::default(),
+            cache: RwLock::default(),
         }
     }
 
@@ -4659,7 +4670,7 @@ mod tests {
         let mut spent = 0;
         index.ensure_module("lib", &mut spent);
         assert_eq!(
-            index.read().modules.get("lib").copied(),
+            index.read_modules().get("lib").copied(),
             None,
             "an unparsed module must stay claimable"
         );
@@ -4667,7 +4678,7 @@ mod tests {
         let mut refilled = super::MAX_QUERY_MODULES;
         index.ensure_module("lib", &mut refilled);
         assert_eq!(
-            index.read().modules.get("lib").copied(),
+            index.read_modules().get("lib").copied(),
             Some(ModuleState::Indexed),
             "a later query with its own budget must index it"
         );
@@ -5576,14 +5587,69 @@ class Child(Base):
     }
 
     #[test]
+    fn cached_signature_queries_do_not_block_on_signature_updates() {
+        let index = Arc::new(index_of(&[("pkg.f", 2)]));
+        assert_eq!(arity(&index, "pkg.f"), Some(2));
+        let guard = index.write();
+        let worker_index = Arc::clone(&index);
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(arity(&worker_index, "pkg.f"))
+                .expect("send cached signature");
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        worker.join().expect("cache worker");
+        assert_eq!(
+            result.expect("cached query must not wait on signature lock"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn module_claims_do_not_block_on_signature_updates() {
+        let index = Arc::new(DefinitionIndex::for_test());
+        let guard = index.write();
+        let worker_index = Arc::clone(&index);
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let claim = worker_index.claim_module("unrelated");
+            let claimed = claim.is_some();
+            drop(claim);
+            tx.send(claimed).expect("send claim result");
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        worker.join().expect("claim worker");
+        assert!(result.expect("module claim must not wait on signature lock"));
+    }
+
+    #[test]
+    fn cached_signature_queries_do_not_block_on_module_claims() {
+        let index = Arc::new(index_of(&[("pkg.f", 2)]));
+        assert_eq!(arity(&index, "pkg.f"), Some(2));
+        let guard = index.write_modules();
+        let worker_index = Arc::clone(&index);
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(arity(&worker_index, "pkg.f"))
+                .expect("send cached signature");
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        worker.join().expect("cache worker");
+        assert_eq!(
+            result.expect("cached query must not wait on module lock"),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn waits_for_in_progress_module_before_caching_a_miss() {
         let index = Arc::new(DefinitionIndex::for_test());
-        {
-            let mut inner = index.write();
-            inner
-                .modules
-                .insert("pkg".to_string(), ModuleState::Indexing);
-        }
+        index
+            .write_modules()
+            .insert("pkg".to_string(), ModuleState::Indexing);
 
         let (tx, rx) = mpsc::channel();
         let worker_index = Arc::clone(&index);
@@ -5596,13 +5662,10 @@ class Child(Base):
             "query returned while the defining module was still being indexed"
         );
 
-        {
-            let mut inner = index.write();
-            inner.store.insert("pkg.f".to_string(), sig(2));
-            inner
-                .modules
-                .insert("pkg".to_string(), ModuleState::Indexed);
-        }
+        index.write().store.insert("pkg.f".to_string(), sig(2));
+        index
+            .write_modules()
+            .insert("pkg".to_string(), ModuleState::Indexed);
 
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
@@ -5615,12 +5678,9 @@ class Child(Base):
     #[test]
     fn constructor_base_preload_waits_for_in_progress_module() {
         let index = Arc::new(DefinitionIndex::for_test());
-        {
-            let mut inner = index.write();
-            inner
-                .modules
-                .insert("pkg".to_string(), ModuleState::Indexing);
-        }
+        index
+            .write_modules()
+            .insert("pkg".to_string(), ModuleState::Indexing);
 
         let (tx, rx) = mpsc::channel();
         let worker_index = Arc::clone(&index);
@@ -5640,12 +5700,9 @@ class Child(Base):
             "base preload returned while the base module was still being indexed"
         );
 
-        {
-            let mut inner = index.write();
-            inner
-                .modules
-                .insert("pkg".to_string(), ModuleState::Indexed);
-        }
+        index
+            .write_modules()
+            .insert("pkg".to_string(), ModuleState::Indexed);
 
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
