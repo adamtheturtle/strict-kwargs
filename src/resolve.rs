@@ -3,7 +3,7 @@
 //! then the environment's site-packages (PEP 561).
 
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, PoisonError, RwLock};
 
 use include_dir::{include_dir, Dir};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -44,6 +44,10 @@ pub struct ModuleResolver {
     namespace_packages: Option<Vec<PathBuf>>,
     /// Discovered `site-packages` directories (third-party / PEP 561 stubs).
     site_packages: Vec<PathBuf>,
+    /// Directory availability is a snapshot for this resolver's run, just like
+    /// the definition index's loaded modules. Many dotted callable names have
+    /// a class or function where a package directory would have to be.
+    directories: RwLock<FxHashMap<PathBuf, bool>>,
 }
 
 impl ModuleResolver {
@@ -61,6 +65,7 @@ impl ModuleResolver {
                 || discover_site_packages(project_root),
                 discover_site_packages_in_environment,
             ),
+            directories: RwLock::default(),
         }
     }
 
@@ -72,7 +77,7 @@ impl ModuleResolver {
         // 1. First-party source (`.pyi` then `.py` so adjacent stubs win).
         if let Some(namespace_packages) = &self.namespace_packages {
             for root in &self.first_party {
-                if let Some(m) = read_module(root, &rel, &["pyi", "py"]) {
+                if let Some(m) = self.read_module(root, &rel, &["pyi", "py"]) {
                     return Some(m);
                 }
                 let namespace_dir = root.join(&rel);
@@ -84,7 +89,7 @@ impl ModuleResolver {
             }
         } else {
             for root in &self.first_party {
-                if let Some(m) = read_module(root, &rel, &["pyi", "py"]) {
+                if let Some(m) = self.read_module(root, &rel, &["pyi", "py"]) {
                     return Some(m);
                 }
             }
@@ -114,10 +119,10 @@ impl ModuleResolver {
         };
         for sp in &self.site_packages {
             // Prefer dedicated `*-stubs` distributions, then inline packages.
-            if let Some(m) = read_module(sp, &stub_rel, &["pyi"]) {
+            if let Some(m) = self.read_module(sp, &stub_rel, &["pyi"]) {
                 return Some(m);
             }
-            if let Some(m) = read_module(sp, &rel, &["pyi"]) {
+            if let Some(m) = self.read_module(sp, &rel, &["pyi"]) {
                 return Some(m);
             }
             // Runtime package source is authoritative only when the
@@ -125,12 +130,75 @@ impl ModuleResolver {
             // ty, which can apply its full untyped-package inference instead
             // of treating our partial source index as a complete signature.
             if has_py_typed_marker(sp, dotted) {
-                if let Some(m) = read_module(sp, &rel, &["py"]) {
+                if let Some(m) = self.read_module(sp, &rel, &["py"]) {
                     return Some(m);
                 }
             }
         }
 
+        None
+    }
+
+    /// A cached missing prefix rules out every path beneath it. Keep unknown
+    /// I/O failures permissive so the original source read decides whether a
+    /// candidate can be used. Metadata follows symlinks and the filesystem's
+    /// own case rules; no filename normalization is needed.
+    fn directory_may_exist(&self, path: &Path) -> bool {
+        // The empty parent of a relative path denotes the current directory.
+        // metadata("") would instead report NotFound.
+        if path.as_os_str().is_empty() {
+            return true;
+        }
+        if let Some(exists) = self
+            .directories
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+        {
+            return *exists;
+        }
+        let exists = if path
+            .parent()
+            .is_some_and(|parent| !self.directory_may_exist(parent))
+        {
+            false
+        } else {
+            match std::fs::metadata(path) {
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) => !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ),
+            }
+        };
+        self.directories
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf(), exists);
+        exists
+    }
+
+    /// Prefer packages over modules within each extension, preserving stub
+    /// precedence. Skip source reads whose parent directory cannot exist.
+    fn read_module(&self, root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> {
+        let package = root.join(rel);
+        let module_parent = package.parent().unwrap_or(root);
+        let package_exists = self.directory_may_exist(&package);
+        let module_parent_exists = self.directory_may_exist(module_parent);
+        for ext in exts {
+            if package_exists {
+                if let Some(text) =
+                    read_python_source_lossy(&package.join(format!("__init__.{ext}")))
+                {
+                    return Some(ResolvedModule::package(text));
+                }
+            }
+            if module_parent_exists {
+                if let Some(text) = read_python_source_lossy(&root.join(format!("{rel}.{ext}"))) {
+                    return Some(ResolvedModule::module(text));
+                }
+            }
+        }
         None
     }
 }
@@ -191,23 +259,6 @@ impl ResolvedModule {
             guard_nesting: true,
         }
     }
-}
-
-/// Try ``<root>/<rel>.<ext>`` (a module) then ``<root>/<rel>/__init__.<ext>``
-/// (a package).
-fn read_module(root: &Path, rel: &str, exts: &[&str]) -> Option<ResolvedModule> {
-    for ext in exts {
-        // Python prefers a package directory over a same-name module file.
-        if let Some(text) =
-            read_python_source_lossy(&root.join(rel).join(format!("__init__.{ext}")))
-        {
-            return Some(ResolvedModule::package(text));
-        }
-        if let Some(text) = read_python_source_lossy(&root.join(format!("{rel}.{ext}"))) {
-            return Some(ResolvedModule::module(text));
-        }
-    }
-    None
 }
 
 /// Locate `site-packages` from the active venv (`VIRTUAL_ENV`) or a project
@@ -382,6 +433,97 @@ mod tests {
     // `discover_site_packages` reads `VIRTUAL_ENV`; serialize the tests that
     // mutate it so they cannot race each other.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn directory_snapshot_accepts_relative_search_roots() {
+        let root = Path::new("benches/fixtures/leaf");
+        let source_roots = SourceRoots::from_config(root, &crate::config::Config::default());
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        assert!(resolver.resolve("leaf").is_some());
+        assert!(resolver.resolve("leaf.absent.child").is_none());
+    }
+
+    #[test]
+    fn missing_callable_prefixes_do_not_hide_sibling_modules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir(root.join("pkg")).expect("package directory");
+        std::fs::write(root.join("pkg/__init__.py"), "class Service: pass\n")
+            .expect("package source");
+        std::fs::write(root.join("pkg/sibling.py"), "def target(value): ...\n")
+            .expect("sibling module");
+        let source_roots = SourceRoots::from_config(root, &crate::config::Config::default());
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        for name in [
+            "pkg.Service.method",
+            "pkg.Service.other",
+            "pkg.absent.child",
+        ] {
+            assert!(resolver.resolve(name).is_none());
+        }
+        assert!(resolver.resolve("pkg").expect("package").is_package);
+        assert!(resolver
+            .resolve("pkg.sibling")
+            .expect("sibling module")
+            .source
+            .contains("target"));
+        assert!(resolver.resolve("pkg.sibling.target").is_none());
+        assert!(resolver.resolve("pkg.sibling").is_some());
+    }
+
+    #[test]
+    fn new_resolver_refreshes_missing_directory_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let source_roots = SourceRoots::from_config(root, &crate::config::Config::default());
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        assert!(resolver.resolve("created.child").is_none());
+        std::fs::create_dir(root.join("created")).expect("create package");
+        std::fs::write(root.join("created/child.py"), "def f(value): ...\n")
+            .expect("create child module");
+        let refreshed = ModuleResolver::new(root, &source_roots, None);
+        assert!(refreshed.resolve("created.child").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_snapshot_follows_symlinks_and_recovers_poisoned_locks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir(root.join("actual")).expect("actual package");
+        std::fs::write(root.join("actual/child.py"), "def f(value): ...\n").expect("child module");
+        std::os::unix::fs::symlink(root.join("actual"), root.join("alias"))
+            .expect("package symlink");
+        let source_roots = SourceRoots::from_config(root, &crate::config::Config::default());
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = resolver.directories.write().expect("lock");
+            panic!("poison directory snapshot");
+        });
+        assert!(resolver.resolve("alias.child").is_some());
+        assert!(resolver.resolve("alias.missing.child").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_directories_keep_source_reads_permissive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).expect("blocked directory");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0))
+            .expect("deny directory search");
+        let source_roots = SourceRoots::from_config(root, &crate::config::Config::default());
+        let resolver = ModuleResolver::new(root, &source_roots, None);
+        let permissive = resolver.directory_may_exist(&blocked.join("child"));
+        let unresolved = resolver.resolve("blocked.child").is_none();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700))
+            .expect("restore directory search");
+        assert!(permissive);
+        assert!(unresolved);
+    }
 
     #[test]
     fn resolves_first_party_then_stdlib_module_and_package() {
