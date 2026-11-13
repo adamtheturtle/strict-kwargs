@@ -600,7 +600,7 @@ fn fixes_ty_resolved_inferred_receiver() {
 }
 
 #[test]
-fn shared_ty_dependencies_are_consistent_across_preopened_files() {
+fn shared_ty_dependencies_are_consistent_across_files() {
     let mut proj = TestProject::new().file(
         "worker.py",
         "class Worker:\n    def configure(self, host: str, port: int) -> None: ...\n\n\
@@ -615,9 +615,9 @@ fn shared_ty_dependencies_are_consistent_across_preopened_files() {
     let paths = [proj.root.clone()];
     let config = proj.config();
     let diagnostics = strict_kwargs::check_paths(&proj.root, &paths, &config, None, None)
-        .expect("check preopened files");
+        .expect("check shared dependencies");
     assert_eq!(diagnostics.len(), 16);
-    let outcome = fix_paths(&proj.root, &paths, &config, None).expect("fix preopened files");
+    let outcome = fix_paths(&proj.root, &paths, &config, None).expect("fix shared dependencies");
     assert_eq!(outcome.declined, 0);
     assert_eq!(outcome.files.len(), 16);
     for file in outcome.files {
