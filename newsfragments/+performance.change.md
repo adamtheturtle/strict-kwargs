@@ -1,0 +1,1 @@
+Require ty 0.0.103 or newer. Speed up checks by opening each ty shard's documents before querying them, allowing inference to reuse shared dependencies. Reuse analysis workers across phases. Apply keyword insertions in one pass to avoid quadratic work when fixing many calls in a large file.

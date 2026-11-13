@@ -190,18 +190,13 @@ fn process_scan_outcome_for_ty(
     Ok(())
 }
 
-/// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
-/// Phase 1 workers to the serial Phase 2 coordinator as each file's built-in
-/// pass finishes. Files that need ty fallback are queued, then opened and
-/// queried in sorted-path order after the scan stream drains. ty computes
-/// answers on demand (the client advertises pull diagnostics, so didOpen
-/// itself triggers no per-file type-check pass) — but its answers for
-/// multi-location symbols can depend on the order files were opened, so the
-/// nondeterministic scan arrival order must not leak into didOpen order or
-/// runs would flicker on those calls.
-/// The final sort in [`check_paths_impl`] keeps output deterministic
-/// regardless of arrival order; the lazy ty-server start is preserved (only
-/// the first file with pending calls triggers it).
+/// Scan files in parallel, then resolve deferred calls on deterministic ty
+/// shards. The coordinator releases scan outcomes in sorted-path order so
+/// worker scheduling cannot change shard ownership or document-open order.
+/// Each shard opens all its source snapshots before issuing any queries,
+/// avoiding repeated inference invalidation as documents are opened.
+/// Servers start only for shards with pending calls. The final sort in
+/// [`check_paths_impl`] keeps diagnostics in source order.
 ///
 /// Excluded from the coverage gate for the same reason as
 /// [`stream_scan_files`]: what is excluded here is only the threading
@@ -284,22 +279,11 @@ fn pipeline_phases(
             )
         });
 
-        // Phase 2 (parallel, background): one thread per ty shard. Files
-        // with deferred calls stream in as the scan releases them in
-        // sorted order; the greedy owner assignment below reproduces the
-        // partition a whole-list pass would compute. Each work item is
-        // sent only to its owner shard, which both opens and queries it —
-        // no shard sees the others' files. This is safe because the only
-        // cross-file dependency ty has is goto-definition *location
-        // order* (which files were opened earlier reorders a symbol's
-        // returned locations), and `resolve_first_def_location` (#233)
-        // tries every returned location until one parses, so the order —
-        // and therefore the open-set — no longer changes the resolved
-        // diagnostic. Dropping the per-shard open-history replay cuts the
-        // `didOpen` traffic by `TY_SHARD_COUNT`×: on a venv-backed run
-        // where most files defer to ty (e.g. the completeness check),
-        // each server now parses only its ~1/N share of the project
-        // instead of all of it (issue #240).
+        // Phase 2: retain each shard's deferred work until the scan drains.
+        // Open every owned source snapshot before querying any of them, so
+        // shared dependencies are inferred against one database revision.
+        // Ownership and both open/query orders remain deterministic; a shard
+        // sees only its own files and starts no server when it has no work.
         let mut shard_senders = Vec::with_capacity(TY_SHARD_COUNT);
         let mut shard_handles = Vec::with_capacity(TY_SHARD_COUNT);
         for _ in 0..TY_SHARD_COUNT {
@@ -308,15 +292,18 @@ fn pipeline_phases(
             let handle = std::thread::Builder::new()
                 .stack_size(crate::limits::STACK_SIZE)
                 .spawn_scoped(scope, move || -> TyShardResult {
-                    let mut ty: Option<TyResolver> = None;
-                    let mut ty_start_attempted = false;
+                    let work: Vec<_> = shard_rx.into_iter().collect();
+                    let mut ty = start_ty_with_documents(
+                        project_root,
+                        python_env,
+                        work.iter()
+                            .map(|(_, work)| (work.path.as_path(), work.source.as_str())),
+                    )?;
+                    let mut ty_start_attempted = ty.is_some();
                     let mut file_cache: FxHashMap<PathBuf, Option<String>> = FxHashMap::default();
                     let mut def_caches = TyDefCaches::default();
                     let mut out: Vec<(usize, Vec<Diagnostic>)> = Vec::new();
-                    // A shard that never receives an owned file never
-                    // starts its server (`resolve_file_with_ty` starts it
-                    // lazily on the first non-empty pending set).
-                    for (work_index, work) in shard_rx {
+                    for (work_index, work) in work {
                         let mut file_diagnostics = Vec::new();
                         resolve_file_with_ty(
                             &mut ty,
@@ -713,18 +700,9 @@ fn check_paths_impl(
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<SkipWarning> = Vec::new();
 
-    // Run the pipeline (Phase 1 parallel built-in pass + Phase 2 sharded ty
-    // fallback) for cache misses only. Files that need ty fallback stream to
-    // the shard servers in sorted-path order as their scan results arrive —
-    // the servers work concurrently with the scan; ty computes
-    // hover/definition answers on demand (pull diagnostics keep didOpen
-    // itself cheap). Files fully handled by the built-in resolver do not
-    // force ty work, and the shard servers start lazily — only a shard that
-    // actually receives a query pays `ty server`'s project-indexing
-    // initialize cost (issue #31), so a run the built-in resolver fully
-    // handles (the common editor-on-save / pre-commit case on first-party
-    // code) starts no server at all. `python_env` (the `--python` value)
-    // also steers the built-in resolver's third-party discovery.
+    // Scan cache misses in parallel, then query each ty shard after opening
+    // all of its source snapshots. Fully built-in runs start no ty servers.
+    // `python_env` steers both built-in and ty third-party discovery.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -14664,6 +14642,30 @@ fn resolve_file_with_ty(
         ty.reenable();
     }
     Err(CheckError::TyServerFailed)
+}
+
+/// Open a shard's source snapshots before querying any of them. Opening a
+/// document advances ty's database revision, so interleaving opens and queries
+/// repeatedly invalidates inference already computed for shared dependencies.
+/// Keeping all opens ahead of inference lets every query reuse the same revision.
+#[cfg_attr(coverage, coverage(off))]
+fn start_ty_with_documents<'a>(
+    project_root: &Path,
+    python_env: Option<&Path>,
+    documents: impl IntoIterator<Item = (&'a Path, &'a str)>,
+) -> Result<Option<TyResolver>, CheckError> {
+    let mut documents = documents.into_iter();
+    let Some((path, source)) = documents.next() else {
+        return Ok(None);
+    };
+    let mut ty = start_ty_for_fallback(project_root, python_env)?;
+    ty.ensure_open(path, source)
+        .ok_or(CheckError::TyServerFailed)?;
+    for (path, source) in documents {
+        ty.ensure_open(path, source)
+            .ok_or(CheckError::TyServerFailed)?;
+    }
+    Ok(Some(ty))
 }
 
 /// Start the `ty` language server once. `ty`'s binary is verified up front

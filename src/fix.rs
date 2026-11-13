@@ -4,7 +4,6 @@
 //! module only models the resulting source edits and renders them, either
 //! applied in place or as a unified diff.
 
-use std::cmp::Reverse;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -440,15 +439,24 @@ pub struct FixOutcome {
 
 /// Apply `insertions` to `source`, returning the rewritten text.
 ///
-/// Edits are applied from the highest offset down so earlier offsets stay
-/// valid as the string grows.
+/// Copy each source span once, in offset order. Equal-offset insertions retain
+/// the result of applying edits from highest to lowest offset: the last edit
+/// at an offset appears first in the rewritten text.
 pub fn apply_insertions(source: &str, insertions: &[Insertion]) -> String {
-    let mut ordered: Vec<&Insertion> = insertions.iter().collect();
-    ordered.sort_by_key(|insertion| Reverse(insertion.at));
-    let mut out = source.to_string();
+    let mut ordered: Vec<&Insertion> = insertions.iter().rev().collect();
+    ordered.sort_by_key(|insertion| insertion.at);
+    let extra: usize = insertions
+        .iter()
+        .map(|insertion| insertion.text.len())
+        .sum();
+    let mut out = String::with_capacity(source.len() + extra);
+    let mut cursor = 0;
     for insertion in ordered {
-        out.insert_str(insertion.at, &insertion.text);
+        out.push_str(&source[cursor..insertion.at]);
+        out.push_str(&insertion.text);
+        cursor = insertion.at;
     }
+    out.push_str(&source[cursor..]);
     out
 }
 
@@ -721,6 +729,30 @@ mod tests {
             ],
         );
         assert_eq!(out, "f(x=a, y=b)");
+    }
+
+    #[test]
+    fn apply_insertions_preserves_equal_offset_order_and_unicode() {
+        let edits = [
+            Insertion {
+                at: 4,
+                text: "end".into(),
+            },
+            Insertion {
+                at: 0,
+                text: "first".into(),
+            },
+            Insertion {
+                at: 2,
+                text: "left".into(),
+            },
+            Insertion {
+                at: 2,
+                text: "right".into(),
+            },
+        ];
+        assert_eq!(apply_insertions("éø", &edits), "firstérightleftøend");
+        assert_eq!(apply_insertions("", &[]), "");
     }
 
     #[test]

@@ -600,6 +600,36 @@ fn fixes_ty_resolved_inferred_receiver() {
 }
 
 #[test]
+fn shared_ty_dependencies_are_consistent_across_preopened_files() {
+    let mut proj = TestProject::new().file(
+        "worker.py",
+        "class Worker:\n    def configure(self, host: str, port: int) -> None: ...\n\n\
+         def make_worker() -> Worker:\n    return Worker()\n",
+    );
+    for i in 0..16 {
+        proj = proj.file(
+            &format!("caller_{i:02}.py"),
+            "from worker import make_worker\nmake_worker().configure(\"é.example\", 8080)\n",
+        );
+    }
+    let paths = [proj.root.clone()];
+    let config = proj.config();
+    let diagnostics = strict_kwargs::check_paths(&proj.root, &paths, &config, None, None)
+        .expect("check preopened files");
+    assert_eq!(diagnostics.len(), 16);
+    let outcome = fix_paths(&proj.root, &paths, &config, None).expect("fix preopened files");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 16);
+    for file in outcome.files {
+        assert_eq!(file.count, 1);
+        assert_eq!(
+            file.fixed,
+            "from worker import make_worker\nmake_worker().configure(host=\"é.example\", port=8080)\n",
+        );
+    }
+}
+
+#[test]
 fn fixes_ty_resolved_bound_dunder_without_double_receiver_skip() {
     // `super().__init__` is resolved by ty as a bound method whose hover
     // signature is already call-site oriented. A `.__init__` suffix must not

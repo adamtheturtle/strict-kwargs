@@ -924,3 +924,42 @@ fn explicit_environment_fingerprint_cache_warm(bencher: divan::Bencher) {
     check_file_cached(root, &path, Some(python_env), cache.path());
     bencher.bench(|| check_file_cached(root, &path, Some(python_env), cache.path()));
 }
+
+/// Fixing many calls in one large file exercises the cost of applying the
+/// resulting edits as well as parsing, resolving, and rendering the diff.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn fix_many_calls_diff() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create many-calls fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"many-calls-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let mut source = String::from(
+            "def emit(message, category, destination, level, timestamp, context):\n    pass\n\n");
+            let padding = "x".repeat(120);
+            for _ in 0..10_000 {
+                writeln!(
+                    source,
+                    "emit(\"{padding}\", \"event\", \"stdout\", 3, 1234, None)"
+                )
+                .expect("format call");
+            }
+            std::fs::write(temp.path().join("app.py"), source).expect("write many calls");
+            temp
+        })
+        .path();
+    let config = Config::load(root).expect("valid many-calls fixture config");
+    let outcome = fix_paths(root, &[root.to_path_buf()], &config, None).expect("fix many calls");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].count, 10_000);
+    outcome
+        .files
+        .iter()
+        .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
+        .sum()
+}
