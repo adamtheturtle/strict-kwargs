@@ -997,3 +997,74 @@ fn fix_many_inferred_calls_diff() -> usize {
         .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
         .sum()
 }
+
+/// Repeated method rebindings in a project containing many unrelated classes.
+/// Invalidating one class's method should visit only its descendants, rather
+/// than cloning and searching the entire project's inheritance graph.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn repeated_method_rebindings() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create rebinding fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"rebinding-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let mut source = String::from(
+                "class Base:\n    def method(self, value): ...\n\n\
+                 class Child(Base):\n    def method(self, value): ...\n\n\
+                 class Grandchild(Child):\n    def method(self, value): ...\n\n",
+            );
+            for i in 0..300 {
+                writeln!(source, "class Unrelated{i}(object):\n    pass\n")
+                    .expect("format unrelated class");
+            }
+            source.push_str("def replacement(self, value): ...\n\n");
+            for _ in 0..300 {
+                source.push_str("Base.method = replacement\n");
+            }
+            source.push_str("def consume(value): ...\nconsume(1)\n");
+            std::fs::write(temp.path().join("app.py"), source).expect("write rebindings");
+            temp
+        })
+        .path();
+    let count = check(root);
+    assert_eq!(count, 1);
+    count
+}
+
+/// Repeated safety checks for method fixes in a large class index. Answers
+/// must remain reusable until indexing or a rebinding changes the graph.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn fix_repeated_method_calls() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create method-call fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"method-call-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let mut source = String::from("class Service:\n    def method(self, value): ...\n\n");
+            for i in 0..300 {
+                writeln!(
+                    source,
+                    "class Unrelated{i}:\n    def method(self, value): ...\n"
+                )
+                .expect("format unrelated method");
+            }
+            source.push_str("service = Service()\n");
+            source.push_str(&"service.method(1)\n".repeat(1_000));
+            std::fs::write(temp.path().join("app.py"), source).expect("write method calls");
+            temp
+        })
+        .path();
+    let config = Config::load(root).expect("valid method-call fixture config");
+    let outcome = fix_paths(root, &[root.to_path_buf()], &config, None).expect("fix method calls");
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].count, 1_000);
+    outcome.files[0].count
+}
