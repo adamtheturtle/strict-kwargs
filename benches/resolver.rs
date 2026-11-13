@@ -963,3 +963,37 @@ fn fix_many_calls_diff() -> usize {
         .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
         .sum()
 }
+
+/// Repeated inferred receiver calls share a hover answer but must each find
+/// their own AST call and produce one unique edit without repeated scans.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn fix_many_inferred_calls_diff() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create inferred-calls fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"inferred-calls-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let source = format!(
+                "from pathlib import Path\np = Path.cwd()\n{}",
+                "p.with_suffix(\".txt\")\n".repeat(10_000)
+            );
+            std::fs::write(temp.path().join("app.py"), source).expect("write inferred calls");
+            temp
+        })
+        .path();
+    let config = Config::load(root).expect("valid inferred-calls config");
+    let outcome =
+        fix_paths(root, &[root.to_path_buf()], &config, None).expect("fix inferred calls");
+    assert_eq!(outcome.declined, 0);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].count, 10_000);
+    outcome
+        .files
+        .iter()
+        .map(|fix| unified_diff(&fix.path, &fix.original, &fix.fixed, false).len())
+        .sum()
+}

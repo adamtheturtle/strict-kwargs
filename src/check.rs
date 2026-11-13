@@ -13788,32 +13788,41 @@ fn identifier_at(source: &str, offset: usize) -> Option<String> {
     (end > 0).then(|| rest[..end].to_string())
 }
 
-struct CallAtStart<'a> {
-    start: usize,
-    callee_offset: usize,
-    call: Option<&'a ast::ExprCall>,
+/// Exact call-site lookup for ty fixes. Nested calls can start at the same
+/// byte, so both the call start and callee offset identify the intended node.
+#[derive(Default)]
+struct FixCallIndex<'a> {
+    calls: FxHashMap<(usize, usize), &'a ast::ExprCall>,
 }
 
 #[cfg_attr(coverage, coverage(off))]
-impl<'a> Visitor<'a> for CallAtStart<'a> {
+impl<'a> Visitor<'a> for FixCallIndex<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
-        if self.call.is_some() {
-            return;
-        }
         if let Expr::Call(call) = expr {
-            if call.start().to_usize() == self.start
-                && Self::callee_offset(call) == Some(self.callee_offset)
-            {
-                self.call = Some(call);
-                return;
+            if let Some(callee) = Self::callee_offset(call) {
+                self.calls
+                    .entry((call.start().to_usize(), callee))
+                    .or_insert(call);
             }
         }
         walk_expr(self, expr);
     }
 }
 
-impl CallAtStart<'_> {
-    #[cfg_attr(coverage, coverage(off))]
+#[cfg_attr(coverage, coverage(off))]
+impl<'a> FixCallIndex<'a> {
+    fn new(suite: &'a [Stmt]) -> Self {
+        let mut index = Self::default();
+        for stmt in suite {
+            index.visit_stmt(stmt);
+        }
+        index
+    }
+
+    fn get(&self, start: usize, callee_offset: usize) -> Option<&'a ast::ExprCall> {
+        self.calls.get(&(start, callee_offset)).copied()
+    }
+
     fn callee_offset(call: &ast::ExprCall) -> Option<usize> {
         match &*call.func {
             Expr::Attribute(attr) => Some(attr.attr.range().start().to_usize()),
@@ -13821,22 +13830,6 @@ impl CallAtStart<'_> {
             _ => None,
         }
     }
-}
-
-#[cfg_attr(coverage, coverage(off))]
-fn call_at_start(suite: &[Stmt], start: usize, callee_offset: usize) -> Option<&ast::ExprCall> {
-    let mut locator = CallAtStart {
-        start,
-        callee_offset,
-        call: None,
-    };
-    for stmt in suite {
-        locator.visit_stmt(stmt);
-        if locator.call.is_some() {
-            break;
-        }
-    }
-    locator.call
 }
 
 /// Parse a ty-reported parameter list (`a: int, b: int = ..., /`) into a
@@ -14406,7 +14399,7 @@ fn ty_call_fix_insertions(
     if callee_fullname.ends_with(".__get__") || callee_fullname.ends_with(".__set__") {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     }
-    let Some(call) = call_at_start(fix_ast.suite, pending.call_start, pending.callee_offset) else {
+    let Some(call) = fix_ast.calls.get(pending.call_start, pending.callee_offset) else {
         return Err(DeclinedFixReason::UnsupportedSignatureShape);
     };
     if offset_is_text_as_data(fix_ast.text_as_data, call.start()) {
@@ -14510,8 +14503,11 @@ fn record_ty_fix(
         }
     };
     let original_len = fixes.insertions.len();
+    let seen = fixes
+        .seen_insertions
+        .get_or_insert_with(|| fixes.insertions.iter().cloned().collect());
     for insertion in insertions {
-        if !fixes.insertions.contains(&insertion) {
+        if seen.insert(insertion.clone()) {
             fixes.insertions.push(insertion);
         }
     }
@@ -14636,6 +14632,7 @@ fn resolve_file_with_ty(
             (fixes.as_mut(), fix_baseline)
         {
             fixes.insertions.truncate(insertions);
+            *fixes.seen_insertions = None;
             *fixes.fixed_calls = fixed_calls;
             fixes.declined_fix_reasons.truncate(declined);
         }
@@ -14699,13 +14696,14 @@ fn start_ty_for_fallback(
 
 struct TyFixes<'a> {
     insertions: &'a mut Vec<Insertion>,
+    seen_insertions: &'a mut Option<FxHashSet<Insertion>>,
     fixed_calls: &'a mut usize,
     declined_fix_reasons: &'a mut Vec<DeclinedFixReason>,
 }
 
 #[derive(Clone, Copy)]
 struct TyFixAst<'a> {
-    suite: &'a [Stmt],
+    calls: &'a FixCallIndex<'a>,
     tokens: &'a Tokens,
     text_as_data: &'a [ruff_text_size::TextRange],
 }
@@ -14816,11 +14814,17 @@ fn resolve_overload_fixes_with_ty(
         .as_ref()
         .map(|parsed| module_text_as_data_ranges(parsed.suite()))
         .unwrap_or_default();
-    let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
-        suite: parsed.suite(),
-        tokens: parsed.tokens(),
-        text_as_data: &fix_text_as_data,
-    });
+    let fix_calls = parsed_for_fixes
+        .as_ref()
+        .map(|parsed| FixCallIndex::new(parsed.suite()));
+    let fix_ast = parsed_for_fixes
+        .as_ref()
+        .zip(fix_calls.as_ref())
+        .map(|(parsed, calls)| TyFixAst {
+            calls,
+            tokens: parsed.tokens(),
+            text_as_data: &fix_text_as_data,
+        });
     let lsp_index = LspLineIndex::new(source);
 
     for chunk in pending.chunks(TY_MAX_IN_FLIGHT) {
@@ -15087,11 +15091,17 @@ fn resolve_pending_with_ty(
         .as_ref()
         .map(|parsed| module_text_as_data_ranges(parsed.suite()))
         .unwrap_or_default();
-    let fix_ast = parsed_for_fixes.as_ref().map(|parsed| TyFixAst {
-        suite: parsed.suite(),
-        tokens: parsed.tokens(),
-        text_as_data: &fix_text_as_data,
-    });
+    let fix_calls = parsed_for_fixes
+        .as_ref()
+        .map(|parsed| FixCallIndex::new(parsed.suite()));
+    let fix_ast = parsed_for_fixes
+        .as_ref()
+        .zip(fix_calls.as_ref())
+        .map(|(parsed, calls)| TyFixAst {
+            calls,
+            tokens: parsed.tokens(),
+            text_as_data: &fix_text_as_data,
+        });
     // Calls in the same hover group (same receiver binding, same attribute;
     // see `CallChecker::hover_group_for_call`) are proven to hover
     // identically, so the first member's raw answer is reused for the rest
@@ -15442,7 +15452,7 @@ mod tests {
         process_scan_outcome_for_ty, receiver_is_class_object, record_ty_fix,
         should_balance_grouped_ty, signature_is_fully_named, signature_mapping_fullname,
         skipped_cache_miss_warnings, strip_unbound_receiver, ty_hover_signature_is_safe_for_fix,
-        without_leading_self, CallAtStart, DeclinedFixReason, FileNoqa, FileScan, FileSelection,
+        without_leading_self, DeclinedFixReason, FileNoqa, FileScan, FileSelection, FixCallIndex,
         FixOptIns, IfBranchTraversal, InOrderReleaser, PendingTy, PendingTyWork, ScanOutcome,
         TyDefCaches, TyFixAst, TyFixes, TyShardAssigner, REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD,
     };
@@ -16226,15 +16236,18 @@ class C:
         let mut insertions = Vec::new();
         let mut fixed_calls = 0usize;
         let mut declined_fix_reasons = Vec::new();
+        let mut seen_insertions = None;
         let mut fixes = Some(TyFixes {
+            seen_insertions: &mut seen_insertions,
             insertions: &mut insertions,
             fixed_calls: &mut fixed_calls,
             declined_fix_reasons: &mut declined_fix_reasons,
         });
         let parsed = ruff_python_parser::parse_module("f(1)\n").expect("parse");
         let text_as_data = module_text_as_data_ranges(parsed.suite());
+        let calls = super::FixCallIndex::new(parsed.suite());
         let fix_ast = TyFixAst {
-            suite: parsed.suite(),
+            calls: &calls,
             tokens: parsed.tokens(),
             text_as_data: &text_as_data,
         };
@@ -18636,6 +18649,18 @@ class C:
     }
 
     #[test]
+    fn fix_call_index_distinguishes_nested_calls_with_the_same_start() {
+        let source = "obj.func(1).method(2)\n";
+        let parsed = parse_module(source).expect("parse nested calls");
+        let calls = super::FixCallIndex::new(parsed.suite());
+        let inner = calls.get(0, 4).expect("inner call");
+        let outer = calls.get(0, 12).expect("outer call");
+        assert_eq!(&source[inner.range], "obj.func(1)");
+        assert_eq!(&source[outer.range], "obj.func(1).method(2)");
+        assert!(calls.get(0, 99).is_none());
+    }
+
+    #[test]
     fn call_at_start_callee_offset_rejects_non_identifier_callee() {
         let parsed = parse_module("(lambda x: x)(1)\n").expect("parse call");
         let Some(super::Stmt::Expr(stmt)) = parsed.suite().first() else {
@@ -18644,6 +18669,6 @@ class C:
         let Expr::Call(call) = stmt.value.as_ref() else {
             panic!("expected a call expression");
         };
-        assert_eq!(CallAtStart::callee_offset(call), None);
+        assert_eq!(FixCallIndex::callee_offset(call), None);
     }
 }
