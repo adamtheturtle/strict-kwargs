@@ -1012,6 +1012,9 @@ impl DefinitionIndex {
         // both per query and globally (cheap non-resolving candidate names —
         // the bulk of a star-import fan-out — never reach here).
         if *query_budget == 0 {
+            // An incomplete ancestry walk must not cache a negative override
+            // answer: a later query receives a fresh module budget.
+            self.write().class_queries.invalidate();
             claim.abandon();
             return;
         }
@@ -1066,6 +1069,9 @@ impl DefinitionIndex {
             return;
         };
         if *query_budget == 0 {
+            // An incomplete ancestry walk must not cache a negative override
+            // answer: a later query receives a fresh module budget.
+            self.write().class_queries.invalidate();
             claim.abandon();
             return;
         }
@@ -4913,6 +4919,45 @@ mod tests {
         assert!(index.is_excluded("pkg.other.m"));
         assert!(index.is_excluded("standalone"));
         assert!(!index.is_excluded("pkg.Child.m"));
+    }
+
+    #[test]
+    fn override_queries_retry_after_a_parse_error_exhausts_the_module_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut path = dir.path().to_path_buf();
+        let mut parts = Vec::new();
+        for i in 0..=super::MAX_QUERY_MODULES {
+            let part = format!("p{i}");
+            path.push(&part);
+            parts.push(part);
+            std::fs::create_dir(&path).expect("package directory");
+            std::fs::write(path.join("__init__.py"), "def (").expect("invalid package source");
+        }
+        std::fs::write(
+            path.join("leaf.py"),
+            "from main import Base\nclass Middle(Base): pass\n",
+        )
+        .expect("valid leaf module");
+        let middle = format!("{}.leaf.Middle", parts.join("."));
+        let source_roots = SourceRoots::from_config(dir.path(), &crate::config::Config::default());
+        for match_tail in [false, true] {
+            let resolver = ModuleResolver::new(dir.path(), &source_roots, None);
+            let mut index = DefinitionIndex::new(resolver, PythonVersion::default());
+            for class in ["main.Base", "main.Sub"] {
+                index.insert_class_for_test(class);
+                index.insert(format!("{class}.m"), sig(2));
+            }
+            index.insert_class_bases("main.Sub".into(), vec![middle.clone()]);
+            let query = || {
+                if match_tail {
+                    index.has_overriding_method_matching_class_name("ty.Base", "m")
+                } else {
+                    index.has_overriding_method("main.Base", "m")
+                }
+            };
+            assert!(!query(), "first query exhausts the module budget");
+            assert!(query(), "a fresh query must retry the deferred base module");
+        }
     }
 
     #[test]
