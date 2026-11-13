@@ -26,6 +26,8 @@
 //!    magnitude smaller than glibc's), which would otherwise make the bound
 //!    non-deterministic.
 
+use std::sync::OnceLock;
+
 use rayon::ThreadPoolBuilder;
 use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::ModModule;
@@ -177,9 +179,10 @@ where
 /// stack issue #54 needs must cover the *worker* threads too, not only the
 /// main analysis thread [`run_with_large_stack`] provides — rayon's default
 /// worker stack is far smaller and a legitimately-accepted ~[`MAX_NESTING_DEPTH`]
-/// file would overflow it. The pool is scoped to this call (mirroring
-/// `run_with_large_stack`'s per-call thread); `f` typically drives a
-/// `par_iter` whose closures then execute on these deep-stacked workers.
+/// file would overflow it. Reuse one process-wide pool across indexing,
+/// exclusion discovery, and checking instead of creating and joining a new
+/// set of workers for each phase. `f` typically drives a `par_iter` whose
+/// closures then execute on these deep-stacked workers.
 ///
 /// Excluded from the coverage gate for the same reason as
 /// [`run_with_large_stack`]: every integration test that runs a check/fix
@@ -196,10 +199,16 @@ where
     F: FnOnce() -> Result<T, CheckError> + Send,
     T: Send,
 {
-    let pool = ThreadPoolBuilder::new()
-        .stack_size(STACK_SIZE)
-        .build()
-        .map_err(|e| CheckError::Io(std::io::Error::other(e.to_string())))?;
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    let pool = if let Some(pool) = POOL.get() {
+        pool
+    } else {
+        let pool = ThreadPoolBuilder::new()
+            .stack_size(STACK_SIZE)
+            .build()
+            .map_err(|e| CheckError::Io(std::io::Error::other(e.to_string())))?;
+        POOL.get_or_init(|| pool)
+    };
     pool.install(f)
 }
 

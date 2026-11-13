@@ -80,6 +80,7 @@ fn resolve_fix_scan(
     let mut declined_reasons = scan.declined_fix_reasons;
     let mut insertions = scan.fixes;
     let mut fixed = scan.fixed_calls;
+    let mut seen_insertions = None;
     resolve_file_with_ty(
         &mut ty_state.ty,
         &mut ty_state.start_attempted,
@@ -97,6 +98,7 @@ fn resolve_fix_scan(
         &mut ty_state.def_caches,
         &mut diagnostics,
         Some(TyFixes {
+            seen_insertions: &mut seen_insertions,
             insertions: &mut insertions,
             fixed_calls: &mut fixed,
             declined_fix_reasons: &mut declined_reasons,
@@ -113,6 +115,7 @@ fn resolve_fix_scan(
         &source,
         &scan.overload_fix_pending,
         Some(TyFixes {
+            seen_insertions: &mut seen_insertions,
             insertions: &mut insertions,
             fixed_calls: &mut fixed,
             declined_fix_reasons: &mut declined_reasons,
