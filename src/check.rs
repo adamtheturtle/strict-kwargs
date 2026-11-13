@@ -7157,6 +7157,13 @@ impl<'a> CallChecker<'a> {
     /// ``setattr(C, "method", …)`` with a resolvable class and literal name.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_setattr_call(&self, call: &ast::ExprCall) {
+        // Callee resolution can load modules and chase inheritance. Most
+        // calls cannot rebind a method, regardless of which callable they
+        // resolve to, so rule out their argument shapes first.
+        let [Expr::Name(obj), Expr::StringLiteral(attr_literal), ..] = call.arguments.args.as_ref()
+        else {
+            return;
+        };
         let is_setattr = matches!(
             call.func.as_ref(),
             Expr::Name(name) if name.id.as_str() == "setattr"
@@ -7166,21 +7173,11 @@ impl<'a> CallChecker<'a> {
         if !is_setattr {
             return;
         }
-        if call.arguments.args.len() < 2 {
-            return;
-        }
-        let obj = &call.arguments.args[0];
-        let attr = &call.arguments.args[1];
-        let Expr::StringLiteral(attr_literal) = attr else {
-            return;
-        };
         let attr_name = attr_literal.value.to_str();
-        let Some(class_fullname) = (match obj {
-            Expr::Name(name) => self
-                .resolve_local(name.id.as_str())
-                .or_else(|| self.class_from_name_annotation(name.id.as_str())),
-            _ => None,
-        }) else {
+        let Some(class_fullname) = self
+            .resolve_local(obj.id.as_str())
+            .or_else(|| self.class_from_name_annotation(obj.id.as_str()))
+        else {
             return;
         };
         self.index
@@ -7275,6 +7272,9 @@ impl<'a> CallChecker<'a> {
     /// Conservative ``exec("name = …")`` / ``exec('name = …')`` invalidation.
     #[cfg_attr(coverage, coverage(off))]
     fn invalidate_exec_literal_assignment(&mut self, call: &ast::ExprCall) {
+        let Some(Expr::StringLiteral(source)) = call.arguments.args.first() else {
+            return;
+        };
         let is_exec = matches!(
             call.func.as_ref(),
             Expr::Name(name) if name.id.as_str() == "exec"
@@ -7283,9 +7283,6 @@ impl<'a> CallChecker<'a> {
         if !is_exec {
             return;
         }
-        let Some(Expr::StringLiteral(source)) = call.arguments.args.first() else {
-            return;
-        };
         for line in source.value.to_str().lines() {
             let trimmed = line.trim();
             if let Some(name) =
