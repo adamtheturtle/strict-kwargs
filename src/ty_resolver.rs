@@ -8,7 +8,7 @@
 //! resolver.
 
 use std::collections::HashSet;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -73,7 +73,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct TyResolver {
     child: Child,
-    stdin: ChildStdin,
+    // Coalesce the formatted header and JSON body into one pipe write for
+    // small RPCs. `write_lsp_message` flushes every frame immediately.
+    stdin: BufWriter<ChildStdin>,
     incoming: Receiver<Value>,
     next_id: i64,
     opened: HashSet<PathBuf>,
@@ -217,7 +219,7 @@ impl TyResolver {
     fn from_parts(child: Child, stdin: ChildStdin, incoming: Receiver<Value>) -> Self {
         Self {
             child,
-            stdin,
+            stdin: BufWriter::new(stdin),
             incoming,
             next_id: 1,
             opened: HashSet::new(),
@@ -1514,6 +1516,34 @@ mod tests {
                 .expect("message is utf8")
                 .starts_with("Content-Length: "));
             assert!(write_lsp_message(&mut BrokenWriter, &body).is_err());
+        }
+
+        #[test]
+        fn buffered_requests_flush_complete_frames_individually() {
+            #[derive(Default)]
+            struct Writes(Vec<Vec<u8>>);
+            impl Write for Writes {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.push(bytes.to_vec());
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut writer = BufWriter::new(Writes::default());
+            for id in [1, 2] {
+                let body = json!({"id": id, "method": "textDocument/hover"}).to_string();
+                write_lsp_message(&mut writer, body.as_bytes()).expect("flush request");
+                assert_eq!(writer.get_ref().0.len(), id);
+                assert_eq!(writer.get_ref().0[id - 1], super::frame(&body));
+            }
+            // didOpen sources can exceed the buffer; framing stays intact.
+            let body =
+                json!({"method": "textDocument/didOpen", "text": "x".repeat(20_000)}).to_string();
+            let before = writer.get_ref().0.len();
+            write_lsp_message(&mut writer, body.as_bytes()).expect("flush large notification");
+            assert_eq!(writer.get_ref().0[before..].concat(), super::frame(&body));
         }
 
         #[test]
