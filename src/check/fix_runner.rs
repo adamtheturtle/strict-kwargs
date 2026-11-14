@@ -110,6 +110,7 @@ fn resolve_fix_scan(
         project_root,
         python_files,
         index,
+        indexed_files,
         python_env,
         &path,
         &source,
