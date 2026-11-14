@@ -8,7 +8,6 @@ cd "$(dirname "$0")/.."
 
 CASE="${1:-${STRICT_KWARGS_COMPLETENESS_CASE:-sphinx}}"
 COMPLETENESS_PYTHON="${STRICT_KWARGS_COMPLETENESS_PYTHON:-3.13}"
-COMPLETENESS_TY_VERSION="${STRICT_KWARGS_COMPLETENESS_TY_VERSION:-0.0.103}"
 COMPLETENESS_CONSTRAINTS="${STRICT_KWARGS_COMPLETENESS_CONSTRAINTS:-tests/golden/completeness-requirements-constraints.txt}"
 temp_dir="$(mktemp -d)"
 trap 'rm -rf "$temp_dir"' EXIT
@@ -45,16 +44,6 @@ case_prefix="STRICT_KWARGS_COMPLETENESS_$(printf '%s' "$CASE" | tr '[:lower:]' '
 export "${case_prefix}_REPOSITORY_NAME=$REPOSITORY_NAME"
 export "${case_prefix}_REPOSITORY_URL=$REPOSITORY_URL"
 export "${case_prefix}_REPOSITORY_REF=$REPOSITORY_REF"
-
-ty_bin_dir="$temp_dir/ty-bin"
-mkdir -p "$ty_bin_dir"
-cat > "$ty_bin_dir/ty" <<EOF
-#!/usr/bin/env bash
-exec uv tool run --from "ty==$COMPLETENESS_TY_VERSION" ty "\$@"
-EOF
-chmod +x "$ty_bin_dir/ty"
-export PATH="$ty_bin_dir:$PATH"
-ty version
 
 checkout_var="${case_prefix}_CHECKOUT"
 python_env_var="${case_prefix}_PYTHON_ENV"

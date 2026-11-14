@@ -26,9 +26,8 @@ The current pinned repositories are:
 
 The CPython floors were regenerated with three runs of the `ty 0.0.103` server on each platform.
 The Sphinx floor originated with `ty 0.0.64`.
-The Sphinx call at `directives/code.py:257` now displays `pyobject_filter` instead of `func` with `ty 0.0.103`; both the server and embedded backends report the same violation.
-CI checks the embedded backend against these floors; use `--features embedded-ty` in the commands below to run it locally.
-The external `ty` version check applies only to the server backend.
+The Sphinx call at `directives/code.py:257` now displays `pyobject_filter` instead of `func` with `ty 0.0.103`; the violation remains unchanged.
+CI and the commands below check the bundled inference engine against these floors.
 
 Regenerate a snapshot with:
 
@@ -39,7 +38,7 @@ scripts/regenerate-completeness-golden.sh cpython
 
 By default the script runs strict-kwargs over the pinned checkout three times, with Sphinx installed editable into a temporary virtual environment.
 CPython is checked directly from its checkout because it does not need an editable install for first-party resolution.
-The script runs the checker through a temporary `ty==0.0.103` wrapper so the oracle does not drift when a newer `ty` release changes hover display details.
+The script uses the bundled inference engine, pinned by `crates/ty_backend/Cargo.toml`, so installed ty executables cannot affect the oracle.
 The script sets `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to refresh the committed snapshot for the current platform directly.
 The Sphinx virtual environment is installed with `tests/golden/completeness-requirements-constraints.txt` so the oracle does not drift when transitive dependencies change their public type surface.
 
@@ -51,7 +50,7 @@ Otherwise the script creates a venv with Python `3.13`, matching scheduled CI; s
 To intentionally refresh the Sphinx third-party dependency surface, update `tests/golden/completeness-requirements-constraints.txt` and regenerate the oracle in the same change.
 To intentionally re-admit or remove platform-sensitive diagnostics, regenerate the affected platform snapshot in the same change.
 To change the number of runs, set `STRICT_KWARGS_COMPLETENESS_RUNS`.
-To intentionally update the pinned `ty` version, set `STRICT_KWARGS_COMPLETENESS_TY_VERSION` while regenerating and update the version documented here and in `tests/completeness.rs`.
+To intentionally update the pinned `ty` version, update the engine revision in `crates/ty_backend/Cargo.toml`, the version documented here and in `tests/completeness.rs`, then regenerate the snapshots.
 
 To intentionally swap or repin a repository, update the repository defaults in `tests/completeness.rs`, CI, this README, any dependency constraints, and the platform snapshots together.
 

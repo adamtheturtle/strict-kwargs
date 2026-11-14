@@ -4,15 +4,10 @@
 //! (`.github/workflows/ci.yml`) so every PR gets an instruction-count delta
 //! against `main`.
 //!
-//! `ty` is a hard requirement, so the `CodSpeed` job installs it (otherwise
-//! `check_paths`/`fix_paths` would error out). Its presence is probed once
-//! per process and memoized (`require_ty_present`), so the benchmarks are
-//! not perturbed by repeated `ty version` spawns. Every fixture is designed
-//! to be fully resolvable by the built-in resolver (project code + embedded
-//! typeshed), so `ty_pending` stays empty and the `ty server` subprocess is
-//! never started — the measured numbers are the deterministic parse / index
-//! / walk / resolve cost, exactly the hot paths every future resolver change
-//! touches.
+//! Fixtures that the native resolver handles completely never initialize the
+//! bundled inference database, so their measurements isolate parse, index,
+//! traversal and resolution costs. The opt-in `CPython` fixture additionally
+//! exercises the shared inference engine.
 
 // `expect`/`unwrap`/`panic` are idiomatic in a benchmark harness: a broken
 // fixture *should* abort with a clear message. A `[[bench]]` target is not
@@ -154,7 +149,7 @@ const LARGE_PROJECT_MODS_PER_PKG: usize = 50;
 /// Functions and matching positional call sites per generated module.
 const LARGE_PROJECT_FUNCS_PER_MOD: usize = 5;
 /// Modules in the `ty` fallback benchmark. Kept moderate because every sample
-/// starts a `ty server` and sends LSP hover requests.
+/// queries the bundled ty inference engine.
 const TY_FALLBACK_MODULES: usize = 8;
 /// return-typed factory calls per module in the `ty` fallback benchmark.
 const TY_FALLBACK_CALLS_PER_MODULE: usize = 12;
@@ -328,7 +323,7 @@ fn reexport_hub_project() -> &'static Path {
 /// packages, so the index walk exercises cross-package resolution too.
 ///
 /// Every call is resolvable by the built-in resolver (project code only, no
-/// third-party deps), so the `ty server` subprocess is never started and the
+/// third-party deps), so the inference database is never initialized and the
 /// measured numbers are the deterministic Phase-1 (parallel built-in pass)
 /// hot path — exactly what issue #46 / #70 targeted and what issue #69 asks to
 /// track over time. Generated once and reused (read-only).
