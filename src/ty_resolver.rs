@@ -1,61 +1,12 @@
 //! Resolve call targets through the bundled ty inference engine.
 
-use std::path::{Path, PathBuf};
-
-#[cfg(test)]
-use serde_json::json;
-use serde_json::Value;
+use std::path::Path;
 
 mod engine;
 pub use engine::TyResolver;
-pub use ty_backend::Session as TySession;
+pub use ty_backend::{Definition as DefLocation, Session as TySession};
 
-/// A resolved definition location (0-based line, 0-based UTF-16 column).
-pub struct DefLocation {
-    pub path: PathBuf,
-    pub line: u32,
-    pub character: u32,
-}
-
-/// Per-file line index for converting byte offsets to LSP positions.
-///
-/// Pending ty requests are clustered per file and can number in the
-/// thousands. Building line starts once keeps each conversion bounded to the
-/// current line instead of rescanning the whole source from byte 0.
-pub struct LspLineIndex {
-    line_starts: Vec<usize>,
-}
-
-impl LspLineIndex {
-    pub fn new(source: &str) -> Self {
-        // Share the tool's universal-newline line splitting so LSP positions
-        // agree with diagnostic positions on `\r`-delimited source (issue #270).
-        Self {
-            line_starts: crate::ast_util::line_starts(source),
-        }
-    }
-
-    pub fn position(&self, source: &str, offset: usize) -> (u32, u32) {
-        let line_index = self.line_starts.partition_point(|&start| start <= offset);
-        let zero_based_line = line_index.saturating_sub(1);
-        let line_start = self.line_starts.get(zero_based_line).copied().unwrap_or(0);
-        let mut col_utf16 = 0usize;
-        if let Some(line_suffix) = source.get(line_start..) {
-            for (relative, ch) in line_suffix.char_indices() {
-                if line_start + relative >= offset || ch == '\n' || ch == '\r' {
-                    break;
-                }
-                col_utf16 += ch.len_utf16();
-            }
-        }
-        (
-            u32::try_from(zero_based_line).unwrap_or(u32::MAX),
-            u32::try_from(col_utf16).unwrap_or(u32::MAX),
-        )
-    }
-}
-
-/// Parse a ty hover `contents.value` into a callable signature description.
+/// Parse a ty hover into a callable signature description.
 pub struct HoverSignature {
     /// `def NAME(` / `bound method T.NAME(` — the callee's display name.
     pub name: String,
@@ -283,167 +234,10 @@ pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Extract every `Location` from a `textDocument/definition` result, which
-/// may be a single `Location`, an array, or `LocationLink`s. This preserves
-/// the wire order; callers that choose one target must apply a stable order
-/// because ty's internal file IDs depend on file loading history.
-pub fn locations_from_value(result: &Value) -> Vec<DefLocation> {
-    match result {
-        Value::Array(items) => items.iter().filter_map(single_location).collect(),
-        Value::Object(_) => single_location(result).into_iter().collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Decode one LSP location object. `LocationLink` uses
-/// `targetUri`/`targetRange`; `Location` uses `uri`/`range`.
-fn single_location(loc: &Value) -> Option<DefLocation> {
-    let uri = loc
-        .get("uri")
-        .or_else(|| loc.get("targetUri"))
-        .and_then(Value::as_str)?;
-    let range = loc.get("range").or_else(|| loc.get("targetRange"))?;
-    let start = range.get("start")?;
-    Some(DefLocation {
-        path: uri_to_path(uri)?,
-        line: u32::try_from(start.get("line").and_then(Value::as_u64)?).ok()?,
-        character: u32::try_from(start.get("character").and_then(Value::as_u64)?).ok()?,
-    })
-}
-
-/// Like [`path_to_uri`], but absolutizes a relative path against the current
-/// directory first. Everything sent *to* ty goes through this: ty resolves
-/// files and answers queries by absolute URI, so a relative CLI path
-/// (`check .`) must not leak into the wire format. Resolution against the
-/// process CWD matches how the same relative path is read from disk.
-///
-/// Host-specific glue like [`path_to_uri`] (the absolutized form depends on
-/// the CWD); the pure URI encoding underneath is unit-tested directly.
-#[cfg_attr(coverage, coverage(off))]
-fn absolute_uri(path: &Path) -> String {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    path_to_uri(&absolute)
-}
-
-/// Build an RFC 8089 `file://` URI. Uses forward slashes and gives Windows
-/// drive paths the leading slash LSP servers expect
-/// (`C:\a` -> `file:///C:/a`), so paths round-trip with what ty returns.
-///
-/// Ty-wire layer; excluded for the reason given on
-/// [`unwrap_enclosing_parens`] (the POSIX/Windows arms are unit-tested but
-/// only one is taken on a given host).
-#[cfg_attr(coverage, coverage(off))]
-fn path_to_uri(path: &Path) -> String {
-    let s = path.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') {
-        // POSIX absolute path: `file://` + `/abs` == `file:///abs`.
-        format!("file://{s}")
-    } else {
-        // Windows drive path (`C:/a`) or other: needs the extra slash.
-        format!("file:///{s}")
-    }
-}
-
-fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri_to_path_string(uri).map(PathBuf::from)
-}
-
-/// Whether two paths denote the same file. ty returns URIs that decode to
-/// forward-slash paths (`C:/a/x.py`) while the paths we hold on Windows use
-/// native backslashes (`C:\a\x.py`); a plain `==` is lexicographic and would
-/// never match, so the current file would be needlessly re-read from disk on
-/// every ty-resolved call. Normalizing separators fixes that. Pure for tests.
+/// Whether two paths denote the same file, allowing native or forward-slash
+/// separators when comparing indexed and inference paths on Windows.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     a == b || a.to_string_lossy().replace('\\', "/") == b.to_string_lossy().replace('\\', "/")
-}
-
-/// Parse a `file://` URI back to a filesystem path string. Strips the
-/// leading slash from `/C:/...` (RFC 8089 Windows form) and
-/// percent-decodes, so it round-trips with [`path_to_uri`] and matches
-/// the native paths we compare against. Pure/deterministic for testing.
-///
-/// Ty-wire layer; excluded for the reason given on
-/// [`unwrap_enclosing_parens`] (drive-letter vs POSIX arms unit-tested but
-/// host-dependent).
-#[cfg_attr(coverage, coverage(off))]
-fn uri_to_path_string(uri: &str) -> Option<String> {
-    let rest = percent_decode(uri.strip_prefix("file://")?);
-    let bytes = rest.as_bytes();
-    // `/C:/path` -> `C:/path` (drive-letter form).
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
-        Some(rest[1..].to_string())
-    } else {
-        Some(rest)
-    }
-}
-
-/// A single hex digit's value (`0..=15`), or `None` if not `[0-9A-Fa-f]`.
-/// Returns `u8` directly so percent-decoding needs no fallible (and thus
-/// uncoverable) numeric conversion.
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Minimal `%XX` percent-decoding (LSP servers encode spaces etc.).
-fn percent_decode(s: &str) -> String {
-    let raw = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == b'%' && i + 2 < raw.len() {
-            if let (Some(hi), Some(lo)) = (hex_nibble(raw[i + 1]), hex_nibble(raw[i + 2])) {
-                // Each nibble is `0..=15`, so `hi * 16 + lo` is `0..=255`
-                // and always fits a `u8` without conversion.
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(raw[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Convert a byte offset in `source` to an LSP `(line, character)` position
-/// (0-based line, 0-based UTF-16 code units), as the LSP spec requires.
-#[cfg(test)]
-fn byte_offset_to_lsp(source: &str, offset: usize) -> (u32, u32) {
-    LspLineIndex::new(source).position(source, offset)
-}
-
-/// Convert an LSP `(line, character)` position back to a byte offset.
-pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usize> {
-    let mut cur_line = 0u32;
-    let mut col_utf16 = 0u32;
-    let mut chars = source.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        if cur_line == line && col_utf16 == character {
-            return Some(idx);
-        }
-        if ch == '\n' || ch == '\r' {
-            if cur_line == line {
-                return Some(idx);
-            }
-            cur_line += 1;
-            col_utf16 = 0;
-            // Python's universal newline rule treats CRLF as one newline.
-            if ch == '\r' {
-                let _ = chars.next_if(|&(_, next)| next == '\n');
-            }
-        } else if cur_line == line {
-            col_utf16 += u32::try_from(ch.len_utf16()).unwrap_or(1);
-        }
-    }
-    if cur_line == line && col_utf16 == character {
-        return Some(source.len());
-    }
-    None
 }
 
 #[cfg(test)]
@@ -451,68 +245,6 @@ pub fn lsp_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usi
 mod tests {
     use super::*;
     use std::path::Path;
-
-    // These run on every CI platform (incl. windows-latest) and need no
-    // `ty` binary, so the Windows file-URI handling is actually exercised.
-
-    #[test]
-    fn posix_path_to_uri() {
-        assert_eq!(
-            path_to_uri(Path::new("/home/u/a.py")),
-            "file:///home/u/a.py"
-        );
-    }
-
-    #[test]
-    fn windows_path_to_uri_is_rfc8089() {
-        // Backslashes are replaced and the drive gets the leading slash;
-        // the old `file://{lossy}` produced `file://C:\...` (the bug).
-        assert_eq!(
-            path_to_uri(Path::new(r"C:\Users\a\x.py")),
-            "file:///C:/Users/a/x.py"
-        );
-    }
-
-    #[test]
-    fn windows_uri_to_path_strips_leading_slash() {
-        // ty returns RFC 8089 `file:///C:/...`; the old code yielded the
-        // invalid `/C:/...`, silently disabling the fallback on Windows.
-        assert_eq!(
-            uri_to_path_string("file:///C:/Users/a/x.py").as_deref(),
-            Some("C:/Users/a/x.py")
-        );
-    }
-
-    #[test]
-    fn posix_uri_to_path_keeps_leading_slash() {
-        assert_eq!(
-            uri_to_path_string("file:///home/u/a.py").as_deref(),
-            Some("/home/u/a.py")
-        );
-    }
-
-    #[test]
-    fn uri_percent_decoded() {
-        assert_eq!(
-            uri_to_path_string("file:///C:/Program%20Files/x.py").as_deref(),
-            Some("C:/Program Files/x.py")
-        );
-    }
-
-    #[test]
-    fn windows_path_uri_round_trips() {
-        // We don't percent-encode on output; decoding on input is still
-        // exercised by `uri_percent_decoded`.
-        let uri = path_to_uri(Path::new(r"C:\a b\x.py"));
-        assert_eq!(uri, "file:///C:/a b/x.py");
-        assert_eq!(uri_to_path_string(&uri).as_deref(), Some("C:/a b/x.py"));
-    }
-
-    #[test]
-    fn posix_path_uri_round_trips() {
-        let uri = path_to_uri(Path::new("/home/u/a.py"));
-        assert_eq!(uri_to_path_string(&uri).as_deref(), Some("/home/u/a.py"));
-    }
 
     #[test]
     fn callable_type_overloads_parses_overload_union() {
@@ -589,10 +321,9 @@ mod tests {
 
     #[test]
     fn same_path_tolerates_separator_mismatch() {
-        // ty's decoded URI uses forward slashes; the path we hold on Windows
-        // uses backslashes. They denote the same file and must compare equal.
+        // Indexed and inference paths may use different separators on Windows.
         assert!(same_path(
-            &uri_to_path("file:///C:/Users/a/x.py").unwrap(),
+            Path::new("C:/Users/a/x.py"),
             Path::new(r"C:\Users\a\x.py"),
         ));
         assert!(same_path(
@@ -605,7 +336,7 @@ mod tests {
         ));
     }
 
-    // ----- Pure parsing/encoding helpers -------------------------------
+    // ----- Pure parsing helpers -------------------------------
 
     #[test]
     fn parse_hover_signature_def_and_bound_method() {
@@ -712,108 +443,5 @@ mod tests {
         assert_eq!(parse_callable_type_overloads("Overload[(a) -> b").len(), 0);
         // No callable arm in the union at all.
         assert_eq!(parse_callable_type_overloads("None | int").len(), 0);
-    }
-
-    #[test]
-    fn locations_from_value_variants() {
-        // Plain `Location`.
-        let locs = locations_from_value(&json!({
-            "uri": "file:///a/x.py",
-            "range": { "start": { "line": 3, "character": 5 } }
-        }));
-        let [loc] = locs.as_slice() else {
-            panic!("expected one location, got {}", locs.len());
-        };
-        assert_eq!(loc.path, PathBuf::from("/a/x.py"));
-        assert_eq!((loc.line, loc.character), (3, 5));
-
-        // Array of locations: all are kept, in ty's order, and an
-        // undecodable entry is skipped without dropping the rest.
-        let locs = locations_from_value(&json!([
-            { "uri": "file:///a/y.py", "range": { "start": { "line": 0, "character": 0 } } },
-            { "uri": "file:///a/no-range.py" },
-            { "uri": "file:///a/z.py", "range": { "start": { "line": 7, "character": 1 } } }
-        ]));
-        assert_eq!(
-            locs.iter().map(|l| l.path.clone()).collect::<Vec<_>>(),
-            vec![PathBuf::from("/a/y.py"), PathBuf::from("/a/z.py")]
-        );
-
-        // `LocationLink` form (`targetUri`/`targetRange`).
-        assert_eq!(
-            locations_from_value(&json!({
-                "targetUri": "file:///a/z.py",
-                "targetRange": { "start": { "line": 1, "character": 2 } }
-            }))
-            .len(),
-            1
-        );
-
-        // Non-object/array => empty.
-        assert!(locations_from_value(&Value::Null).is_empty());
-        // Empty array => empty.
-        assert!(locations_from_value(&json!([])).is_empty());
-        // Missing range => empty.
-        assert!(locations_from_value(&json!({ "uri": "file:///a/x.py" })).is_empty());
-        // Line out of u32 range => empty.
-        assert!(locations_from_value(&json!({
-            "uri": "file:///a/x.py",
-            "range": { "start": { "line": 99_999_999_999u64, "character": 0 } }
-        }))
-        .is_empty());
-    }
-
-    #[test]
-    fn byte_offset_and_lsp_round_trip_with_multibyte() {
-        // `é` is 2 UTF-8 bytes / 1 UTF-16 unit; `𝄞` is 4 bytes / 2 units.
-        let src = "ab\né𝄞x\ny";
-        assert_eq!(byte_offset_to_lsp(src, 0), (0, 0));
-        assert_eq!(byte_offset_to_lsp(src, 3), (1, 0));
-        // After `é` (col 1) then `𝄞` (cols 1+2 = 3).
-        let off_x = src.find('x').unwrap();
-        assert_eq!(byte_offset_to_lsp(src, off_x), (1, 3));
-
-        // lsp_to_byte_offset: start, within line, end-of-line, past end.
-        assert_eq!(lsp_to_byte_offset(src, 0, 0), Some(0));
-        assert_eq!(lsp_to_byte_offset(src, 1, 3), Some(off_x));
-        // Column past the line's end returns the newline offset.
-        assert_eq!(lsp_to_byte_offset("abc\ndef", 0, 99), Some(3));
-        // Final position with no trailing newline => source length.
-        assert_eq!(lsp_to_byte_offset("abc", 0, 3), Some(3));
-        // Unreachable line => None.
-        assert_eq!(lsp_to_byte_offset("abc", 9, 0), None);
-    }
-
-    #[test]
-    fn lsp_to_byte_offset_uses_universal_newlines() {
-        let src = "first\rsecond\r\nthird";
-        assert_eq!(lsp_to_byte_offset(src, 1, 0), Some("first\r".len()));
-        assert_eq!(lsp_to_byte_offset(src, 1, 99), Some("first\rsecond".len()));
-        assert_eq!(
-            lsp_to_byte_offset(src, 2, 0),
-            Some("first\rsecond\r\n".len())
-        );
-    }
-
-    #[test]
-    fn percent_decode_and_uri_paths() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        // Invalid escape is passed through verbatim (bad nibble).
-        assert_eq!(percent_decode("a%zzb"), "a%zzb");
-        // Trailing `%` with no two following chars is passed through.
-        assert_eq!(percent_decode("a%"), "a%");
-        // Upper- and lower-case hex both decode.
-        assert_eq!(percent_decode("%2F%2f"), "//");
-        // Drive-letter URI strips the leading slash; POSIX keeps it.
-        assert_eq!(
-            uri_to_path_string("file:///C:/a/b").as_deref(),
-            Some("C:/a/b")
-        );
-        assert_eq!(
-            uri_to_path_string("file:///srv/a").as_deref(),
-            Some("/srv/a")
-        );
-        // Not a `file://` URI.
-        assert!(uri_to_path_string("http://x/y").is_none());
     }
 }

@@ -1,13 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
-
 pub struct TyResolver {
     engine: ty_backend::Engine,
-    pending: HashMap<i64, Value>,
-    next_id: i64,
     opened: HashSet<PathBuf>,
     disabled: bool,
 }
@@ -20,8 +16,6 @@ impl TyResolver {
             .ok()?;
         Some(Self {
             engine,
-            pending: HashMap::new(),
-            next_id: 1,
             opened: HashSet::new(),
             disabled: false,
         })
@@ -41,29 +35,23 @@ impl TyResolver {
         Some(())
     }
 
-    pub fn ask(&mut self, method: &str, path: &Path, line: u32, character: u32) -> Option<i64> {
+    pub fn hover(&self, path: &Path, offset: usize) -> Option<String> {
         if self.disabled {
             return None;
         }
-        let offset = self.engine.offset(path, line, character)?;
-        let result = match method {
-            "textDocument/hover" => self.engine.hover(path, offset)
-                .map_or(Value::Null, |value| json!({"contents": {"value": value}})),
-            "textDocument/definition" => self.engine.definitions(path, offset)
-                .map_or(Value::Null, |locations| Value::Array(locations.into_iter().map(|(path, line, character)| {
-                    json!({"uri": super::absolute_uri(&path), "range": {"start": {"line": line, "character": character}}})
-                }).collect())),
-            _ => return None,
-        };
-        let id = self.next_id;
-        self.next_id += 1;
-        self.pending.insert(id, result);
-        Some(id)
+        self.engine.hover(path, u32::try_from(offset).ok()?)
     }
 
-    pub fn take(&mut self, id: i64) -> Option<Value> {
-        self.pending.remove(&id)
+    pub fn definitions(&self, path: &Path, offset: usize) -> Vec<super::DefLocation> {
+        if self.disabled {
+            return Vec::new();
+        }
+        u32::try_from(offset)
+            .ok()
+            .and_then(|offset| self.engine.definitions(path, offset))
+            .unwrap_or_default()
     }
+
     pub const fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -78,16 +66,12 @@ mod tests {
 
     fn hover(resolver: &mut TyResolver, path: &Path, source: &str, line: u32) -> String {
         resolver.ensure_open(path, source).expect("open source");
-        let id = resolver
-            .ask("textDocument/hover", path, line, 0)
-            .expect("hover request");
-        let response = resolver.take(id).expect("hover response");
-        response
-            .get("contents")
-            .and_then(|contents| contents.get("value"))
-            .and_then(Value::as_str)
-            .expect("callable hover")
-            .to_owned()
+        let offset = source
+            .split_inclusive('\n')
+            .take(usize::try_from(line).expect("line"))
+            .map(str::len)
+            .sum();
+        resolver.hover(path, offset).expect("callable hover")
     }
 
     #[test]
@@ -166,9 +150,57 @@ mod tests {
         assert!(resolver.ensure_open(&missing, source).is_none());
         assert!(resolver.is_disabled());
         assert!(resolver.ensure_open(&path, source).is_none());
-        assert!(resolver.ask("textDocument/hover", &path, 1, 0).is_none());
+        assert!(resolver
+            .hover(&path, source.find("target(1)").expect("call"))
+            .is_none());
+        assert!(resolver.definitions(&path, 0).is_empty());
         resolver.reenable();
         assert!(!resolver.is_disabled());
         assert!(hover(&mut resolver, &path, source, 1).contains("target"));
+    }
+
+    #[test]
+    fn native_queries_preserve_unicode_offsets_and_file_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("module %20 turtle.py");
+        let source = "# α\r\ncaption = '🐢'\rdef target(value): ...\r\ntarget(1)\n";
+        std::fs::write(&path, source).expect("write source");
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
+        let mut resolver = TyResolver::start(&session).expect("worker");
+        resolver.ensure_open(&path, source).expect("open source");
+        let call = source.rfind("target(1)").expect("call");
+        let result = resolver.hover(&path, call).expect("signature");
+        assert!(result.contains("target(value"), "{result}");
+        let definitions = resolver.definitions(&path, call);
+        assert!(definitions.iter().any(|target| target.path == path
+            && usize::try_from(target.offset).expect("offset")
+                == source.find("target(value)").expect("definition")));
+    }
+    #[test]
+    fn call_queries_return_the_signature_without_docstrings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("app.py");
+        let source = "def target(value: int) -> None:\n    \"\"\"Documentation is not part of a call signature.\"\"\"\n    pass\ntarget(1)\n";
+        std::fs::write(&path, source).expect("write source");
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
+        let mut resolver = TyResolver::start(&session).expect("worker");
+        let result = hover(&mut resolver, &path, source, 3);
+        assert!(result.contains("target(value: int)"), "{result}");
+        assert!(!result.contains("Documentation"), "{result}");
+    }
+
+    #[test]
+    fn hovering_an_argument_does_not_return_the_called_signature() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("app.py");
+        let source = "def target(value: int) -> None: ...\nargument = 1\ntarget(argument)\n";
+        std::fs::write(&path, source).expect("write source");
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
+        let mut resolver = TyResolver::start(&session).expect("worker");
+        resolver.ensure_open(&path, source).expect("open source");
+        let offset = source.find("argument)").expect("argument");
+        let result = resolver.hover(&path, offset).expect("type");
+        assert!(result.contains("Literal[1]"), "{result}");
+        assert!(!result.contains("def target"), "{result}");
     }
 }

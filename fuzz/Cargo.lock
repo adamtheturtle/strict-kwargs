@@ -2204,10 +2204,11 @@ version = "0.0.0"
 dependencies = [
  "ruff_db",
  "ruff_notebook",
- "ruff_source_file",
+ "ruff_python_ast",
  "ruff_text_size",
  "ty_ide",
  "ty_project",
+ "ty_python_semantic",
 ]
 
 [[package]]
