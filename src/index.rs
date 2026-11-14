@@ -635,6 +635,8 @@ struct Inner {
 struct ClassQueryCache {
     generation: u64,
     snapshot: Option<ClassQuerySnapshot>,
+    /// Positive and negative ancestry answers from the current class graph.
+    ancestry: FxHashMap<String, FxHashMap<String, bool>>,
     overrides: FxHashMap<String, FxHashMap<String, bool>>,
     matching_overrides: FxHashMap<String, FxHashMap<String, bool>>,
     resolved_methods: FxHashMap<String, FxHashMap<String, Option<String>>>,
@@ -649,6 +651,7 @@ impl ClassQueryCache {
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.snapshot = None;
+        self.ancestry.clear();
         self.overrides.clear();
         self.matching_overrides.clear();
         self.resolved_methods.clear();
@@ -1301,10 +1304,45 @@ impl DefinitionIndex {
     }
 
     /// Whether `class_fullname` inherits from `base_fullname` through the
-    /// indexed direct-base graph.
+    /// indexed direct-base graph. Cache both outcomes until indexing changes
+    /// that graph; repeated receiver and constructor checks share the answer.
     pub fn class_inherits_from(&self, class_fullname: &str, base_fullname: &str) -> bool {
+        let generation = {
+            let inner = self.read();
+            if let Some(result) = inner
+                .class_queries
+                .ancestry
+                .get(class_fullname)
+                .and_then(|bases| bases.get(base_fullname))
+            {
+                return *result;
+            }
+            inner.class_queries.generation
+        };
         let mut visited = FxHashSet::default();
-        self.class_inherits_from_inner(class_fullname, base_fullname, &mut visited)
+        let result = self.class_inherits_from_inner(class_fullname, base_fullname, &mut visited);
+        self.cache_ancestry(generation, class_fullname, base_fullname, result);
+        result
+    }
+
+    fn cache_ancestry(
+        &self,
+        generation: u64,
+        class_fullname: &str,
+        base_fullname: &str,
+        result: bool,
+    ) {
+        let mut inner = self.write();
+        // Lazy indexing or a concurrent graph update invalidates the snapshot.
+        // Budget exhaustion also advances the generation so misses can retry.
+        if inner.class_queries.generation == generation {
+            inner
+                .class_queries
+                .ancestry
+                .entry(class_fullname.to_owned())
+                .or_default()
+                .insert(base_fullname.to_owned(), result);
+        }
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -4983,6 +5021,29 @@ mod tests {
     }
 
     #[test]
+    fn ancestry_cache_refreshes_after_base_changes_and_late_indexing() {
+        let mut index =
+            index_source_of("class Base: pass\nclass Other: pass\nclass Child(Base): pass\n");
+        for _ in 0..2 {
+            assert!(index.class_inherits_from("main.Child", "main.Base"));
+            assert!(!index.class_inherits_from("main.Child", "main.Other"));
+            assert!(!index.class_inherits_from("extra.GrandChild", "main.Base"));
+        }
+        let generation = index.read().class_queries.generation;
+        index.insert_class_bases("main.Child".into(), vec!["main.Other".into()]);
+        // A query that raced with graph replacement cannot publish its result.
+        index.cache_ancestry(generation, "main.Child", "main.Base", true);
+        assert!(!index.class_inherits_from("main.Child", "main.Base"));
+        assert!(index.class_inherits_from("main.Child", "main.Other"));
+
+        let parsed = parse_module("from main import Base\nclass GrandChild(Base): pass\n")
+            .expect("parse late class");
+        index.index_source("extra", false, parsed.suite());
+        assert!(index.class_inherits_from("extra.GrandChild", "main.Base"));
+        assert!(!index.class_inherits_from("main.Base", "main.Base"));
+    }
+
+    #[test]
     fn method_resolution_cache_refreshes_after_graph_and_exclusion_changes() {
         let mut index = index_source_of(
             "class Base:\n    def m(self, value): ...\nclass Other:\n    def m(self, renamed): ...\nclass Child(Base): pass\n",
@@ -5111,7 +5172,7 @@ mod tests {
     }
 
     #[test]
-    fn override_queries_retry_after_a_parse_error_exhausts_the_module_budget() {
+    fn class_graph_queries_retry_after_a_parse_error_exhausts_the_module_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut path = dir.path().to_path_buf();
         let mut parts = Vec::new();
@@ -5129,7 +5190,7 @@ mod tests {
         .expect("valid leaf module");
         let middle = format!("{}.leaf.Middle", parts.join("."));
         let source_roots = SourceRoots::from_config(dir.path(), &crate::config::Config::default());
-        for match_tail in [false, true] {
+        for mode in ["override", "matching_override", "ancestry"] {
             let resolver = ModuleResolver::new(dir.path(), &source_roots, None);
             let mut index = DefinitionIndex::new(resolver, PythonVersion::default());
             for class in ["main.Base", "main.Sub"] {
@@ -5137,12 +5198,12 @@ mod tests {
                 index.insert(format!("{class}.m"), sig(2));
             }
             index.insert_class_bases("main.Sub".into(), vec![middle.clone()]);
-            let query = || {
-                if match_tail {
+            let query = || match mode {
+                "override" => index.has_overriding_method("main.Base", "m"),
+                "matching_override" => {
                     index.has_overriding_method_matching_class_name("ty.Base", "m")
-                } else {
-                    index.has_overriding_method("main.Base", "m")
                 }
+                _ => index.class_inherits_from("main.Sub", "main.Base"),
             };
             assert!(!query(), "first query exhausts the module budget");
             assert!(query(), "a fresh query must retry the deferred base module");
