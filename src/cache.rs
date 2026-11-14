@@ -73,9 +73,9 @@ impl FnvHasher {
 // ---------------------------------------------------------------------------
 
 /// The name of the `ty` binary (platform-aware).
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "embedded-ty")))]
 const TY_BIN: &str = "ty.exe";
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(feature = "embedded-ty")))]
 const TY_BIN: &str = "ty";
 
 /// Return the mtime of `path` as nanoseconds since the Unix epoch, or `None`
@@ -177,6 +177,7 @@ fn hash_path_content(path: &Path, h: &mut FnvHasher) {
 /// and where); excluded from the coverage gate so environment-specific
 /// branches are not required.
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(not(feature = "embedded-ty"))]
 fn find_ty_on_path() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path_var) {
@@ -194,6 +195,7 @@ fn find_ty_on_path() -> Option<PathBuf> {
 /// whether its metadata is readable both depend on the execution environment
 /// and cannot be deterministically controlled in unit tests.
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(not(feature = "embedded-ty"))]
 fn hash_ty_binary(h: &mut FnvHasher) {
     let Some(ty_path) = find_ty_on_path() else {
         return;
@@ -203,6 +205,12 @@ fn hash_ty_binary(h: &mut FnvHasher) {
         h.write_bytes(&mtime);
     }
     hash_path_content(&ty_path, h);
+}
+
+/// Distinguish the embedded engine from external-server cache entries.
+#[cfg(feature = "embedded-ty")]
+fn hash_ty_binary(h: &mut FnvHasher) {
+    h.write_bytes(ty_backend::ENGINE_ID.as_bytes());
 }
 
 /// Collect all first-party `.py`/`.pyi` files under `root`, then mix each

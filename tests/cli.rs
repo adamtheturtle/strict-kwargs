@@ -164,7 +164,7 @@ impl Project {
     /// server-started-then-fails path: losing the required backend must abort
     /// (`CheckError::TyServerFailed`), not silently reduce diagnostics (issues
     /// #275, #276). Unix + Python only; the coverage gate runs on Linux.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(feature = "embedded-ty")))]
     fn run_with_erroring_ty_server(&self, args: &[&str]) -> Output {
         use std::os::unix::fs::PermissionsExt;
         let python = {
@@ -197,7 +197,7 @@ impl Project {
 /// A minimal `ty` replacement: it passes `ty version`, answers the LSP
 /// `initialize` request, then returns a JSON-RPC error for every subsequent
 /// request (hover/definition/shutdown).
-#[cfg(unix)]
+#[cfg(all(unix, not(feature = "embedded-ty")))]
 const ERRORING_TY_STUB: &str = r#"import sys, json
 
 if len(sys.argv) > 1 and sys.argv[1] == "version":
@@ -1608,6 +1608,7 @@ fn fix_write_failure_is_fatal_exit_two() {
     );
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 #[test]
 fn check_without_ty_is_fatal_exit_two() {
     // `ty` is a hard requirement: a missing backend aborts (exit 2) rather
@@ -1625,6 +1626,7 @@ fn check_without_ty_is_fatal_exit_two() {
     assert!(err.contains("PATH"), "stderr: {err}");
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 #[test]
 fn fix_without_ty_is_fatal_exit_two() {
     let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
@@ -1643,7 +1645,7 @@ fn fix_without_ty_is_fatal_exit_two() {
 // A return-typed method call the built-in resolver cannot resolve, so it is
 // deferred to `ty`, exercising the per-file driver where a failed lazy
 // server start becomes the fatal `TyServerFailed`.
-#[cfg(unix)]
+#[cfg(any(unix, feature = "embedded-ty"))]
 const TY_DEFERRED: &str =
     "class A:\n    def m(self, a: int) -> None: ...\n\ndef make() -> A:\n    return A()\n\nmake().m(1)\n";
 
@@ -1719,6 +1721,7 @@ fn check_method_local_helper_with_unstartable_ty_server_uses_builtin_resolution(
 }
 
 #[cfg(unix)]
+#[cfg(not(feature = "embedded-ty"))]
 #[test]
 fn check_with_unstartable_ty_server_is_fatal_exit_two() {
     // `ty` is present (the `version` probe passes) but `ty server` will not
@@ -1735,6 +1738,7 @@ fn check_with_unstartable_ty_server_is_fatal_exit_two() {
 }
 
 #[cfg(unix)]
+#[cfg(not(feature = "embedded-ty"))]
 #[test]
 fn check_with_erroring_ty_query_is_fatal_exit_two() {
     // `ty` starts and initializes, but every hover/definition returns a
@@ -1753,6 +1757,7 @@ fn check_with_erroring_ty_query_is_fatal_exit_two() {
 }
 
 #[cfg(unix)]
+#[cfg(not(feature = "embedded-ty"))]
 #[test]
 fn fix_with_unstartable_ty_server_is_fatal_exit_two() {
     let project = Project::new().write("main.py", TY_DEFERRED);
@@ -1765,6 +1770,19 @@ fn fix_with_unstartable_ty_server_is_fatal_exit_two() {
         stderr(&output)
     );
     assert_eq!(project.read("main.py"), source);
+}
+
+#[cfg(feature = "embedded-ty")]
+#[test]
+fn embedded_inference_works_without_an_external_ty_executable() {
+    let project = Project::new().write("main.py", TY_DEFERRED);
+    let output = project.run_without_ty(&["check", "main.py"]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+    assert!(combined_output(&output).contains("Too many positional"));
+    let output = project.run_without_ty(&["check", "--fix", "main.py"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(!combined_output(&output).contains("ty server"));
+    assert!(project.read("main.py").contains("m(a=1)"));
 }
 
 #[test]

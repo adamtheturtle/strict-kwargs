@@ -13,7 +13,7 @@ use std::process::Command;
 use insta::assert_snapshot;
 use strict_kwargs::{check_paths, Config, Diagnostic};
 
-const TY_VERSION: &str = "0.0.64";
+const TY_VERSION: &str = "0.0.103";
 /// Index every ``sys.version_info`` branch when diffing pinned repositories.
 const COMPLETENESS_TARGET_VERSION: &str = "3.14";
 const SPHINX_LINUX_SNAPSHOT_RELATIVE_PATH: &str =
@@ -102,6 +102,7 @@ fn cpython_repository_diagnostics_match_golden_oracle() {
 }
 
 fn run_repository_case(case: RepositoryCase) {
+    #[cfg(not(feature = "embedded-ty"))]
     assert_ty_version();
     let repository = pinned_repository(case);
     let checkout = pinned_checkout(&repository);
@@ -326,6 +327,7 @@ fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
         .expect("run git")
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 fn assert_ty_version() {
     let output = Command::new("ty")
         .arg("version")

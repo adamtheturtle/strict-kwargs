@@ -22,7 +22,13 @@ The current pinned repositories are:
 - Sphinx Python dependencies: `tests/golden/completeness-requirements-constraints.txt`
 - CPython repository: `https://github.com/python/cpython.git`
 - CPython ref: `8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a`
-- `ty`: `0.0.64`
+- `ty`: `0.0.103`
+
+The CPython floors were regenerated with three runs of the `ty 0.0.103` server on each platform.
+The Sphinx floor originated with `ty 0.0.64`.
+The Sphinx call at `directives/code.py:257` now displays `pyobject_filter` instead of `func` with `ty 0.0.103`; both the server and embedded backends report the same violation.
+CI checks the embedded backend against these floors; use `--features embedded-ty` in the commands below to run it locally.
+The external `ty` version check applies only to the server backend.
 
 Regenerate a snapshot with:
 
@@ -33,7 +39,7 @@ scripts/regenerate-completeness-golden.sh cpython
 
 By default the script runs strict-kwargs over the pinned checkout three times, with Sphinx installed editable into a temporary virtual environment.
 CPython is checked directly from its checkout because it does not need an editable install for first-party resolution.
-The script runs the checker through a temporary `ty==0.0.64` wrapper so the oracle does not drift when a newer `ty` release changes hover display details.
+The script runs the checker through a temporary `ty==0.0.103` wrapper so the oracle does not drift when a newer `ty` release changes hover display details.
 The script sets `STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN=1` and `INSTA_UPDATE=always` to refresh the committed snapshot for the current platform directly.
 The Sphinx virtual environment is installed with `tests/golden/completeness-requirements-constraints.txt` so the oracle does not drift when transitive dependencies change their public type surface.
 

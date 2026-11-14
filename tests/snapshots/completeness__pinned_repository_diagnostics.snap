@@ -5,7 +5,7 @@ expression: "format_snapshot(&repository, &actual_keys)"
 # Pinned repository diagnostic snapshot.
 # Repository: https://github.com/sphinx-doc/sphinx.git
 # Ref: cc7c6f435ad37bb12264f8118c8461b230e6830c
-# ty: 0.0.64
+# Baseline ty: 0.0.64; callable label at directives/code.py:257 updated for 0.0.103.
 # Format: relative-path<TAB>line<TAB>column<TAB>callee
 doc/conf.py	115	5	"escape"
 doc/conf.py	116	5	"escape"
@@ -1301,7 +1301,7 @@ sphinx/directives/code.py	226	18	"open"
 sphinx/directives/code.py	229	24	"expandtabs"
 sphinx/directives/code.py	231	20	"splitlines"
 sphinx/directives/code.py	255	21	"read_file"
-sphinx/directives/code.py	257	25	"func"
+sphinx/directives/code.py	257	25	"pyobject_filter"
 sphinx/directives/code.py	262	21	"read_file"
 sphinx/directives/code.py	264	21	"read_file"
 sphinx/directives/code.py	265	16	"unified_diff"

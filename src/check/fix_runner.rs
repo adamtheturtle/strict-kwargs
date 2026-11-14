@@ -6,7 +6,7 @@ use crate::config::{Config, SourceRoots};
 use crate::error::CheckError;
 use crate::fix::{declined_fix_reason_counts, FileFix, FixOptIns, FixOutcome};
 use crate::index::build_index_with_sources;
-use crate::ty_resolver::TyResolver;
+use crate::ty_resolver::{TyResolver, TySession};
 
 use super::{
     collect_python_files_for_fix, discover_rebinding_exclusions, explicit_python_files,
@@ -57,6 +57,7 @@ fn resolve_fix_scan(
     path: PathBuf,
     outcome: ScanOutcome,
     ty_state: &mut FixTyState,
+    ty_session: &TySession,
 ) -> Result<ResolvedFixFile, CheckError> {
     let scan = match outcome {
         ScanOutcome::Skipped(reason) => {
@@ -84,6 +85,7 @@ fn resolve_fix_scan(
     resolve_file_with_ty(
         &mut ty_state.ty,
         &mut ty_state.start_attempted,
+        ty_session,
         project_root,
         python_files,
         index,
@@ -107,6 +109,7 @@ fn resolve_fix_scan(
     resolve_overload_fixes_with_ty(
         &mut ty_state.ty,
         &mut ty_state.start_attempted,
+        ty_session,
         project_root,
         python_files,
         index,
@@ -296,6 +299,7 @@ fn fix_paths_impl(
         })
         .sum::<usize>();
 
+    let ty_session = TySession::new(project_root, python_env, &python_files);
     let mut resolved_files = if should_parallelize_fix_ty(deferred_calls) {
         // Match the checker's deterministic, load-balanced ty ownership. Each
         // server sees only its files, while final results are restored to the
@@ -333,6 +337,7 @@ fn fix_paths_impl(
                                     path,
                                     outcome,
                                     &mut ty_state,
+                                    &ty_session,
                                 )
                             })
                             .collect()
@@ -369,6 +374,7 @@ fn fix_paths_impl(
                     path,
                     outcome,
                     &mut ty_state,
+                    &ty_session,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?

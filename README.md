@@ -46,7 +46,15 @@ pip install strict-kwargs
 ```
 
 This is tested on Python 3.11+.
-Building the Rust binary from source requires Rust 1.92 or newer.
+Building the Rust binary from source requires Rust 1.97 or newer.
+Python wheels embed the ty inference engine.
+Cargo builds can enable the same backend with `--features embedded-ty`; builds without this feature use an external `ty server`.
+
+On Windows, enable Git's long-path support before building from source:
+
+```shell
+git config --global core.longpaths true
+```
 
 ## Usage
 

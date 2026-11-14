@@ -33,6 +33,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-latest, windows-latest]
+        backend: [server, embedded]
 
     runs-on: ${{ matrix.platform }}
 
@@ -41,13 +42,17 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-${{ matrix.platform }}
+          shared-key: test-${{ matrix.platform }}-${{ matrix.backend }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
@@ -65,7 +70,15 @@ jobs:
         run: ty version
 
       - name: Run tests
-        run: cargo test --locked --verbose
+        env:
+          TY_BACKEND: ${{ matrix.backend }}
+        shell: bash
+        run: |
+          if [ "$TY_BACKEND" = embedded ]; then
+            cargo test --locked --verbose --features embedded-ty
+          else
+            cargo test --locked --verbose
+          fi
 
   hook:
     # Exercises `.pre-commit-hooks.yaml`, which nothing else here does: this
@@ -93,9 +106,8 @@ jobs:
       - name: Install pre-commit
         run: uv tool install pre-commit
 
-      # No ty on PATH here on purpose: the hook builds this repo's maturin
-      # wheel into an isolated environment, so ty must arrive as a dependency
-      # of the built package -- exactly as it does for a consumer.
+      # No ty on PATH here on purpose: the isolated maturin wheel embeds its
+      # inference engine, so consumers do not need a separate language server.
       - name: Run the hook against a throwaway consumer project
         run: ./scripts/hook-e2e.sh
 
@@ -103,7 +115,7 @@ jobs:
     # Continuous benchmarking (issue #30). Pull requests compile the benchmark
     # target as a smoke test; CodSpeed uploads run only on non-PR events so an
     # external comparison cannot block unrelated PRs while still keeping the
-    # scheduled/main-branch signal. `ty` is now a hard requirement, so it must
+    # scheduled/main-branch signal. This job uses the server backend, so ty must
     # be installed for `check_paths`/`fix_paths` to run at all. Its presence is
     # probed once per process (memoized in `require_ty_present`), so the
     # benchmarks still measure the built-in resolver hot paths — the fixtures
@@ -217,7 +229,7 @@ jobs:
       - name: Install ty (type-inference fallback under test)
         shell: bash
         run: |
-          uv tool install ty==0.0.64
+          uv tool install ty==0.0.103
           uv tool dir --bin >> "$GITHUB_PATH"
 
       - name: Verify ty is on PATH
@@ -275,7 +287,7 @@ jobs:
           STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
-          cargo test --locked --test completeness \
+          cargo test --locked --features embedded-ty --test completeness \
             pinned_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
       - name: Run CPython completeness test
@@ -284,7 +296,7 @@ jobs:
           STRICT_KWARGS_COMPLETENESS_CPYTHON_PYTHON_ENV: ${{ runner.temp }}/cpython-completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
-          cargo test --locked --test completeness \
+          cargo test --locked --features embedded-ty --test completeness \
             cpython_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:
