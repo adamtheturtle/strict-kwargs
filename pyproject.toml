@@ -4,7 +4,7 @@ requires = [ "maturin>=1.9.3,<2" ]
 
 [project]
 name = "strict-kwargs"
-version = "2026.10.9"
+version = "2026.11.14"
 description = "Enforce using keyword arguments where possible."
 # Avoid Pyroma treating parameterized Markdown as reStructuredText.
 # https://github.com/regebro/pyroma/issues/135

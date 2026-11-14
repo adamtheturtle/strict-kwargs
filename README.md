@@ -107,7 +107,7 @@ Use `--python` to point third-party resolution at an interpreter, virtual enviro
 ```yaml
 repos:
   - repo: https://github.com/adamtheturtle/strict-kwargs-pre-commit
-    rev: 2026.10.9  # pin to a release tag
+    rev: 2026.11.14  # pin to a release tag
     hooks:
       - id: strict-kwargs
 ```
