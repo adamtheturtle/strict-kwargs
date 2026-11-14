@@ -145,6 +145,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -204,6 +208,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
