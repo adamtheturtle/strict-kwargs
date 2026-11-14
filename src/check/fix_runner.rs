@@ -10,14 +10,13 @@ use crate::ty_resolver::{TyResolver, TySession};
 
 use super::{
     collect_python_files_for_fix, discover_rebinding_exclusions, explicit_python_files,
-    plan_rewrite_insertions, require_ty_present, resolve_file_with_ty,
-    resolve_overload_fixes_with_ty, run_with_large_stack, scan_files_for_fix, ScanOutcome,
-    TyDefCaches, TyFixes, TyShardAssigner, TY_SHARD_COUNT,
+    plan_rewrite_insertions, resolve_file_with_ty, resolve_overload_fixes_with_ty,
+    run_with_large_stack, scan_files_for_fix, ScanOutcome, TyDefCaches, TyFixes, TyShardAssigner,
+    TY_SHARD_COUNT,
 };
 
-/// Minimum deferred-call count that justifies starting multiple ty servers.
-/// Below this, server initialization costs more than parallel query handling;
-/// this keeps Sphinx on one server while `CPython` uses the sharded path.
+/// Minimum deferred-call count that justifies multiple inference workers.
+/// Retain the measured scheduling threshold while workers share one database.
 const PARALLEL_FIX_TY_THRESHOLD: usize = 20_000;
 
 const fn should_parallelize_fix_ty(deferred_calls: usize) -> bool {
@@ -48,11 +47,8 @@ struct ResolvedFixFile {
 #[cfg_attr(coverage, coverage(off))]
 fn resolve_fix_scan(
     order: usize,
-    project_root: &Path,
-    python_files: &[PathBuf],
     index: &crate::index::DefinitionIndex,
     indexed_files: &FxHashMap<PathBuf, crate::index::IndexedFile>,
-    python_env: Option<&Path>,
     config: &Config,
     path: PathBuf,
     outcome: ScanOutcome,
@@ -86,11 +82,8 @@ fn resolve_fix_scan(
         &mut ty_state.ty,
         &mut ty_state.start_attempted,
         ty_session,
-        project_root,
-        python_files,
         index,
         indexed_files,
-        python_env,
         &path,
         &source,
         &scan.pending,
@@ -110,11 +103,8 @@ fn resolve_fix_scan(
         &mut ty_state.ty,
         &mut ty_state.start_attempted,
         ty_session,
-        project_root,
-        python_files,
         index,
         indexed_files,
-        python_env,
         &path,
         &source,
         &scan.overload_fix_pending,
@@ -174,8 +164,7 @@ fn resolve_fix_scan(
 ///
 /// Returns [`CheckError`] if a path argument does not exist
 /// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
-/// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
-/// its server cannot start ([`CheckError::TyServerFailed`]). A file nested
+/// or the bundled engine fails ([`CheckError::TyInferenceFailed`]). A file nested
 /// deeper than the supported limit is rejected
 /// ([`CheckError::TooDeeplyNested`]) rather than overflowing the stack; the
 /// walk runs on a large dedicated stack (issue #54).
@@ -252,7 +241,6 @@ fn fix_paths_impl(
     fix_opt_ins: FixOptIns,
 ) -> Result<FixOutcome, CheckError> {
     // `ty` is a hard requirement; verify it up front (see `check_paths`).
-    require_ty_present()?;
     let python_files = collect_python_files_for_fix(project_root, paths, config)?;
     let explicit_files = explicit_python_files(paths, &python_files);
     let source_roots = SourceRoots::from_config(project_root, config);
@@ -302,7 +290,7 @@ fn fix_paths_impl(
     let ty_session = TySession::new(project_root, python_env, &python_files);
     let mut resolved_files = if should_parallelize_fix_ty(deferred_calls) {
         // Match the checker's deterministic, load-balanced ty ownership. Each
-        // server sees only its files, while final results are restored to the
+        // worker sees only its files, while final results are restored to the
         // sorted input order before warnings and rewrites are emitted.
         let mut partitions: Vec<Vec<(usize, PathBuf, ScanOutcome)>> =
             (0..TY_SHARD_COUNT).map(|_| Vec::new()).collect();
@@ -328,11 +316,8 @@ fn fix_paths_impl(
                             .map(|(order, path, outcome)| {
                                 resolve_fix_scan(
                                     order,
-                                    project_root,
-                                    &python_files,
                                     &index,
                                     &indexed_files,
-                                    python_env,
                                     config,
                                     path,
                                     outcome,
@@ -356,8 +341,7 @@ fn fix_paths_impl(
             Ok(resolved)
         })?
     } else {
-        // Starting several language servers costs more than it saves for
-        // small projects, so retain the original one-server path there.
+        // Small projects retain a single inference worker.
         let mut ty_state = FixTyState::default();
         scans
             .into_iter()
@@ -365,11 +349,8 @@ fn fix_paths_impl(
             .map(|(order, (path, outcome))| {
                 resolve_fix_scan(
                     order,
-                    project_root,
-                    &python_files,
                     &index,
                     &indexed_files,
-                    python_env,
                     config,
                     path,
                     outcome,

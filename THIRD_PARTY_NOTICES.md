@@ -1,6 +1,6 @@
 # Bundled dependency notices
 
-Python wheels built with `embedded-ty` contain the unmodified ty inference engine from Ruff revision `ab1a1265b8a54d9212373eb221c6540f854e1f84` (ty 0.0.103).
+All builds contain the unmodified ty inference engine from Ruff revision `ab1a1265b8a54d9212373eb221c6540f854e1f84` (ty 0.0.103).
 The engine is MIT licensed; its license is included here with the additional dependency license texts listed below.
 
 | Dependency | Version | License | Original source archive |

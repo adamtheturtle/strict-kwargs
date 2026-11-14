@@ -90,20 +90,18 @@ struct Checkout {
 }
 
 #[test]
-#[ignore = "heavy opt-in test: clones/checks a pinned external repository and starts ty server"]
+#[ignore = "heavy opt-in test: clones/checks a pinned external repository using the bundled inference engine"]
 fn pinned_repository_diagnostics_match_golden_oracle() {
     run_repository_case(SPHINX);
 }
 
 #[test]
-#[ignore = "heavy opt-in test: clones/checks CPython and starts ty server"]
+#[ignore = "heavy opt-in test: clones/checks CPython using the bundled inference engine"]
 fn cpython_repository_diagnostics_match_golden_oracle() {
     run_repository_case(CPYTHON);
 }
 
 fn run_repository_case(case: RepositoryCase) {
-    #[cfg(not(feature = "embedded-ty"))]
-    assert_ty_version();
     let repository = pinned_repository(case);
     let checkout = pinned_checkout(&repository);
 
@@ -325,26 +323,6 @@ fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
         .current_dir(root)
         .output()
         .expect("run git")
-}
-
-#[cfg(not(feature = "embedded-ty"))]
-fn assert_ty_version() {
-    let output = Command::new("ty")
-        .arg("version")
-        .output()
-        .expect("run ty version");
-    assert!(
-        output.status.success(),
-        "ty version failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("ty version output is utf8");
-    assert!(
-        stdout.split_whitespace().any(|part| part == TY_VERSION),
-        "completeness oracle requires ty {TY_VERSION}; got: {}",
-        stdout.trim()
-    );
 }
 
 fn run_count() -> usize {

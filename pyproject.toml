@@ -44,7 +44,6 @@ dev = [
 release = [ "check-wheel-contents==0.6.3", "towncrier==26.9.0" ]
 
 [tool.maturin]
-features = [ "embedded-ty" ]
 bindings = "bin"
 module-name = "strict_kwargs"
 

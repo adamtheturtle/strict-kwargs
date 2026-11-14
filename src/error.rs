@@ -67,15 +67,8 @@ pub enum CheckError {
         /// What is wrong with it, phrased to follow the path.
         message: String,
     },
-    /// The `ty` type-inference backend is a hard requirement, but no `ty`
-    /// executable was found on `PATH`. Failing instead of silently
-    /// degrading keeps results deterministic across machines (a run never
-    /// resolves fewer calls just because `ty` happens to be missing).
-    TyNotFound,
-    /// `ty` is on `PATH` but its language server (`ty server`) could not be
-    /// started, so the inference backend is unavailable. Fatal for the same
-    /// determinism reason as [`Self::TyNotFound`].
-    TyServerFailed,
+    /// The bundled inference engine could not initialize or complete analysis.
+    TyInferenceFailed,
 }
 
 impl From<std::io::Error> for CheckError {
@@ -107,22 +100,9 @@ impl std::fmt::Display for CheckError {
                 "refusing to write {}: the rewrite would not parse (file left unchanged)",
                 path.display()
             ),
-            Self::TyNotFound => write!(
-                formatter,
-                "the `ty` type-inference backend is required but no `ty` \
-                 executable was found on PATH; install it (e.g. `uv tool \
-                 install ty`)"
-            ),
-            #[cfg(feature = "embedded-ty")]
-            Self::TyServerFailed => write!(
+            Self::TyInferenceFailed => write!(
                 formatter,
                 "the bundled ty inference engine could not initialize or complete its analysis"
-            ),
-            #[cfg(not(feature = "embedded-ty"))]
-            Self::TyServerFailed => write!(
-                formatter,
-                "`ty` was found but its language server (`ty server`) could \
-                 not be started; the type-inference backend is required"
             ),
             Self::PathNotFound { path } => {
                 write!(formatter, "no such file or directory: {}", path.display())
@@ -208,17 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn ty_not_found_explains_the_requirement() {
-        let error = CheckError::TyNotFound;
-        let message = error.to_string();
-        assert!(message.contains("required"));
-        assert!(message.contains("PATH"));
-        // Points at the documented install path.
-        assert!(message.contains("uv tool install ty"));
-        assert_eq!(format!("{error:?}"), "TyNotFound");
-    }
-
-    #[test]
     fn path_not_found_names_the_path() {
         let error = CheckError::PathNotFound {
             path: PathBuf::from("typo_does_not_exist.py"),
@@ -279,16 +248,10 @@ mod tests {
     }
 
     #[test]
-    fn ty_backend_failure_describes_the_selected_backend() {
-        let error = CheckError::TyServerFailed;
+    fn ty_backend_failure_describes_the_inference_engine() {
+        let error = CheckError::TyInferenceFailed;
         let message = error.to_string();
-        #[cfg(not(feature = "embedded-ty"))]
-        {
-            assert!(message.contains("ty server"));
-            assert!(message.contains("required"));
-        }
-        #[cfg(feature = "embedded-ty")]
         assert!(message.contains("bundled ty inference engine"));
-        assert_eq!(format!("{error:?}"), "TyServerFailed");
+        assert_eq!(format!("{error:?}"), "TyInferenceFailed");
     }
 }

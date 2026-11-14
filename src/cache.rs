@@ -72,12 +72,6 @@ impl FnvHasher {
 // Cache fingerprints
 // ---------------------------------------------------------------------------
 
-/// The name of the `ty` binary (platform-aware).
-#[cfg(all(windows, not(feature = "embedded-ty")))]
-const TY_BIN: &str = "ty.exe";
-#[cfg(all(not(windows), not(feature = "embedded-ty")))]
-const TY_BIN: &str = "ty";
-
 /// Return the mtime of `path` as nanoseconds since the Unix epoch, or `None`
 /// if the metadata cannot be obtained.
 ///
@@ -171,45 +165,8 @@ fn hash_path_content(path: &Path, h: &mut FnvHasher) {
     }
 }
 
-/// Find the `ty` binary on `PATH`, returning its path if found.
-///
-/// The result depends on the execution environment (whether `ty` is installed
-/// and where); excluded from the coverage gate so environment-specific
-/// branches are not required.
-#[cfg_attr(coverage, coverage(off))]
-#[cfg(not(feature = "embedded-ty"))]
-fn find_ty_on_path() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(TY_BIN);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Mix the `ty` binary's path and mtime into `h`.
-///
-/// Excluded from the coverage gate: whether `ty` is found on `PATH` and
-/// whether its metadata is readable both depend on the execution environment
-/// and cannot be deterministically controlled in unit tests.
-#[cfg_attr(coverage, coverage(off))]
-#[cfg(not(feature = "embedded-ty"))]
-fn hash_ty_binary(h: &mut FnvHasher) {
-    let Some(ty_path) = find_ty_on_path() else {
-        return;
-    };
-    h.write_bytes(ty_path.as_os_str().as_encoded_bytes());
-    if let Some(mtime) = mtime_nanos(&ty_path) {
-        h.write_bytes(&mtime);
-    }
-    hash_path_content(&ty_path, h);
-}
-
-/// Distinguish the embedded engine from external-server cache entries.
-#[cfg(feature = "embedded-ty")]
-fn hash_ty_binary(h: &mut FnvHasher) {
+/// Include the bundled engine revision in cache fingerprints.
+fn hash_ty_engine(h: &mut FnvHasher) {
     h.write_bytes(ty_backend::ENGINE_ID.as_bytes());
 }
 
@@ -394,7 +351,7 @@ pub fn compute_cache_fingerprints_with_project_files(
     }
 
     // `ty` binary path + mtime.
-    hash_ty_binary(&mut dependency);
+    hash_ty_engine(&mut dependency);
 
     let mut project = FnvHasher::new();
     for root in fingerprint_walk_roots(project_root, first_party_roots) {

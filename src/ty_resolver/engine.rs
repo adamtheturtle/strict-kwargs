@@ -15,7 +15,6 @@ pub struct TyResolver {
 impl TyResolver {
     pub fn start(session: &super::TySession) -> Option<Self> {
         let engine = session
-            .engine
             .engine()
             .map_err(|e| eprintln!("embedded ty: {e}"))
             .ok()?;
@@ -143,5 +142,37 @@ mod tests {
         let mut second = TyResolver::start(&second_session).expect("second run");
         assert!(hover(&mut second, &path, source, 1).contains("extra"));
         assert!(!hover(&mut first, &path, source, 1).contains("extra"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_project_path_cannot_start_inference() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+        let session = crate::ty_resolver::TySession::new(&root, None, &[]);
+        assert!(TyResolver::start(&session).is_none());
+    }
+
+    #[test]
+    fn source_failure_disables_queries_until_reenabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("app.py");
+        let source = "def target(value): ...\ntarget(1)\n";
+        std::fs::write(&path, source).expect("write source");
+        let session =
+            crate::ty_resolver::TySession::new(temp.path(), None, std::slice::from_ref(&path));
+        let mut resolver = TyResolver::start(&session).expect("worker");
+        let missing = temp.path().join("missing.py");
+        assert!(resolver.ensure_open(&missing, source).is_none());
+        assert!(resolver.is_disabled());
+        assert!(resolver.ensure_open(&path, source).is_none());
+        assert!(resolver.ask("textDocument/hover", &path, 1, 0).is_none());
+        resolver.reenable();
+        assert!(!resolver.is_disabled());
+        assert!(hover(&mut resolver, &path, source, 1).contains("target"));
     }
 }

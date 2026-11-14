@@ -33,7 +33,6 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-latest, windows-latest]
-        backend: [server, embedded]
 
     runs-on: ${{ matrix.platform }}
 
@@ -52,33 +51,10 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-${{ matrix.platform }}-${{ matrix.backend }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
-
-      - name: Install ty (type-inference fallback under test)
-        shell: bash
-        run: |
-          uv tool install ty
-          uv tool dir --bin >> "$GITHUB_PATH"
-
-      - name: Verify ty is on PATH
-        # Fail loudly if ty is missing so the ty-backed tests are actually
-        # exercised on every platform (incl. Windows) rather than skipped.
-        shell: bash
-        run: ty version
+          shared-key: test-${{ matrix.platform }}
 
       - name: Run tests
-        env:
-          TY_BACKEND: ${{ matrix.backend }}
-        shell: bash
-        run: |
-          if [ "$TY_BACKEND" = embedded ]; then
-            cargo test --locked --verbose --features embedded-ty
-          else
-            cargo test --locked --verbose
-          fi
+        run: cargo test --locked --verbose
 
   hook:
     # Exercises `.pre-commit-hooks.yaml`, which nothing else here does: this
@@ -115,12 +91,8 @@ jobs:
     # Continuous benchmarking (issue #30). Pull requests compile the benchmark
     # target as a smoke test; CodSpeed uploads run only on non-PR events so an
     # external comparison cannot block unrelated PRs while still keeping the
-    # scheduled/main-branch signal. This job uses the server backend, so ty must
-    # be installed for `check_paths`/`fix_paths` to run at all. Its presence is
-    # probed once per process (memoized in `require_ty_present`), so the
-    # benchmarks still measure the built-in resolver hot paths — the fixtures
-    # are fully resolvable by the built-in resolver, so `ty_pending` stays
-    # empty and the `ty server` subprocess is never started.
+    # scheduled/main-branch signal. The ordinary fixtures are fully resolved
+    # by the native resolver and never initialize the bundled inference engine.
     #
     # This is a public repository, so the upload is tokenless: CodSpeed v4
     # authenticates via the GitHub OIDC token (`id-token: write` below), so
@@ -146,19 +118,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: codspeed
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
-
-      - name: Install ty (required backend; probed once per process)
-        shell: bash
-        run: |
-          uv tool install ty
-          uv tool dir --bin >> "$GITHUB_PATH"
-
-      - name: Verify ty is on PATH
-        shell: bash
-        run: ty version
 
       - name: Check Cargo.lock freshness
         run: cargo metadata --locked --format-version 1
@@ -226,16 +185,6 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 
-      - name: Install ty (type-inference fallback under test)
-        shell: bash
-        run: |
-          uv tool install ty==0.0.103
-          uv tool dir --bin >> "$GITHUB_PATH"
-
-      - name: Verify ty is on PATH
-        shell: bash
-        run: ty version
-
       - name: Clone pinned completeness repositories
         shell: bash
         env:
@@ -287,7 +236,7 @@ jobs:
           STRICT_KWARGS_COMPLETENESS_SPHINX_PYTHON_ENV: ${{ runner.temp }}/completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
-          cargo test --locked --features embedded-ty --test completeness \
+          cargo test --locked --test completeness \
             pinned_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
       - name: Run CPython completeness test
@@ -296,7 +245,7 @@ jobs:
           STRICT_KWARGS_COMPLETENESS_CPYTHON_PYTHON_ENV: ${{ runner.temp }}/cpython-completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
         run: |
-          cargo test --locked --features embedded-ty --test completeness \
+          cargo test --locked --test completeness \
             cpython_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
 
   completion-ci:

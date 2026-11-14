@@ -74,17 +74,10 @@ impl Project {
             .expect("spawn strict-kwargs")
     }
 
-    /// Run a *copy* of the built binary out of `bin_subdir`, with `PATH` set
-    /// to `path_dir`, so the only `ty` that can be resolved is one `path_dir`
-    /// provides.
+    /// Run a copy of the built binary with a controlled executable search path.
     ///
-    /// Running a copy (rather than `BIN` under `target/`) is load-bearing:
-    /// `ty_command` looks for a `ty` next to the *running executable* before
-    /// it consults `PATH`, so controlling `PATH` alone would not hide a `ty`
-    /// that happened to sit beside `strict-kwargs` in `target/debug`. The
-    /// copy lives in a directory containing nothing but itself, so that
-    /// sibling-discovery step finds no `ty` and `PATH` becomes the sole
-    /// source — exactly the invariant these tests depend on.
+    /// The isolated directory and PATH ensure no external inference engine is
+    /// available, regardless of executables installed on the test host.
     fn run_isolated(&self, args: &[&str], bin_subdir: &str, path_dir: &Path) -> Output {
         let bin_dir = self.root.join(bin_subdir);
         std::fs::create_dir_all(&bin_dir).expect("mkdir");
@@ -127,127 +120,13 @@ impl Project {
             .expect("spawn strict-kwargs (after ETXTBSY retries)")
     }
 
-    /// Run with no discoverable `ty` at all, so the required-backend probe
-    /// must fail regardless of whether the host has `ty` installed: `PATH`
-    /// is an empty directory and the binary copy has no sibling `ty` (see
-    /// [`Self::run_isolated`]).
+    /// Check and fix using only the bundled inference engine.
     fn run_without_ty(&self, args: &[&str]) -> Output {
         let empty = self.root.join("__no_ty_path__");
         std::fs::create_dir_all(&empty).expect("mkdir");
         self.run_isolated(args, "__no_ty_bin__", &empty)
     }
-
-    /// Run with `PATH` pointing at a fake `ty` that passes the up-front
-    /// `ty version` probe but whose `ty server` exits immediately, so the
-    /// lazy server start fails (`CheckError::TyServerFailed`). The shim is
-    /// the *only* discoverable `ty`: the strict-kwargs copy sits in its own
-    /// directory with no sibling `ty` (see [`Self::run_isolated`]). Unix-only
-    /// (shell shim); the coverage gate runs on Linux.
-    #[cfg(unix)]
-    fn run_with_broken_ty_server(&self, args: &[&str]) -> Output {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = self.root.join("__fake_ty__");
-        std::fs::create_dir_all(&bin).expect("mkdir");
-        let shim = bin.join("ty");
-        std::fs::write(
-            &shim,
-            "#!/bin/sh\ncase \"$1\" in\nversion) echo 'ty 0.0.0'; exit 0;;\n*) exit 1;;\nesac\n",
-        )
-        .expect("write shim");
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        self.run_isolated(args, "__sk_bin__", &bin)
-    }
-
-    /// Run with `PATH` pointing at a fake `ty` that passes `ty version`,
-    /// completes the LSP `initialize` handshake, then answers every
-    /// hover/definition with a JSON-RPC error. This exercises the
-    /// server-started-then-fails path: losing the required backend must abort
-    /// (`CheckError::TyServerFailed`), not silently reduce diagnostics (issues
-    /// #275, #276). Unix + Python only; the coverage gate runs on Linux.
-    #[cfg(all(unix, not(feature = "embedded-ty")))]
-    fn run_with_erroring_ty_server(&self, args: &[&str]) -> Output {
-        use std::os::unix::fs::PermissionsExt;
-        let python = {
-            let located = Command::new("sh")
-                .arg("-c")
-                .arg("command -v python3")
-                .output()
-                .expect("locate python3");
-            String::from_utf8(located.stdout)
-                .expect("python3 path is utf8")
-                .trim()
-                .to_owned()
-        };
-        assert!(!python.is_empty(), "python3 is required for the ty stub");
-        let bin = self.root.join("__erroring_ty__");
-        std::fs::create_dir_all(&bin).expect("mkdir");
-        let stub = bin.join("ty_stub.py");
-        std::fs::write(&stub, ERRORING_TY_STUB).expect("write stub");
-        let shim = bin.join("ty");
-        std::fs::write(
-            &shim,
-            format!("#!/bin/sh\nexec {python} \"{}\" \"$@\"\n", stub.display()),
-        )
-        .expect("write shim");
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        self.run_isolated(args, "__sk_err_bin__", &bin)
-    }
 }
-
-/// A minimal `ty` replacement: it passes `ty version`, answers the LSP
-/// `initialize` request, then returns a JSON-RPC error for every subsequent
-/// request (hover/definition/shutdown).
-#[cfg(all(unix, not(feature = "embedded-ty")))]
-const ERRORING_TY_STUB: &str = r#"import sys, json
-
-if len(sys.argv) > 1 and sys.argv[1] == "version":
-    print("ty 0.0.0")
-    sys.exit(0)
-if len(sys.argv) < 2 or sys.argv[1] != "server":
-    sys.exit(1)
-
-inp = sys.stdin.buffer
-out = sys.stdout.buffer
-
-
-def read_message():
-    length = None
-    while True:
-        line = inp.readline()
-        if not line:
-            return None
-        line = line.decode("ascii").strip()
-        if not line:
-            break
-        key, _, value = line.partition(":")
-        if key.strip().lower() == "content-length":
-            length = int(value.strip())
-    if length is None:
-        return None
-    return json.loads(inp.read(length))
-
-
-def write_message(obj):
-    data = json.dumps(obj).encode("utf-8")
-    out.write(b"Content-Length: %d\r\n\r\n" % len(data))
-    out.write(data)
-    out.flush()
-
-
-while True:
-    message = read_message()
-    if message is None:
-        break
-    request_id = message.get("id")
-    if message.get("method") == "initialize":
-        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"capabilities": {}}})
-    elif request_id is not None:
-        write_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32603, "message": "synthetic query failure"},
-        })
-"#;
 
 fn code(output: &Output) -> i32 {
     output.status.code().expect("exit code")
@@ -1608,58 +1487,15 @@ fn fix_write_failure_is_fatal_exit_two() {
     );
 }
 
-#[cfg(not(feature = "embedded-ty"))]
-#[test]
-fn check_without_ty_is_fatal_exit_two() {
-    // `ty` is a hard requirement: a missing backend aborts (exit 2) rather
-    // than silently resolving fewer calls. The probe is up front and
-    // content-independent, so even this fully built-in-resolvable file fails.
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(a=1)\n");
-    let output = project.run_without_ty(&["check", "main.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = combined_output(&output);
-    assert!(err.starts_with("error: "), "stderr: {err}");
-    assert!(
-        err.contains("`ty`") && err.contains("required"),
-        "stderr: {err}"
-    );
-    assert!(err.contains("PATH"), "stderr: {err}");
-}
-
-#[cfg(not(feature = "embedded-ty"))]
-#[test]
-fn fix_without_ty_is_fatal_exit_two() {
-    let project = Project::new().write("main.py", "def f(a: int) -> None: ...\nf(1)\n");
-    let source = project.read("main.py");
-    let output = project.run_without_ty(&["check", "--fix", "main.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    assert!(
-        stderr(&output).contains("required"),
-        "stderr: {}",
-        stderr(&output)
-    );
-    // The required-backend check is up front, so nothing was rewritten.
-    assert_eq!(project.read("main.py"), source);
-}
-
-// A return-typed method call the built-in resolver cannot resolve, so it is
-// deferred to `ty`, exercising the per-file driver where a failed lazy
-// server start becomes the fatal `TyServerFailed`.
-#[cfg(any(unix, feature = "embedded-ty"))]
+// A return-typed method call that requires inference.
 const TY_DEFERRED: &str =
     "class A:\n    def m(self, a: int) -> None: ...\n\ndef make() -> A:\n    return A()\n\nmake().m(1)\n";
 
-// Inherited methods are handled by the built-in resolver, so this should not
-// attempt to start the lazy `ty server` even when the only discoverable `ty`
-// is the intentionally broken shim.
-#[cfg(unix)]
+// Inherited methods remain resolvable with no external executables.
 const BUILTIN_INHERITED_METHOD: &str =
     "class A:\n    def m(self, a: int) -> None: ...\n\nclass B(A):\n    pass\n\nB().m(1)\n";
 
-// Literal receivers and simple assignments from literals are handled by the
-// built-in resolver, so this should not attempt to start the lazy `ty server`
-// even when the only discoverable `ty` is the intentionally broken shim.
-#[cfg(unix)]
+// Literal receivers and assignments work with no external executables.
 const BUILTIN_LITERAL_METHODS: &str = r#"
 "abc".encode()
 b"abc".decode()
@@ -1679,7 +1515,6 @@ xs: list[int] = []
 xs.append(1)
 "#;
 
-#[cfg(unix)]
 const BUILTIN_METHOD_LOCAL_HELPER: &str = "\
 class TestCase:
     def test_something(self) -> None:
@@ -1689,90 +1524,31 @@ class TestCase:
         check(1)
 ";
 
-#[cfg(unix)]
 #[test]
-fn check_inherited_method_with_unstartable_ty_server_uses_builtin_resolution() {
+fn check_inherited_method_without_external_ty_uses_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_INHERITED_METHOD);
-    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
+    let output = project.run_without_ty(&["check", "main.py"]);
     assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
     let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
-    assert!(!err.contains("ty server"), "stderr: {err}");
 }
 
-#[cfg(unix)]
 #[test]
-fn check_literal_methods_with_unstartable_ty_server_use_builtin_resolution() {
+fn check_literal_methods_without_external_ty_use_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_LITERAL_METHODS);
-    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
+    let output = project.run_without_ty(&["check", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    assert!(!combined_output(&output).contains("ty server"));
 }
 
-#[cfg(unix)]
 #[test]
-fn check_method_local_helper_with_unstartable_ty_server_uses_builtin_resolution() {
+fn check_method_local_helper_without_external_ty_uses_builtin_resolution() {
     let project = Project::new().write("main.py", BUILTIN_METHOD_LOCAL_HELPER);
-    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
+    let output = project.run_without_ty(&["check", "main.py"]);
     assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
     let err = combined_output(&output);
     assert!(err.contains("Too many positional"), "stderr: {err}");
-    assert!(!err.contains("ty server"), "stderr: {err}");
 }
 
-#[cfg(unix)]
-#[cfg(not(feature = "embedded-ty"))]
-#[test]
-fn check_with_unstartable_ty_server_is_fatal_exit_two() {
-    // `ty` is present (the `version` probe passes) but `ty server` will not
-    // start, so the run aborts rather than silently degrading.
-    let project = Project::new().write("main.py", TY_DEFERRED);
-    let output = project.run_with_broken_ty_server(&["check", "main.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = combined_output(&output);
-    assert!(err.starts_with("error: "), "stderr: {err}");
-    assert!(
-        err.contains("ty server") && err.contains("required"),
-        "stderr: {err}"
-    );
-}
-
-#[cfg(unix)]
-#[cfg(not(feature = "embedded-ty"))]
-#[test]
-fn check_with_erroring_ty_query_is_fatal_exit_two() {
-    // `ty` starts and initializes, but every hover/definition returns a
-    // JSON-RPC error. Once inference is known to be required, losing it is an
-    // operational failure (exit 2), never a silent `All checks passed!`
-    // (issues #275, #276).
-    let project = Project::new().write("main.py", TY_DEFERRED);
-    let output = project.run_with_erroring_ty_server(&["check", "main.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    let err = combined_output(&output);
-    assert!(err.starts_with("error: "), "stderr: {err}");
-    assert!(
-        err.contains("ty server") && err.contains("required"),
-        "stderr: {err}"
-    );
-}
-
-#[cfg(unix)]
-#[cfg(not(feature = "embedded-ty"))]
-#[test]
-fn fix_with_unstartable_ty_server_is_fatal_exit_two() {
-    let project = Project::new().write("main.py", TY_DEFERRED);
-    let source = project.read("main.py");
-    let output = project.run_with_broken_ty_server(&["check", "--fix", "main.py"]);
-    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
-    assert!(
-        combined_output(&output).contains("ty server"),
-        "stderr: {}",
-        stderr(&output)
-    );
-    assert_eq!(project.read("main.py"), source);
-}
-
-#[cfg(feature = "embedded-ty")]
 #[test]
 fn embedded_inference_works_without_an_external_ty_executable() {
     let project = Project::new().write("main.py", TY_DEFERRED);
@@ -1781,8 +1557,39 @@ fn embedded_inference_works_without_an_external_ty_executable() {
     assert!(combined_output(&output).contains("Too many positional"));
     let output = project.run_without_ty(&["check", "--fix", "main.py"]);
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
-    assert!(!combined_output(&output).contains("ty server"));
     assert!(project.read("main.py").contains("m(a=1)"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bundled_inference_failure_is_fatal_and_does_not_rewrite_source() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let project = Project::new();
+    // Linux filenames can be non-UTF8, but ty's project paths must be UTF8.
+    // A real initialization failure must abort instead of reporting clean.
+    let root = project
+        .root
+        .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+    std::fs::create_dir(&root).expect("mkdir non-UTF8 root");
+    let path = root.join("main.py");
+    std::fs::write(&path, TY_DEFERRED).expect("write source");
+    for args in [&["check"][..], &["check", "--fix"][..]] {
+        let output = Command::new(BIN)
+            .args(args)
+            .arg("--project-root")
+            .arg(&root)
+            .arg(&path)
+            .env_remove(CACHE_DIR_ENV_VAR)
+            .output()
+            .expect("spawn strict-kwargs");
+        assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+        assert!(stderr(&output).contains("bundled ty inference engine"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read source"),
+            TY_DEFERRED
+        );
+    }
 }
 
 #[test]

@@ -36,7 +36,7 @@ use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
-    same_path, split_top_level, ty_binary_present, LspLineIndex, TyResolver, TySession,
+    same_path, split_top_level, LspLineIndex, TyResolver, TySession,
 };
 
 mod file_selection;
@@ -51,16 +51,9 @@ use file_selection::{
 use file_selection::{is_ignored_path, FileSelection};
 pub use fix_runner::{fix_paths, fix_paths_with_opt_ins, recover_fix_journals_for};
 
-/// Maximum fallback requests in flight at once. This must stay at 1: `ty
-/// server` handles concurrent requests on a thread pool, and its answers for
-/// multi-location symbols (re-exported classes, instance `__call__`) depend
-/// on which thread populates its inference caches first — two runs feeding
-/// byte-identical request streams returned different definitions whenever
-/// more than one request was outstanding. Serial round-trips are the only
-/// schedule-independent mode, and they cost nothing where it matters: the
-/// `CPython` completeness run is bound by ty's per-query inference, not by
-/// pipe round-trips (41.6s serial vs 44s with a 128-wide window).
-const TY_MAX_IN_FLIGHT: usize = 1;
+/// Process one inference query at a time within each worker. Workers share
+/// the invocation's inference database; file-level parallelism is unchanged.
+const TY_QUERY_BATCH_SIZE: usize = 1;
 
 type SkipWarning = (usize, PathBuf, String);
 
@@ -127,8 +120,7 @@ fn resolve_python_version(config: &Config, python_env: Option<&Path>) -> PythonV
 ///
 /// Returns [`CheckError`] if a path argument does not exist
 /// ([`CheckError::PathNotFound`]), a source file cannot be read or parsed,
-/// or the required `ty` backend is missing ([`CheckError::TyNotFound`]) or
-/// its server cannot start ([`CheckError::TyServerFailed`]).
+/// or the bundled inference engine fails ([`CheckError::TyInferenceFailed`]).
 ///
 /// The whole walk runs on a large dedicated stack so a deeply nested file
 /// cannot overflow it; one nested deeper than the supported limit is rejected
@@ -191,18 +183,11 @@ fn process_scan_outcome_for_ty(
     Ok(())
 }
 
-/// Pipeline phases 1 and 2 (issue #67): stream [`ScanOutcome`]s from parallel
-/// Phase 1 workers to the serial Phase 2 coordinator as each file's built-in
-/// pass finishes. Files that need ty fallback are queued, then opened and
-/// queried in sorted-path order after the scan stream drains. ty computes
-/// answers on demand (the client advertises pull diagnostics, so didOpen
-/// itself triggers no per-file type-check pass) — but its answers for
-/// multi-location symbols can depend on the order files were opened, so the
-/// nondeterministic scan arrival order must not leak into didOpen order or
-/// runs would flicker on those calls.
-/// The final sort in [`check_paths_impl`] keeps output deterministic
-/// regardless of arrival order; the lazy ty-server start is preserved (only
-/// the first file with pending calls triggers it).
+/// Stream native scan outcomes to inference workers in sorted-file order.
+/// Each worker resolves its owned files using this invocation's shared ty
+/// database. Sorting the released work and final diagnostics keeps results
+/// independent of scan completion order. Inference starts lazily when a file
+/// has unresolved calls.
 ///
 /// Excluded from the coverage gate for the same reason as
 /// [`stream_scan_files`]: what is excluded here is only the threading
@@ -290,18 +275,9 @@ fn pipeline_phases(
         // with deferred calls stream in as the scan releases them in
         // sorted order; the greedy owner assignment below reproduces the
         // partition a whole-list pass would compute. Each work item is
-        // sent only to its owner shard, which both opens and queries it —
-        // no shard sees the others' files. This is safe because the only
-        // cross-file dependency ty has is goto-definition *location
-        // order* (which files were opened earlier reorders a symbol's
-        // returned locations), and `resolve_first_def_location` chooses
-        // the first usable target in a stable order, so the open-set no
-        // longer changes the resolved diagnostic. Dropping the per-shard
-        // open-history replay cuts the
-        // `didOpen` traffic by `TY_SHARD_COUNT`×: on a venv-backed run
-        // where most files defer to ty (e.g. the completeness check),
-        // each server now parses only its ~1/N share of the project
-        // instead of all of it (issue #240).
+        // sent only to its owner shard, which both opens and queries it.
+        // Workers share the run's inference database and retain only their
+        // own per-file lookup caches. Each file has one owner.
         let mut shard_senders = Vec::with_capacity(TY_SHARD_COUNT);
         let mut shard_handles = Vec::with_capacity(TY_SHARD_COUNT);
         for _ in 0..TY_SHARD_COUNT {
@@ -317,7 +293,7 @@ fn pipeline_phases(
                     let mut def_caches = TyDefCaches::default();
                     let mut out: Vec<(usize, Vec<Diagnostic>)> = Vec::new();
                     // A shard that never receives an owned file never
-                    // starts its server (`resolve_file_with_ty` starts it
+                    // acquires an engine (`resolve_file_with_ty` starts it
                     // lazily on the first non-empty pending set).
                     for (work_index, work) in shard_rx {
                         let mut file_diagnostics = Vec::new();
@@ -325,11 +301,8 @@ fn pipeline_phases(
                             &mut ty,
                             &mut ty_start_attempted,
                             ty_session,
-                            project_root,
-                            all_project_files,
                             index,
                             indexed_files,
-                            python_env,
                             &work.path,
                             &work.source,
                             &work.pending,
@@ -351,7 +324,7 @@ fn pipeline_phases(
 
         // Coordinator: release scan outcomes in sorted-file order (scan
         // results arrive in nondeterministic worker order, but the order
-        // files reach each ty server must be a pure function of the file
+        // files reach each ty worker must be a pure function of the file
         // list for the fallback to be reproducible), assign each pending
         // file to the least-loaded shard, and send it only to that owner.
         let mut releaser = InOrderReleaser::new();
@@ -434,14 +407,8 @@ fn pipeline_phases(
     Ok(())
 }
 
-/// Fixed shard count for the parallel ty fallback. This must be a constant —
-/// never derived from the host's core count — because the shard a file lands
-/// in determines which `ty server` answers its queries, and ty's answers for
-/// multi-location symbols depend on which files that server saw earlier. A
-/// machine-dependent shard count would make diagnostics differ across
-/// machines. Eight shards are the measured sweet spot with current ty: they
-/// expose more parallelism in its serial request stream without paying the
-/// startup and project-indexing overhead observed at twelve shards.
+/// Fixed worker count for deterministic, load-balanced inference. Preserve
+/// the established scheduling while workers share a single database.
 const TY_SHARD_COUNT: usize = 8;
 
 /// What a file walk is for.
@@ -467,11 +434,8 @@ const fn should_balance_grouped_ty(files: usize) -> bool {
     files >= REQUEST_AWARE_TY_SHARD_FILE_THRESHOLD
 }
 
-/// How many times a single file's ty fallback is attempted before a still-off
-/// backend is treated as fatal. A transient timeout/disconnect under shard
-/// contention is retried on the same warm server; a persistent failure after
-/// this many tries surfaces as [`CheckError::TyServerFailed`] rather than a
-/// silent diagnostic drop (issue #275).
+/// Retry a file after an inference source-access failure, discarding partial
+/// results. Persistent failures are fatal rather than silent diagnostic drops.
 const TY_FILE_ATTEMPTS: usize = 3;
 
 /// One shard's outcome: each owned work item's index in the released
@@ -529,7 +493,7 @@ fn estimated_hover_requests(pending: usize, groups: &[Option<u32>]) -> usize {
 /// order) goes to the shard with the least estimated request work so far
 /// (ties: lowest shard index). The estimate accounts for hover-group reuse,
 /// and the greedy rule is a pure function of the sorted work prefix, so the
-/// partition — and therefore each ty server's request stream — is
+/// partition — and therefore each ty worker's query stream — is
 /// reproducible everywhere and can be computed while files stream in.
 struct TyShardAssigner {
     loads: Vec<usize>,
@@ -615,7 +579,6 @@ fn check_paths_impl(
     // file content: a codebase the built-in resolver fully handles still
     // errors if `ty` is missing, so the same source can never resolve fewer
     // calls on a machine that merely lacks `ty`.
-    require_ty_present()?;
     let (python_files, project_inventory) = if cache_dir.is_some() {
         collect_python_files_with_project_inventory(project_root, paths, config)?
     } else {
@@ -717,18 +680,9 @@ fn check_paths_impl(
     // the original sorted-file order after both phases finish (issue #53 + #46).
     let mut skip_warnings: Vec<SkipWarning> = Vec::new();
 
-    // Run the pipeline (Phase 1 parallel built-in pass + Phase 2 sharded ty
-    // fallback) for cache misses only. Files that need ty fallback stream to
-    // the shard servers in sorted-path order as their scan results arrive —
-    // the servers work concurrently with the scan; ty computes
-    // hover/definition answers on demand (pull diagnostics keep didOpen
-    // itself cheap). Files fully handled by the built-in resolver do not
-    // force ty work, and the shard servers start lazily — only a shard that
-    // actually receives a query pays `ty server`'s project-indexing
-    // initialize cost (issue #31), so a run the built-in resolver fully
-    // handles (the common editor-on-save / pre-commit case on first-party
-    // code) starts no server at all. `python_env` (the `--python` value)
-    // also steers the built-in resolver's third-party discovery.
+    // Run the native scan and inference pipeline for cache misses. Only
+    // files with unresolved calls acquire a handle to the shared database.
+    // The Python environment also steers native dependency discovery.
     pipeline_phases(
         &files_to_scan,
         &python_files,
@@ -4163,7 +4117,7 @@ impl<'a> CallChecker<'a> {
         // Keep shard ownership identical to the pre-localization behavior:
         // a class context poisoned anywhere used to lose every group. Runtime
         // reuse stays method-local, but changing the balancing weights can
-        // move expensive files between ty servers and lengthen the critical
+        // move expensive files between ty workers and lengthen the critical
         // path even when the total request count falls.
         let balancing_groups = if self.balancing_poisoned_hover_ctxs.is_empty() {
             groups.clone()
@@ -14585,24 +14539,6 @@ fn hover_text(value: &serde_json::Value) -> Option<&str> {
     contents.get("value").and_then(serde_json::Value::as_str)
 }
 
-/// Fail unless a usable `ty` executable is on `PATH`.
-///
-/// Verify that the selected inference backend is available. The embedded
-/// backend is always present; the server backend probes the external binary
-/// once per process before scanning. Actual inference starts lazily.
-///
-/// Excluded from coverage because the test environment provides ty. The
-/// absent-backend errors are exercised by the server-specific CLI tests.
-#[cfg_attr(coverage, coverage(off))]
-fn require_ty_present() -> Result<(), CheckError> {
-    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *PRESENT.get_or_init(ty_binary_present) {
-        Ok(())
-    } else {
-        Err(CheckError::TyNotFound)
-    }
-}
-
 /// Reuse retained syntax only when its token offsets describe this source.
 /// Callers without an indexed file keep the existing parse-on-demand path.
 fn parsed_fix_module<'a>(
@@ -14619,22 +14555,17 @@ fn parsed_fix_module<'a>(
     parse_module(source).ok().map(Cow::Owned)
 }
 
-/// Per-file ty-fallback driver: lazily start `ty` on first need, then
-/// resolve this file's pending calls. The lazy-start and `ty`-available
-/// branches depend on the (environment-specific) `ty` subprocess, so this
-/// wiring is excluded from the gate like the rest of the ty fallback;
-/// behaviour is covered by the ty-backed integration tests.
+/// Lazily acquire an inference worker and resolve this file's pending calls.
+/// Filesystem- and environment-dependent startup and recovery are exercised
+/// by the inference integration tests, like the surrounding orchestration.
 #[cfg_attr(coverage, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     ty_session: &TySession,
-    project_root: &Path,
-    _all_files: &[PathBuf],
     index: &DefinitionIndex,
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
-    python_env: Option<&Path>,
     path: &Path,
     source: &str,
     pending: &[PendingTy],
@@ -14650,20 +14581,15 @@ fn resolve_file_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        // The binary was verified up front (`require_ty_present`), so a
-        // failure here is the server not starting — fatal, not a silent
-        // downgrade, so results stay deterministic.
-        *ty = Some(start_ty_for_fallback(ty_session, project_root, python_env)?);
+        // Initialization failure is fatal, so missing inference never
+        // silently reduces diagnostics.
+        *ty = Some(start_ty(ty_session)?);
     }
     let Some(ty) = ty.as_mut() else {
         return Ok(());
     };
-    // A transient timeout/disconnect latches the shard's server OFF part-way
-    // through a file, which would otherwise silently drop the rest of its
-    // diagnostics (issue #275). Retry on the same warm server, discarding the
-    // failed attempt's partial results; only a backend that stays off after
-    // every attempt is fatal. This keeps results deterministic under shard
-    // contention instead of load-dependent.
+    // A source-access failure disables the worker. Retry without retaining
+    // partial diagnostics or rewrites; a persistent failure aborts the run.
     let baseline = diagnostics.len();
     let mut fixes = fixes;
     let fix_baseline = fixes.as_ref().map(|fixes| {
@@ -14702,43 +14628,15 @@ fn resolve_file_with_ty(
         }
         ty.reenable();
     }
-    Err(CheckError::TyServerFailed)
+    Err(CheckError::TyInferenceFailed)
 }
 
-/// Start the `ty` language server once. `ty`'s binary is verified up front
-/// ([`require_ty_present`]); if the server still cannot be launched the run
-/// fails with [`CheckError::TyServerFailed`] rather than silently dropping
-/// the (now required) inference backend.
-///
-/// Like [`TyResolver::start`], this is `ty`-subprocess orchestration whose
-/// outcome is environment-specific (the coverage gate guarantees `ty` is
-/// present and startable, so the failure path cannot be taken there), so it
-/// is excluded from the gate.
+/// Acquire a worker handle from this invocation's shared inference database.
+/// Startup depends on the filesystem and Python environment; integration tests
+/// exercise this orchestration together with the surrounding inference driver.
 #[cfg_attr(coverage, coverage(off))]
-#[cfg(not(feature = "embedded-ty"))]
-fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver, CheckError> {
-    TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
-}
-
-/// Lazily start a server or acquire this run's shared embedded database.
-/// Backend startup depends on the execution environment and is excluded
-/// from coverage like the surrounding inference orchestration.
-#[cfg_attr(coverage, coverage(off))]
-fn start_ty_for_fallback(
-    session: &TySession,
-    project_root: &Path,
-    python_env: Option<&Path>,
-) -> Result<TyResolver, CheckError> {
-    #[cfg(feature = "embedded-ty")]
-    {
-        let _ = (project_root, python_env);
-        TyResolver::start(session).ok_or(CheckError::TyServerFailed)
-    }
-    #[cfg(not(feature = "embedded-ty"))]
-    {
-        let _ = session;
-        start_ty(project_root, python_env)
-    }
+fn start_ty(session: &TySession) -> Result<TyResolver, CheckError> {
+    TyResolver::start(session).ok_or(CheckError::TyInferenceFailed)
 }
 
 struct TyFixes<'a> {
@@ -14817,11 +14715,8 @@ fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
     ty_session: &TySession,
-    project_root: &Path,
-    _all_files: &[PathBuf],
     index: &DefinitionIndex,
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
-    python_env: Option<&Path>,
     path: &Path,
     source: &str,
     pending: &[PendingTyOverloadFix],
@@ -14832,7 +14727,7 @@ fn resolve_overload_fixes_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        let Ok(started) = start_ty_for_fallback(ty_session, project_root, python_env) else {
+        let Ok(started) = start_ty(ty_session) else {
             record_declined_fixes(
                 &mut fixes,
                 DeclinedFixReason::UnresolvedOverload,
@@ -14878,7 +14773,7 @@ fn resolve_overload_fixes_with_ty(
         });
     let lsp_index = LspLineIndex::new(source);
 
-    for chunk in pending.chunks(TY_MAX_IN_FLIGHT) {
+    for chunk in pending.chunks(TY_QUERY_BATCH_SIZE) {
         let hover_ids: Vec<Option<i64>> = chunk
             .iter()
             .map(|p| {
@@ -15101,9 +14996,8 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// stdlib too), then goto-definition for the rest (constructors and callable
 /// `__call__` definitions). Fails closed.
 ///
-/// This is pure orchestration of the `ty` LSP subprocess: it pipelines
-/// hover/goto-definition requests and dispatches each reply to the parsing
-/// and emission logic. Its outcome depends on `ty`'s own
+/// This orchestrates bundled inference queries and dispatches their results
+/// to the shared signature parsing and diagnostic emission logic. Its outcome depends on `ty`'s own
 /// version-/environment-specific resolution (the suite asserts ty behaviour
 /// only weakly for the same reason), so — like [`TyResolver::start`] — it is
 /// excluded from the coverage gate. Every piece of decision logic it calls is
@@ -15167,8 +15061,8 @@ fn resolve_pending_with_ty(
 
     // Phase A: pipeline hover requests in bounded batches, then collect.
     let mut needs_def: Vec<usize> = Vec::new();
-    for chunk_start in (0..pending.len()).step_by(TY_MAX_IN_FLIGHT) {
-        let chunk_end = pending.len().min(chunk_start + TY_MAX_IN_FLIGHT);
+    for chunk_start in (0..pending.len()).step_by(TY_QUERY_BATCH_SIZE) {
+        let chunk_end = pending.len().min(chunk_start + TY_QUERY_BATCH_SIZE);
         let hover_ids: Vec<(usize, Option<i64>)> = (chunk_start..chunk_end)
             .map(|i| {
                 if group_of(i).is_some_and(|g| group_hover.contains_key(&g)) {
@@ -15387,7 +15281,7 @@ fn resolve_pending_with_ty(
     // bounded batches too. Hover misses are group-consistent (the cached
     // hover answer routed every member here), so definition answers are
     // reused per group the same way.
-    for chunk in needs_def.chunks(TY_MAX_IN_FLIGHT) {
+    for chunk in needs_def.chunks(TY_QUERY_BATCH_SIZE) {
         let def_ids: Vec<(usize, Option<i64>)> = chunk
             .iter()
             .map(|&i| {

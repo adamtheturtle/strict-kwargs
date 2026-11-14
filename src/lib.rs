@@ -30,15 +30,11 @@ mod noqa;
 mod resolve;
 mod signature;
 mod source;
-// The `ty` type-inference fallback is an *optional*, environment-dependent
-// subprocess integration: real `ty` only ever drives the happy paths, while
-// the error/edge branches (disabled latch, malformed frames, timeouts,
-// unusual hover/goto shapes) are reachable only from unit tests, which are
-// `#[coverage(off)]`. The whole module's behaviour is verified by those
-// tests and the ty-backed integration tests, but it is excluded from the
-// 100% line/branch gate — the gate covers the built-in resolver, fixer and
-// index (the core product), consistent with the already-excluded
-// `resolve_pending_with_ty`/`start` glue.
+// The inference adapter depends on filesystem/Python environments and ty's
+// signature displays. Its decoders and engine behavior are exercised by unit
+// and integration tests. Preserve the existing coverage boundary: the 100%
+// gate covers native analysis, indexing and rewriting; inference orchestration
+// is also excluded at its call sites in `check`.
 #[cfg_attr(coverage, coverage(off))]
 mod ty_resolver;
 
