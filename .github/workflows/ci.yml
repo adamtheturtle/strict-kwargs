@@ -42,6 +42,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
