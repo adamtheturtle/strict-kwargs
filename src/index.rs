@@ -1,5 +1,6 @@
 //! Index of callable definitions discovered in the project.
 
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -8,7 +9,7 @@ use ruff_python_ast::{self as ast};
 use ruff_python_ast::{Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::ast_util::signature_from_parameters;
 use crate::cache::FnvHasher;
@@ -711,6 +712,18 @@ impl ClassQuerySnapshot {
     }
 }
 
+const SIGNATURE_CACHE_SHARDS: usize = 32;
+
+type SignatureCache = FxHashMap<String, Option<Arc<[Signature]>>>;
+
+// Independent cache lines keep concurrent reads of unrelated names from
+// fighting over one shared lock's reader counter.
+#[derive(Default)]
+#[repr(align(128))]
+struct SignatureCacheShard {
+    entries: RwLock<SignatureCache>,
+}
+
 pub struct DefinitionIndex {
     /// Resolves a dotted module name to source. `None` in unit tests that
     /// drive the edge/signature logic directly (no module resolution).
@@ -724,7 +737,7 @@ pub struct DefinitionIndex {
     /// Memoizes [`DefinitionIndex::get`] (including resolved-to-`None`), so a
     /// name queried repeatedly across the file walk is chased through the
     /// edge graph at most once.
-    cache: RwLock<FxHashMap<String, Option<Arc<[Signature]>>>>,
+    cache: [SignatureCacheShard; SIGNATURE_CACHE_SHARDS],
     inner: RwLock<Inner>,
 }
 
@@ -841,7 +854,7 @@ impl DefinitionIndex {
             resolver: Some(resolver),
             inner: RwLock::new(inner),
             modules: RwLock::default(),
-            cache: RwLock::default(),
+            cache: std::array::from_fn(|_| SignatureCacheShard::default()),
         }
     }
 
@@ -1310,10 +1323,13 @@ impl DefinitionIndex {
     /// backwards on demand. A real definition always wins; aliases are only
     /// consulted when no definition is bound under the queried name. Memoized.
     pub fn get(&self, fullname: &str) -> Option<Arc<[Signature]>> {
+        let hash = FxBuildHasher.hash_one(fullname);
+        let shard = usize::from(hash.to_le_bytes()[0]) % SIGNATURE_CACHE_SHARDS;
+        let cache = &self.cache[shard].entries;
         // Release the cache guard before demand resolution, which may index
         // definitions and resolve more aliases on other workers.
         {
-            let cache = self.cache.read().unwrap_or_else(PoisonError::into_inner);
+            let cache = cache.read().unwrap_or_else(PoisonError::into_inner);
             if let Some(hit) = cache.get(fullname) {
                 return hit.clone();
             }
@@ -1322,7 +1338,7 @@ impl DefinitionIndex {
         let mut query_budget = MAX_QUERY_MODULES;
         let mut steps = MAX_QUERY_STEPS;
         let resolved = self.resolve_alias(fullname, &mut visited, 0, &mut query_budget, &mut steps);
-        self.cache
+        cache
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(fullname.to_string(), resolved.clone());
@@ -4572,7 +4588,7 @@ impl DefinitionIndex {
             resolver: None,
             inner: RwLock::new(Inner::default()),
             modules: RwLock::default(),
-            cache: RwLock::default(),
+            cache: std::array::from_fn(|_| SignatureCacheShard::default()),
         }
     }
 
