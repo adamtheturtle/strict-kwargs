@@ -35,8 +35,8 @@ use crate::noqa::NoqaDirectives;
 use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
-    locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
-    same_path, split_top_level, LspLineIndex, TyResolver, TySession,
+    parse_callable_type_overloads, parse_hover_signature, same_path, split_top_level, TyResolver,
+    TySession,
 };
 
 mod file_selection;
@@ -50,10 +50,6 @@ use file_selection::{
 #[cfg(test)]
 use file_selection::{is_ignored_path, FileSelection};
 pub use fix_runner::{fix_paths, fix_paths_with_opt_ins, recover_fix_journals_for};
-
-/// Process one inference query at a time within each worker. Workers share
-/// the invocation's inference database; file-level parallelism is unchanged.
-const TY_QUERY_BATCH_SIZE: usize = 1;
 
 type SkipWarning = (usize, PathBuf, String);
 
@@ -14133,8 +14129,7 @@ fn ty_fallback_ignore_may_need_definition(config: &Config, fullname: &str) -> bo
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct DefCacheKey {
     path: PathBuf,
-    line: u32,
-    character: u32,
+    offset: u32,
 }
 
 type DefCache = FxHashMap<DefCacheKey, Option<(String, Vec<Signature>)>>;
@@ -14172,8 +14167,7 @@ fn resolve_def_location_cached(
 ) -> Option<(String, Vec<Signature>)> {
     let key = DefCacheKey {
         path: loc.path.clone(),
-        line: loc.line,
-        character: loc.character,
+        offset: loc.offset,
     };
     if let Some(cached) = def_caches.locations.get(&key) {
         // A cross-file lookup can fail because the target is not readable
@@ -14197,7 +14191,7 @@ fn resolve_def_location_cached(
                 file_cache.get(&loc.path).and_then(Option::as_deref)?,
             )
         };
-        let off = lsp_to_byte_offset(target, loc.line, loc.character)?;
+        let off = usize::try_from(loc.offset).ok()?;
         if !def_caches.files.contains_key(target_path) {
             let def_index = indexed_files
                 .get(target_path)
@@ -14224,18 +14218,15 @@ fn resolve_def_location_cached(
     reason = "ty definition resolution threads explicit per-run caches through fallback glue"
 )]
 fn resolve_ty_definition_for_pending(
-    ty: &mut TyResolver,
+    ty: &TyResolver,
     path: &Path,
     source: &str,
-    lsp_index: &LspLineIndex,
     pending: &PendingTy,
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
-    let (line, ch) = lsp_index.position(source, pending.callee_offset);
-    let id = ty.ask("textDocument/definition", path, line, ch)?;
-    let response = ty.take(id)?;
+    let response = ty.definitions(path, pending.callee_offset);
     resolve_first_def_location(
         path,
         source,
@@ -14256,25 +14247,18 @@ fn resolve_ty_definition_for_pending(
 fn resolve_first_def_location(
     path: &Path,
     source: &str,
-    response: &serde_json::Value,
+    locations: &[crate::ty_resolver::DefLocation],
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
-    let mut locations = locations_from_value(response);
+    let mut locations: Vec<_> = locations.iter().collect();
     locations.sort_unstable_by(|left, right| {
-        (
-            !same_path(&left.path, path),
-            &left.path,
-            left.line,
-            left.character,
-        )
-            .cmp(&(
-                !same_path(&right.path, path),
-                &right.path,
-                right.line,
-                right.character,
-            ))
+        (!same_path(&left.path, path), &left.path, left.offset).cmp(&(
+            !same_path(&right.path, path),
+            &right.path,
+            right.offset,
+        ))
     });
     locations.iter().find_map(|loc| {
         resolve_def_location_cached(path, source, loc, indexed_files, file_cache, def_caches)
@@ -14529,16 +14513,6 @@ fn record_ty_fix(
     }
 }
 
-// ty-fallback helper; excluded (see `collect_defs`).
-#[cfg_attr(coverage, coverage(off))]
-fn hover_text(value: &serde_json::Value) -> Option<&str> {
-    let contents = value.get("contents")?;
-    if let Some(s) = contents.as_str() {
-        return Some(s);
-    }
-    contents.get("value").and_then(serde_json::Value::as_str)
-}
-
 /// Reuse retained syntax only when its token offsets describe this source.
 /// Callers without an indexed file keep the existing parse-on-demand path.
 fn parsed_fix_module<'a>(
@@ -14771,26 +14745,12 @@ fn resolve_overload_fixes_with_ty(
             tokens: parsed.tokens(),
             text_as_data: &fix_text_as_data,
         });
-    let lsp_index = LspLineIndex::new(source);
-
-    for chunk in pending.chunks(TY_QUERY_BATCH_SIZE) {
-        let hover_ids: Vec<Option<i64>> = chunk
-            .iter()
-            .map(|p| {
-                let (line, ch) = lsp_index.position(source, p.pending.callee_offset);
-                ty.ask("textDocument/hover", path, line, ch)
-            })
-            .collect();
-
-        for (item, hover_id) in chunk.iter().zip(hover_ids) {
-            let response = hover_id.and_then(|id| ty.take(id));
-            let raw = response.as_ref().and_then(hover_text);
-            let Some(raw) = raw else {
-                record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
-                continue;
-            };
-            record_selected_overload_fix(&mut fixes, index, fix_ast, item, raw);
-        }
+    for item in pending {
+        let Some(raw) = ty.hover(path, item.pending.callee_offset) else {
+            record_declined_fix(&mut fixes, DeclinedFixReason::UnresolvedOverload);
+            continue;
+        };
+        record_selected_overload_fix(&mut fixes, index, fix_ast, item, &raw);
     }
 }
 
@@ -14991,7 +14951,7 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
             .all(|(left, right)| left.kind == right.kind && left.name == right.name)
 }
 
-/// Resolve, in bounded pipelined batches per file, the calls the built-in
+/// Resolve, in sorted-file order, the calls the built-in
 /// resolver missed: hover (precise, overload- and inheritance-resolved,
 /// stdlib too), then goto-definition for the rest (constructors and callable
 /// `__call__` definitions). Fails closed.
@@ -15001,11 +14961,9 @@ fn same_parameter_mapping(left: &Signature, right: &Signature) -> bool {
 /// version-/environment-specific resolution (the suite asserts ty behaviour
 /// only weakly for the same reason), so — like [`TyResolver::start`] — it is
 /// excluded from the coverage gate. Every piece of decision logic it calls is
-/// unit-tested deterministically instead: [`hover_text`],
-/// [`parse_hover_signature`], [`signature_from_param_text`],
+/// unit-tested deterministically instead: [`parse_hover_signature`], [`signature_from_param_text`],
 /// [`parse_callable_type_overloads`], [`strip_unbound_receiver`],
-/// [`identifier_at`], `byte_offset_to_lsp`, [`lsp_to_byte_offset`],
-/// [`locations_from_value`], [`DefFileIndex::resolve_at`] and
+/// [`identifier_at`], [`DefFileIndex::resolve_at`] and
 /// [`emit_if_violation_with_signature_fullname`].
 #[cfg_attr(coverage, coverage(off))]
 #[allow(
@@ -15030,7 +14988,6 @@ fn resolve_pending_with_ty(
         return;
     }
     let source_line_starts = line_starts(source);
-    let lsp_index = LspLineIndex::new(source);
     let parsed_for_fixes = fixes
         .as_ref()
         .and_then(|_| parsed_fix_module(indexed_files, path, source));
@@ -15053,191 +15010,84 @@ fn resolve_pending_with_ty(
     // see `CallChecker::hover_group_for_call`) are proven to hover
     // identically, so the first member's raw answer is reused for the rest
     // — the bulk of a test suite's `self.assert*` calls collapse to one
-    // round-trip per method. The request stream stays a pure function of
+    // query per method. The request stream stays a pure function of
     // the (sorted) work list, so reproducibility is unaffected.
     let group_of = |i: usize| pending_groups.get(i).copied().flatten();
     let mut group_hover: FxHashMap<u32, Arc<str>> = FxHashMap::default();
-    let mut group_def: FxHashMap<u32, Arc<serde_json::Value>> = FxHashMap::default();
+    let mut group_def: FxHashMap<u32, Arc<Vec<crate::ty_resolver::DefLocation>>> =
+        FxHashMap::default();
 
-    // Phase A: pipeline hover requests in bounded batches, then collect.
+    // Phase A: resolve each hover synchronously, reusing proven groups.
     let mut needs_def: Vec<usize> = Vec::new();
-    for chunk_start in (0..pending.len()).step_by(TY_QUERY_BATCH_SIZE) {
-        let chunk_end = pending.len().min(chunk_start + TY_QUERY_BATCH_SIZE);
-        let hover_ids: Vec<(usize, Option<i64>)> = (chunk_start..chunk_end)
-            .map(|i| {
-                if group_of(i).is_some_and(|g| group_hover.contains_key(&g)) {
-                    // Answered from the group cache; no request needed.
-                    return (i, None);
+    for (i, p) in pending.iter().enumerate() {
+        let group = group_of(i);
+        let cached = group.and_then(|g| group_hover.get(&g).cloned());
+        let response = if cached.is_some() {
+            None
+        } else {
+            ty.hover(path, p.callee_offset)
+        };
+        let raw = cached.as_deref().or(response.as_deref());
+        if cached.is_none() {
+            // A usable callable signature is group-consistent. Exact
+            // Unknown answers can also be shared when there are no other
+            // attribute reads that could narrow this receiver. ty
+            // answers a member sitting in code it deems unreachable — e.g.
+            // a `sys.platform`-guarded branch live on one OS but dead on
+            // another — with the bottom type (`Never`, or no hover at all)
+            // rather than the receiver's real signature. Caching that
+            // answer would suppress the group's *live* members, which do
+            // resolve to a real signature. Leave such answers uncached so
+            // each remaining member falls back to its own hover; the first
+            // member that yields a real signature re-seeds the shared
+            // answer for the rest.
+            if let (Some(g), Some(raw)) = (group, raw) {
+                if parse_hover_signature(raw).is_some()
+                    || (p.unknown_hover_is_stable && raw.trim() == "Unknown")
+                {
+                    group_hover.insert(g, Arc::from(raw));
                 }
-                let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
-                (i, ty.ask("textDocument/hover", path, line, ch))
-            })
-            .collect();
+            }
+        }
+        let Some(raw) = raw else {
+            needs_def.push(i);
+            continue;
+        };
 
-        for (i, hover_id) in hover_ids {
-            let p = &pending[i];
-            let group = group_of(i);
-            let cached = group.and_then(|g| group_hover.get(&g).cloned());
-            let response = if cached.is_some() {
-                None
-            } else {
-                hover_id.and_then(|id| ty.take(id))
+        // `def …`/`bound method …` display: a single, named signature.
+        if let Some(sig) = parse_hover_signature(raw) {
+            let Some(signature) =
+                signature_from_param_text_cached(&sig.params, &mut def_caches.param_signatures)
+            else {
+                continue;
             };
-            let raw = cached
+            let (effective_signature, positional_count, receiver_is_explicit) =
+                strip_unbound_receiver(signature.clone(), p.positional_count, sig.owner.is_none());
+            let owner = sig
+                .owner
                 .as_deref()
-                .or_else(|| response.as_ref().and_then(hover_text));
-            if cached.is_none() {
-                // A usable callable signature is group-consistent. Exact
-                // Unknown answers can also be shared when there are no other
-                // attribute reads that could narrow this receiver. ty
-                // answers a member sitting in code it deems unreachable — e.g.
-                // a `sys.platform`-guarded branch live on one OS but dead on
-                // another — with the bottom type (`Never`, or no hover at all)
-                // rather than the receiver's real signature. Caching that
-                // answer would suppress the group's *live* members, which do
-                // resolve to a real signature. Leave such answers uncached so
-                // each remaining member falls back to its own hover; the first
-                // member that yields a real signature re-seeds the shared
-                // answer for the rest.
-                if let (Some(g), Some(raw)) = (group, raw) {
-                    if parse_hover_signature(raw).is_some()
-                        || (p.unknown_hover_is_stable && raw.trim() == "Unknown")
-                    {
-                        group_hover.insert(g, Arc::from(raw));
-                    }
+                .filter(|owner| hover_owner_is_a_real_class(owner));
+            let fullname = match owner {
+                Some(owner) => {
+                    let owner = owner.split('[').next().unwrap_or(owner);
+                    let owner = owner.rsplit('.').next().unwrap_or(owner);
+                    format!("ty.{owner}.{}", sig.name)
                 }
-            }
-            let Some(raw) = raw else {
-                needs_def.push(i);
-                continue;
+                None => format!("ty.{}", sig.name),
             };
-
-            // `def …`/`bound method …` display: a single, named signature.
-            if let Some(sig) = parse_hover_signature(raw) {
-                let Some(signature) =
-                    signature_from_param_text_cached(&sig.params, &mut def_caches.param_signatures)
-                else {
-                    continue;
-                };
-                let (effective_signature, positional_count, receiver_is_explicit) =
-                    strip_unbound_receiver(
-                        signature.clone(),
-                        p.positional_count,
-                        sig.owner.is_none(),
-                    );
-                let owner = sig
-                    .owner
-                    .as_deref()
-                    .filter(|owner| hover_owner_is_a_real_class(owner));
-                let fullname = match owner {
-                    Some(owner) => {
-                        let owner = owner.split('[').next().unwrap_or(owner);
-                        let owner = owner.rsplit('.').next().unwrap_or(owner);
-                        format!("ty.{owner}.{}", sig.name)
-                    }
-                    None => format!("ty.{}", sig.name),
-                };
-                // ty renders an attribute-access hover with the receiver already
-                // bound, so a `def …` line for a receiver dunder has dropped
-                // `self` even when the display carries no owner. Reading only
-                // the owner let the synthetic `ty.__init__` fullname strip a
-                // second parameter, which reported `super().__init__(data)`
-                // against a positional-only base (issue #1248).
-                let receiver_already_omitted = sig.owner.is_some() || is_receiver_dunder(&sig.name);
-                let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
-                if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
-                    if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
-                        ty,
-                        path,
-                        source,
-                        &lsp_index,
-                        p,
-                        indexed_files,
-                        file_cache,
-                        def_caches,
-                    ) {
-                        ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
-                    }
-                }
-                let signature_fullname =
-                    signature_mapping_fullname(&fullname, receiver_already_omitted);
-                if let Some(max_positional) = emit_if_violation_with_signature_fullname(
-                    &fullname,
-                    signature_fullname,
-                    std::slice::from_ref(&effective_signature),
-                    positional_count,
-                    ignored,
-                    source,
-                    p.call_start,
-                    path,
-                    diagnostics,
-                    Some(&source_line_starts),
-                ) {
-                    let fix_signature = if receiver_is_explicit {
-                        &signature
-                    } else {
-                        &effective_signature
-                    };
-                    let fix_positional_count = if receiver_is_explicit {
-                        p.positional_count
-                    } else {
-                        positional_count
-                    };
-                    if ty_hover_signature_is_safe_for_fix(
-                        &sig.name,
-                        sig.owner.as_deref(),
-                        p.positional_count,
-                    ) {
-                        record_ty_fix(
-                            fixes,
-                            Some(index),
-                            fix_ast,
-                            p,
-                            &fullname,
-                            fix_signature,
-                            max_positional,
-                            fix_positional_count,
-                            receiver_is_explicit,
-                            receiver_already_omitted,
-                        );
-                    } else {
-                        record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
-                    }
-                }
-                continue;
-            }
-
-            // Callable-*type* display, incl. `Overload[…]`: ty already excluded
-            // `self` and kept typeshed positional-only `/` markers. Use it
-            // directly rather than falling through to goto-definition, which on
-            // an inferred stdlib receiver lands on runtime `.py` source whose
-            // signatures drop `/` and yield false positives (issue #14).
-            let overloads: Vec<Signature> = parse_callable_type_overloads(raw)
-                .iter()
-                .filter_map(|params| {
-                    signature_from_param_text_cached(params, &mut def_caches.param_signatures)
-                })
-                .collect();
-            if hover_names_single_dispatch(raw) {
-                // `@singledispatch` dispatches on `args[0].__class__`, so the
-                // first argument must stay positional. `Index::is_excluded`
-                // covers this when the function is indexed; in the ty fallback
-                // the hover names the decorated type instead (issue #1263).
-                continue;
-            }
-            if overloads.is_empty() {
-                needs_def.push(i);
-                continue;
-            }
-            let name = identifier_at(source, p.callee_offset).unwrap_or_default();
-            let fullname = format!("ty.{name}");
+            // ty renders an attribute-access hover with the receiver already
+            // bound, so a `def …` line for a receiver dunder has dropped
+            // `self` even when the display carries no owner. Reading only
+            // the owner let the synthetic `ty.__init__` fullname strip a
+            // second parameter, which reported `super().__init__(data)`
+            // against a positional-only base (issue #1248).
+            let receiver_already_omitted = sig.owner.is_some() || is_receiver_dunder(&sig.name);
             let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
             if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
                 if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
                     ty,
                     path,
                     source,
-                    &lsp_index,
                     p,
                     indexed_files,
                     file_cache,
@@ -15246,11 +15096,13 @@ fn resolve_pending_with_ty(
                     ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
                 }
             }
+            let signature_fullname =
+                signature_mapping_fullname(&fullname, receiver_already_omitted);
             if let Some(max_positional) = emit_if_violation_with_signature_fullname(
                 &fullname,
-                signature_mapping_fullname(&fullname, true),
-                &overloads,
-                p.positional_count,
+                signature_fullname,
+                std::slice::from_ref(&effective_signature),
+                positional_count,
                 ignored,
                 source,
                 p.call_start,
@@ -15258,110 +15110,176 @@ fn resolve_pending_with_ty(
                 diagnostics,
                 Some(&source_line_starts),
             ) {
-                if let [signature] = overloads.as_slice() {
+                let fix_signature = if receiver_is_explicit {
+                    &signature
+                } else {
+                    &effective_signature
+                };
+                let fix_positional_count = if receiver_is_explicit {
+                    p.positional_count
+                } else {
+                    positional_count
+                };
+                if ty_hover_signature_is_safe_for_fix(
+                    &sig.name,
+                    sig.owner.as_deref(),
+                    p.positional_count,
+                ) {
                     record_ty_fix(
                         fixes,
                         Some(index),
                         fix_ast,
                         p,
                         &fullname,
-                        signature,
+                        fix_signature,
                         max_positional,
-                        p.positional_count,
-                        false,
-                        true,
+                        fix_positional_count,
+                        receiver_is_explicit,
+                        receiver_already_omitted,
                     );
-                } else if fixes.is_some() {
-                    record_declined_fix(fixes, DeclinedFixReason::AmbiguousTyHover);
+                } else {
+                    record_declined_fix(fixes, DeclinedFixReason::UnsupportedSignatureShape);
                 }
+            }
+            continue;
+        }
+
+        // Callable-*type* display, incl. `Overload[…]`: ty already excluded
+        // `self` and kept typeshed positional-only `/` markers. Use it
+        // directly rather than falling through to goto-definition, which on
+        // an inferred stdlib receiver lands on runtime `.py` source whose
+        // signatures drop `/` and yield false positives (issue #14).
+        let overloads: Vec<Signature> = parse_callable_type_overloads(raw)
+            .iter()
+            .filter_map(|params| {
+                signature_from_param_text_cached(params, &mut def_caches.param_signatures)
+            })
+            .collect();
+        if hover_names_single_dispatch(raw) {
+            // `@singledispatch` dispatches on `args[0].__class__`, so the
+            // first argument must stay positional. `Index::is_excluded`
+            // covers this when the function is indexed; in the ty fallback
+            // the hover names the decorated type instead (issue #1263).
+            continue;
+        }
+        if overloads.is_empty() {
+            needs_def.push(i);
+            continue;
+        }
+        let name = identifier_at(source, p.callee_offset).unwrap_or_default();
+        let fullname = format!("ty.{name}");
+        let mut ignored = ty_fallback_callee_is_ignored(config, &fullname);
+        if !ignored && ty_fallback_ignore_may_need_definition(config, &fullname) {
+            if let Some((def_fullname, _)) = resolve_ty_definition_for_pending(
+                ty,
+                path,
+                source,
+                p,
+                indexed_files,
+                file_cache,
+                def_caches,
+            ) {
+                ignored = ty_fallback_callee_is_ignored(config, &def_fullname);
+            }
+        }
+        if let Some(max_positional) = emit_if_violation_with_signature_fullname(
+            &fullname,
+            signature_mapping_fullname(&fullname, true),
+            &overloads,
+            p.positional_count,
+            ignored,
+            source,
+            p.call_start,
+            path,
+            diagnostics,
+            Some(&source_line_starts),
+        ) {
+            if let [signature] = overloads.as_slice() {
+                record_ty_fix(
+                    fixes,
+                    Some(index),
+                    fix_ast,
+                    p,
+                    &fullname,
+                    signature,
+                    max_positional,
+                    p.positional_count,
+                    false,
+                    true,
+                );
+            } else if fixes.is_some() {
+                record_declined_fix(fixes, DeclinedFixReason::AmbiguousTyHover);
             }
         }
     }
-    // Phase B: pipeline goto-definition for hover misses (constructors) in
-    // bounded batches too. Hover misses are group-consistent (the cached
+    // Phase B: resolve goto-definition for hover misses (constructors).
+    // Hover misses are group-consistent (the cached
     // hover answer routed every member here), so definition answers are
     // reused per group the same way.
-    for chunk in needs_def.chunks(TY_QUERY_BATCH_SIZE) {
-        let def_ids: Vec<(usize, Option<i64>)> = chunk
-            .iter()
-            .map(|&i| {
-                if group_of(i).is_some_and(|g| group_def.contains_key(&g)) {
-                    // Answered from the group cache; no request needed.
-                    return (i, None);
-                }
-                let (line, ch) = lsp_index.position(source, pending[i].callee_offset);
-                (i, ty.ask("textDocument/definition", path, line, ch))
-            })
-            .collect();
-        for (i, id) in def_ids {
-            let group = group_of(i);
-            let cached = group.and_then(|g| group_def.get(&g).cloned());
-            let raw_def = if cached.is_some() {
-                cached
-            } else {
-                let raw = id.and_then(|id| ty.take(id)).map(Arc::new);
-                // Only a positive answer is group-consistent; see the matching
-                // note in the hover phase. A definition miss at an unreachable
-                // member must not suppress live members of the same group.
-                if let (Some(g), Some(raw)) = (group, raw.as_ref()) {
-                    group_def.insert(g, Arc::clone(raw));
+    for i in needs_def {
+        let group = group_of(i);
+        let raw_def = group
+            .and_then(|g| group_def.get(&g).cloned())
+            .unwrap_or_else(|| {
+                let raw = Arc::new(ty.definitions(path, pending[i].callee_offset));
+                // Retain the existing per-group navigation reuse, including
+                // empty location lists, without a protocol response envelope.
+                if let Some(g) = group {
+                    group_def.insert(g, Arc::clone(&raw));
                 }
                 raw
-            };
-            // A `ty` goto-definition target is a dependency/stub. Each
-            // location goes through the guarded parser so a deeply-nested
-            // target is rejected gracefully rather than crashing the
-            // analysis thread (issue #83 follow-up to #54). The two-stage
-            // pre-filter keeps typical stubs cheap (byte count only); only
-            // genuinely deep ones pay the tokeniser scan — and those would
-            // have crashed the old unguarded call. A response whose every
-            // location is too deep or unparsable is silently skipped, same
-            // fail-closed behaviour as before.
-            if let Some((fullname, sigs)) = raw_def.as_deref().and_then(|response| {
-                resolve_first_def_location(
-                    path,
-                    source,
-                    response,
-                    indexed_files,
-                    file_cache,
-                    def_caches,
-                )
-            }) {
-                let ignored = ty_fallback_callee_is_ignored(config, &fullname);
-                let max_positional = emit_if_violation_with_signature_fullname(
-                    &fullname,
-                    &fullname,
-                    &sigs,
-                    pending[i].positional_count,
-                    ignored,
-                    source,
-                    pending[i].call_start,
-                    path,
-                    diagnostics,
-                    Some(&source_line_starts),
-                );
-                if let Some(max_positional) = max_positional {
-                    let mut attempted_fix = false;
-                    if fullname.ends_with(".__call__") {
-                        if let [signature] = sigs.as_slice() {
-                            attempted_fix = true;
-                            record_ty_fix(
-                                fixes,
-                                Some(index),
-                                fix_ast,
-                                &pending[i],
-                                &fullname,
-                                signature,
-                                max_positional,
-                                pending[i].positional_count,
-                                false,
-                                false,
-                            );
-                        }
+            });
+        // A `ty` goto-definition target is a dependency/stub. Each
+        // location goes through the guarded parser so a deeply-nested
+        // target is rejected gracefully rather than crashing the
+        // analysis thread (issue #83 follow-up to #54). The two-stage
+        // pre-filter keeps typical stubs cheap (byte count only); only
+        // genuinely deep ones pay the tokeniser scan — and those would
+        // have crashed the old unguarded call. A response whose every
+        // location is too deep or unparsable is silently skipped, same
+        // fail-closed behaviour as before.
+        if let Some((fullname, sigs)) = resolve_first_def_location(
+            path,
+            source,
+            &raw_def,
+            indexed_files,
+            file_cache,
+            def_caches,
+        ) {
+            let ignored = ty_fallback_callee_is_ignored(config, &fullname);
+            let max_positional = emit_if_violation_with_signature_fullname(
+                &fullname,
+                &fullname,
+                &sigs,
+                pending[i].positional_count,
+                ignored,
+                source,
+                pending[i].call_start,
+                path,
+                diagnostics,
+                Some(&source_line_starts),
+            );
+            if let Some(max_positional) = max_positional {
+                let mut attempted_fix = false;
+                if fullname.ends_with(".__call__") {
+                    if let [signature] = sigs.as_slice() {
+                        attempted_fix = true;
+                        record_ty_fix(
+                            fixes,
+                            Some(index),
+                            fix_ast,
+                            &pending[i],
+                            &fullname,
+                            signature,
+                            max_positional,
+                            pending[i].positional_count,
+                            false,
+                            false,
+                        );
                     }
-                    if !attempted_fix {
-                        record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
-                    }
+                }
+                if !attempted_fix {
+                    record_declined_fix(fixes, DeclinedFixReason::TyDefinitionOnly);
                 }
             }
         }
@@ -15478,17 +15396,15 @@ mod tests {
         let source = "binding = 1\ndef local(value): ...\n";
         let earlier = PathBuf::from("/project/a.py");
         let later = PathBuf::from("/project/b.py");
-        let location = |path: &Path, line: u32, character: u32| {
-            serde_json::json!({
-                "uri": format!("file://{}", path.display()),
-                "range": {"start": {"line": line, "character": character}},
-            })
+        let location = |path: &Path, offset: u32| DefLocation {
+            path: path.to_path_buf(),
+            offset,
         };
         let targets = [
-            location(current, 0, 0), // A binding is not a callable definition.
-            location(&earlier, 1, 4),
-            location(&earlier, 0, 4),
-            location(&later, 0, 4),
+            location(current, 0), // A binding is not a callable definition.
+            location(&earlier, 26),
+            location(&earlier, 4),
+            location(&later, 4),
         ];
         for reverse in [false, true] {
             for rotation in 0..targets.len() {
@@ -15500,7 +15416,7 @@ mod tests {
                 for local in [false, true] {
                     let mut response = ordered.clone();
                     if local {
-                        response.push(location(current, 1, 4));
+                        response.push(location(current, 16));
                     }
                     let mut files = FxHashMap::from_iter([
                         (
@@ -15515,7 +15431,7 @@ mod tests {
                     let resolved = super::resolve_first_def_location(
                         current,
                         source,
-                        &serde_json::Value::Array(response),
+                        &response,
                         &FxHashMap::default(),
                         &mut files,
                         &mut TyDefCaches::default(),
@@ -15534,8 +15450,7 @@ mod tests {
         let target = temp.path().join("not-on-disk.py");
         let location = DefLocation {
             path: target.clone(),
-            line: 0,
-            character: 4,
+            offset: 4,
         };
         let mut file_cache = FxHashMap::default();
         let mut def_caches = TyDefCaches::default();
@@ -16631,24 +16546,6 @@ while cond:
             &mut d,
         );
         assert_eq!(d.len(), 0);
-    }
-
-    #[test]
-    fn hover_text_reads_string_or_value_or_none() {
-        use super::hover_text;
-        use serde_json::json;
-
-        // `contents` is a bare string.
-        assert_eq!(hover_text(&json!({"contents": "plain"})), Some("plain"));
-        // `contents.value` (MarkupContent form).
-        assert_eq!(
-            hover_text(&json!({"contents": {"value": "marked"}})),
-            Some("marked")
-        );
-        // No `contents` at all.
-        assert_eq!(hover_text(&json!({})), None);
-        // `contents` present but neither a string nor a `.value` string.
-        assert_eq!(hover_text(&json!({"contents": {"x": 1}})), None);
     }
 
     // ----- issue #27 unbound-class-method guard arms ------------------

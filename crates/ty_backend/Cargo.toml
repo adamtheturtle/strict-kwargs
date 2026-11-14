@@ -9,7 +9,8 @@ publish = false
 [dependencies]
 ruff_db = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84", features = ["os"] }
 ruff_notebook = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }
-ruff_source_file = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }
+ruff_python_ast = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }
 ruff_text_size = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }
 ty_ide = { version = "=0.0.0", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }
 ty_project = { version = "=0.0.0", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84", default-features = false, features = ["deflate"] }
+ty_python_semantic = { version = "=0.0.22", git = "https://github.com/astral-sh/ruff", rev = "ab1a1265b8a54d9212373eb221c6540f854e1f84" }

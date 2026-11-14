@@ -5,13 +5,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ruff_db::files::{File, FilePath, system_path_to_file};
-use ruff_db::source::{line_index, source_text};
+use ruff_db::parsed::parsed_module;
+use ruff_db::source::source_text;
 use ruff_db::system::{SystemPath, SystemPathBuf};
-use ruff_source_file::{OneIndexed, PositionEncoding, SourceLocation};
-use ruff_text_size::TextSize;
+use ruff_python_ast as ast;
+use ruff_python_ast::find_node::covering_node;
+use ruff_python_ast::token::TokenKind;
+use ruff_text_size::{Ranged, TextSize};
 use ty_project::metadata::options::{EnvironmentOptions, Options};
 use ty_project::metadata::value::RelativePathBuf;
 use ty_project::{CheckMode, ProjectDatabase, ProjectMetadata, SemanticDb};
+use ty_python_semantic::types::ide_support::{
+    call_type_simplified_by_overloads, constructor_signature,
+};
+use ty_python_semantic::types::{KnownInstanceType, Type};
+use ty_python_semantic::{HasType, SemanticModel};
 
 /// Include the dependency pin in cache keys automatically when it changes.
 pub const ENGINE_ID: &str = concat!("embedded ty\n", include_str!("../Cargo.toml"));
@@ -118,6 +126,13 @@ impl Session {
     }
 }
 
+/// A definition in the source's native UTF-8 byte coordinates.
+#[derive(Clone)]
+pub struct Definition {
+    pub path: PathBuf,
+    pub offset: u32,
+}
+
 /// One worker's database handle. Ordinary files share cached inference;
 /// changed or decoded source switches this worker to a mutable database.
 pub struct Engine {
@@ -150,26 +165,11 @@ impl Engine {
         Some(())
     }
 
-    pub fn offset(&self, path: &Path, line: u32, character: u32) -> Option<u32> {
-        let file = system_path_to_file(&self.db, SystemPath::from_std_path(path)?).ok()?;
-        let source = source_text(&self.db, file);
-        let index = line_index(&self.db, file);
-        Some(
-            index
-                .offset(
-                    SourceLocation {
-                        line: OneIndexed::from_zero_indexed(line as usize),
-                        character_offset: OneIndexed::from_zero_indexed(character as usize),
-                    },
-                    &source,
-                    PositionEncoding::Utf16,
-                )
-                .to_u32(),
-        )
-    }
-
     pub fn hover(&self, path: &Path, offset: u32) -> Option<String> {
         let file = system_path_to_file(&self.db, SystemPath::from_std_path(path)?).ok()?;
+        if let Some(signature) = self.call_hover(file, TextSize::from(offset)) {
+            return Some(signature);
+        }
         let hover = ty_ide::hover(&self.db, self.db.program_file(file), TextSize::from(offset))?;
         Some(
             hover
@@ -179,7 +179,62 @@ impl Engine {
         )
     }
 
-    pub fn definitions(&self, path: &Path, offset: u32) -> Option<Vec<(PathBuf, u32, u32)>> {
+    // Call sites need only the signature, not IDE docstrings and their
+    // additional definition/argument-resolution work. Other targets retain
+    // the ordinary hover implementation.
+    fn call_hover(&self, file: File, offset: TextSize) -> Option<String> {
+        let program_file = self.db.program_file(file);
+        let parsed = parsed_module(&self.db, program_file.python_file(&self.db)).load(&self.db);
+        let tokens = parsed.tokens();
+        let token = tokens
+            .at_offset(offset)
+            .find(|token| token.kind() == TokenKind::Identifier)
+            .or_else(|| {
+                // Several zero-width dedents can precede an identifier at the
+                // same offset. at_offset exposes only the first boundary.
+                if !tokens
+                    .at_offset(offset)
+                    .any(|token| token.range().is_empty() && token.start() == offset)
+                {
+                    return None;
+                }
+                tokens
+                    .after(offset)
+                    .iter()
+                    .take_while(|token| token.start() == offset)
+                    .find(|token| token.kind() == TokenKind::Identifier)
+                    .copied()
+            })?;
+        let node = covering_node(parsed.syntax().into(), token.range())
+            .find_first(|node| node.is_identifier() || node.is_expression())
+            .ok()?;
+        let call = node.ancestors().find_map(|node| {
+            let call = node.expr_call()?;
+            match call.func.as_ref() {
+                ast::Expr::Name(name) if name.range() == token.range() => Some(call),
+                ast::Expr::Attribute(attr) if attr.attr.range() == token.range() => Some(call),
+                _ => None,
+            }
+        })?;
+        let model = SemanticModel::new(&self.db, program_file);
+        if let Some(signature) = constructor_signature(&model, call)
+            .or_else(|| call_type_simplified_by_overloads(&model, call))
+        {
+            return Some(signature);
+        }
+        let ty = call.func.inferred_type(&model)?;
+        let env = model.program_environment();
+        if matches!(
+            ty,
+            Type::TypeVar(_) | Type::KnownInstance(KnownInstanceType::TypeVar(_))
+        ) || ty.display_alias_declaration(&self.db, &env).is_some()
+        {
+            return None;
+        }
+        Some(ty.display(&self.db, &env).multiline().to_string())
+    }
+
+    pub fn definitions(&self, path: &Path, offset: u32) -> Option<Vec<Definition>> {
         let file = system_path_to_file(&self.db, SystemPath::from_std_path(path)?).ok()?;
         let definitions =
             ty_ide::goto_definition(&self.db, self.db.program_file(file), TextSize::from(offset))?;
@@ -195,17 +250,10 @@ impl Engine {
                             .to_path_buf(),
                         FilePath::SystemVirtual(_) => return None,
                     };
-                    let source = source_text(&self.db, file);
-                    let location = line_index(&self.db, file).source_location(
-                        target.focus_range().start(),
-                        &source,
-                        PositionEncoding::Utf16,
-                    );
-                    Some((
+                    Some(Definition {
                         path,
-                        u32::try_from(location.line.to_zero_indexed()).ok()?,
-                        u32::try_from(location.character_offset.to_zero_indexed()).ok()?,
-                    ))
+                        offset: target.focus_range().start().to_u32(),
+                    })
                 })
                 .collect(),
         )
