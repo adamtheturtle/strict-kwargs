@@ -293,10 +293,10 @@ fn pipeline_phases(
         // no shard sees the others' files. This is safe because the only
         // cross-file dependency ty has is goto-definition *location
         // order* (which files were opened earlier reorders a symbol's
-        // returned locations), and `resolve_first_def_location` (#233)
-        // tries every returned location until one parses, so the order —
-        // and therefore the open-set — no longer changes the resolved
-        // diagnostic. Dropping the per-shard open-history replay cuts the
+        // returned locations), and `resolve_first_def_location` chooses
+        // the first usable target in a stable order, so the open-set no
+        // longer changes the resolved diagnostic. Dropping the per-shard
+        // open-history replay cuts the
         // `didOpen` traffic by `TY_SHARD_COUNT`×: on a venv-backed run
         // where most files defer to ty (e.g. the completeness check),
         // each server now parses only its ~1/N share of the project
@@ -14289,13 +14289,11 @@ fn resolve_ty_definition_for_pending(
     )
 }
 
-/// Resolve a `textDocument/definition` response to the first usable
-/// definition, trying ty's locations in order. ty's relative ordering of a
-/// multi-location answer depends on the answering server's open/query
-/// history, and the leading entry is often a local binding the definition
-/// parser cannot use — trying each location keeps the result independent of
-/// that ordering whenever exactly one location resolves, and recovers
-/// definitions a first-entry-only read would lose.
+/// Resolve a definition response in a stable order. ty orders navigation
+/// targets by internal file IDs, which depend on which files were loaded
+/// first. Prefer definitions in the queried file, then order remaining
+/// targets by path and position so loading history cannot select a different
+/// callable. Keep trying targets when a binding cannot be resolved.
 // ty-fallback helper; excluded (see `collect_defs`).
 #[cfg_attr(coverage, coverage(off))]
 fn resolve_first_def_location(
@@ -14306,7 +14304,22 @@ fn resolve_first_def_location(
     file_cache: &mut FxHashMap<PathBuf, Option<String>>,
     def_caches: &mut TyDefCaches,
 ) -> Option<(String, Vec<Signature>)> {
-    locations_from_value(response).iter().find_map(|loc| {
+    let mut locations = locations_from_value(response);
+    locations.sort_unstable_by(|left, right| {
+        (
+            !same_path(&left.path, path),
+            &left.path,
+            left.line,
+            left.character,
+        )
+            .cmp(&(
+                !same_path(&right.path, path),
+                &right.path,
+                right.line,
+                right.character,
+            ))
+    });
+    locations.iter().find_map(|loc| {
         resolve_def_location_cached(path, source, loc, indexed_files, file_cache, def_caches)
     })
 }
@@ -15563,6 +15576,62 @@ mod tests {
         ));
         assert!(super::parsed_fix_module(&indexed_files, &path, "def (").is_none());
         assert!(super::parsed_fix_module(&indexed_files, missing, "def (").is_none());
+    }
+
+    #[test]
+    fn definition_selection_is_independent_of_navigation_target_order() {
+        let current = Path::new("/project/z.py");
+        let source = "binding = 1\ndef local(value): ...\n";
+        let earlier = PathBuf::from("/project/a.py");
+        let later = PathBuf::from("/project/b.py");
+        let location = |path: &Path, line: u32, character: u32| {
+            serde_json::json!({
+                "uri": format!("file://{}", path.display()),
+                "range": {"start": {"line": line, "character": character}},
+            })
+        };
+        let targets = [
+            location(current, 0, 0), // A binding is not a callable definition.
+            location(&earlier, 1, 4),
+            location(&earlier, 0, 4),
+            location(&later, 0, 4),
+        ];
+        for reverse in [false, true] {
+            for rotation in 0..targets.len() {
+                let mut ordered = targets.to_vec();
+                ordered.rotate_left(rotation);
+                if reverse {
+                    ordered.reverse();
+                }
+                for local in [false, true] {
+                    let mut response = ordered.clone();
+                    if local {
+                        response.push(location(current, 1, 4));
+                    }
+                    let mut files = FxHashMap::from_iter([
+                        (
+                            earlier.clone(),
+                            Some("def first(value): ...\ndef second(value, /): ...\n".to_string()),
+                        ),
+                        (
+                            later.clone(),
+                            Some("def other(value, /): ...\n".to_string()),
+                        ),
+                    ]);
+                    let resolved = super::resolve_first_def_location(
+                        current,
+                        source,
+                        &serde_json::Value::Array(response),
+                        &FxHashMap::default(),
+                        &mut files,
+                        &mut TyDefCaches::default(),
+                    )
+                    .expect("a callable target resolves");
+                    assert_eq!(resolved.0, if local { "ty.local" } else { "ty.first" });
+                    assert_eq!(resolved.1[0].parameters[0].name.as_deref(), Some("value"));
+                }
+            }
+        }
     }
 
     #[test]
