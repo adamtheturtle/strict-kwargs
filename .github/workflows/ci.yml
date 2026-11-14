@@ -295,18 +295,9 @@ jobs:
           STRICT_KWARGS_COMPLETENESS_CPYTHON_CHECKOUT: ${{ runner.temp }}/external/cpython
           STRICT_KWARGS_COMPLETENESS_CPYTHON_PYTHON_ENV: ${{ runner.temp }}/cpython-completeness-venv
           STRICT_KWARGS_COMPLETENESS_RUNS: 3
-          STRICT_KWARGS_COMPLETENESS_REGENERATE_GOLDEN: 1
-          INSTA_UPDATE: always
         run: |
-          cargo test --locked --test completeness \
+          cargo test --locked --features embedded-ty --test completeness \
             cpython_repository_diagnostics_match_golden_oracle -- --ignored --nocapture
-
-      - name: Export refreshed ty 0.0.103 CPython oracle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ty-103-oracle-${{ matrix.platform }}
-          path: tests/snapshots/completeness__cpython_repository_diagnostics*.snap
-          if-no-files-found: error
 
   completion-ci:
     needs: build
