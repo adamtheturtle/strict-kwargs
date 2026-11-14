@@ -92,6 +92,7 @@ struct CheckArgs {
 }
 
 fn main() -> ExitCode {
+    ty_backend::prepare_for_process_exit();
     match run() {
         Ok(exit_code) => exit_code,
         Err(error) => {

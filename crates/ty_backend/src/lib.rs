@@ -1,6 +1,7 @@
 //! An in-process bridge to the pinned ty inference engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ruff_db::files::{File, FilePath, system_path_to_file};
@@ -18,6 +19,14 @@ pub const ENGINE_ID: &str = concat!("embedded ty\n", include_str!("../Cargo.toml
 mod overlay;
 use overlay::OverlaySystem;
 
+static PROCESS_WILL_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Let the one-shot CLI leave cached inference storage to process teardown.
+/// Library callers retain ordinary reclamation after each invocation.
+pub fn prepare_for_process_exit() {
+    PROCESS_WILL_EXIT.store(true, Ordering::Relaxed);
+}
+
 /// A single check/fix invocation owns one lazily initialized database.
 /// Sharing is confined to this invocation: simultaneous runs must not share
 /// frozen filesystem inputs or source buffers.
@@ -28,6 +37,23 @@ struct SessionInner {
     root: PathBuf,
     python: Option<PathBuf>,
     database: Mutex<Option<ProjectDatabase>>,
+}
+
+impl Drop for SessionInner {
+    fn drop(&mut self) {
+        if PROCESS_WILL_EXIT.load(Ordering::Relaxed) {
+            if let Some(db) = self
+                .database
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                // Match ty's CLI. Only Salsa storage is retained; remaining
+                // fields still drop so environment workers shut down normally.
+                db.forget_storage_on_exit();
+            }
+        }
+    }
 }
 
 impl Session {
