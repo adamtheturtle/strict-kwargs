@@ -53,9 +53,6 @@ jobs:
         with:
           shared-key: test-${{ matrix.platform }}
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
-
       - name: Run tests
         run: cargo test --locked --verbose
 
@@ -121,9 +118,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: codspeed
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Check Cargo.lock freshness
         run: cargo metadata --locked --format-version 1
