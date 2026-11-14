@@ -684,14 +684,9 @@ fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
 }
 
 /// Extract every `Location` from a `textDocument/definition` result, which
-/// may be a single `Location`, an array, or `LocationLink`s, preserving ty's
-/// order. Callers must try the locations in order and use the first one they
-/// can resolve: a multi-location answer (re-exports, `class X` plus a local
-/// binding) frequently leads with a location the local definition parser
-/// cannot use, and the *relative order* of the locations depends on the
-/// open/query history of the answering `ty server`, so committing to only
-/// the first entry both loses resolvable definitions and makes the outcome
-/// depend on request scheduling.
+/// may be a single `Location`, an array, or `LocationLink`s. This preserves
+/// the wire order; callers that choose one target must apply a stable order
+/// because ty's internal file IDs depend on file loading history.
 pub fn locations_from_value(result: &Value) -> Vec<DefLocation> {
     match result {
         Value::Array(items) => items.iter().filter_map(single_location).collect(),
