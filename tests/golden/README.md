@@ -24,7 +24,8 @@ The current pinned repositories are:
 - CPython ref: `8b31d08e62b9714cf8dd1d8b19afa5ecbad2414a`
 - `ty`: `0.0.103`
 
-The existing required floors were generated with `ty 0.0.64`.
+The CPython floors were regenerated with three runs of the `ty 0.0.103` server on each platform.
+The Sphinx floor originated with `ty 0.0.64`.
 The Sphinx call at `directives/code.py:257` now displays `pyobject_filter` instead of `func` with `ty 0.0.103`; both the server and embedded backends report the same violation.
 CI checks the embedded backend against these floors; use `--features embedded-ty` in the commands below to run it locally.
 The external `ty` version check applies only to the server backend.
