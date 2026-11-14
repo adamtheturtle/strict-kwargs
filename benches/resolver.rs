@@ -1136,3 +1136,29 @@ fn repeated_inherited_method_calls() -> usize {
     assert_eq!(count, 3_000);
     count
 }
+
+/// Repeated calls through one unresolved parameter should share a live
+/// Unknown hover without repeating the same backend round trip.
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn repeated_unknown_receiver_calls() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create unknown receiver fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"unknown-receiver-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write config");
+            let source = format!(
+                "def caller(receiver):\n{}",
+                "    receiver.method(1)\n".repeat(1_000)
+            );
+            std::fs::write(temp.path().join("app.py"), source).expect("write unknown calls");
+            temp
+        })
+        .path();
+    let count = check(root);
+    assert_eq!(count, 0);
+    count
+}

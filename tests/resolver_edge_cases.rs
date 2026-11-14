@@ -11268,3 +11268,30 @@ OrderedDict({"x": target}).get(key="x")(1)
         "invalid keyword call resolved a concrete value: {messages:?}"
     );
 }
+
+/// An earlier Unknown hover must not hide a callable selected by a later
+/// discriminant-based narrowing of the same receiver binding.
+#[test]
+fn unknown_hover_does_not_hide_later_discriminant_narrowing() {
+    let messages = check_source(
+        "from typing import Literal\n\nclass Unknown:\n    kind: Literal['unknown']\n\nclass Known:\n    kind: Literal['known']\n    def method(self, value): ...\n\ndef caller(receiver: Unknown | Known):\n    if receiver.kind == 'unknown':\n        receiver.method(1)\n    if receiver.kind == 'known':\n        receiver.method(2)\n",
+    );
+    assert!(
+        has_error_at(&messages, 14, "Too many positional"),
+        "{messages:?}"
+    );
+}
+
+/// A platform-unreachable member must not seed an Unknown answer that hides
+/// the live sibling in the same hover group.
+#[test]
+fn unknown_hover_reuse_keeps_platform_live_calls() {
+    let messages = check_source(
+        "import sys\nimport unittest\nBase = unittest.TestCase\nclass T(Base):\n    def m(self):\n        if sys.platform == 'win32':\n            self.assertEqual(1, 2)\n        else:\n            self.assertEqual(3, 4)\n",
+    );
+    let live_line = if cfg!(windows) { 7 } else { 9 };
+    assert!(
+        has_error_at(&messages, live_line, "Too many positional"),
+        "{messages:?}"
+    );
+}
