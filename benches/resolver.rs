@@ -1107,3 +1107,32 @@ fn fix_distinct_method_calls() -> usize {
     assert_eq!(outcome.files[0].count, 1_000);
     outcome.files[0].count
 }
+
+/// Repeated inherited calls should reuse one stable method-owner lookup.
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn repeated_inherited_method_calls() -> usize {
+    static PROJECT: OnceLock<TempDir> = OnceLock::new();
+    let root = PROJECT
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().expect("create inherited-call fixture");
+            std::fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"inherited-call-fixture\"\nversion = \"0\"\n",
+            )
+            .expect("write project config");
+            let mut source = String::from("class Base:\n    def method(self, value): ...\n");
+            let mut base = String::from("Base");
+            for i in 0..20 {
+                writeln!(source, "class Child{i}({base}): pass").expect("format child");
+                base = format!("Child{i}");
+            }
+            writeln!(source, "instance = {base}()").expect("format instance");
+            source.push_str(&"instance.method(1)\n".repeat(3_000));
+            std::fs::write(temp.path().join("app.py"), source).expect("write inherited calls");
+            temp
+        })
+        .path();
+    let count = check(root);
+    assert_eq!(count, 3_000);
+    count
+}

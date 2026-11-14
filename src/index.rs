@@ -637,6 +637,12 @@ struct ClassQueryCache {
     snapshot: Option<ClassQuerySnapshot>,
     overrides: FxHashMap<String, FxHashMap<String, bool>>,
     matching_overrides: FxHashMap<String, FxHashMap<String, bool>>,
+    resolved_methods: FxHashMap<String, FxHashMap<String, Option<String>>>,
+    /// Exclusions can grow without removing a signature (an inherited or
+    /// re-exported method has none under its lookup name). Such changes must
+    /// also invalidate method resolutions. Removals happen during indexing,
+    /// which already changes `generation` and clears the cache.
+    resolved_method_exclusions: usize,
 }
 
 impl ClassQueryCache {
@@ -645,6 +651,7 @@ impl ClassQueryCache {
         self.snapshot = None;
         self.overrides.clear();
         self.matching_overrides.clear();
+        self.resolved_methods.clear();
     }
 }
 
@@ -1242,8 +1249,55 @@ impl DefinitionIndex {
     /// handles only bases the index has already resolved to concrete first
     /// party / typeshed / discovered package classes.
     pub fn resolve_method(&self, class_fullname: &str, method: &str) -> Option<String> {
+        let (generation, exclusions) = {
+            let inner = self.read();
+            let cache = &inner.class_queries;
+            if cache.resolved_method_exclusions == inner.store.excluded.len() {
+                if let Some(result) = cache
+                    .resolved_methods
+                    .get(class_fullname)
+                    .and_then(|methods| methods.get(method))
+                {
+                    return result.clone();
+                }
+            }
+            (cache.generation, inner.store.excluded.len())
+        };
         let mut visited = FxHashSet::default();
-        self.resolve_method_inner(class_fullname, method, &mut visited)
+        let result = self.resolve_method_inner(class_fullname, method, &mut visited);
+        self.cache_method_resolution(
+            generation,
+            exclusions,
+            class_fullname,
+            method,
+            result.as_deref(),
+        );
+        result
+    }
+
+    fn cache_method_resolution(
+        &self,
+        generation: u64,
+        exclusions: usize,
+        class_fullname: &str,
+        method: &str,
+        result: Option<&str>,
+    ) {
+        let mut inner = self.write();
+        if inner.class_queries.generation == generation && inner.store.excluded.len() == exclusions
+        {
+            let cache = &mut inner.class_queries;
+            if cache.resolved_method_exclusions != exclusions {
+                cache.resolved_methods.clear();
+                cache.resolved_method_exclusions = exclusions;
+            }
+            cache
+                .resolved_methods
+                .entry(class_fullname.to_string())
+                .or_default()
+                .insert(method.to_string(), result.map(str::to_string));
+        }
+        drop(inner);
     }
 
     /// Whether `class_fullname` inherits from `base_fullname` through the
@@ -4926,6 +4980,79 @@ mod tests {
         assert!(index.class_inherits_from("pkg.Child", "pkg.Base"));
         assert!(index.class_inherits_from("pkg.GrandChild", "pkg.Base"));
         assert_eq!(arity(&index, "pkg.Base.m"), Some(2));
+    }
+
+    #[test]
+    fn method_resolution_cache_refreshes_after_graph_and_exclusion_changes() {
+        let mut index = index_source_of(
+            "class Base:\n    def m(self, value): ...\nclass Other:\n    def m(self, renamed): ...\nclass Child(Base): pass\n",
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                index.resolve_method("main.Child", "m").as_deref(),
+                Some("main.Base.m")
+            );
+            assert!(index.resolve_method("main.Child", "missing").is_none());
+        }
+        let snapshot = {
+            let inner = index.read();
+            (inner.class_queries.generation, inner.store.excluded.len())
+        };
+        index.insert_class_bases("main.Child".into(), vec!["main.Other".into()]);
+        index.cache_method_resolution(
+            snapshot.0,
+            snapshot.1,
+            "main.Child",
+            "m",
+            Some("main.Base.m"),
+        );
+        assert_eq!(
+            index.resolve_method("main.Child", "m").as_deref(),
+            Some("main.Other.m")
+        );
+        index.exclude_rebinding("main.Child.m");
+        assert!(index.resolve_method("main.Child", "m").is_none());
+        assert!(index.resolve_method("main.Child", "added").is_none());
+        let parsed =
+            parse_module("class Later:\n    def added(self, value): ...\n").expect("parse method");
+        index.index_source("extra", false, parsed.suite());
+        index.insert_class_bases("main.Child".into(), vec!["extra.Later".into()]);
+        assert_eq!(
+            index.resolve_method("main.Child", "added").as_deref(),
+            Some("extra.Later.added")
+        );
+    }
+
+    #[test]
+    fn cached_reexported_method_is_invalidated_without_a_local_signature() {
+        let mut index = with_edges(index_of(&[("source.m", 2)]), &[("source.m", "pkg.Child.m")]);
+        index.insert_class_for_test("pkg.Child");
+        assert_eq!(
+            index.resolve_method("pkg.Child", "m").as_deref(),
+            Some("pkg.Child.m")
+        );
+        let generation = index.read().class_queries.generation;
+        let exclusions = index.read().store.excluded.len();
+        index.exclude_rebinding("pkg.Child.m");
+        assert_eq!(index.read().class_queries.generation, generation);
+        assert!(index.resolve_method("pkg.Child", "m").is_none());
+        index.cache_method_resolution(
+            generation,
+            exclusions,
+            "pkg.Child",
+            "m",
+            Some("pkg.Child.m"),
+        );
+        assert_eq!(
+            index
+                .read()
+                .class_queries
+                .resolved_methods
+                .get("pkg.Child")
+                .and_then(|methods| methods.get("m")),
+            Some(&None)
+        );
+        assert!(index.resolve_method("pkg.Child", "m").is_none());
     }
 
     #[test]
