@@ -51,6 +51,10 @@ const MAX_QUERY_STEPS: usize = 1500;
 enum ModuleState {
     Indexing,
     Indexed,
+    /// A regular module whose possible namespace directories are unchecked.
+    IndexedFile,
+    /// A regular module with no directory in any resolver search root.
+    IndexedLeaf,
 }
 
 /// The real definitions discovered so far: fully-qualified name -> one or
@@ -774,15 +778,27 @@ impl IndexedFile {
     }
 }
 
+/// A completed module state or ownership of its outstanding indexing work.
+enum ModuleLookup<'a> {
+    Ready(ModuleState),
+    Claimed(ModuleIndexClaim<'a>),
+}
+
 struct ModuleIndexClaim<'a> {
     index: &'a DefinitionIndex,
     dotted: String,
     /// Whether dropping the claim should record the module as indexed.
     /// Cleared by [`ModuleIndexClaim::abandon`].
     mark_indexed: bool,
+    is_file: bool,
 }
 
 impl ModuleIndexClaim<'_> {
+    /// Retain the resolved module kind when the claim completes.
+    const fn set_module_kind(&mut self, is_package: bool) {
+        self.is_file = !is_package;
+    }
+
     /// Give the claim up without recording the module as indexed, so a
     /// later query can still index it.
     ///
@@ -803,9 +819,14 @@ impl Drop for ModuleIndexClaim<'_> {
         if !self.mark_indexed {
             return;
         }
-        self.index
-            .write_modules()
-            .insert(self.dotted.clone(), ModuleState::Indexed);
+        self.index.write_modules().insert(
+            self.dotted.clone(),
+            if self.is_file {
+                ModuleState::IndexedFile
+            } else {
+                ModuleState::Indexed
+            },
+        );
     }
 }
 
@@ -857,23 +878,38 @@ impl DefinitionIndex {
     }
 
     /// Claim `dotted` for indexing, coordinating with other parallel workers.
-    /// Returns `None` if it is already fully `Indexed` (nothing to do), or a
-    /// claim whose [`Drop`] marks it `Indexed` once this worker finishes. If
+    /// Returns `None` if indexing is complete, or a claim whose [`Drop`]
+    /// records completion and the resolved module kind. If
     /// another worker currently holds an in-progress claim, this spins
     /// (yielding) until that claim resolves — module parsing is brief and
     /// lock-free, so the wait is short and only happens on a genuine race for
     /// the same not-yet-loaded module.
     fn claim_module(&self, dotted: &str) -> Option<ModuleIndexClaim<'_>> {
+        match self.lookup_module(dotted) {
+            ModuleLookup::Ready(_) => None,
+            ModuleLookup::Claimed(claim) => Some(claim),
+        }
+    }
+
+    fn lookup_module(&self, dotted: &str) -> ModuleLookup<'_> {
         // Fast path: a concurrent read confirms an already-indexed module, so
         // the common case (every re-query of a loaded module) never contends
         // on the write lock.
-        if matches!(self.read_modules().get(dotted), Some(ModuleState::Indexed)) {
-            return None;
+        let state = self.read_modules().get(dotted).copied();
+        if let Some(
+            state @ (ModuleState::Indexed | ModuleState::IndexedFile | ModuleState::IndexedLeaf),
+        ) = state
+        {
+            return ModuleLookup::Ready(state);
         }
         loop {
             let mut modules = self.write_modules();
             match modules.get(dotted).copied() {
-                Some(ModuleState::Indexed) => return None,
+                Some(
+                    state @ (ModuleState::Indexed
+                    | ModuleState::IndexedFile
+                    | ModuleState::IndexedLeaf),
+                ) => return ModuleLookup::Ready(state),
                 Some(ModuleState::Indexing) => {
                     // Another worker is mid-index; release the lock and retry.
                     drop(modules);
@@ -882,10 +918,11 @@ impl DefinitionIndex {
                 None => {
                     modules.insert(dotted.to_string(), ModuleState::Indexing);
                     drop(modules);
-                    return Some(ModuleIndexClaim {
+                    return ModuleLookup::Claimed(ModuleIndexClaim {
                         index: self,
                         dotted: dotted.to_string(),
                         mark_indexed: true,
+                        is_file: false,
                     });
                 }
             }
@@ -1066,16 +1103,18 @@ impl DefinitionIndex {
     // Same rationale as the other documented exclusions (`index_source`'s
     // callees, `synthesize_data_constructor`).
     #[cfg_attr(coverage, coverage(off))]
-    fn ensure_module(&self, dotted: &str, query_budget: &mut usize) {
-        let Some(claim) = self.claim_module(dotted) else {
-            return;
+    fn ensure_module(&self, dotted: &str, query_budget: &mut usize) -> bool {
+        let mut claim = match self.lookup_module(dotted) {
+            ModuleLookup::Ready(state) => return self.module_is_leaf(dotted, state),
+            ModuleLookup::Claimed(claim) => claim,
         };
         let Some(resolver) = self.resolver.as_ref() else {
-            return;
+            return false;
         };
         let Some(m) = resolver.resolve(dotted) else {
-            return;
+            return false;
         };
+        claim.set_module_kind(m.is_package);
         // A real module was found; parsing it is the expensive step. Bound it
         // both per query and globally (cheap non-resolving candidate names —
         // the bulk of a star-import fan-out — never reach here).
@@ -1084,12 +1123,12 @@ impl DefinitionIndex {
             // answer: a later query receives a fresh module budget.
             self.write().class_queries.invalidate();
             claim.abandon();
-            return;
+            return false;
         }
         {
             let mut inner = self.write();
             if inner.budget == 0 {
-                return;
+                return false;
             }
             inner.budget -= 1;
         }
@@ -1106,7 +1145,7 @@ impl DefinitionIndex {
             parse_module(&m.source).map_err(CheckError::from)
         };
         let Ok(parsed) = parsed else {
-            return;
+            return false;
         };
         self.index_source_with_imported_base_preload(
             dotted,
@@ -1114,7 +1153,13 @@ impl DefinitionIndex {
             parsed.suite(),
             m.guard_nesting,
         );
+        let state = if claim.is_file {
+            ModuleState::IndexedFile
+        } else {
+            ModuleState::Indexed
+        };
         drop(claim);
+        self.module_is_leaf(dotted, state)
     }
 
     #[cfg_attr(coverage, coverage(off))]
@@ -1123,30 +1168,32 @@ impl DefinitionIndex {
         dotted: &str,
         query_budget: &mut usize,
         active_modules: &mut FxHashSet<String>,
-    ) {
+    ) -> bool {
         if active_modules.contains(dotted) {
-            return;
+            return false;
         }
-        let Some(claim) = self.claim_module(dotted) else {
-            return;
+        let mut claim = match self.lookup_module(dotted) {
+            ModuleLookup::Ready(state) => return self.module_is_leaf(dotted, state),
+            ModuleLookup::Claimed(claim) => claim,
         };
         let Some(resolver) = self.resolver.as_ref() else {
-            return;
+            return false;
         };
         let Some(m) = resolver.resolve(dotted) else {
-            return;
+            return false;
         };
+        claim.set_module_kind(m.is_package);
         if *query_budget == 0 {
             // An incomplete ancestry walk must not cache a negative override
             // answer: a later query receives a fresh module budget.
             self.write().class_queries.invalidate();
             claim.abandon();
-            return;
+            return false;
         }
         {
             let mut inner = self.write();
             if inner.budget == 0 {
-                return;
+                return false;
             }
             inner.budget -= 1;
         }
@@ -1157,7 +1204,7 @@ impl DefinitionIndex {
             parse_module(&m.source).map_err(CheckError::from)
         };
         let Ok(parsed) = parsed else {
-            return;
+            return false;
         };
         active_modules.insert(dotted.to_string());
         self.index_source_with_active(
@@ -1168,18 +1215,50 @@ impl DefinitionIndex {
             active_modules,
         );
         active_modules.remove(dotted);
+        let state = if claim.is_file {
+            ModuleState::IndexedFile
+        } else {
+            ModuleState::Indexed
+        };
         drop(claim);
+        self.module_is_leaf(dotted, state)
     }
 
-    /// Ensure every dotted prefix of `name` (parents first) and `name` itself
-    /// is resolved, so the module that *defines* `name` and every package
-    /// `__init__` whose re-exports *route* to it are indexed. Misses are
-    /// memoized, so a non-module prefix (the symbol itself) costs O(1).
+    /// Confirm a known regular module cannot supply any dotted descendants.
+    /// Missing modules remain open to namespace children. Directory evidence
+    /// is checked once and conservatively retained when a root is unreadable.
+    fn module_is_leaf(&self, name: &str, state: ModuleState) -> bool {
+        match state {
+            ModuleState::IndexedLeaf => return true,
+            ModuleState::IndexedFile => {}
+            _ => return false,
+        }
+        let leaf = self
+            .resolver
+            .as_ref()
+            .is_some_and(|resolver| !resolver.may_have_submodules(name));
+        self.write_modules().insert(
+            name.to_string(),
+            if leaf {
+                ModuleState::IndexedLeaf
+            } else {
+                ModuleState::Indexed
+            },
+        );
+        leaf
+    }
+
+    /// Resolve package prefixes and the defining module, parents first.
+    /// A regular module with no overlapping namespace directory terminates
+    /// the search: its remaining components name members, not submodules.
+    /// Re-export routing still resolves its source modules independently.
     fn ensure_for(&self, name: &str, query_budget: &mut usize) {
         let mut idx = 0;
         while let Some(rel) = name[idx..].find('.') {
             let end = idx + rel;
-            self.ensure_module(&name[..end], query_budget);
+            if self.ensure_module(&name[..end], query_budget) {
+                return;
+            }
             idx = end + 1;
         }
         self.ensure_module(name, query_budget);
@@ -1218,7 +1297,10 @@ impl DefinitionIndex {
         let mut idx = 0;
         while let Some(rel) = name[idx..].find('.') {
             let end = idx + rel;
-            self.ensure_module_data_constructor_base(&name[..end], query_budget, active_modules);
+            if self.ensure_module_data_constructor_base(&name[..end], query_budget, active_modules)
+            {
+                return;
+            }
             idx = end + 1;
         }
         self.ensure_module_data_constructor_base(name, query_budget, active_modules);
@@ -2034,9 +2116,10 @@ pub fn build_index_with_sources(
             continue;
         };
         let module_name = module_name_for_path(source_roots, path);
-        let Some(claim) = index.claim_first_party_module(&module_name) else {
+        let Some(mut claim) = index.claim_first_party_module(&module_name) else {
             continue;
         };
+        claim.set_module_kind(is_package_init(path));
         index.mark_first_party_module(&module_name);
         index.index_source(&module_name, is_package_init(path), parsed.suite());
         drop(claim);
@@ -4822,7 +4905,7 @@ mod tests {
         index.ensure_module("lib", &mut refilled);
         assert_eq!(
             index.read_modules().get("lib").copied(),
-            Some(ModuleState::Indexed),
+            Some(ModuleState::IndexedLeaf),
             "a later query with its own budget must index it"
         );
         assert!(index.get("lib.target").is_some());
@@ -5003,6 +5086,100 @@ mod tests {
         assert_eq!(arity(&index, "a.f"), Some(4));
         // A name reachable only through the pure cycle terminates as `None`.
         assert!(index.get("b.missing").is_none());
+    }
+
+    #[test]
+    fn regular_module_members_do_not_probe_descendant_modules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("plain.py"),
+            "class Worker:\n    def method(self, value): ...\n",
+        )
+        .expect("write module");
+        let roots = SourceRoots::from_config(dir.path(), &crate::config::Config::default());
+        let index = DefinitionIndex::new(
+            ModuleResolver::new(dir.path(), &roots, None),
+            PythonVersion::default(),
+        );
+        assert_eq!(arity(&index, "plain.Worker.method"), Some(2));
+        assert!(index.get("plain.missing").is_none());
+        assert_eq!(
+            index.read_modules().get("plain"),
+            Some(&ModuleState::IndexedLeaf)
+        );
+        assert!(!index.read_modules().contains_key("plain.Worker"));
+        assert!(!index.read_modules().contains_key("plain.missing"));
+        // A complete leaf still satisfies ordinary module-claim lookups.
+        assert!(index.claim_module("plain").is_none());
+    }
+
+    #[test]
+    fn regular_module_prefixes_keep_namespace_children_across_search_roots() {
+        for different_root in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file_root = if different_root {
+                dir.path().join("src")
+            } else {
+                dir.path().to_path_buf()
+            };
+            std::fs::create_dir_all(&file_root).expect("mkdir source root");
+            std::fs::write(file_root.join("mixed.py"), "def local(value): ...\n")
+                .expect("write module");
+            std::fs::create_dir(dir.path().join("mixed")).expect("mkdir namespace");
+            std::fs::write(
+                dir.path().join("mixed/child.py"),
+                "def function(value): ...\n",
+            )
+            .expect("write namespace child");
+            let config = crate::config::Config {
+                src: if different_root {
+                    vec![std::path::PathBuf::from("src")]
+                } else {
+                    Vec::new()
+                },
+                ..crate::config::Config::default()
+            };
+            let roots = SourceRoots::from_config(dir.path(), &config);
+            let index = DefinitionIndex::new(
+                ModuleResolver::new(dir.path(), &roots, None),
+                PythonVersion::default(),
+            );
+            assert_eq!(arity(&index, "mixed.child.function"), Some(1));
+            assert_eq!(
+                index.read_modules().get("mixed"),
+                Some(&ModuleState::Indexed)
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_module_prefix_keeps_namespace_children_reachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("namespace")).expect("mkdir namespace");
+        std::fs::write(
+            dir.path().join("namespace/child.py"),
+            "def function(value): ...\n",
+        )
+        .expect("write namespace child");
+        let roots = SourceRoots::from_config(dir.path(), &crate::config::Config::default());
+        let index = DefinitionIndex::new(
+            ModuleResolver::new(dir.path(), &roots, None),
+            PythonVersion::default(),
+        );
+        assert_eq!(arity(&index, "namespace.child.function"), Some(1));
+    }
+
+    #[test]
+    fn a_file_without_resolver_evidence_is_not_a_leaf() {
+        let index = DefinitionIndex::for_test();
+        index
+            .write_modules()
+            .insert("plain".into(), ModuleState::IndexedFile);
+        assert!(!index.module_is_leaf("plain", ModuleState::IndexedFile));
+        assert_eq!(
+            index.read_modules().get("plain"),
+            Some(&ModuleState::Indexed)
+        );
     }
 
     #[test]

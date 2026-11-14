@@ -179,10 +179,10 @@ where
 /// stack issue #54 needs must cover the *worker* threads too, not only the
 /// main analysis thread [`run_with_large_stack`] provides — rayon's default
 /// worker stack is far smaller and a legitimately-accepted ~[`MAX_NESTING_DEPTH`]
-/// file would overflow it. Reuse one process-wide pool across indexing,
-/// exclusion discovery, and checking instead of creating and joining a new
-/// set of workers for each phase. `f` typically drives a `par_iter` whose
-/// closures then execute on these deep-stacked workers.
+/// file would overflow it. Reuse this pool for independent parsing work;
+/// shared-index analysis uses [`with_large_stack_resolver_pool`] to bound
+/// contention separately. `f` typically drives a `par_iter` whose closures
+/// then execute on these deep-stacked workers.
 ///
 /// Excluded from the coverage gate for the same reason as
 /// [`run_with_large_stack`]: every integration test that runs a check/fix
@@ -200,14 +200,58 @@ where
     T: Send,
 {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    let pool = if let Some(pool) = POOL.get() {
+    with_pool(&POOL, None, f)
+}
+
+/// Run shared-index analysis on at most four deep-stack workers.
+/// On 64-bit targets parsing retains its own pool, while resolver workers
+/// share one index. On 32-bit targets both phases retain the same pool to
+/// avoid reserving an additional set of large stacks. Explicit
+/// `RAYON_NUM_THREADS` settings retain their existing effect.
+///
+/// # Errors
+/// Returns the analysis error or a worker-pool construction error.
+#[cfg_attr(coverage, coverage(off))]
+pub fn with_large_stack_resolver_pool<T, F>(f: F) -> Result<T, CheckError>
+where
+    F: FnOnce() -> Result<T, CheckError> + Send,
+    T: Send,
+{
+    #[cfg(target_pointer_width = "32")]
+    {
+        with_large_stack_pool(f)
+    }
+    #[cfg(not(target_pointer_width = "32"))]
+    {
+        static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+        with_pool(&POOL, Some(4), f)
+    }
+}
+
+// Thread construction and its failure paths are environment-dependent, like
+// the public wrappers. Integration checks exercise the successful paths.
+#[cfg_attr(coverage, coverage(off))]
+fn with_pool<T, F>(
+    pool: &OnceLock<rayon::ThreadPool>,
+    limit: Option<usize>,
+    f: F,
+) -> Result<T, CheckError>
+where
+    F: FnOnce() -> Result<T, CheckError> + Send,
+    T: Send,
+{
+    let pool = if let Some(pool) = pool.get() {
         pool
     } else {
-        let pool = ThreadPoolBuilder::new()
-            .stack_size(STACK_SIZE)
+        let mut builder = ThreadPoolBuilder::new().stack_size(STACK_SIZE);
+        if let Some(limit) = limit.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
+            let available = std::thread::available_parallelism().map_or(1, usize::from);
+            builder = builder.num_threads(available.min(limit));
+        }
+        let candidate = builder
             .build()
             .map_err(|e| CheckError::Io(std::io::Error::other(e.to_string())))?;
-        POOL.get_or_init(|| pool)
+        pool.get_or_init(|| candidate)
     };
     pool.install(f)
 }

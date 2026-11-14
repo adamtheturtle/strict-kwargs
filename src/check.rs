@@ -30,7 +30,7 @@ use crate::index::{
     is_package_init, module_name_for_path, relative_base, taken_elif_else_after_false,
     DefinitionIndex, IndexedFile, PythonVersion, TakenElifElse,
 };
-use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_pool};
+use crate::limits::{parse_module_guarded, run_with_large_stack, with_large_stack_resolver_pool};
 use crate::noqa::NoqaDirectives;
 use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
@@ -808,7 +808,7 @@ fn check_paths_impl(
 /// The file under check is parsed through [`parse_module_guarded`], so one
 /// nested deeper than the supported limit is rejected
 /// ([`CheckError::TooDeeplyNested`]) instead of overflowing the stack; this
-/// runs on a [`with_large_stack_pool`] worker, so legitimately-accepted deep
+/// runs on a [`with_large_stack_resolver_pool`] worker, so legitimately-accepted deep
 /// nesting has the same large stack the serial path gets (issue #54 + #46).
 #[allow(clippy::too_many_arguments)]
 fn scan_file(
@@ -1072,7 +1072,7 @@ fn stream_scan_files(
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     tx: std::sync::mpsc::Sender<(usize, PathBuf, Result<ScanOutcome, CheckError>)>,
 ) -> Result<(), CheckError> {
-    with_large_stack_pool(move || {
+    with_large_stack_resolver_pool(move || {
         python_files
             .par_iter()
             .enumerate()
@@ -1119,7 +1119,7 @@ fn discover_rebinding_exclusions(
 ) {
     // A failure here is not reported: the real scan re-reads the same file and
     // surfaces the error with its proper context.
-    let _ = with_large_stack_pool(|| {
+    let _ = with_large_stack_resolver_pool(|| {
         python_files.par_iter().for_each(|path| {
             let _ = scan_file(
                 source_roots,
@@ -1151,7 +1151,7 @@ fn scan_files_for_fix(
     indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     fix_opt_ins: FixOptIns,
 ) -> Result<Vec<(PathBuf, ScanOutcome)>, CheckError> {
-    with_large_stack_pool(|| {
+    with_large_stack_resolver_pool(|| {
         python_files
             .par_iter()
             .map(|path| {

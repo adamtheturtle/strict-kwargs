@@ -37,6 +37,14 @@ static TYPESHED_STDLIB_FILES: LazyLock<
     files
 });
 
+/// Embedded directories, including namespace directories without `__init__`.
+static TYPESHED_STDLIB_DIRS: LazyLock<FxHashSet<&'static Path>> = LazyLock::new(|| {
+    TYPESHED_STDLIB_FILES
+        .keys()
+        .flat_map(|&path| path.ancestors().skip(1))
+        .collect()
+});
+
 pub struct ModuleResolver {
     /// First-party search roots (the project itself).
     first_party: Vec<PathBuf>,
@@ -62,6 +70,29 @@ impl ModuleResolver {
                 discover_site_packages_in_environment,
             ),
         }
+    }
+
+    /// Whether any search root contains a directory for this module name.
+    /// A regular module can terminate prefix searches only when no overlapping
+    /// package or namespace directory could supply a longer dotted module.
+    pub fn may_have_submodules(&self, dotted: &str) -> bool {
+        let rel = dotted.replace('.', "/");
+        if TYPESHED_STDLIB_DIRS.contains(Path::new(&rel))
+            || self
+                .first_party
+                .iter()
+                .any(|root| may_be_directory(&root.join(&rel)))
+        {
+            return true;
+        }
+        let top = dotted.split('.').next().unwrap_or(dotted);
+        let stub_rel = match dotted.split_once('.') {
+            Some((_, rest)) => format!("{top}-stubs/{}", rest.replace('.', "/")),
+            None => format!("{top}-stubs"),
+        };
+        self.site_packages.iter().any(|root| {
+            may_be_directory(&root.join(&rel)) || may_be_directory(&root.join(&stub_rel))
+        })
     }
 
     /// Resolve a dotted module name (e.g. ``os.path``) to its source.
@@ -132,6 +163,19 @@ impl ModuleResolver {
         }
 
         None
+    }
+}
+
+// Metadata errors other than a definite absence keep ordinary resolution
+// available. Permission and filesystem failures cannot prove a module leaf.
+#[cfg_attr(coverage, coverage(off))]
+fn may_be_directory(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
     }
 }
 
@@ -519,6 +563,29 @@ mod tests {
             .expect("module under namespace")
             .source
             .contains("def run"));
+    }
+
+    #[test]
+    fn module_leaf_evidence_includes_namespace_and_stub_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("plain.py"), "").expect("write module");
+        std::fs::create_dir(dir.path().join("namespace")).expect("mkdir namespace");
+        let environment = dir.path().join("env");
+        let site = environment.join("lib/python3.12/site-packages");
+        std::fs::create_dir_all(site.join("vendor-stubs")).expect("mkdir stub package");
+        std::fs::create_dir(site.join("inline")).expect("mkdir inline package");
+        std::fs::write(site.join("vendor.pyi"), "value: int").expect("write inline module");
+        std::fs::write(site.join("vendor-stubs/child.pyi"), "value: int")
+            .expect("write child stub");
+        let roots = SourceRoots::from_config(dir.path(), &crate::config::Config::default());
+        let resolver = ModuleResolver::new(dir.path(), &roots, Some(&environment));
+        assert!(!resolver.may_have_submodules("plain"));
+        assert!(!resolver.may_have_submodules("absent"));
+        assert!(resolver.may_have_submodules("namespace"));
+        assert!(resolver.may_have_submodules("xml.etree"));
+        assert!(resolver.may_have_submodules("vendor"));
+        assert!(resolver.may_have_submodules("inline"));
+        assert!(resolver.resolve("vendor.child").is_some());
     }
 
     #[test]
