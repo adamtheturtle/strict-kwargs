@@ -1474,6 +1474,9 @@ struct PendingTy {
     call_start: usize,
     positional_count: usize,
     rewrite_args_are_statically_precise: bool,
+    /// Unknown callee types can be shared only when other attribute reads
+    /// cannot narrow this receiver between grouped calls.
+    unknown_hover_is_stable: bool,
     /// Indexed constructor signature used to normalize ty's unstable
     /// ``object.__class__`` answer for a dynamic ``instance.__class__`` call.
     /// The ty query still runs so later responses keep the same request stream.
@@ -3667,6 +3670,7 @@ impl<'a> CallChecker<'a> {
             call_start: call.start().to_usize(),
             positional_count: positional_argument_count(&call.arguments),
             rewrite_args_are_statically_precise,
+            unknown_hover_is_stable: false,
             fallback_fullname,
         })
     }
@@ -4177,6 +4181,25 @@ impl<'a> CallChecker<'a> {
                 .collect()
         };
         let balancing_hover_requests = estimated_hover_requests(groups.len(), &balancing_groups);
+        // Discriminant tests such as `receiver.kind == "known"` can change
+        // an Unknown attribute into a concrete callable. Existing grouping
+        // only poisons `kind`, so require no other attribute reads before
+        // reusing Unknown. Keep the established shard weights unchanged.
+        let attribute_read_contexts: FxHashSet<u32> = self
+            .poisoned_hover_keys
+            .iter()
+            .map(|(ctx, _)| *ctx)
+            .collect();
+        let unknown_safe_groups: FxHashSet<u32> = self
+            .hover_groups
+            .iter()
+            .filter(|(key, _)| !attribute_read_contexts.contains(&key.ctx))
+            .map(|(_, &group)| group)
+            .collect();
+        for (pending, group) in self.ty_pending.iter_mut().zip(&groups) {
+            pending.unknown_hover_is_stable =
+                group.is_some_and(|group| unknown_safe_groups.contains(&group));
+        }
         (groups, balancing_hover_requests)
     }
 
@@ -15135,7 +15158,9 @@ fn resolve_pending_with_ty(
                 .as_deref()
                 .or_else(|| response.as_ref().and_then(hover_text));
             if cached.is_none() {
-                // Only a usable callable signature is group-consistent. ty
+                // A usable callable signature is group-consistent. Exact
+                // Unknown answers can also be shared when there are no other
+                // attribute reads that could narrow this receiver. ty
                 // answers a member sitting in code it deems unreachable — e.g.
                 // a `sys.platform`-guarded branch live on one OS but dead on
                 // another — with the bottom type (`Never`, or no hover at all)
@@ -15146,7 +15171,9 @@ fn resolve_pending_with_ty(
                 // member that yields a real signature re-seeds the shared
                 // answer for the rest.
                 if let (Some(g), Some(raw)) = (group, raw) {
-                    if parse_hover_signature(raw).is_some() {
+                    if parse_hover_signature(raw).is_some()
+                        || (p.unknown_hover_is_stable && raw.trim() == "Unknown")
+                    {
                         group_hover.insert(g, Arc::from(raw));
                     }
                 }
@@ -15471,6 +15498,7 @@ mod tests {
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: false,
+                    unknown_hover_is_stable: false,
                     fallback_fullname: None,
                 })
                 .collect(),
@@ -16199,6 +16227,7 @@ class C:
             call_start: 0,
             positional_count: 1,
             rewrite_args_are_statically_precise: true,
+            unknown_hover_is_stable: false,
             fallback_fullname: None,
         };
         let named = sig(&["a"]);
@@ -16642,6 +16671,13 @@ while cond:
     }
 
     fn pending_hover_groups_and_balance(source: &str) -> (Vec<Option<u32>>, usize) {
+        let (groups, balance, _) = pending_hover_groups_and_unknown_safety(source);
+        (groups, balance)
+    }
+
+    fn pending_hover_groups_and_unknown_safety(
+        source: &str,
+    ) -> (Vec<Option<u32>>, usize, Vec<bool>) {
         let index = DefinitionIndex::for_test();
         let config = Config::default();
         let parsed = parse_module(source).expect("parse source");
@@ -16660,7 +16696,27 @@ while cond:
         for stmt in parsed.suite() {
             checker.visit_stmt(stmt);
         }
-        checker.take_pending_hover_groups()
+        let (groups, balance) = checker.take_pending_hover_groups();
+        let safety = checker
+            .ty_pending
+            .iter()
+            .map(|pending| pending.unknown_hover_is_stable)
+            .collect();
+        (groups, balance, safety)
+    }
+
+    #[test]
+    fn unknown_hover_reuse_requires_no_other_receiver_attribute_reads() {
+        let cases = [
+            ("def f(receiver):\n    receiver.method(1)\n    receiver.method(2)\n", vec![true, true]),
+            ("def f(receiver):\n    receiver.method(1)\n    if receiver.kind == 'known':\n        receiver.method(2)\n", vec![false, false]),
+            ("def f(receiver):\n    receiver.method(1)\n    receiver.other\n    receiver.method(2)\n", vec![false, false]),
+            ("def f(receiver):\n    receiver.method(1)\n    receiver = replacement\n    receiver.method(2)\n", vec![false, false]),
+        ];
+        for (source, expected) in cases {
+            let (_, _, safety) = pending_hover_groups_and_unknown_safety(source);
+            assert_eq!(safety, expected, "{source}");
+        }
     }
 
     #[test]
@@ -17655,6 +17711,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    unknown_hover_is_stable: false,
                     fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
@@ -17753,6 +17810,7 @@ registry['k'](1, 2)
                     call_start: 0,
                     positional_count: 1,
                     rewrite_args_are_statically_precise: true,
+                    unknown_hover_is_stable: false,
                     fallback_fullname: None,
                 }],
                 pending_groups: vec![None],
