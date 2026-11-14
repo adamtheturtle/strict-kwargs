@@ -229,7 +229,7 @@ fn pipeline_phases(
     let mut released_pending_files = 0usize;
     let mut noqa_files: Vec<(PathBuf, FileNoqa)> = Vec::new();
 
-    let ty_session = TySession::new(project_root, python_env, all_project_files);
+    let ty_session = TySession::new(project_root, python_env);
     let request_aware_balancing = should_balance_grouped_ty(files_to_scan.len());
     let shard_results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
         // Phase 1 (parallel, background): the built-in pass over every

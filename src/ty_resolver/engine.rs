@@ -96,8 +96,7 @@ mod tests {
         let path = temp.path().join("app.py");
         let original = "def target(value): ...\ntarget(1)\n";
         std::fs::write(&path, original).expect("write source");
-        let session =
-            crate::ty_resolver::TySession::new(temp.path(), None, std::slice::from_ref(&path));
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
         let mut first = TyResolver::start(&session).expect("first worker");
         let mut second = TyResolver::start(&session).expect("second worker");
         let changed = "def target(value, extra): ...\ntarget(1)\n";
@@ -116,8 +115,7 @@ mod tests {
         let bytes = b"# coding: latin-1\ncaption = '\xe9'\ndef target(value): ...\ntarget(1)\n";
         std::fs::write(&path, bytes).expect("write Latin-1 source");
         let decoded = "# coding: latin-1\ncaption = '\u{e9}'\ndef target(value): ...\ntarget(1)\n";
-        let session =
-            crate::ty_resolver::TySession::new(temp.path(), None, std::slice::from_ref(&path));
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
         let mut resolver = TyResolver::start(&session).expect("worker");
         let result = hover(&mut resolver, &path, decoded, 3);
         assert!(result.contains("target"), "{result}");
@@ -133,12 +131,11 @@ mod tests {
         let source = "from library import target\ntarget(1)\n";
         std::fs::write(&path, source).expect("write caller");
         std::fs::write(&dependency, "def target(value): ...\n").expect("write dependency");
-        let files = [path.clone(), dependency.clone()];
-        let first_session = crate::ty_resolver::TySession::new(temp.path(), None, &files);
+        let first_session = crate::ty_resolver::TySession::new(temp.path(), None);
         let mut first = TyResolver::start(&first_session).expect("first run");
         assert!(!hover(&mut first, &path, source, 1).contains("extra"));
         std::fs::write(&dependency, "def target(value, extra): ...\n").expect("change dependency");
-        let second_session = crate::ty_resolver::TySession::new(temp.path(), None, &files);
+        let second_session = crate::ty_resolver::TySession::new(temp.path(), None);
         let mut second = TyResolver::start(&second_session).expect("second run");
         assert!(hover(&mut second, &path, source, 1).contains("extra"));
         assert!(!hover(&mut first, &path, source, 1).contains("extra"));
@@ -153,7 +150,7 @@ mod tests {
         let root = temp
             .path()
             .join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
-        let session = crate::ty_resolver::TySession::new(&root, None, &[]);
+        let session = crate::ty_resolver::TySession::new(&root, None);
         assert!(TyResolver::start(&session).is_none());
     }
 
@@ -163,8 +160,7 @@ mod tests {
         let path = temp.path().join("app.py");
         let source = "def target(value): ...\ntarget(1)\n";
         std::fs::write(&path, source).expect("write source");
-        let session =
-            crate::ty_resolver::TySession::new(temp.path(), None, std::slice::from_ref(&path));
+        let session = crate::ty_resolver::TySession::new(temp.path(), None);
         let mut resolver = TyResolver::start(&session).expect("worker");
         let missing = temp.path().join("missing.py");
         assert!(resolver.ensure_open(&missing, source).is_none());
