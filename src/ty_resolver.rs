@@ -32,13 +32,16 @@ pub struct TySession {
 }
 
 impl TySession {
+    #[cfg(feature = "embedded-ty")]
     pub fn new(root: &Path, python: Option<&Path>, files: &[PathBuf]) -> Self {
-        #[cfg(not(feature = "embedded-ty"))]
-        let _ = (root, python, files);
         Self {
-            #[cfg(feature = "embedded-ty")]
             engine: ty_backend::Session::new(root, python, files),
         }
+    }
+
+    #[cfg(not(feature = "embedded-ty"))]
+    pub const fn new(_root: &Path, _python: Option<&Path>, _files: &[PathBuf]) -> Self {
+        Self {}
     }
 }
 
