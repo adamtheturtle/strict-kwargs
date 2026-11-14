@@ -287,7 +287,7 @@ fn fix_paths_impl(
         })
         .sum::<usize>();
 
-    let ty_session = TySession::new(project_root, python_env, &python_files);
+    let ty_session = TySession::new(project_root, python_env);
     let mut resolved_files = if should_parallelize_fix_ty(deferred_calls) {
         // Match the checker's deterministic, load-balanced ty ownership. Each
         // worker sees only its files, while final results are restored to the

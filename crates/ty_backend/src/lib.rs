@@ -10,7 +10,7 @@ use ruff_source_file::{OneIndexed, PositionEncoding, SourceLocation};
 use ruff_text_size::TextSize;
 use ty_project::metadata::options::{EnvironmentOptions, Options};
 use ty_project::metadata::value::RelativePathBuf;
-use ty_project::{CheckMode, Db, ProjectDatabase, ProjectMetadata, SemanticDb};
+use ty_project::{CheckMode, ProjectDatabase, ProjectMetadata, SemanticDb};
 
 /// Include the dependency pin in cache keys automatically when it changes.
 pub const ENGINE_ID: &str = concat!("embedded ty\n", include_str!("../Cargo.toml"));
@@ -27,16 +27,14 @@ pub struct Session(Arc<SessionInner>);
 struct SessionInner {
     root: PathBuf,
     python: Option<PathBuf>,
-    files: Vec<PathBuf>,
     database: Mutex<Option<ProjectDatabase>>,
 }
 
 impl Session {
-    pub fn new(root: &Path, python: Option<&Path>, files: &[PathBuf]) -> Self {
+    pub fn new(root: &Path, python: Option<&Path>) -> Self {
         Self(Arc::new(SessionInner {
             root: root.to_path_buf(),
             python: python.map(Path::to_path_buf),
-            files: files.to_vec(),
             database: Mutex::new(None),
         }))
     }
@@ -45,16 +43,6 @@ impl Session {
         let mut database = self.0.database.lock().map_err(|e| e.to_string())?;
         if database.is_none() {
             let mut db = self.create_database()?;
-            let files = self
-                .0
-                .files
-                .iter()
-                .filter_map(|path| SystemPath::from_std_path(path))
-                .filter(|path| db.project().is_file_included(&db, path).is_included())
-                .filter_map(|path| system_path_to_file(&db, path).ok())
-                .collect();
-            db.project().set_open_files(&mut db, files);
-            db.set_check_mode(CheckMode::OpenFiles);
             db.freeze();
             *database = Some(db);
         }
@@ -92,8 +80,15 @@ impl Session {
         }
         // Match the language server's handling of invalid environment settings.
         let _ = metadata.apply_configuration_files(&system);
-        Ok(ProjectDatabase::fallible(metadata.clone(), system.clone())
-            .unwrap_or_else(|_| ProjectDatabase::use_defaults(metadata, system)))
+        let mut db = ProjectDatabase::fallible(metadata.clone(), system.clone())
+            .unwrap_or_else(|_| ProjectDatabase::use_defaults(metadata, system));
+        // Signature queries still infer types for every required scope. An
+        // empty, frozen open-file set skips diagnostic validation and editor
+        // completion metadata that this checker never consumes. Apply the
+        // same policy to private databases for decoded or changed buffers.
+        db.set_check_mode(CheckMode::OpenFiles);
+        db.freeze_open_files();
+        Ok(db)
     }
 }
 
@@ -126,15 +121,6 @@ impl Engine {
             .downcast_mut::<OverlaySystem>()?
             .set_source(path.to_path_buf(), text.to_owned());
         File::sync_path(&mut self.db, path);
-        let file = system_path_to_file(&self.db, path).ok()?;
-        if self
-            .db
-            .project()
-            .is_file_included(&self.db, path)
-            .is_included()
-        {
-            self.db.project().open_file(&mut self.db, file);
-        }
         Some(())
     }
 
