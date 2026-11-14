@@ -1,20 +1,46 @@
-//! Resolve call targets through `ty`'s type inference by driving a
-//! `ty server` (LSP) subprocess and issuing `textDocument/definition`.
-//!
-//! This gives strict-kwargs ty-grade resolution — inheritance/MRO, return
-//! types, annotated parameters, overloads — that a standalone AST resolver
-//! cannot do. Everything degrades gracefully: any failure (ty missing, slow,
-//! protocol hiccup) yields `None` and the caller falls back to the built-in
-//! resolver.
+//! Resolve call targets through ty's inference engine. The server backend
+//! uses LSP hover and definition requests; `embedded-ty` calls the Rust APIs
+//! directly. Both feed the same signature and definition resolution logic.
 
+#[cfg(not(feature = "embedded-ty"))]
 use std::collections::HashSet;
-use std::io::{BufReader, BufWriter, Read, Write};
+#[cfg(any(test, not(feature = "embedded-ty")))]
+use std::io::{BufReader, Read};
+#[cfg(not(feature = "embedded-ty"))]
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "embedded-ty"))]
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(not(feature = "embedded-ty"))]
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+#[cfg(not(feature = "embedded-ty"))]
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+#[cfg(any(test, not(feature = "embedded-ty")))]
+use serde_json::json;
+use serde_json::Value;
+
+#[cfg(feature = "embedded-ty")]
+mod embedded;
+#[cfg(feature = "embedded-ty")]
+pub use embedded::TyResolver;
+
+/// Shared inference state owned by one check or fix invocation.
+pub struct TySession {
+    #[cfg(feature = "embedded-ty")]
+    engine: ty_backend::Session,
+}
+
+impl TySession {
+    pub fn new(root: &Path, python: Option<&Path>, files: &[PathBuf]) -> Self {
+        #[cfg(not(feature = "embedded-ty"))]
+        let _ = (root, python, files);
+        Self {
+            #[cfg(feature = "embedded-ty")]
+            engine: ty_backend::Session::new(root, python, files),
+        }
+    }
+}
 
 /// A resolved definition location (0-based line, 0-based UTF-16 column).
 pub struct DefLocation {
@@ -67,10 +93,13 @@ impl LspLineIndex {
 /// The bound is therefore generous: it exists only to catch a genuinely wedged
 /// server, which the caller then recovers from (retry) or surfaces (issue
 /// #275), never to clip a slow-but-live answer into a silent miss.
+#[cfg(not(feature = "embedded-ty"))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// The initialize handshake (project discovery) can be slower than steady
 /// state, so allow more headroom.
+#[cfg(not(feature = "embedded-ty"))]
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(not(feature = "embedded-ty"))]
 pub struct TyResolver {
     child: Child,
     // Coalesce the formatted header and JSON body into one pipe write for
@@ -86,15 +115,9 @@ pub struct TyResolver {
     disabled: bool,
 }
 
-/// Build a [`Command`] for the `ty` executable.
-///
-/// strict-kwargs declares `ty` as a hard dependency of its wheel (see
-/// `pyproject.toml`), so `ty` normally lives in the *same*
-/// `bin`/`Scripts` directory as our own binary. `uv tool install` does
-/// **not** expose a dependency's entry point on `PATH`, so a bare `ty`
-/// would not be found for the recommended install. Prefer the co-located
-/// `ty[.exe]`; fall back to a bare `ty` (resolved via `PATH`) for `cargo
-/// install` users or an activated venv where it is on `PATH`.
+/// Find an external server for Cargo builds without `embedded-ty`. Prefer a
+/// co-located executable, then search PATH. Python wheels use the embedded
+/// backend and never launch this command.
 ///
 /// Host-/install-layout-specific glue: which of the
 /// `current_exe`/parent/`is_file` arms is taken depends on how the binary
@@ -104,6 +127,7 @@ pub struct TyResolver {
 /// behaviour is exercised by the ty-backed integration tests and the
 /// `ty`-absent CLI test.
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(not(feature = "embedded-ty"))]
 fn ty_command() -> Command {
     let program = std::env::current_exe()
         .ok()
@@ -116,6 +140,7 @@ fn ty_command() -> Command {
 
 /// Whether a usable `ty` executable can be located (next to our own binary,
 /// or on `PATH`; see [`ty_command`]).
+#[cfg(not(feature = "embedded-ty"))]
 pub fn ty_binary_present() -> bool {
     ty_command()
         .arg("version")
@@ -125,6 +150,13 @@ pub fn ty_binary_present() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// The embedded backend is included in the executable.
+#[cfg(feature = "embedded-ty")]
+pub const fn ty_binary_present() -> bool {
+    true
+}
+
+#[cfg(not(feature = "embedded-ty"))]
 type FxPending = std::collections::HashMap<i64, Value>;
 
 /// Build the LSP `initialize` params, optionally forwarding an explicit
@@ -138,6 +170,7 @@ type FxPending = std::collections::HashMap<i64, Value>;
 /// this one) that do not implement `workspace/configuration`. A bad path is
 /// not validated here: ty just resolves nothing against it, so the fallback
 /// fails closed (no wrong diagnostics) exactly as when no env is configured.
+#[cfg(any(test, not(feature = "embedded-ty")))]
 fn initialize_params(project_root: &Path, python_env: Option<&Path>) -> Value {
     let mut params = json!({
         "processId": std::process::id(),
@@ -165,6 +198,7 @@ fn initialize_params(project_root: &Path, python_env: Option<&Path>) -> Value {
     params
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 impl TyResolver {
     /// Start `ty server` and complete the LSP initialize handshake rooted at
     /// `project_root`. Returns `None` if ty is unavailable or misbehaves —
@@ -388,6 +422,7 @@ impl TyResolver {
     }
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 fn write_lsp_message(writer: &mut impl Write, body: &[u8]) -> std::io::Result<()> {
     write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
     writer.write_all(body)?;
@@ -622,6 +657,7 @@ pub fn parse_callable_type_overloads(value: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(not(feature = "embedded-ty"))]
 impl Drop for TyResolver {
     fn drop(&mut self) {
         let _ = self.send(&json!({
@@ -638,6 +674,7 @@ impl Drop for TyResolver {
 /// [`unwrap_enclosing_parens`] (unit-tested; real `ty` never emits the
 /// malformed-frame / invalid-JSON branches).
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(any(test, not(feature = "embedded-ty")))]
 fn read_messages(stdout: impl Read, tx: &std::sync::mpsc::Sender<Value>) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -1007,6 +1044,7 @@ mod tests {
 
     // ----- Pure parsing/encoding helpers -------------------------------
 
+    #[cfg(not(feature = "embedded-ty"))]
     #[test]
     fn ty_binary_present_matches_actual_environment() {
         // `ty_binary_present` gates a hard requirement, so its correctness
@@ -1355,7 +1393,7 @@ mod tests {
     // stdin. The coverage gate runs on Linux; Windows `cargo test` simply
     // skips them (the code still compiles there).
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(feature = "embedded-ty")))]
     mod rpc {
         use super::super::*;
         use serde_json::json;

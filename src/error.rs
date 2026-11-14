@@ -113,6 +113,12 @@ impl std::fmt::Display for CheckError {
                  executable was found on PATH; install it (e.g. `uv tool \
                  install ty`)"
             ),
+            #[cfg(feature = "embedded-ty")]
+            Self::TyServerFailed => write!(
+                formatter,
+                "the bundled ty inference engine could not initialize or complete its analysis"
+            ),
+            #[cfg(not(feature = "embedded-ty"))]
             Self::TyServerFailed => write!(
                 formatter,
                 "`ty` was found but its language server (`ty server`) could \
@@ -273,11 +279,16 @@ mod tests {
     }
 
     #[test]
-    fn ty_server_failed_explains_the_requirement() {
+    fn ty_backend_failure_describes_the_selected_backend() {
         let error = CheckError::TyServerFailed;
         let message = error.to_string();
-        assert!(message.contains("ty server"));
-        assert!(message.contains("required"));
+        #[cfg(not(feature = "embedded-ty"))]
+        {
+            assert!(message.contains("ty server"));
+            assert!(message.contains("required"));
+        }
+        #[cfg(feature = "embedded-ty")]
+        assert!(message.contains("bundled ty inference engine"));
         assert_eq!(format!("{error:?}"), "TyServerFailed");
     }
 }

@@ -89,7 +89,7 @@ hooks = [
     stages = ["pre-commit"],
     args = [
     ],
-    exclude = '^(fuzz/seeds/|vendored/|Cargo\.lock$|uv\.lock$)'
+    exclude = '^(fuzz/seeds/|vendored/|third-party-licenses/|Cargo\.lock$|uv\.lock$)'
   }
 ]
 

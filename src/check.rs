@@ -36,7 +36,7 @@ use crate::signature::{Parameter, ParameterKind, Signature};
 use crate::source::{read_python_source, Source};
 use crate::ty_resolver::{
     locations_from_value, lsp_to_byte_offset, parse_callable_type_overloads, parse_hover_signature,
-    same_path, split_top_level, ty_binary_present, LspLineIndex, TyResolver,
+    same_path, split_top_level, ty_binary_present, LspLineIndex, TyResolver, TySession,
 };
 
 mod file_selection;
@@ -244,6 +244,7 @@ fn pipeline_phases(
     let mut released_pending_files = 0usize;
     let mut noqa_files: Vec<(PathBuf, FileNoqa)> = Vec::new();
 
+    let ty_session = TySession::new(project_root, python_env, all_project_files);
     let request_aware_balancing = should_balance_grouped_ty(files_to_scan.len());
     let shard_results = std::thread::scope(|scope| -> Result<Vec<TyShardResult>, CheckError> {
         // Phase 1 (parallel, background): the built-in pass over every
@@ -304,6 +305,7 @@ fn pipeline_phases(
         let mut shard_senders = Vec::with_capacity(TY_SHARD_COUNT);
         let mut shard_handles = Vec::with_capacity(TY_SHARD_COUNT);
         for _ in 0..TY_SHARD_COUNT {
+            let ty_session = &ty_session;
             let (shard_tx, shard_rx) = std::sync::mpsc::channel::<(usize, PendingTyWork)>();
             shard_senders.push(shard_tx);
             let handle = std::thread::Builder::new()
@@ -322,6 +324,7 @@ fn pipeline_phases(
                         resolve_file_with_ty(
                             &mut ty,
                             &mut ty_start_attempted,
+                            ty_session,
                             project_root,
                             all_project_files,
                             index,
@@ -14584,24 +14587,12 @@ fn hover_text(value: &serde_json::Value) -> Option<&str> {
 
 /// Fail unless a usable `ty` executable is on `PATH`.
 ///
-/// `ty` is a hard requirement (see [`check_paths`]); this is the cheap,
-/// content-independent up-front probe (`ty version`). The actual server is
-/// still started lazily — only when a file has calls the built-in resolver
-/// could not resolve — so a fully-resolvable run never pays ty's
-/// project-indexing startup cost (issue #31).
+/// Verify that the selected inference backend is available. The embedded
+/// backend is always present; the server backend probes the external binary
+/// once per process before scanning. Actual inference starts lazily.
 ///
-/// The probe result is memoized for the process: `ty`'s presence on `PATH`
-/// cannot change mid-run, the real CLI calls this once anyway, and
-/// memoizing keeps the benchmark suite (which calls `check_paths` many times
-/// per process, issue #30) measuring the resolver rather than repeated
-/// `ty version` subprocess spawns.
-///
-/// Excluded from the coverage gate for the same reason as [`start_ty`]: the
-/// gate environment guarantees `ty` is present (`coverage.yml` asserts `ty
-/// version`), so the `Err` arm cannot be taken there. Its error value is
-/// covered directly by `error.rs`' unit tests and end-to-end by the
-/// `ty`-absent CLI test (which runs the binary with `ty` stripped from
-/// `PATH`).
+/// Excluded from coverage because the test environment provides ty. The
+/// absent-backend errors are exercised by the server-specific CLI tests.
 #[cfg_attr(coverage, coverage(off))]
 fn require_ty_present() -> Result<(), CheckError> {
     static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -14638,6 +14629,7 @@ fn parsed_fix_module<'a>(
 fn resolve_file_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
+    ty_session: &TySession,
     project_root: &Path,
     _all_files: &[PathBuf],
     index: &DefinitionIndex,
@@ -14661,7 +14653,7 @@ fn resolve_file_with_ty(
         // The binary was verified up front (`require_ty_present`), so a
         // failure here is the server not starting — fatal, not a silent
         // downgrade, so results stay deterministic.
-        *ty = Some(start_ty_for_fallback(project_root, python_env)?);
+        *ty = Some(start_ty_for_fallback(ty_session, project_root, python_env)?);
     }
     let Some(ty) = ty.as_mut() else {
         return Ok(());
@@ -14723,23 +14715,30 @@ fn resolve_file_with_ty(
 /// present and startable, so the failure path cannot be taken there), so it
 /// is excluded from the gate.
 #[cfg_attr(coverage, coverage(off))]
+#[cfg(not(feature = "embedded-ty"))]
 fn start_ty(project_root: &Path, python_env: Option<&Path>) -> Result<TyResolver, CheckError> {
     TyResolver::start(project_root, python_env).ok_or(CheckError::TyServerFailed)
 }
 
-/// Start ty for fallback queries. Query sites open the current file before
-/// asking for hover/definition; the client advertises pull diagnostics, so
-/// ty computes nothing for an opened file until a query demands it and
-/// there is no per-file warm-up cost to wait out.
-///
-/// `ty`-subprocess orchestration like [`start_ty`]; excluded from the coverage
-/// gate for the same reason.
+/// Lazily start a server or acquire this run's shared embedded database.
+/// Backend startup depends on the execution environment and is excluded
+/// from coverage like the surrounding inference orchestration.
 #[cfg_attr(coverage, coverage(off))]
 fn start_ty_for_fallback(
+    session: &TySession,
     project_root: &Path,
     python_env: Option<&Path>,
 ) -> Result<TyResolver, CheckError> {
-    start_ty(project_root, python_env)
+    #[cfg(feature = "embedded-ty")]
+    {
+        let _ = (project_root, python_env);
+        TyResolver::start(session).ok_or(CheckError::TyServerFailed)
+    }
+    #[cfg(not(feature = "embedded-ty"))]
+    {
+        let _ = session;
+        start_ty(project_root, python_env)
+    }
 }
 
 struct TyFixes<'a> {
@@ -14817,6 +14816,7 @@ fn normalize_static_ty_fallback(
 fn resolve_overload_fixes_with_ty(
     ty: &mut Option<TyResolver>,
     ty_start_attempted: &mut bool,
+    ty_session: &TySession,
     project_root: &Path,
     _all_files: &[PathBuf],
     index: &DefinitionIndex,
@@ -14832,7 +14832,7 @@ fn resolve_overload_fixes_with_ty(
     }
     if !*ty_start_attempted {
         *ty_start_attempted = true;
-        let Ok(started) = start_ty_for_fallback(project_root, python_env) else {
+        let Ok(started) = start_ty_for_fallback(ty_session, project_root, python_env) else {
             record_declined_fixes(
                 &mut fixes,
                 DeclinedFixReason::UnresolvedOverload,
