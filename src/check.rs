@@ -1,5 +1,6 @@
 //! Check Python sources for positional calls that should use keywords.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
 use ruff_python_ast::{self as ast};
 use ruff_python_ast::{AnyNodeRef, ExprRef, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_ast::{Expr, Number};
-use ruff_python_parser::parse_module;
+use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -14575,6 +14576,22 @@ fn require_ty_present() -> Result<(), CheckError> {
     }
 }
 
+/// Reuse retained syntax only when its token offsets describe this source.
+/// Callers without an indexed file keep the existing parse-on-demand path.
+fn parsed_fix_module<'a>(
+    indexed_files: &'a FxHashMap<PathBuf, IndexedFile>,
+    path: &Path,
+    source: &str,
+) -> Option<Cow<'a, Parsed<ast::ModModule>>> {
+    if let Some(indexed) = indexed_files
+        .get(path)
+        .filter(|file| file.source.as_str() == source)
+    {
+        return Some(Cow::Borrowed(&indexed.parsed));
+    }
+    parse_module(source).ok().map(Cow::Owned)
+}
+
 /// Per-file ty-fallback driver: lazily start `ty` on first need, then
 /// resolve this file's pending calls. The lazy-start and `ty`-available
 /// branches depend on the (environment-specific) `ty` subprocess, so this
@@ -14767,6 +14784,7 @@ fn resolve_overload_fixes_with_ty(
     project_root: &Path,
     _all_files: &[PathBuf],
     index: &DefinitionIndex,
+    indexed_files: &FxHashMap<PathBuf, IndexedFile>,
     python_env: Option<&Path>,
     path: &Path,
     source: &str,
@@ -14804,7 +14822,9 @@ fn resolve_overload_fixes_with_ty(
         );
         return;
     }
-    let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let parsed_for_fixes = fixes
+        .as_ref()
+        .and_then(|_| parsed_fix_module(indexed_files, path, source));
     let fix_text_as_data = parsed_for_fixes
         .as_ref()
         .map(|parsed| module_text_as_data_ranges(parsed.suite()))
@@ -15081,7 +15101,9 @@ fn resolve_pending_with_ty(
     }
     let source_line_starts = line_starts(source);
     let lsp_index = LspLineIndex::new(source);
-    let parsed_for_fixes = fixes.as_ref().and_then(|_| parse_module(source).ok());
+    let parsed_for_fixes = fixes
+        .as_ref()
+        .and_then(|_| parsed_fix_module(indexed_files, path, source));
     let fix_text_as_data = parsed_for_fixes
         .as_ref()
         .map(|parsed| module_text_as_data_ranges(parsed.suite()))
@@ -15477,6 +15499,42 @@ mod tests {
             pending_groups: vec![None; pending_calls],
             balancing_hover_requests: pending_calls,
         }
+    }
+
+    #[test]
+    fn fix_module_reuses_only_matching_indexed_source() {
+        let path = PathBuf::from("example.py");
+        let source = "def target(value): ...\ntarget(1)\n";
+        let mut indexed_files = FxHashMap::default();
+        indexed_files.insert(
+            path.clone(),
+            crate::index::IndexedFile {
+                source: std::sync::Arc::new(source.to_string()),
+                parsed: ruff_python_parser::parse_module(source).expect("parse retained source"),
+            },
+        );
+        let parsed =
+            super::parsed_fix_module(&indexed_files, &path, source).expect("retained syntax");
+        assert!(matches!(parsed, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(
+            std::ptr::from_ref(parsed.as_ref()),
+            std::ptr::from_ref(&indexed_files[&path].parsed)
+        ));
+        let changed = "def target(renamed): ...\ntarget((1))\n";
+        let parsed =
+            super::parsed_fix_module(&indexed_files, &path, changed).expect("changed syntax");
+        assert!(matches!(parsed, std::borrow::Cow::Owned(_)));
+        assert_eq!(
+            parsed.as_ref(),
+            &ruff_python_parser::parse_module(changed).expect("parse changed source")
+        );
+        let missing = Path::new("missing.py");
+        assert!(matches!(
+            super::parsed_fix_module(&indexed_files, missing, source),
+            Some(std::borrow::Cow::Owned(_))
+        ));
+        assert!(super::parsed_fix_module(&indexed_files, &path, "def (").is_none());
+        assert!(super::parsed_fix_module(&indexed_files, missing, "def (").is_none());
     }
 
     #[test]
