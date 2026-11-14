@@ -51,13 +51,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --bin strict-kwargs
 
-      - name: Install ty
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv tool install ty
-          uv tool dir --bin >> "$GITHUB_PATH"
-          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+      - name: Add release binary to PATH
+        run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
 
       - name: Clone pinned external repositories
         shell: bash
