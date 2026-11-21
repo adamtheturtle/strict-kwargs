@@ -71,11 +71,11 @@ cargo test --locked --test completeness \
 
 ## Snapshot tooling decision
 
-`insta` is the best fit now that the oracle no longer carries an allowed-extra set.
+`insta` is the best fit now that the oracle omits the allowed-extra set.
 The test still keeps the pinned-repository setup in Rust and shell code: pinned checkout setup, pinned `ty`, Python environment control, multi-run stable-diagnostic filtering, required-baseline checking, and canonicalized diagnostic keys.
 `insta` handles the large golden file, regeneration, review-oriented diffs, and optional `cargo insta review` workflow.
 
-Other options considered were weaker for this shape:
+Other options considered:
 
 - `expect-test` can store inline or file-based expectations, but the snapshot is large enough that `insta`'s `.snap.new` and `cargo insta` review workflow is more useful.
 - `pretty_assertions` improves direct assertion diffs, but it does not provide snapshot storage or regeneration.
