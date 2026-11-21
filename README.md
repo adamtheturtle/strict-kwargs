@@ -114,7 +114,7 @@ repos:
 
 ## Configuration
 
-Configuration lives in `pyproject.toml`:
+Configure the tool in `pyproject.toml`:
 
 ```toml
 [tool.strict_kwargs]
