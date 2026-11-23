@@ -42,7 +42,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
@@ -150,7 +150,7 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
@@ -214,7 +214,7 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject.toml'
@@ -259,7 +259,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           # No cache on artifact-publishing jobs: a poisoned restore must not
           # be able to influence what is published to PyPI.
@@ -304,7 +304,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           # No cache on artifact-publishing jobs: a poisoned restore must not
           # be able to influence what is published to PyPI.
